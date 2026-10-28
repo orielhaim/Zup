@@ -292,11 +292,7 @@ where
     H: SessionHost + Clone + Send + Sync + 'static,
 {
     match control.state.accept(action) {
-        HostDecision::Run {
-            action,
-            selection,
-            cleanup_lock,
-        } => {
+        HostDecision::Run { action, selection } => {
             control.inbox = control.reports.subscribe();
             if control.active.is_some() {
                 return;
@@ -309,7 +305,6 @@ where
                 id,
                 action,
                 selection,
-                cleanup_lock,
             };
             let host = control.host.clone();
             let executable = control.executable.clone();
@@ -382,7 +377,6 @@ struct OperationRequest {
     id: zup_runtime::Uuid,
     action: LifecycleAction,
     selection: Selection,
-    cleanup_lock: bool,
 }
 
 fn rebind<H: SessionHost + Clone + Send + Sync + 'static>(
@@ -428,7 +422,6 @@ where
             id: operation.id,
             action: operation.action,
             selection: &operation.selection,
-            cleanup_lock: operation.cleanup_lock,
             control,
         },
     );

@@ -1,5 +1,7 @@
 # Installer size measurements
 
+These measurements describe PR #7. See [terminal installer measurements](/ship/terminal-size) for the subsequent shared Console frontend.
+
 Measured on native GitHub runners with Rust 1.99 on 2026-10-28. Each application contains one 22-byte file, with no custom assets, prerequisites, or plugins. Runtime capabilities remain available. Sizes include the complete installer, not just its application payload.
 
 The baseline is merged PR #6 using its release profile. The optimized build uses the `installer` profile.

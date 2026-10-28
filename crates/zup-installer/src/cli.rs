@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, ValueHint};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueHint};
 
 use zup_presentation::OutputFormat;
 
 use crate::frontend;
 use crate::lifecycle;
 use crate::run::RuntimeContext;
+use crate::terminal::{Output, Scope};
 
 pub fn invoked_name() -> String {
     std::env::args_os()
@@ -36,24 +37,6 @@ pub fn parse() -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
 }
 
-#[cfg(test)]
-pub fn public_commands() -> Vec<String> {
-    parser()
-        .get_subcommands()
-        .filter(|command| !command.is_hide_set())
-        .map(|command| command.get_name().to_owned())
-        .collect()
-}
-
-#[cfg(test)]
-pub fn internal_commands() -> Vec<String> {
-    parser()
-        .get_subcommands()
-        .filter(|command| command.is_hide_set())
-        .map(|command| command.get_name().to_owned())
-        .collect()
-}
-
 pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
     match cli.command {
         Some(Commands::Install(args)) => lifecycle::apply(context, args),
@@ -68,6 +51,21 @@ pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
         Some(Commands::Update(args)) => crate::maintenance::run_update(context, args),
         Some(Commands::Uninstall(args)) => crate::maintenance::run_uninstall(context, args),
         Some(Commands::Worker { bootstrap }) => crate::run::run_worker(&bootstrap),
+        Some(Commands::TerminalRunner(args)) => {
+            zup_windows::wait_for_process_exit(args.wait_pid)
+                .map_err(|error| miette::miette!("wait for maintenance process: {error}"))?;
+            let executable = crate::package::current_executable()?;
+            let parsed = crate::terminal::Cli::parse_from(
+                std::iter::once(executable.clone().into_os_string()).chain(args.arguments),
+            );
+            let result = crate::terminal::run_cli(
+                crate::host::WindowsSessionHost::default(),
+                context.frontend,
+                parsed,
+            );
+            crate::maintenance::schedule_runner_cleanup(&executable);
+            result
+        }
         Some(Commands::UninstallRunner(args)) => {
             zup_windows::wait_for_process_exit(args.wait_pid)
                 .map_err(|error| miette::miette!("wait for maintenance process: {error}"))?;
@@ -117,6 +115,8 @@ pub(crate) enum Commands {
     },
     #[command(name = "__uninstall_runner", hide = true)]
     UninstallRunner(UninstallRunnerArgs),
+    #[command(name = "__terminal_runner", hide = true)]
+    TerminalRunner(TerminalRunnerArgs),
     #[command(name = "__upgrade", hide = true)]
     Upgrade(LifecycleArgs),
     #[command(name = "__recover", hide = true)]
@@ -125,8 +125,8 @@ pub(crate) enum Commands {
 
 #[derive(Debug, Clone, Default, Args)]
 pub struct LifecycleArgs {
-    #[arg(long, value_enum, default_value = "user")]
-    pub scope: ScopeArg,
+    #[arg(long, value_enum)]
+    pub scope: Option<Scope>,
     #[arg(long = "enable", alias = "component", value_name = "ID")]
     pub enable: Vec<String>,
     #[arg(long = "disable", value_name = "ID")]
@@ -134,12 +134,14 @@ pub struct LifecycleArgs {
     #[arg(long, alias = "install-dir", value_name = "PATH", value_hint = ValueHint::DirPath)]
     pub install_directory: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "human")]
-    pub output: OutputArg,
+    pub output: Output,
     /// Never ask a question.
     #[arg(long)]
     pub non_interactive: bool,
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub plain: bool,
 
     #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
@@ -161,15 +163,6 @@ impl LifecycleArgs {
     pub fn output(&self) -> OutputFormat {
         self.output.into()
     }
-
-    /// and the headless frontend never prompt: a question nobody can answer is a
-    /// process that never returns.
-    pub fn may_prompt(&self, context: RuntimeContext) -> bool {
-        !self.non_interactive
-            && !self.yes
-            && context.output == OutputFormat::Human
-            && context.is_live_console()
-    }
 }
 
 #[derive(Debug, Args)]
@@ -181,67 +174,19 @@ pub struct RepairArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct TerminalRunnerArgs {
+    #[arg(long)]
+    wait_pid: u32,
+    #[arg(last = true)]
+    arguments: Vec<std::ffi::OsString>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct UninstallRunnerArgs {
     #[arg(long)]
     wait_pid: u32,
     #[command(flatten)]
     uninstall: crate::maintenance::UninstallArgs,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum ScopeArg {
-    #[default]
-    User,
-    Machine,
-    Either,
-}
-
-impl ScopeArg {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Machine => "machine",
-            Self::Either => "either",
-        }
-    }
-}
-
-impl From<ScopeArg> for zup_core::SelectedScope {
-    fn from(value: ScopeArg) -> Self {
-        match value {
-            ScopeArg::User => Self::User,
-            ScopeArg::Machine => Self::Machine,
-            ScopeArg::Either => Self::User,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum OutputArg {
-    #[default]
-    Human,
-    Json,
-    Jsonl,
-}
-
-impl OutputArg {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Human => "human",
-            Self::Json => "json",
-            Self::Jsonl => "jsonl",
-        }
-    }
-}
-
-impl From<OutputArg> for OutputFormat {
-    fn from(value: OutputArg) -> Self {
-        match value {
-            OutputArg::Human => Self::Human,
-            OutputArg::Json => Self::Json,
-            OutputArg::Jsonl => Self::Jsonl,
-        }
-    }
 }
 
 impl Cli {

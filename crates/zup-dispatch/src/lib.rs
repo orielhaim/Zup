@@ -66,17 +66,17 @@ pub enum Outcome {
 
 impl Outcome {
     /// The process exit code for this outcome.
-    pub const fn exit_code(&self) -> u8 {
+    pub const fn exit_code(&self) -> i32 {
         match self {
-            Self::Completed { .. } => 0,
+            Self::Completed { code }
+            | Self::InstallerFailed { code }
+            | Self::RebootRequired { code }
+            | Self::RecoveryRequired { code } => *code,
             Self::Unsupported { .. } => 9,
             Self::ResolveFailed { .. } => 10,
             Self::AcquisitionFailed { .. } => 11,
             Self::VerificationFailed { .. } => 12,
             Self::LaunchFailed { .. } => 13,
-            Self::InstallerFailed { .. } => 1,
-            Self::RebootRequired { .. } => 14,
-            Self::RecoveryRequired { .. } => 15,
             Self::Refused { .. } => 70,
         }
     }
@@ -101,6 +101,7 @@ pub struct Options {
     pub non_interactive: bool,
     pub yes: bool,
     pub force_files: bool,
+    pub plain: bool,
     pub output: Option<String>,
     pub enable: Vec<String>,
     pub disable: Vec<String>,
@@ -109,16 +110,12 @@ pub struct Options {
     pub help: bool,
 }
 
-/// The lifecycle step to run in the staged runtime.
-///
-/// These are the staged runtime's own verbs, so a universal installer answers
-/// the same operations as the installer it stages. There is no `upgrade`:
-/// installing a newer artifact upgrades, exactly like a self-contained
-/// installer.
+/// The operation forwarded to the native runtime.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Verb {
     #[default]
     Install,
+    Upgrade,
     Modify,
     Repair,
     Update,
@@ -129,6 +126,7 @@ impl Verb {
     fn runtime_name(self) -> &'static str {
         match self {
             Self::Install => "install",
+            Self::Upgrade => "upgrade",
             Self::Modify => "modify",
             Self::Repair => "repair",
             Self::Update => "update",
@@ -139,6 +137,7 @@ impl Verb {
     fn from_arg(arg: &str) -> Option<Self> {
         match arg.to_ascii_lowercase().as_str() {
             "install" => Some(Self::Install),
+            "upgrade" => Some(Self::Upgrade),
             "modify" => Some(Self::Modify),
             "repair" => Some(Self::Repair),
             "update" => Some(Self::Update),
@@ -290,12 +289,15 @@ fn staged_arguments(
     if options.yes {
         arguments.push("--yes".to_owned());
     }
+    if options.plain {
+        arguments.push("--plain".to_owned());
+    }
     if let Some(output) = &options.output {
         arguments.push("--output".to_owned());
         arguments.push(output.clone());
     }
     match options.verb {
-        Verb::Install | Verb::Modify | Verb::Repair => {
+        Verb::Install | Verb::Upgrade | Verb::Modify | Verb::Repair => {
             for id in &options.enable {
                 arguments.push("--enable".to_owned());
                 arguments.push(id.clone());
@@ -317,16 +319,11 @@ fn staged_arguments(
     arguments
 }
 
-/// Turn a native runtime's exit code into a typed outcome.
-///
-/// The codes are the ones `zup` already uses for machine output, so a script
-/// that reads them needs no second table. 255 is the reboot code 3010 clamped
-/// to a byte by the runtime's exit mapping; without this arm a reboot would
-/// come back as a generic failure.
+/// Preserve native runtime outcomes at the bootstrapper boundary.
 pub fn classify(code: i32) -> Outcome {
     match code {
         0 => Outcome::Completed { code: 0 },
-        3010 | 255 => Outcome::RebootRequired { code },
+        3010 => Outcome::RebootRequired { code },
         7 => Outcome::RecoveryRequired { code },
         _ => Outcome::InstallerFailed { code },
     }
@@ -445,7 +442,11 @@ pub fn main_with(executable: Option<PathBuf>, options: Options) -> ExitCode {
                 && options.output.is_none(),
         ),
     }
-    ExitCode::from(outcome.exit_code())
+    let code = outcome.exit_code();
+    if !(0..=255).contains(&code) {
+        std::process::exit(code);
+    }
+    ExitCode::from(code as u8)
 }
 
 impl Outcome {
@@ -552,6 +553,7 @@ pub fn options_from(
             },
             "--non-interactive" => flag(&mut options.non_interactive),
             "--yes" => flag(&mut options.yes),
+            "--plain" => flag(&mut options.plain),
             "--force-files" => flag(&mut options.force_files),
             "--enable" | "--component" => match value() {
                 Some(id) => options.enable.push(id),
@@ -573,16 +575,10 @@ pub fn options_from(
                 verb_seen = true;
                 match Verb::from_arg(&name) {
                     Some(verb) => options.verb = verb,
-                    None if name.eq_ignore_ascii_case("upgrade") => {
-                        error = Some(
-                            "there is no upgrade verb: installing a newer artifact upgrades"
-                                .to_owned(),
-                        );
-                    }
                     None => {
                         error = Some(format!(
                             "unrecognised verb `{name}`; expected install, modify, repair, \
-                             update, or uninstall"
+                             upgrade, update, or uninstall"
                         ));
                     }
                 }
@@ -661,6 +657,14 @@ mod tests {
         assert_eq!(options.verb, Verb::Uninstall);
         assert!(options.non_interactive);
 
+        let (options, _) =
+            options_from(args(&["upgrade", "--plain"]).into_iter()).expect("upgrade parses");
+        assert_eq!(options.verb, Verb::Upgrade);
+        let forwarded =
+            staged_arguments(&options, Path::new("state"), zup_core::SelectedScope::User);
+        assert_eq!(forwarded[0], "upgrade");
+        assert!(forwarded.iter().any(|argument| argument == "--plain"));
+
         let (options, _) = options_from(args(&[]).into_iter()).expect("no verb parses");
         assert_eq!(options.verb, Verb::Install);
     }
@@ -694,9 +698,9 @@ mod tests {
         assert_eq!(classify(1), Outcome::InstallerFailed { code: 1 });
         assert_eq!(classify(7), Outcome::RecoveryRequired { code: 7 });
         assert_eq!(classify(3010), Outcome::RebootRequired { code: 3010 });
-        assert_eq!(classify(255), Outcome::RebootRequired { code: 255 });
-        for outcome in [classify(1), classify(7), classify(255), classify(3010)] {
-            assert_ne!(outcome.exit_code(), 0, "{outcome:?}");
+        assert_eq!(classify(255), Outcome::InstallerFailed { code: 255 });
+        for code in [-1, 1, 2, 3, 5, 7, 255, 3010] {
+            assert_eq!(classify(code).exit_code(), code);
         }
     }
 
@@ -722,7 +726,7 @@ mod tests {
             Outcome::RebootRequired { code: 3010 },
             Outcome::RecoveryRequired { code: 7 },
         ];
-        let mut codes: Vec<u8> = outcomes.iter().map(Outcome::exit_code).collect();
+        let mut codes: Vec<_> = outcomes.iter().map(Outcome::exit_code).collect();
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), outcomes.len(), "{outcomes:?}");

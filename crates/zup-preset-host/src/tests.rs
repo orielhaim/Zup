@@ -153,17 +153,11 @@ fn an_existing_installation_opens_on_its_maintenance() {
 fn an_install_runs_reports_progress_and_succeeds() {
     let mut host = install_host();
     let decision = host.accept(Action::Install);
-    let HostDecision::Run {
-        action,
-        selection,
-        cleanup_lock,
-    } = decision
-    else {
+    let HostDecision::Run { action, selection } = decision else {
         panic!("an install runs a lifecycle")
     };
     assert_eq!(action, LifecycleAction::Install);
     assert_eq!(selection.scope, SelectedScope::User);
-    assert!(!cleanup_lock);
     assert_eq!(host.snapshot().state, InstallerState::Running);
     assert!(host.snapshot().state.is_active());
 
@@ -551,16 +545,10 @@ fn an_uninstall_asks_before_it_removes_anything() {
     ));
     assert_eq!(host.snapshot().state, InstallerState::ConfirmUninstall);
 
-    let HostDecision::Run {
-        action,
-        cleanup_lock,
-        ..
-    } = host.accept(Action::ConfirmUninstall)
-    else {
+    let HostDecision::Run { action, .. } = host.accept(Action::ConfirmUninstall) else {
         panic!("a confirmed uninstall runs")
     };
     assert_eq!(action, LifecycleAction::Uninstall);
-    assert!(cleanup_lock);
     assert_eq!(host.snapshot().state, InstallerState::Running);
 }
 

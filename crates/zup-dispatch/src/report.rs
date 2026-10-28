@@ -10,7 +10,7 @@ use zup_windows::Selection;
 
 /// Print or show the selected variant.
 pub fn describe(selection: &Selection, index: &ArtifactIndex) {
-    println!(
+    eprintln!(
         "{} {} → {} ({})",
         index.artifact.application.name,
         index.artifact.application.version,
@@ -52,7 +52,10 @@ pub fn choose_scope(graphical: bool) -> Result<zup_core::SelectedScope, String> 
         };
     }
     use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
+    if !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
         return Err(zup_core::ScopeSelectionError::ChoiceRequired.to_string());
     }
     eprint!("Install for your account [user] or everyone [machine]? ");
@@ -96,13 +99,14 @@ fn message_box(_message: &str, _style: u32) -> i32 {
 pub fn print_usage() {
     println!("zup installer launcher");
     println!();
-    println!("  [install | modify | repair | update | uninstall] [options]");
-    println!("  install is the default; installing a newer artifact upgrades");
+    println!("  [install | upgrade | modify | repair | update | uninstall] [options]");
+    println!("  install is the default; use upgrade for an installed application");
     println!();
     println!("  --scope <user|machine>   whose installation to affect");
     println!("  --state-root <dir>       where this machine records its installations");
     println!("  --source <dir>           a local release tree to read before the network");
     println!("  --non-interactive, --yes never ask a question");
+    println!("  --plain                  line prompts without terminal effects");
     println!("  --force-files            repair files even when nothing drifted");
     println!("  --enable <id>, --disable <id>");
     println!("                           components to include or skip");

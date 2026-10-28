@@ -113,6 +113,21 @@ pub fn resolve_operation(
     }
 }
 
+pub fn maintenance_operations(
+    installed: &semver::Version,
+    package: &semver::Version,
+) -> Vec<Operation> {
+    let mut operations = match package.cmp(installed) {
+        std::cmp::Ordering::Greater => vec![Operation::Upgrade],
+        std::cmp::Ordering::Equal => {
+            vec![Operation::Modify, Operation::Repair { force_files: false }]
+        }
+        std::cmp::Ordering::Less => Vec::new(),
+    };
+    operations.push(Operation::Uninstall);
+    operations
+}
+
 pub struct OperationInput<'a> {
     pub build: &'a TargetBuildPlan,
     pub installer: &'a Path,
@@ -308,7 +323,15 @@ pub fn prepare_operation<H: OperationHost>(
             ));
         }
         let target = if host.resolve_target_for_uninstall() {
-            let plan_request = PlanRequest::new(installer.target, input.scope);
+            let plan_request = plan_request(
+                installer,
+                input.scope,
+                Some(ledger),
+                &OperationSelection::default(),
+                LifecycleAction::Modify,
+                persisted_install_directory(Some(ledger))
+                    .filter(|_| installer.install.allow_directory_override),
+            )?;
             let planned = host
                 .plan_build(input.build, &plan_request, input.cancellation)
                 .map_err(|message| OperationError::refused("plan", message))?;
@@ -510,6 +533,16 @@ fn apply_selection(
     request: &mut PlanRequest,
     selection: &OperationSelection,
 ) -> Result<(), OperationError> {
+    if let Some(id) = selection
+        .enable
+        .iter()
+        .find(|id| selection.disable.contains(id))
+    {
+        return Err(OperationError::refused(
+            "selection",
+            format!("component `{id}` is both enabled and disabled"),
+        ));
+    }
     for raw in &selection.enable {
         let id = ComponentId::new(raw).map_err(|error| {
             OperationError::refused("selection", format!("component {raw}: {error}"))

@@ -81,7 +81,12 @@ pub fn accept(
         session: handoff.session,
         scope: match handoff.scope.as_str() {
             "machine" => SelectedScope::Machine,
-            _ => SelectedScope::User,
+            "user" => SelectedScope::User,
+            _ => {
+                return Err(Rejection::Unverified(
+                    "the handoff names an unsupported scope".into(),
+                ));
+            }
         },
         mode: handoff.mode,
     })

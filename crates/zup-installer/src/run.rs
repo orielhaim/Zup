@@ -12,7 +12,7 @@ pub fn gui() -> ExitCode {
             if was_launched_interactively() {
                 show_error(&error.to_string());
             }
-            ExitCode::from(crate::process_exit_code(&error))
+            failure_exit(&error)
         }
     }
 }
@@ -21,8 +21,13 @@ pub fn console() -> ExitCode {
     match run_frontend(Frontend::Console) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(crate::process_exit_code(&error))
+            if error
+                .downcast_ref::<crate::terminal::ReportedFailure>()
+                .is_none()
+            {
+                eprintln!("{error}");
+            }
+            failure_exit(&error)
         }
     }
 }
@@ -31,10 +36,24 @@ pub fn headless() -> ExitCode {
     match run_frontend(Frontend::Headless) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(crate::process_exit_code(&error))
+            if error
+                .downcast_ref::<crate::terminal::ReportedFailure>()
+                .is_none()
+            {
+                eprintln!("{error}");
+            }
+            failure_exit(&error)
         }
     }
+}
+
+fn failure_exit(error: &miette::Report) -> ExitCode {
+    let code = crate::process_exit_code(error);
+    #[cfg(windows)]
+    if code > 255 {
+        std::process::exit(code);
+    }
+    ExitCode::from(code.clamp(1, 255) as u8)
 }
 
 fn run_frontend(frontend: Frontend) -> miette::Result<()> {
@@ -95,6 +114,10 @@ impl RuntimeContext {
     pub fn with_output(mut self, output: OutputFormat) -> Self {
         self.output = output;
         self
+    }
+
+    pub fn may_prompt(self, non_interactive: bool, yes: bool) -> bool {
+        !non_interactive && !yes && self.output == OutputFormat::Human && self.is_live_console()
     }
 
     pub fn is_live_console(self) -> bool {

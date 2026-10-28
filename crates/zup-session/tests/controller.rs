@@ -275,6 +275,30 @@ impl SessionHost for FakeHost {
         Ok(self.clone())
     }
 
+    fn describe(&mut self, _executable: &Path) -> Result<Arc<zup_core::TargetBuildPlan>, String> {
+        Ok(Arc::new(self.build.clone()))
+    }
+
+    fn observe(
+        &self,
+        _installer: &zup_core::Installer,
+        scope: SelectedScope,
+        state_root: Option<&Path>,
+    ) -> Result<OperationContext, String> {
+        let installation = self
+            .installations
+            .iter()
+            .find(|installation| installation.scope == scope);
+        Ok(OperationContext {
+            scope,
+            state_root: state_root
+                .map(Path::to_path_buf)
+                .or_else(|| installation.map(|installation| installation.state_root.clone()))
+                .unwrap_or_default(),
+            ledger: installation.and_then(|installation| installation.ledger.clone()),
+        })
+    }
+
     fn discover(
         &mut self,
         _executable: &std::path::Path,
@@ -291,7 +315,7 @@ impl SessionHost for FakeHost {
             self.installations.clone()
         };
         Ok(SessionDiscovery {
-            build: self.build.clone(),
+            build: Arc::new(self.build.clone()),
             installations,
         })
     }
@@ -441,7 +465,6 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
             id: zup_runtime::Uuid::now_v7(),
             action: zup_exec::LifecycleAction::Uninstall,
             selection: &selection,
-            cleanup_lock: true,
             control,
         },
     )

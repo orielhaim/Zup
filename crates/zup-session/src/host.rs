@@ -34,7 +34,7 @@ pub struct OperationContext {
 
 #[derive(Debug, Clone)]
 pub struct SessionDiscovery {
-    pub build: TargetBuildPlan,
+    pub build: Arc<TargetBuildPlan>,
     pub installations: Vec<ScopedInstallation>,
 }
 
@@ -113,11 +113,57 @@ pub trait SessionHost {
     where
         Self: 'a;
 
+    fn describe(&mut self, executable: &Path) -> Result<Arc<TargetBuildPlan>, String>;
+
+    fn observe(
+        &self,
+        installer: &Installer,
+        scope: SelectedScope,
+        state_root: Option<&Path>,
+    ) -> Result<OperationContext, String>;
+
     fn discover(
         &mut self,
         executable: &Path,
         launch: &SessionLaunch,
-    ) -> Result<SessionDiscovery, String>;
+    ) -> Result<SessionDiscovery, String> {
+        let build = self.describe(executable)?;
+        let mut installations = Vec::new();
+        for scope in build.installer.install.scope.scopes() {
+            let context = self.observe(&build.installer, *scope, launch.state_root.as_deref())?;
+            installations.push(ScopedInstallation {
+                scope: context.scope,
+                state_root: context.state_root,
+                ledger: context.ledger,
+            });
+        }
+        if launch.maintenance
+            && installations
+                .iter()
+                .all(|installation| installation.ledger.is_none())
+        {
+            return Err("the installed application was not found".into());
+        }
+        Ok(SessionDiscovery {
+            build,
+            installations,
+        })
+    }
+
+    fn acquire_content(
+        &mut self,
+        _build: &mut Arc<TargetBuildPlan>,
+        _context: &OperationContext,
+        _operation: zup_runtime::Operation,
+        _selection: &zup_runtime::OperationSelection,
+        _events: &mut (dyn FnMut(zup_presentation::InstallerEvent) + Send),
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn release_identity(&self) -> Option<zup_core::ReleaseIdentity> {
+        None
+    }
 
     fn bind<'a>(&'a self, context: &'a OperationContext) -> Result<Self::Bound<'a>, String>;
 
@@ -345,9 +391,8 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<zup_presentation::Installe
                 outcome,
                 code: outcome.code(),
                 message: message.clone(),
-                diagnostic: Some(zup_presentation::DiagnosticPresentation::from_message(
-                    message,
-                    *kind == "recovery_required",
+                diagnostic: Some(zup_presentation::DiagnosticPresentation::for_outcome(
+                    outcome, message,
                 )),
             }]
         }

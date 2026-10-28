@@ -29,6 +29,10 @@ path = "src/bin/zup-setup-headless.rs"
 required-features = ["headless"]
 
 [[test]]
+name = "terminal"
+required-features = ["console", "headless"]
+
+[[test]]
 name = "preset_session"
 required-features = ["gui"]
 
@@ -37,17 +41,22 @@ name = "preset_persistence"
 required-features = ["gui"]
 
 [dependencies]
+cliclack = { workspace = true, optional = true }
+console = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
+zup-exec.workspace = true
+zup-plan.workspace = true
+zup-runtime.workspace = true
+zup-session.workspace = true
 clap = { workspace = true }
 miette.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 zup-core.workspace = true
 zup-presentation.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-cliclack = { workspace = true, optional = true }
-console = { workspace = true, optional = true }
-indicatif = { workspace = true, optional = true }
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
@@ -69,30 +78,26 @@ zup-acquire.workspace = true
 zup-artifact.workspace = true
 zup-bootstrap.workspace = true
 zup-bundle.workspace = true
-zup-exec.workspace = true
-zup-plan.workspace = true
 zup-platform.workspace = true
 zup-plugin-runtime.workspace = true
-zup-runtime.workspace = true
 zup-transaction.workspace = true
 zup-preset-host.workspace = true
-zup-session.workspace = true
 zup-preset-protocol.workspace = true
 zup-update.workspace = true
 zup-windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1", features = ["rt", "sync", "signal", "macros"] }
 uuid.workspace = true
 zup-linux.workspace = true
-zup-plan.workspace = true
 zup-presentation.workspace = true
 zup-protocol.workspace = true
-zup-runtime.workspace = true
-zup-session.workspace = true
 zup-transaction.workspace = true
 
 [dev-dependencies]
+portable-pty = "0.9"
+zup-compose.workspace = true
+zup-bundle.workspace = true
 tempfile.workspace = true
 rstest.workspace = true
 uuid.workspace = true

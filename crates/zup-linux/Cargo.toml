@@ -39,6 +39,7 @@ zup-compose.workspace = true
 zup-core.workspace = true
 zup-exec.workspace = true
 zup-plan.workspace = true
+zup-plugin-runtime.workspace = true
 zup-platform.workspace = true
 zup-preset-host.workspace = true
 zup-preset-ipc = { workspace = true, optional = true }

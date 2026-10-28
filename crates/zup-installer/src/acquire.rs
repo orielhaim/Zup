@@ -89,26 +89,18 @@ impl Acquired {
         }
     }
 
-    /// Retention marks objects; it never copies them, so a retained object is the
     pub fn record_retention(&self, policy: CachePolicy) -> Result<(), std::io::Error> {
-        let mut pinned = BTreeSet::new();
-        if policy.retains_payload() {
-            for entry in &self.manifest.plan.entries {
-                pinned.insert(entry.blob);
-            }
-            for artifact in &self.manifest.plan.prerequisite_artifacts {
-                pinned.insert(artifact.blob);
-            }
-            for artifact in &self.manifest.plan.plugins {
-                pinned.insert(artifact.blob);
-            }
-            if let Some(preset) = self.manifest.preset.as_ref() {
-                pinned.insert(preset.digest);
-            }
-            for asset in &self.manifest.plan.ui_assets {
-                pinned.insert(asset.sha256);
-            }
-        }
+        let pinned = if policy.retains_payload() {
+            self.plan
+                .items()
+                .iter()
+                .filter(|item| item.descriptor.kind == ContentKind::Payload)
+                .map(|item| *item.digest())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+
         let state = RetentionState::record(policy, self.resolved.descriptor.release_digest, pinned);
         write_retention(self.cache.root(), &state)
             .map_err(|error| std::io::Error::other(error.to_string()))
@@ -341,6 +333,19 @@ async fn barrier(
         trust_anchor,
         outcome: gate.enter(),
     })
+}
+
+pub fn target_plan(manifest: &VariantManifest) -> Result<zup_core::TargetBuildPlan, GraphError> {
+    let bytes =
+        zup_bundle::BundleWriter::encode_plan_only_plan(&manifest.plan, &manifest.plan.plugins)
+            .map_err(|error| GraphError::Manifest(error.to_string()))?;
+    zup_bundle::Package::from_bytes(bytes)
+        .and_then(|package| package.build_plan())
+        .map_err(|error| GraphError::Manifest(error.to_string()))?
+        .targets
+        .into_iter()
+        .next()
+        .ok_or_else(|| GraphError::Manifest("the release contains no target plan".into()))
 }
 
 pub fn payload_source(

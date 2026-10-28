@@ -120,6 +120,15 @@ pub struct WindowsSessionHost {
     bundle: Option<zup_windows::EmbeddedBundle>,
     app_id: Option<zup_core::AppId>,
     frontend: Frontend,
+    acquired: Option<AcquiredContent>,
+    handoff: Option<Arc<crate::handoff::Accepted>>,
+    seed: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct AcquiredContent {
+    release: Arc<crate::acquire::Acquired>,
+    payload: Arc<zup_bundle::AcquiredPayloadSource>,
 }
 
 impl WindowsSessionHost {
@@ -139,7 +148,13 @@ impl WindowsSessionHost {
             scope: context.scope,
             frontend: self.frontend,
             state_root: context.state_root.clone(),
-            content: zup_windows::WindowsContent::Embedded(bundle),
+            content: match &self.acquired {
+                Some(content) => zup_windows::WindowsContent::Acquired(
+                    &content.release.manifest,
+                    &content.payload,
+                ),
+                None => zup_windows::WindowsContent::Embedded(bundle),
+            },
             acquire_prerequisites: true,
         })
     }
@@ -148,6 +163,142 @@ impl WindowsSessionHost {
 impl SessionHost for WindowsSessionHost {
     type Bound<'a> = zup_windows::WindowsOperationHost<'a>;
 
+    fn acquire_content(
+        &mut self,
+        build: &mut Arc<zup_core::TargetBuildPlan>,
+        context: &zup_session::OperationContext,
+        operation: zup_runtime::Operation,
+        selection: &zup_runtime::OperationSelection,
+        events: &mut (dyn FnMut(zup_presentation::InstallerEvent) + Send),
+    ) -> Result<(), String> {
+        if !self
+            .bundle
+            .as_ref()
+            .is_some_and(|bundle| bundle.package().is_plan_only())
+            && self.handoff.is_none()
+            || operation == zup_runtime::Operation::Uninstall
+        {
+            return Ok(());
+        }
+        let installer = &build.installer;
+        let config = installer.updates.as_ref().ok_or_else(|| {
+            "this thin installer has no authenticated update repository".to_owned()
+        })?;
+        if matches!(operation, zup_runtime::Operation::Repair { .. })
+            && context
+                .ledger
+                .as_ref()
+                .and_then(zup_exec::InstallLedger::release_identity)
+                .is_none()
+        {
+            return Err(
+                "this installation has no authenticated release identity to repair from".into(),
+            );
+        }
+        let action = zup_runtime::resolve_operation(
+            operation,
+            context.ledger.as_ref().map(|ledger| &ledger.version),
+            &installer.app.version,
+        )
+        .map_err(|error| error.to_string())?;
+        let request = zup_runtime::plan_request(
+            installer,
+            context.scope,
+            context.ledger.as_ref(),
+            selection,
+            action,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let selected = zup_plan::select_components(&installer.components, &request.components)
+            .map_err(|error| error.to_string())?;
+        let selected_names = selected.iter().map(|id| id.as_str()).collect::<Vec<_>>();
+        let components = zup_update::ComponentSelection::Only(&selected_names);
+        let content_root = if context.scope == SelectedScope::Machine {
+            state::peer_user_state_root().map_err(|error| error.to_string())?
+        } else {
+            context.state_root.clone()
+        };
+        let trust = zup_update::TrustContext::from_update_config(
+            config,
+            installer.app.id.clone(),
+            content_root,
+        );
+        let (sink, mut receiver) = zup_acquire::ProgressSink::channel(128);
+        let acquired = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while let Some(event) = receiver.blocking_recv() {
+                    for event in zup_presentation::automation_events(&event) {
+                        events(event);
+                    }
+                }
+            });
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            if let Some(handoff) = &self.handoff {
+                let mut resolver = zup_update::ReleaseResolver::new(
+                    trust,
+                    zup_acquire::HostProfile::native(),
+                    zup_acquire::CachePolicy::Auto,
+                    sink,
+                )
+                .map_err(|error| error.to_string())?;
+                if let Some(seed) = &self.seed {
+                    resolver = resolver.with_seed("local source", seed.clone());
+                }
+                runtime
+                    .block_on(crate::acquire::acquire_closure(
+                        &resolver,
+                        handoff.acquired.resolved.clone(),
+                        components,
+                    ))
+                    .map_err(|error| error.to_string())
+            } else {
+                let seeds = self.seed.iter().cloned().collect::<Vec<_>>();
+                runtime
+                    .block_on(crate::acquire::acquire(
+                        trust, components, None, &seeds, sink,
+                    ))
+                    .map_err(|error| error.to_string())
+            }
+        })?;
+        if acquired.resolved.variant.target != installer.target
+            || acquired.resolved.descriptor.app_id != installer.app.id
+        {
+            return Err(
+                "the authenticated release does not match this installer's application and target"
+                    .into(),
+            );
+        }
+        if let Some(prior) = context
+            .ledger
+            .as_ref()
+            .and_then(zup_exec::InstallLedger::release_identity)
+            && prior.variant != acquired.resolved.variant.id
+        {
+            return Err("the authenticated release does not match the installed variant".into());
+        }
+        let payload =
+            crate::acquire::payload_source(&acquired).map_err(|error| error.to_string())?;
+        *build = Arc::new(
+            crate::acquire::target_plan(&acquired.manifest).map_err(|error| error.to_string())?,
+        );
+        self.acquired = Some(AcquiredContent {
+            release: Arc::new(acquired),
+            payload: Arc::new(payload),
+        });
+        Ok(())
+    }
+
+    fn release_identity(&self) -> Option<zup_core::ReleaseIdentity> {
+        self.acquired
+            .as_ref()
+            .map(|content| content.release.identity())
+    }
+
     fn bind<'a>(
         &'a self,
         context: &'a zup_session::OperationContext,
@@ -155,49 +306,40 @@ impl SessionHost for WindowsSessionHost {
         self.operation_host(context)
     }
 
-    fn discover(
-        &mut self,
-        executable: &Path,
-        launch: &SessionLaunch,
-    ) -> Result<SessionDiscovery, String> {
+    fn describe(&mut self, executable: &Path) -> Result<Arc<zup_core::TargetBuildPlan>, String> {
         let bundle = package::open_bundle_if_present(executable)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
                 "this file carries no installer package; run the installer you downloaded"
                     .to_owned()
             })?;
-        let build = package::target_plan(&bundle).map_err(|error| error.to_string())?;
-        let installer = build.installer.clone();
-        let mut installations = Vec::new();
-        for scope in zup_preset_host::surface::scopes(&installer)
-            .into_iter()
-            .map(zup_preset_host::engine_scope)
-        {
-            let state_root = state::resolve_state_root(launch.state_root.clone(), scope)
-                .map_err(|error| error.to_string())?;
-            let ledger = zup_windows::InstallLedgerStore::new(&state_root)
-                .load(&installer.app.id, scope)
-                .map_err(|error| error.to_string())?;
-            installations.push(zup_session::ScopedInstallation {
-                scope,
-                state_root,
-                ledger,
-            });
-        }
-        if launch.maintenance
-            && installations
-                .iter()
-                .all(|installation| installation.ledger.is_none())
-        {
-            return Err("the installed application was not found".into());
-        }
+        let build = match &self.handoff {
+            Some(handoff) => crate::acquire::target_plan(&handoff.acquired.manifest)
+                .map_err(|error| error.to_string())?,
+            None => package::target_plan(&bundle).map_err(|error| error.to_string())?,
+        };
         self.executable = executable.to_path_buf();
         self.bundle = Some(bundle);
-        self.app_id = Some(installer.app.id.clone());
-        self.frontend = installer.frontend;
-        Ok(SessionDiscovery {
-            build,
-            installations,
+        self.app_id = Some(build.installer.app.id.clone());
+        self.frontend = build.installer.frontend;
+        Ok(Arc::new(build))
+    }
+
+    fn observe(
+        &self,
+        installer: &zup_core::Installer,
+        scope: SelectedScope,
+        state_root: Option<&Path>,
+    ) -> Result<zup_session::OperationContext, String> {
+        let state_root = state::resolve_state_root(state_root.map(Path::to_path_buf), scope)
+            .map_err(|error| error.to_string())?;
+        let ledger = zup_windows::InstallLedgerStore::new(&state_root)
+            .load(&installer.app.id, scope)
+            .map_err(|error| error.to_string())?;
+        Ok(zup_session::OperationContext {
+            scope,
+            state_root,
+            ledger,
         })
     }
 
@@ -206,7 +348,13 @@ impl SessionHost for WindowsSessionHost {
         context: &zup_session::OperationContext,
         prepared: &zup_runtime::PreparedOperation,
     ) -> Result<Arc<dyn zup_runtime::RuntimeBackend>, String> {
-        let backend = if prepared.action == zup_exec::LifecycleAction::Uninstall {
+        let backend = if let Some(content) = &self.acquired {
+            zup_windows::WindowsRuntimeBackend::from_acquired(
+                Arc::clone(&content.payload),
+                content.release.cache.root().to_path_buf(),
+            )
+            .map_err(|error| error.to_string())?
+        } else if prepared.action == zup_exec::LifecycleAction::Uninstall {
             zup_windows::WindowsRuntimeBackend::from_path(self.executable.clone(), None)
                 .map_err(|error| error.to_string())?
         } else {
@@ -289,6 +437,7 @@ impl SessionHost for WindowsSessionHost {
         })
     }
 
+    #[cfg(feature = "gui")]
     fn update(
         &self,
         scope: SelectedScope,
@@ -304,14 +453,23 @@ impl SessionHost for WindowsSessionHost {
     fn after_commit(
         &self,
         context: &zup_session::OperationContext,
-        _prepared: &zup_runtime::PreparedOperation,
+        prepared: &zup_runtime::PreparedOperation,
     ) -> Result<(), String> {
         let app_id = self
             .app_id
             .as_ref()
             .ok_or_else(|| "the session host was not discovered".to_owned())?;
-        zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
-            .map_err(|error| error.to_string())
+        if prepared.action == zup_exec::LifecycleAction::Uninstall {
+            zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(acquired) = &self.acquired {
+            acquired
+                .release
+                .record_retention(zup_acquire::CachePolicy::Auto)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -338,7 +496,7 @@ impl Launch {
         Self {
             maintenance: false,
             auto_uninstall: false,
-            scope: Some(SelectedScope::from(args.scope)),
+            scope: args.scope.map(Into::into),
             state_root: args.state_root.clone(),
             preselected: (!args.enable.is_empty()).then(|| {
                 args.enable
@@ -353,7 +511,7 @@ impl Launch {
         Self {
             maintenance: true,
             auto_uninstall: true,
-            scope: args.scope.map(SelectedScope::from),
+            scope: args.scope.map(Into::into),
             state_root: args.state_root.clone(),
             preselected: None,
         }
@@ -420,6 +578,150 @@ impl Default for WindowsSessionHost {
             bundle: None,
             app_id: None,
             frontend: Frontend::Gui,
+            acquired: None,
+            handoff: None,
+            seed: None,
         }
     }
+}
+
+pub(crate) fn command() -> clap::Command {
+    crate::terminal::command().subcommand(
+        clap::Command::new("update")
+            .about("Check for and install authenticated updates")
+            .subcommand(clap::Command::new("check"))
+            .arg(
+                clap::Arg::new("source")
+                    .long("source")
+                    .value_name("PATH")
+                    .value_parser(clap::value_parser!(PathBuf))
+                    .value_hint(clap::ValueHint::DirPath),
+            ),
+    )
+}
+
+pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
+    use clap::FromArgMatches;
+    let mut matches = crate::terminal::parse_matches(command());
+    if matches.subcommand_name() == Some("update") {
+        let (_, update) = matches
+            .remove_subcommand()
+            .expect("selected native operation");
+        let cli =
+            crate::terminal::Cli::from_arg_matches(&matches).expect("validated terminal arguments");
+        let output = cli.output.into();
+        let args = crate::maintenance::UpdateArgs {
+            command: update
+                .subcommand_name()
+                .map(|_| crate::maintenance::UpdateCommand::Check),
+            scope: cli.scope,
+            output: cli.output,
+            non_interactive: cli.non_interactive,
+            yes: cli.yes,
+            plain: cli.plain,
+            state_root: cli.state_root,
+            source: update.get_one::<PathBuf>("source").cloned(),
+        };
+        let result = crate::maintenance::run_update(
+            crate::run::RuntimeContext::new(frontend).with_output(output),
+            args,
+        );
+        if let Err(error) = &result
+            && !crate::execute::already_reported(error)
+            && error
+                .downcast_ref::<crate::terminal::ReportedFailure>()
+                .is_none()
+        {
+            crate::emit_failure(output, error);
+        }
+        return result;
+    }
+    let cli =
+        crate::terminal::Cli::from_arg_matches(&matches).expect("validated terminal arguments");
+    if cli.operation.is_none()
+        && frontend == Frontend::Console
+        && !cli.non_interactive
+        && !cli.yes
+        && matches!(cli.output, crate::terminal::Output::Human)
+        && crate::run::console_is_a_terminal()
+    {
+        let executable =
+            std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
+        if zup_transaction::is_maintenance_path(&executable) {
+            return crate::maintenance::launch_terminal_runner(&executable);
+        }
+    }
+    if matches!(&cli.operation, Some(crate::terminal::Command::Uninstall))
+        && std::env::current_exe()
+            .is_ok_and(|executable| zup_transaction::is_maintenance_path(&executable))
+    {
+        let output = zup_presentation::OutputFormat::from(cli.output);
+        let args = crate::maintenance::UninstallArgs {
+            scope: cli.scope,
+            output: cli.output,
+            non_interactive: cli.non_interactive,
+            yes: cli.yes,
+            plain: cli.plain,
+            state_root: cli.state_root,
+            app_id: None,
+            work_root: None,
+            ui: false,
+        };
+        return crate::maintenance::run_uninstall(
+            crate::run::RuntimeContext::new(frontend).with_output(output),
+            args,
+        );
+    }
+    crate::terminal::run_cli(WindowsSessionHost::default(), frontend, cli)
+}
+
+pub(crate) fn terminal_handoff(
+    context: crate::run::RuntimeContext,
+    action: zup_exec::LifecycleAction,
+    args: &crate::cli::LifecycleArgs,
+    accepted: crate::handoff::Accepted,
+) -> miette::Result<()> {
+    let operation = match action {
+        zup_exec::LifecycleAction::Install => {
+            crate::terminal::Command::Install(crate::terminal::Components {
+                enable: args.enable.clone(),
+                disable: args.disable.clone(),
+            })
+        }
+        zup_exec::LifecycleAction::Upgrade => {
+            crate::terminal::Command::Upgrade(crate::terminal::Components {
+                enable: args.enable.clone(),
+                disable: args.disable.clone(),
+            })
+        }
+        zup_exec::LifecycleAction::Modify => {
+            crate::terminal::Command::Modify(crate::terminal::Components {
+                enable: args.enable.clone(),
+                disable: args.disable.clone(),
+            })
+        }
+        zup_exec::LifecycleAction::Repair { force_files } => {
+            crate::terminal::Command::Repair { force_files }
+        }
+        zup_exec::LifecycleAction::Uninstall => crate::terminal::Command::Uninstall,
+    };
+    let cli = crate::terminal::Cli {
+        operation: Some(operation),
+        scope: Some(match accepted.scope {
+            SelectedScope::User => crate::terminal::Scope::User,
+            SelectedScope::Machine => crate::terminal::Scope::Machine,
+        }),
+        state_root: args.state_root.clone(),
+        install_directory: args.install_directory.clone(),
+        non_interactive: args.non_interactive,
+        yes: args.yes,
+        plain: args.plain,
+        output: args.output,
+    };
+    let host = WindowsSessionHost {
+        handoff: Some(Arc::new(accepted)),
+        seed: args.source.clone(),
+        ..Default::default()
+    };
+    crate::terminal::run_cli(host, context.frontend, cli)
 }

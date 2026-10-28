@@ -589,10 +589,7 @@ fn generated_inputs(
         let Some(source) = node.meta.source_relative.as_ref() else {
             continue;
         };
-        if !source
-            .as_str()
-            .starts_with(crate::integration::GENERATED_PREFIX)
-        {
+        if !crate::integration::is_generated_content(source.as_str()) {
             continue;
         }
         let bytes = generated.get(source.as_str()).ok_or_else(|| {

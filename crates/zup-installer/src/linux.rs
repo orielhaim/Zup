@@ -2,9 +2,10 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
-use zup_core::{Frontend, SelectedScope};
-use zup_session::SessionHost;
+use clap::{Args, Parser, Subcommand};
+use zup_core::Frontend;
+
+use crate::terminal::Scope;
 
 #[derive(Debug, Parser)]
 #[command(name = "setup", version)]
@@ -13,7 +14,7 @@ struct Cli {
     verb: Option<Verb>,
 
     #[arg(long, global = true)]
-    scope: Option<ScopeFlag>,
+    scope: Option<Scope>,
 
     /// scope only inside the machine program tree: an override never widens
     #[arg(long, global = true, value_name = "PATH")]
@@ -21,22 +22,6 @@ struct Cli {
 
     #[arg(long, global = true)]
     state_root: Option<PathBuf>,
-}
-
-/// The scope flag: an explicit choice, never a silent default to machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum ScopeFlag {
-    User,
-    Machine,
-}
-
-impl ScopeFlag {
-    fn selected(self) -> SelectedScope {
-        match self {
-            Self::User => SelectedScope::User,
-            Self::Machine => SelectedScope::Machine,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -83,7 +68,7 @@ struct WorkerArgs {
 }
 
 pub fn command() -> clap::Command {
-    Cli::command()
+    crate::terminal::command()
 }
 
 pub fn run(frontend: Frontend) -> miette::Result<()> {
@@ -99,113 +84,17 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
     if let Some((session, client_pid, socket_path)) = worker_session_args() {
         return run_worker(session, client_pid, socket_path);
     }
-    let cli = Cli::parse();
-    match &cli.verb {
-        Some(Verb::__PrivilegedWorker(args)) => {
-            let args = args.clone();
-            return run_worker(args.session, args.client_pid, args.socket_path);
-        }
-        Some(Verb::Recover(args)) => {
+    if std::env::args().any(|argument| argument == "__recover") {
+        let cli = Cli::parse();
+        if let Some(Verb::Recover(args)) = &cli.verb {
             return run_recovery(&cli, args.clone());
         }
-        _ => {}
     }
-    let selection_of = |selection: &SelectionArgs| zup_runtime::OperationSelection {
-        enable: selection.enable.clone(),
-        disable: selection.disable.clone(),
-        install_directory: None,
-    };
-    let (operation, selection) = match cli.verb {
-        None => (zup_runtime::Operation::Apply, Default::default()),
-        Some(Verb::Install(selection)) => {
-            (zup_runtime::Operation::Install, selection_of(&selection))
-        }
-        Some(Verb::Upgrade(selection)) => {
-            (zup_runtime::Operation::Upgrade, selection_of(&selection))
-        }
-        Some(Verb::Modify(selection)) => (zup_runtime::Operation::Modify, selection_of(&selection)),
-        Some(Verb::Repair(args)) => (
-            zup_runtime::Operation::Repair {
-                force_files: args.force,
-            },
-            Default::default(),
-        ),
-        Some(Verb::Uninstall) => (zup_runtime::Operation::Uninstall, Default::default()),
-        Some(Verb::Recover(_)) | Some(Verb::__PrivilegedWorker(_)) => unreachable!("handled above"),
-    };
-    let executable =
-        std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
-    let mut selection = selection;
-    if selection.install_directory.is_none() {
-        selection.install_directory = cli.install_dir.clone();
-    }
-    let launch = zup_session::SessionLaunch {
-        scope: cli.scope.map(ScopeFlag::selected),
-        state_root: cli.state_root.clone(),
-        ..Default::default()
-    };
-    let mut host = zup_linux::LinuxSessionHost::open(executable.clone());
-    let discovery = host
-        .discover(&executable, &launch)
-        .map_err(|error| miette::miette!("{error}"))?;
-    let scope = zup_session::select_scope(
-        discovery.installer().install.scope,
-        &launch,
-        &discovery.installations,
+    crate::terminal::run_cli(
+        zup_linux::LinuxSessionHost::open(PathBuf::new()),
+        frontend,
+        crate::terminal::parse(),
     )
-    .map_err(|error| miette::miette!("{error}"))?;
-    let state_root = discovery
-        .context(scope)
-        .map_err(|error| miette::miette!("{error}"))?
-        .state_root;
-    let outcome = zup_linux::run_outcome(&zup_linux::LinuxRunRequest {
-        installer: executable,
-        scope,
-        state_root: Some(state_root.clone()),
-        action: operation,
-        install_dir_override: cli.install_dir,
-        selection,
-    });
-    match outcome {
-        Ok(zup_runtime::InstallOutcome::Committed) => {
-            println!("committed");
-            Ok(())
-        }
-        Ok(zup_runtime::InstallOutcome::RolledBack) => {
-            Err(miette::miette!("transaction: rolled back"))
-        }
-        Ok(zup_runtime::InstallOutcome::RecoveryRequired) => {
-            let transaction = zup_runtime::discover_recovery(&state_root)
-                .map_err(|error| miette::miette!("cannot inspect recovery state: {error}"))?
-                .into_iter()
-                .find_map(|status| match status {
-                    zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id } => {
-                        Some(transaction_id)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| "unknown".to_owned());
-            Err(miette::miette!(
-                "transaction {transaction} requires recovery"
-            ))
-        }
-        Ok(zup_runtime::InstallOutcome::Busy { .. }) => {
-            Err(miette::miette!("another maintenance operation is running"))
-        }
-        Ok(zup_runtime::InstallOutcome::Cancelled) => Err(miette::miette!("cancelled")),
-        Ok(zup_runtime::InstallOutcome::RebootRequired { .. }) => {
-            Err(miette::miette!("a reboot is required"))
-        }
-        Ok(zup_runtime::InstallOutcome::Failed(message)) => Err(miette::miette!("{message}")),
-        Ok(
-            zup_runtime::InstallOutcome::AuthorizationRequired
-            | zup_runtime::InstallOutcome::AuthorizationCancelled,
-        ) => Err(miette::miette!("authorization required")),
-        Ok(zup_runtime::InstallOutcome::CommittedPendingReconciliation { detail }) => {
-            Err(miette::miette!("{detail}"))
-        }
-        Err(error) => Err(miette::miette!("{error}")),
-    }
 }
 
 #[cfg(feature = "gui")]
@@ -248,7 +137,7 @@ fn run_gui() -> miette::Result<()> {
     }
     let executable =
         std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
-    let scope = cli.scope.map(ScopeFlag::selected);
+    let scope = cli.scope.map(Into::into);
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -273,8 +162,8 @@ fn run_recovery(cli: &Cli, args: RecoverArgs) -> miette::Result<()> {
     let id = zup_transaction::TransactionId::from_uuid(id);
     let scope = cli
         .scope
-        .map(ScopeFlag::selected)
-        .unwrap_or(SelectedScope::User);
+        .map(Into::into)
+        .ok_or_else(|| miette::miette!("recovery requires --scope user or --scope machine"))?;
     let state_root = match &cli.state_root {
         Some(root) => root.clone(),
         None => zup_linux::state_root(scope).map_err(|error| miette::miette!("{error}"))?,

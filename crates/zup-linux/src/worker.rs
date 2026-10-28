@@ -553,6 +553,7 @@ fn prepare_operation(
         install_directory: intent.install_dir_override.as_ref().map(PathBuf::from),
     };
     let host = crate::operation_host::LinuxOperationHost {
+        installer: carrier_path.clone(),
         machine: Some(crate::operation_host::MachineHost {
             roots: roots.clone(),
             systemd: context.systemd.clone(),
@@ -582,6 +583,8 @@ fn prepare_operation(
             .map_err(|error| IpcError::Policy(format!("install destination: {error}")))?;
     }
 
+    let generated =
+        crate::operation_host::generated_content(&prepared).map_err(IpcError::Policy)?;
     let plan = prepared.transaction_plan;
     if plan.nodes.iter().any(|node| {
         matches!(
@@ -645,7 +648,7 @@ fn prepare_operation(
             installer: carrier_path,
             maintenance_sha256,
             maintenance_size,
-            generated: BTreeMap::new(),
+            generated,
             package: carrier.package().payload_source(),
         },
         _lock: lock,

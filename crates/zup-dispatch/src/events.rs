@@ -80,7 +80,7 @@ impl Human {
         use std::io::Write;
         let line = render(event);
         let is_progress = matches!(event, AcquisitionEvent::DownloadProgress { .. });
-        let mut out = std::io::stdout().lock();
+        let mut out = std::io::stderr().lock();
         if is_progress {
             if self.moving {
                 let _ = write!(out, "\r{line}");

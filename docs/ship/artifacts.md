@@ -73,6 +73,6 @@ which selects and verifies the required payload before installation.
 
 A universal artifact can contain several target variants and select the matching one when launched. This is useful when one download should cover x64 and ARM64.
 
-Run it like the installer it stages: `install`, `repair`, `update`, `modify`, and `uninstall` (plus `--scope`, `--non-interactive`, `--yes`, and the install/modify/repair options) travel to the staged native runtime, which validates them exactly as if it had been started directly. Installing a newer artifact upgrades.
+Run it like the installer it stages: `install`, `upgrade`, `modify`, `repair`, `update`, and `uninstall` travel to the native runtime with their selection and reporting options. Use `upgrade` to apply a newer artifact to an existing installation. `--plain` selects line prompts; `--non-interactive` and `--yes` suppress prompts. The runtime independently validates the forwarded choices.
 
 Do not make every release universal by default. One file per target is easier to inspect and distribute when a single download is not a product requirement.

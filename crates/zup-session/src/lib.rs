@@ -9,5 +9,5 @@ pub use host::{
     process_outcome, select_scope, state_name,
 };
 pub use runner::{
-    OperationCompletion, OperationLaunch, Reporter, complete_operation, run_operation,
+    OperationCompletion, OperationLaunch, complete_operation, reconcile_operation, run_operation,
 };

@@ -80,6 +80,7 @@ pub(crate) fn plan_expected(
         selection.install_directory = request.install_dir_override.clone();
     }
     let host = crate::operation_host::LinuxOperationHost {
+        installer: request.installer.clone(),
         machine: Some(crate::operation_host::MachineHost {
             roots: roots.clone(),
             systemd: systemd.clone(),

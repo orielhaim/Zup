@@ -87,6 +87,10 @@ pub enum PlanError {
     #[diagnostic(code(zup_plan::component_both_enabled_and_disabled))]
     ComponentBothEnabledAndDisabled { id: ComponentId },
 
+    #[error("choose at least one optional component in group `{group}` using --enable ID")]
+    #[diagnostic(code(zup_plan::component_group_selection_required))]
+    ComponentGroupSelectionRequired { group: String },
+
     #[error("required component `{id}` cannot be disabled")]
     #[diagnostic(code(zup_plan::required_component_disabled))]
     RequiredComponentDisabled { id: ComponentId },

@@ -3,30 +3,32 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueHint};
 use zup_acquire::CachePolicy;
-use zup_core::{AppId, Frontend, InstallScope, SelectedScope};
+use zup_core::{AppId, Frontend, SelectedScope};
 use zup_exec::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{ExecutionPolicy, RuntimeRequest};
 use zup_transaction::{NodeKind, TransactionId, TransactionStore};
 use zup_update::{ComponentSelection, TrustContext};
 
-use crate::cli::{OutputArg, ScopeArg};
 use crate::lifecycle::{self, PreparedRuntime};
 use crate::package;
 use crate::run::RuntimeContext;
+use crate::terminal::{Output, Scope};
 use crate::{acquire, execute};
 
 #[derive(Debug, Clone, Args)]
 pub struct UninstallArgs {
     #[arg(long, value_enum)]
-    pub scope: Option<ScopeArg>,
+    pub scope: Option<Scope>,
     #[arg(long, value_enum, default_value = "human")]
-    pub output: OutputArg,
+    pub output: Output,
     /// Never ask a question.
     #[arg(long)]
     pub non_interactive: bool,
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub plain: bool,
 
     #[arg(long, hide = true)]
     pub app_id: Option<String>,
@@ -52,16 +54,29 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
         return Ok(());
     }
 
+    if context.frontend != Frontend::Gui && package::open_bundle_if_present(&executable)?.is_some()
+    {
+        let scope = args.scope.map(Into::into);
+        return crate::terminal::uninstall(
+            crate::host::WindowsSessionHost::default(),
+            context.with_output(args.output()),
+            scope,
+            args.state_root,
+            args.non_interactive,
+            args.yes,
+            args.plain,
+        );
+    }
+
     if args.ui {
         return Err(miette::miette!(
             "this build has no graphical surface; omit --ui or add --yes"
         ));
     }
 
-    if context.is_live_console()
-        && !args.non_interactive
-        && !args.yes
-        && args.output == OutputArg::Human
+    if context
+        .with_output(args.output())
+        .may_prompt(args.non_interactive, args.yes)
         && !crate::frontend::confirm_uninstall()?
     {
         return Err(crate::frontend::cancelled());
@@ -82,18 +97,17 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
     let (scope, state_root) = resolve_scope(
         &app_id,
         build.as_ref().map(|build| &build.installer),
-        args.scope.unwrap_or(ScopeArg::Either),
+        args.scope.map(Into::into),
         args.state_root.as_deref(),
     )?;
     let output = args.output();
-    let policy = if args.non_interactive
-        || args.yes
-        || args.output != OutputArg::Human
-        || !context.is_live_console()
+    let policy = if context
+        .with_output(args.output())
+        .may_prompt(args.non_interactive, args.yes)
     {
-        ExecutionPolicy::NonInteractive
-    } else {
         ExecutionPolicy::Interactive
+    } else {
+        ExecutionPolicy::NonInteractive
     };
 
     let prepared = match &build {
@@ -186,38 +200,30 @@ fn prepare_from_ledger(
 fn resolve_scope(
     app_id: &AppId,
     installer: Option<&zup_core::Installer>,
-    requested: ScopeArg,
+    requested: Option<SelectedScope>,
     state_root: Option<&Path>,
 ) -> miette::Result<(SelectedScope, PathBuf)> {
-    let declared = installer.map(|installer| installer.install.scope);
-    let allowed: &[SelectedScope] = match declared {
-        Some(InstallScope::User) => &[SelectedScope::User],
-        Some(InstallScope::Machine) => &[SelectedScope::Machine],
-        Some(InstallScope::Either) | None => &[SelectedScope::User, SelectedScope::Machine],
-    };
-    if declared == Some(InstallScope::Machine) {
-        return Ok((
-            SelectedScope::Machine,
-            resolve_state_root(state_root.map(Path::to_path_buf), SelectedScope::Machine)?,
-        ));
-    }
-    let named = match requested {
-        ScopeArg::User => Some(SelectedScope::User),
-        ScopeArg::Machine => Some(SelectedScope::Machine),
-        ScopeArg::Either => None,
-    };
-    if let Some(scope) = named {
-        if !allowed.contains(&scope) {
-            return Err(miette::miette!(
-                "this application does not install into the {scope} scope"
-            ));
-        }
+    if let Some(installer) = installer {
+        let scope =
+            installer.install.scope.select(requested).map_err(|error| {
+                miette::miette!("{error}; specify --scope user or --scope machine")
+            })?;
         return Ok((
             scope,
             resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
         ));
     }
-    discover_scope(app_id, allowed, state_root)
+    if let Some(scope) = requested {
+        return Ok((
+            scope,
+            resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
+        ));
+    }
+    discover_scope(
+        app_id,
+        &[SelectedScope::User, SelectedScope::Machine],
+        state_root,
+    )
 }
 
 fn discover_scope(
@@ -244,10 +250,8 @@ fn discover_scope(
     if let Some(result) = found.pop() {
         return Ok(result);
     }
-    let scope = SelectedScope::User;
-    Ok((
-        scope,
-        resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
+    Err(miette::miette!(
+        "this application is not installed; specify --scope to inspect one installation"
     ))
 }
 
@@ -258,15 +262,11 @@ pub fn launch_runner(
     args: &UninstallArgs,
     ui: bool,
 ) -> miette::Result<std::process::Child> {
-    let temporary =
-        std::env::temp_dir().join(format!("zup-uninstall-{}.exe", uuid::Uuid::now_v7()));
-    zup_windows::copy_new_durable(executable, &temporary)
-        .map_err(|error| miette::miette!("prepare the uninstall runner: {error}"))?;
-    let mut command = std::process::Command::new(&temporary);
-    command
-        .arg("__uninstall_runner")
-        .arg("--wait-pid")
-        .arg(std::process::id().to_string());
+    let interactive = crate::run::console_is_a_terminal()
+        && !args.non_interactive
+        && !args.yes
+        && args.output == Output::Human;
+    let mut command = runner_command(executable, "__uninstall_runner", interactive)?;
     if ui {
         command.arg("--ui");
     }
@@ -288,18 +288,49 @@ pub fn launch_runner(
     if args.yes {
         command.arg("--yes");
     }
-    if args.output != OutputArg::Human {
-        command.arg("--output").arg(args.output.as_str());
+    if args.plain {
+        command.arg("--plain");
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        command.creation_flags(DETACHED_PROCESS);
+    if args.output != Output::Human {
+        command.arg("--output").arg(args.output.as_str());
     }
     command
         .spawn()
         .map_err(|error| miette::miette!("start the uninstall runner: {error}"))
+}
+
+fn runner_command(
+    executable: &Path,
+    kind: &str,
+    interactive: bool,
+) -> miette::Result<std::process::Command> {
+    use std::os::windows::process::CommandExt;
+    let temporary =
+        std::env::temp_dir().join(format!("zup-maintenance-{}.exe", uuid::Uuid::now_v7()));
+    zup_windows::copy_new_durable(executable, &temporary)
+        .map_err(|error| miette::miette!("prepare the maintenance helper: {error}"))?;
+    let mut command = std::process::Command::new(temporary);
+    command
+        .arg(kind)
+        .arg("--wait-pid")
+        .arg(std::process::id().to_string());
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    command.creation_flags(if interactive {
+        CREATE_NEW_CONSOLE
+    } else {
+        DETACHED_PROCESS
+    });
+    Ok(command)
+}
+
+pub fn launch_terminal_runner(executable: &Path) -> miette::Result<()> {
+    runner_command(executable, "__terminal_runner", true)?
+        .arg("--")
+        .args(std::env::args_os().skip(1))
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| miette::miette!("start the maintenance terminal: {error}"))
 }
 
 pub fn schedule_runner_cleanup(path: &Path) {
@@ -335,7 +366,7 @@ mod tests {
             frontend: Frontend::Headless,
             updates: None,
             install: zup_core::Install {
-                scope: InstallScope::Machine,
+                scope: zup_core::InstallScope::Machine,
                 directory: zup_core::InstallDirectory {
                     user: None,
                     machine: None,
@@ -353,13 +384,14 @@ mod tests {
             protocols: Vec::new(),
             file_associations: Vec::new(),
         };
-        let (scope, root) = resolve_scope(&app, Some(&installer), ScopeArg::User, None)
+        let (scope, root) = resolve_scope(&app, Some(&installer), None, None)
             .expect("a machine-wide application resolves without asking");
         assert!(
             root.ends_with("zup"),
             "machine scope uses the authoritative state root"
         );
         assert_eq!(scope, SelectedScope::Machine);
+        assert!(resolve_scope(&app, Some(&installer), Some(SelectedScope::User), None).is_err());
     }
 }
 
@@ -371,16 +403,18 @@ pub struct UpdateArgs {
     #[command(subcommand)]
     pub command: Option<UpdateCommand>,
     #[arg(long, value_enum)]
-    pub scope: Option<ScopeArg>,
+    pub scope: Option<Scope>,
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub source: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "human")]
-    pub output: OutputArg,
+    pub output: Output,
     /// Never ask a question.
     #[arg(long)]
     pub non_interactive: bool,
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub plain: bool,
 
     #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
@@ -398,7 +432,6 @@ impl UpdateArgs {
 }
 
 pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<()> {
-    let _ = context;
     let executable = package::current_executable()?;
     let bundle = package::open_bundle(&executable).map_err(|error| {
         miette::miette!("an update needs this application's installer package: {error}")
@@ -413,7 +446,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     let check_only = args.command.is_some();
     let machine_run = output != OutputFormat::Human && !check_only;
 
-    let (scope, state_root, ledger) = committed_installation(installer, &args)?;
+    let (scope, state_root, ledger) = committed_installation(context, installer, &args)?;
     let update_root = if scope == SelectedScope::Machine && args.state_root.is_none() {
         peer_user_state_root()?
     } else {
@@ -442,11 +475,11 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     }
 
     let installed = ledger.release_identity().cloned();
-    let (sink, _receiver) = zup_acquire::ProgressSink::channel(256);
-    let context =
+    let sink = zup_acquire::ProgressSink::discard();
+    let trust =
         TrustContext::from_update_config(config, installer.app.id.clone(), update_root.clone());
     let mut resolver = zup_update::ReleaseResolver::new(
-        context,
+        trust,
         zup_acquire::HostProfile::native(),
         CachePolicy::Auto,
         sink.clone(),
@@ -491,7 +524,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
         );
     }
 
-    confirm(&args, output)?;
+    confirm(context, &args)?;
     if output == OutputFormat::Human {
         println!(
             "update available: {} → {}",
@@ -514,10 +547,10 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     if output == OutputFormat::Human {
         eprintln!("  {}", acquired.estimate());
     }
-    let policy = if args.non_interactive || output != OutputFormat::Human {
-        ExecutionPolicy::NonInteractive
-    } else {
+    let policy = if context.may_prompt(args.non_interactive, args.yes) {
         ExecutionPolicy::Interactive
+    } else {
+        ExecutionPolicy::NonInteractive
     };
     lifecycle::run_acquired_transition(
         acquire::Request {
@@ -603,41 +636,30 @@ pub fn from_maintenance_surface(
 }
 
 fn committed_installation(
+    context: RuntimeContext,
     installer: &zup_core::Installer,
     args: &UpdateArgs,
 ) -> miette::Result<(SelectedScope, PathBuf, zup_exec::InstallLedger)> {
-    let mut scope = if installer.install.scope == zup_core::InstallScope::Machine {
-        SelectedScope::Machine
-    } else {
-        args.scope
-            .map(SelectedScope::from)
-            .unwrap_or(SelectedScope::User)
-    };
-    let mut state_root = resolve_state_root(args.state_root.clone(), scope)?;
-    let store = zup_windows::InstallLedgerStore::new(&state_root);
-    let mut ledger = store
+    let scope = crate::terminal::choose_scope(
+        installer,
+        args.scope.map(Into::into),
+        context.may_prompt(args.non_interactive, args.yes),
+        args.plain,
+    )?;
+    let state_root = resolve_state_root(args.state_root.clone(), scope)?;
+    let ledger = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&installer.app.id, scope)
-        .map_err(|error| miette::miette!("installation ledger: {error}"))?;
-    if ledger.is_none()
-        && args.scope.is_none()
-        && args.state_root.is_none()
-        && scope == SelectedScope::User
-    {
-        scope = SelectedScope::Machine;
-        state_root = resolve_state_root(None, scope)?;
-        ledger = store
-            .load(&installer.app.id, scope)
-            .map_err(|error| miette::miette!("installation ledger: {error}"))?;
-    }
-    let ledger = ledger.ok_or_else(|| miette::miette!("this application is not installed"))?;
+        .map_err(|error| miette::miette!("installation ledger: {error}"))?
+        .ok_or_else(|| {
+            miette::miette!("this application is not installed in the selected scope")
+        })?;
     Ok((scope, state_root, ledger))
 }
 
-fn confirm(args: &UpdateArgs, output: OutputFormat) -> miette::Result<()> {
-    if args.yes || args.non_interactive || output != OutputFormat::Human {
-        return Ok(());
-    }
-    if crate::run::console_is_a_terminal() && !crate::frontend::confirm_update()? {
+fn confirm(context: RuntimeContext, args: &UpdateArgs) -> miette::Result<()> {
+    if context.may_prompt(args.non_interactive, args.yes)
+        && !crate::frontend::confirm_update(args.plain)?
+    {
         return Err(crate::frontend::cancelled());
     }
     Ok(())
@@ -729,10 +751,10 @@ fn update_available(
 pub struct RecoveryArgs {
     #[arg(long)]
     pub transaction_id: uuid::Uuid,
-    #[arg(long, value_enum, default_value = "user")]
-    pub scope: ScopeArg,
+    #[arg(long, value_enum)]
+    pub scope: Option<Scope>,
     #[arg(long, value_enum, default_value = "human")]
-    pub output: OutputArg,
+    pub output: Output,
 
     #[arg(long, hide = true, value_hint = clap::ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
@@ -747,10 +769,18 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     let executable = package::current_executable()?;
     let bundle = package::open_bundle_if_present(&executable)?;
     let embedded = bundle.as_ref().map(package::target_plan).transpose()?;
-    let scope = embedded.as_ref().map_or_else(
-        || SelectedScope::from(args.scope),
-        |build| default_install_scope(build.installer.install.scope),
-    );
+    let scope = match &embedded {
+        Some(build) => build
+            .installer
+            .install
+            .scope
+            .select(args.scope.map(Into::into))
+            .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?,
+        None => args
+            .scope
+            .map(Into::into)
+            .ok_or_else(|| miette::miette!("recovery requires --scope user or --scope machine"))?,
+    };
     let state_root = resolve_state_root(args.state_root, scope)?;
     let id = TransactionId::from_uuid(args.transaction_id);
     if scope == SelectedScope::Machine {
@@ -878,13 +908,6 @@ pub fn resolve_state_root(
 
 pub fn peer_user_state_root() -> miette::Result<PathBuf> {
     state_root(SelectedScope::User)
-}
-
-pub fn default_install_scope(scope: InstallScope) -> SelectedScope {
-    match scope {
-        InstallScope::Machine => SelectedScope::Machine,
-        InstallScope::User | InstallScope::Either => SelectedScope::User,
-    }
 }
 
 pub fn action_name(action: LifecycleAction) -> &'static str {

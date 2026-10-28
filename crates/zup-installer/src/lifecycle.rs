@@ -27,28 +27,9 @@ pub struct PreparedRuntime {
     pub(crate) action: LifecycleAction,
 }
 
-impl PreparedRuntime {
-    #[cfg(feature = "console")]
-    pub(crate) fn retaining_overlay(&self) -> Self {
-        let backend = self
-            .backend
-            .as_ref()
-            .clone()
-            .with_overlay_policy(zup_windows::OverlayPolicy::RetainOnBlocked);
-        Self {
-            request: self.request.clone(),
-            backend: Arc::new(backend),
-            action: self.action,
-        }
-    }
-}
-
 pub fn apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
     if args.ui {
         return frontend::graphical_for(context, args);
-    }
-    if args.may_prompt(context) {
-        return frontend::console_apply(context, args);
     }
     transition(context, Operation::Apply, &args, policy_for(&args))
 }
@@ -61,9 +42,6 @@ pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::
         return Err(miette::miette!(
             "this build has no graphical surface; omit --ui"
         ));
-    }
-    if args.may_prompt(context) {
-        return frontend::console_verb(context, verb, args);
     }
     transition(context, verb.action(), &args, policy_for(&args))
 }
@@ -100,7 +78,7 @@ pub fn direct_launch(context: RuntimeContext) -> miette::Result<()> {
     })?;
     match context.frontend {
         zup_core::Frontend::Gui => frontend::graphical(context, &executable, &bundle),
-        zup_core::Frontend::Console => frontend::console_direct(&executable, &bundle),
+        zup_core::Frontend::Console => crate::host::terminal(context.frontend),
         zup_core::Frontend::Headless => Err(miette::miette!(
             "this runtime needs an operation.\n\n  Usage: {} <install|modify|repair|update|uninstall> [OPTIONS]",
             crate::cli::invoked_name()
@@ -117,7 +95,7 @@ pub fn transition(
     let executable = package::current_executable()?;
 
     if let Some(handoff_path) = &args.handoff {
-        return run_handoff(&executable, request, args, policy, handoff_path);
+        return run_handoff(context, &executable, request, args, policy, handoff_path);
     }
 
     match package::open_bundle_if_present(&executable)? {
@@ -126,11 +104,14 @@ pub fn transition(
         }
         Some(bundle) => {
             let build = package::target_plan(&bundle)?;
-            let scope = if build.installer.install.scope == zup_core::InstallScope::Machine {
-                SelectedScope::Machine
-            } else {
-                SelectedScope::from(args.scope)
-            };
+            let scope = build
+                .installer
+                .install
+                .scope
+                .select(args.scope.map(Into::into))
+                .map_err(|error| {
+                    miette::miette!("{error}; specify --scope user or --scope machine")
+                })?;
             run_embedded(
                 request,
                 context,
@@ -148,7 +129,7 @@ pub fn transition(
 
 pub fn run_embedded(
     request: Operation,
-    context: RuntimeContext,
+    _context: RuntimeContext,
     scope: SelectedScope,
     args: &LifecycleArgs,
     policy: ExecutionPolicy,
@@ -163,10 +144,6 @@ pub fn run_embedded(
         args.install_directory.clone(),
     )?;
     if output == OutputFormat::Human {
-        if context.frontend == zup_core::Frontend::Console {
-            let action = prepared.action;
-            return frontend::execute_console(prepared, action);
-        }
         execute::execute_with_policy(prepared, policy).map_err(Into::into)
     } else {
         let action = prepared.action;
@@ -175,6 +152,7 @@ pub fn run_embedded(
 }
 
 fn run_handoff(
+    context: RuntimeContext,
     executable: &Path,
     request: Operation,
     args: &LifecycleArgs,
@@ -197,7 +175,7 @@ fn run_handoff(
         miette::miette!("{error}")
     })?;
     let resume = accepted.session.resume_line();
-    if args.output == crate::cli::OutputArg::Human && !resume.is_empty() {
+    if args.output == crate::terminal::Output::Human && !resume.is_empty() {
         eprintln!("{resume}");
     }
     let expected = match accepted.mode {
@@ -216,6 +194,9 @@ fn run_handoff(
             accepted.mode.verb(),
             state::action_name(action)
         ));
+    }
+    if context.frontend != zup_core::Frontend::Gui {
+        return crate::host::terminal_handoff(context, expected, args, accepted);
     }
     run_acquired_transition(
         acquire::Request {
@@ -267,11 +248,11 @@ fn run_graph_transition(
              release graph to acquire from"
         )
     })?;
-    let scope = if installer.install.scope == zup_core::InstallScope::Machine {
-        SelectedScope::Machine
-    } else {
-        SelectedScope::from(args.scope)
-    };
+    let scope = installer
+        .install
+        .scope
+        .select(args.scope.map(Into::into))
+        .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?;
     let state_root = state::resolve_state_root(args.state_root.clone(), scope)?;
     let ledger = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&installer.app.id, scope)
@@ -308,8 +289,11 @@ fn run_graph_transition(
     let seeds: Vec<PathBuf> = args.source.iter().cloned().collect();
     let (sink, receiver) = zup_acquire::ProgressSink::channel(256);
     let emitter = match args.output {
-        crate::cli::OutputArg::Jsonl => Some(zup_presentation::acquisition_thread(receiver)),
-        _ => None,
+        crate::terminal::Output::Jsonl => Some(zup_presentation::acquisition_thread(receiver)),
+        _ => {
+            drop(receiver);
+            None
+        }
     };
     let tokio = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -352,44 +336,13 @@ fn run_graph_transition(
     }
 
     let action = match request {
-        Operation::Apply => {
-            let action = resolve_request_operation(
-                Operation::Apply,
-                ledger.as_ref().map(|ledger| &ledger.version),
-                &acquired.resolved.descriptor.version,
-            )?;
-            if action == LifecycleAction::Install {
-                LifecycleAction::Upgrade
-            } else {
-                action
-            }
-        }
+        Operation::Apply => resolve_request_operation(
+            Operation::Apply,
+            ledger.as_ref().map(|ledger| &ledger.version),
+            &acquired.resolved.descriptor.version,
+        )?,
         named => named_action(named).expect("named operations resolve directly"),
     };
-
-    if let Some(installed) = ledger
-        .as_ref()
-        .and_then(zup_exec::InstallLedger::release_identity)
-        && installed.same_release(&acquired.identity())
-        && action != LifecycleAction::Uninstall
-    {
-        return match args.output {
-            crate::cli::OutputArg::Jsonl => {
-                println!(
-                    "{}",
-                    serde_json::to_string(&zup_presentation::InstallerEvent::Completed {
-                        outcome: zup_presentation::ProcessOutcome::Success,
-                    })
-                    .map_err(|error| miette::miette!("output: {error}"))?
-                );
-                Ok(())
-            }
-            _ => {
-                println!("up to date ({})", acquired.resolved.descriptor.version);
-                Ok(())
-            }
-        };
-    }
 
     run_acquired_transition(
         acquire::Request {
@@ -430,47 +383,15 @@ pub fn run_acquired_transition(
     } = request;
     let action =
         action.ok_or_else(|| miette::miette!("a graph transition needs a lifecycle verb"))?;
-    let build = zup_bundle::Package::from_bytes(
-        zup_bundle::BundleWriter::encode_plan_only_plan(
-            &acquired.manifest.plan,
-            &acquired.manifest.plan.plugins,
-        )
-        .map_err(|error| miette::miette!("graph plan: {error}"))?,
-    )
-    .and_then(|package| package.build_plan())
-    .map_err(|error| miette::miette!("graph plan: {error}"))?;
-    let build = build
-        .targets
-        .into_iter()
-        .next()
-        .ok_or_else(|| miette::miette!("the release plan names no target"))?;
+    let build =
+        acquire::target_plan(&acquired.manifest).map_err(|error| miette::miette!("{error}"))?;
     let installer = &build.installer;
 
-    let scope = match scope {
-        Some(scope) => scope,
-        None if installer.install.scope == zup_core::InstallScope::Machine => {
-            SelectedScope::Machine
-        }
-        None if installer.install.scope == zup_core::InstallScope::User => SelectedScope::User,
-        None => {
-            let committed = zup_windows::InstallLedgerStore::new(acquired.cache.root())
-                .load(&installer.app.id, SelectedScope::Machine)
-                .ok()
-                .flatten();
-            if committed.is_some() {
-                SelectedScope::Machine
-            } else {
-                SelectedScope::User
-            }
-        }
-    };
-    if installer.install.scope == zup_core::InstallScope::Machine && scope != SelectedScope::Machine
-    {
-        return Err(miette::miette!(
-            "this application installs machine-wide, not into the {} scope",
-            scope
-        ));
-    }
+    let scope = installer
+        .install
+        .scope
+        .select(scope)
+        .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?;
 
     let state_root = state::resolve_state_root(Some(acquired.cache.root().to_path_buf()), scope)?;
     let prior =

@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use zup_session::{automation_events, process_outcome};
 
 use crate::lifecycle::PreparedRuntime;
 use zup_exec::LifecycleAction;
@@ -12,21 +13,30 @@ use zup_runtime::{
 pub struct ExecutionError {
     error: miette::Report,
     reported: bool,
+    outcome: ProcessOutcome,
 }
 
 impl ExecutionError {
     pub fn reported(error: miette::Report) -> Self {
+        let outcome = crate::error_outcome(&error);
         Self {
             error,
             reported: true,
+            outcome,
         }
     }
 
     pub fn silent(error: miette::Report) -> Self {
+        let outcome = crate::error_outcome(&error);
         Self {
             error,
             reported: false,
+            outcome,
         }
+    }
+
+    pub fn outcome(&self) -> ProcessOutcome {
+        self.outcome
     }
 
     pub fn was_reported(&self) -> bool {
@@ -279,9 +289,7 @@ fn publish_outcome(
                 }
                 Ok(())
             } else {
-                Err(ExecutionError::silent(miette::miette!(
-                    "transaction: {outcome:?}"
-                )))
+                Err(ExecutionError::silent(outcome_error(&outcome)))
             }
         }
         OutputFormat::Json => {
@@ -301,25 +309,41 @@ fn publish_outcome(
             if process == ProcessOutcome::Success {
                 Ok(())
             } else {
-                Err(ExecutionError::silent(miette::miette!(
-                    "transaction: {outcome:?}"
-                )))
+                Err(ExecutionError::reported(outcome_error(&outcome)))
             }
         }
         OutputFormat::Jsonl => {
-            let event = InstallerEvent::Completed { outcome: process };
+            let event = if process == ProcessOutcome::Success {
+                InstallerEvent::Completed { outcome: process }
+            } else {
+                let message = format!("{outcome:?}");
+                InstallerEvent::Failed {
+                    outcome: process,
+                    code: process.code(),
+                    diagnostic: Some(zup_presentation::DiagnosticPresentation::for_outcome(
+                        process, &message,
+                    )),
+                    message,
+                }
+            };
             emit_line(
                 &serde_json::to_string(&event)
                     .map_err(|error| ExecutionError::silent(miette::miette!("output: {error}")))?,
             );
             if !matches!(outcome, InstallOutcome::Committed) {
-                return Err(ExecutionError::silent(miette::miette!(
-                    "transaction: {outcome:?}"
-                )));
+                return Err(ExecutionError::reported(outcome_error(&outcome)));
             }
             Ok(())
         }
     }
+}
+
+fn outcome_error(outcome: &InstallOutcome) -> miette::Report {
+    crate::terminal::Failure {
+        outcome: process_outcome(outcome),
+        message: format!("transaction: {outcome:?}"),
+    }
+    .into()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -333,7 +357,7 @@ fn report_failure(
     drift: &[String],
     error: miette::Report,
 ) -> miette::Report {
-    let process = ProcessOutcome::from_message(&error.to_string());
+    let process = crate::error_outcome(&error);
     let message = error.to_string();
     match output {
         OutputFormat::Human => {}
@@ -353,9 +377,8 @@ fn report_failure(
                 outcome: process,
                 code: process.code(),
                 message: message.clone(),
-                diagnostic: Some(zup_presentation::DiagnosticPresentation::from_message(
-                    &message,
-                    process == ProcessOutcome::RecoveryRequired,
+                diagnostic: Some(zup_presentation::DiagnosticPresentation::for_outcome(
+                    process, &message,
                 )),
             };
             if let Ok(value) = serde_json::to_string(&event) {
@@ -401,14 +424,6 @@ fn emit_line(line: &str) {
     if !captured {
         println!("{line}");
     }
-}
-
-pub fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
-    zup_session::process_outcome(outcome)
-}
-
-pub fn automation_events(event: &RuntimeEvent) -> Vec<InstallerEvent> {
-    zup_session::automation_events(event)
 }
 
 thread_local! {
