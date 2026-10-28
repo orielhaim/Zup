@@ -1,11 +1,9 @@
 use std::path::Path;
 
 use zup_core::Frontend;
-use zup_exec::LifecycleAction;
 use zup_windows::EmbeddedBundle;
 
 use crate::cli::LifecycleArgs;
-use crate::lifecycle::{PreparedRuntime, Verb};
 use crate::run::RuntimeContext;
 
 pub fn graphical(
@@ -61,50 +59,10 @@ pub fn graphical_for(context: RuntimeContext, args: LifecycleArgs) -> miette::Re
     }
 }
 
-pub fn console_apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
-    #[cfg(feature = "console")]
-    {
-        crate::console::run_apply(context, args)
-    }
-    #[cfg(not(feature = "console"))]
-    {
-        let _ = (context, args);
-        Err(no_surface("interactive console"))
-    }
-}
-
-pub fn console_verb(
-    context: RuntimeContext,
-    verb: Verb,
-    args: LifecycleArgs,
-) -> miette::Result<()> {
-    #[cfg(feature = "console")]
-    {
-        crate::console::run(context, verb, args)
-    }
-    #[cfg(not(feature = "console"))]
-    {
-        let _ = (context, verb, args);
-        Err(no_surface("interactive console"))
-    }
-}
-
-pub fn console_direct(executable: &Path, bundle: &EmbeddedBundle) -> miette::Result<()> {
-    #[cfg(feature = "console")]
-    {
-        crate::console::direct_launch(executable, bundle)
-    }
-    #[cfg(not(feature = "console"))]
-    {
-        let _ = (executable, bundle);
-        Err(no_surface("interactive console"))
-    }
-}
-
 pub fn confirm_uninstall() -> miette::Result<bool> {
     #[cfg(feature = "console")]
     {
-        crate::console::confirm_uninstall()
+        crate::console::confirm("Uninstall this application?", false)
     }
     #[cfg(not(feature = "console"))]
     {
@@ -115,7 +73,7 @@ pub fn confirm_uninstall() -> miette::Result<bool> {
 pub fn confirm_update() -> miette::Result<bool> {
     #[cfg(feature = "console")]
     {
-        crate::console::confirm_update()
+        crate::console::confirm("Install this update?", false)
     }
     #[cfg(not(feature = "console"))]
     {
@@ -131,18 +89,6 @@ pub fn cancelled() -> miette::Report {
     #[cfg(not(feature = "console"))]
     {
         miette::miette!("cancelled")
-    }
-}
-
-pub fn execute_console(prepared: PreparedRuntime, action: LifecycleAction) -> miette::Result<()> {
-    #[cfg(feature = "console")]
-    {
-        crate::console::execute(prepared, action)
-    }
-    #[cfg(not(feature = "console"))]
-    {
-        let _ = (prepared, action);
-        Err(no_surface("interactive console"))
     }
 }
 

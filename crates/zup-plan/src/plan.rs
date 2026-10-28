@@ -138,6 +138,20 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
 
     let selected = select_components(&installer.components, &request.components)?;
     let selected_set: BTreeSet<ComponentId> = selected.iter().cloned().collect();
+    for group in &installer.component_groups {
+        if group.selection == zup_core::SelectionRequirement::Explicit
+            && !installer.components.iter().any(|component| {
+                !component.required
+                    && component.group.as_ref() == Some(&group.id)
+                    && selected_set.contains(&component.id)
+            })
+        {
+            return Err(PlanError::ComponentGroupSelectionRequired {
+                group: group.id.to_string(),
+            });
+        }
+    }
+
     info!(
         default_count = installer.components.iter().filter(|c| c.default).count(),
         enable_count = request.components.enable.len(),

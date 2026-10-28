@@ -161,15 +161,6 @@ impl LifecycleArgs {
     pub fn output(&self) -> OutputFormat {
         self.output.into()
     }
-
-    /// and the headless frontend never prompt: a question nobody can answer is a
-    /// process that never returns.
-    pub fn may_prompt(&self, context: RuntimeContext) -> bool {
-        !self.non_interactive
-            && !self.yes
-            && context.output == OutputFormat::Human
-            && context.is_live_console()
-    }
 }
 
 #[derive(Debug, Args)]

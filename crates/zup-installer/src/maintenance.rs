@@ -52,6 +52,23 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
         return Ok(());
     }
 
+    if context.frontend != Frontend::Gui && package::open_bundle_if_present(&executable)?.is_some()
+    {
+        let scope = match args.scope {
+            Some(ScopeArg::User) => Some(SelectedScope::User),
+            Some(ScopeArg::Machine) => Some(SelectedScope::Machine),
+            Some(ScopeArg::Either) | None => None,
+        };
+        return crate::terminal::uninstall(
+            crate::host::WindowsSessionHost::default(),
+            context.with_output(args.output()),
+            scope,
+            args.state_root,
+            args.non_interactive,
+            args.yes,
+        );
+    }
+
     if args.ui {
         return Err(miette::miette!(
             "this build has no graphical surface; omit --ui or add --yes"

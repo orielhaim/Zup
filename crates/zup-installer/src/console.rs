@@ -1,454 +1,420 @@
-//! caller who supplied one never sees a question.
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use std::path::{Path, PathBuf};
-
-use zup_core::{ComponentId, Frontend, InstallScope, Installer, SelectedScope};
+use zup_core::{ComponentId, Installer, SelectedScope};
 use zup_exec::LifecycleAction;
-use zup_runtime::{ExecutionPolicy, InstallOutcome};
-use zup_windows::EmbeddedBundle;
+use zup_presentation::{InstallerEvent, PlanPreview};
+use zup_runtime::{Operation, OperationSelection};
+use zup_session::{OperationContext, SessionDiscovery};
 
-use crate::cli::{LifecycleArgs, ScopeArg};
-use crate::execute;
-use crate::lifecycle::{self, PreparedRuntime};
-use crate::maintenance as state;
-use crate::package;
-use crate::run::RuntimeContext;
-
-struct SetupTheme;
-
-impl cliclack::Theme for SetupTheme {
-    fn bar_color(&self, state: &cliclack::ThemeState) -> console::Style {
-        match state {
-            cliclack::ThemeState::Active => console::Style::new().cyan(),
-            cliclack::ThemeState::Cancel | cliclack::ThemeState::Error(_) => {
-                console::Style::new().red()
+fn prompt<T>(result: io::Result<T>) -> miette::Result<T> {
+    result.map_err(|error| {
+        if error.kind() == io::ErrorKind::Interrupted {
+            crate::terminal::Failure {
+                outcome: zup_presentation::ProcessOutcome::Cancelled,
+                message: "cancelled".into(),
             }
-            _ => console::Style::new().bright().black(),
+            .into()
+        } else {
+            miette::miette!("terminal input: {error}")
+        }
+    })
+}
+
+fn text(value: impl std::fmt::Display) -> String {
+    console::strip_ansi_codes(&value.to_string())
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect()
+}
+
+fn plain() -> bool {
+    std::env::var("TERM").is_ok_and(|term| term == "dumb") || console::Term::stderr().size().1 < 50
+}
+
+fn line(question: &str) -> miette::Result<String> {
+    eprint!("{question}: ");
+    prompt(io::stderr().flush())?;
+    let mut value = String::new();
+    if prompt(io::stdin().read_line(&mut value))? == 0 {
+        return Err(crate::terminal::Failure {
+            outcome: zup_presentation::ProcessOutcome::Cancelled,
+            message: "input closed; cancelled".into(),
+        }
+        .into());
+    }
+    Ok(value.trim().to_owned())
+}
+
+fn choose(question: &str, items: &[(String, String)]) -> miette::Result<usize> {
+    if plain() {
+        eprintln!("{question}");
+        for (index, (label, hint)) in items.iter().enumerate() {
+            eprintln!("  {}. {label} {hint}", index + 1);
+        }
+        loop {
+            let value = line("Choose a number, or q to cancel")?;
+            if value.eq_ignore_ascii_case("q") {
+                return Err(cancelled());
+            }
+            if let Ok(index) = value.parse::<usize>()
+                && index > 0
+                && index <= items.len()
+            {
+                return Ok(index - 1);
+            }
+            eprintln!("Enter a number between 1 and {}.", items.len());
         }
     }
-
-    fn state_symbol_color(&self, state: &cliclack::ThemeState) -> console::Style {
-        match state {
-            cliclack::ThemeState::Submit => console::Style::new().green(),
-            _ => self.bar_color(state),
-        }
+    let mut select = cliclack::select(text(question)).max_rows(8);
+    for (index, (label, hint)) in items.iter().enumerate() {
+        select = select.item(index, text(label), text(hint));
     }
+    prompt(select.interact())
 }
 
-pub fn run_apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
-    ask(context, zup_runtime::Operation::Apply, args)
-}
-
-pub fn run(
-    context: RuntimeContext,
-    verb: lifecycle::Verb,
-    args: LifecycleArgs,
-) -> miette::Result<()> {
-    ask(context, verb.action(), args)
-}
-
-pub fn direct_launch(executable: &Path, bundle: &EmbeddedBundle) -> miette::Result<()> {
-    cliclack::set_theme(SetupTheme);
-    let build = package::target_plan(bundle)?;
-    let installer = &build.installer;
-    let installed = find_installation(installer, None, ScopeArg::Either)?;
-    let action = crate::lifecycle::resolve_request_operation(
-        zup_runtime::Operation::Apply,
-        installed.as_ref().map(|(_, ledger)| &ledger.version),
-        &installer.app.version.to_string(),
-    )?;
-    let scope = choose_scope(
-        installer,
-        ScopeArg::User,
-        installed.as_ref().map(|(s, _)| *s),
-    )?;
-    let components = choose_components(
-        installer,
-        &[],
-        &[],
-        installed.as_ref().map(|(_, ledger)| ledger),
-    )?;
-    let install_directory = choose_install_directory(
-        installer,
-        None,
-        installed.as_ref().map(|(_, ledger)| ledger),
-    )?;
-    let location = install_directory
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "the configured install directory".into());
-    if !confirm(&format!("{} to {location}?", state::action_name(action)))? {
-        return Err(cancelled());
-    }
-    let _ = cliclack::outro("Ready to install");
-    let _ = executable;
-    let args = LifecycleArgs {
-        scope: scope_arg(scope),
-        enable: components.iter().map(ToString::to_string).collect(),
-        disable: installer
-            .components
-            .iter()
-            .filter(|component| !components.contains(&component.id))
-            .map(|component| component.id.to_string())
-            .collect(),
-        install_directory,
-        non_interactive: true,
-        yes: true,
-        ui: false,
-        ..LifecycleArgs::default()
-    };
-    lifecycle::transition(
-        RuntimeContext::new(Frontend::Console).with_output(zup_presentation::OutputFormat::Human),
-        zup_runtime::Operation::from(action),
-        &args,
-        ExecutionPolicy::Interactive,
-    )
-}
-
-fn ask(
-    context: RuntimeContext,
-    request: zup_runtime::Operation,
-    mut args: LifecycleArgs,
-) -> miette::Result<()> {
-    cliclack::set_theme(SetupTheme);
-    let executable = package::current_executable()?;
-    let bundle = package::open_bundle(&executable)?;
-    let build = package::target_plan(&bundle)?;
-    let installer = &build.installer;
-    let installed = find_installation(installer, args.state_root.as_deref(), args.scope)?;
-    let action = match request {
-        zup_runtime::Operation::Apply => crate::lifecycle::resolve_request_operation(
-            zup_runtime::Operation::Apply,
-            installed.as_ref().map(|(_, ledger)| &ledger.version),
-            &installer.app.version.to_string(),
-        )?,
-        named => crate::lifecycle::named_action(named).expect("named operations resolve directly"),
-    };
-    let scope = choose_scope(installer, args.scope, installed.as_ref().map(|(s, _)| *s))?;
-    let repair = matches!(action, LifecycleAction::Repair { .. });
-    if repair && (!args.enable.is_empty() || !args.disable.is_empty()) {
-        return Err(miette::miette!(
-            "repair uses the committed component selection"
-        ));
-    }
-    let components = if repair {
-        Vec::new()
+pub fn intro(installer: &Installer) -> miette::Result<()> {
+    let title = format!("{} {}", text(&installer.app.name), installer.app.version);
+    if plain() {
+        eprintln!("\n{title}\n");
     } else {
-        choose_components(
-            installer,
-            &args.enable,
-            &args.disable,
-            installed.as_ref().map(|(_, ledger)| ledger),
-        )?
-    };
-    let install_directory = if repair {
-        if args.install_directory.is_some() {
-            return Err(miette::miette!(
-                "repair uses the committed install location"
-            ));
-        }
-        None
-    } else {
-        choose_install_directory(
-            installer,
-            args.install_directory.as_deref(),
-            installed.as_ref().map(|(_, ledger)| ledger),
-        )?
-    };
-    let location = install_directory
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "the configured install directory".into());
-    if !confirm(&format!("{} to {location}?", state::action_name(action)))? {
-        return Err(cancelled());
+        prompt(cliclack::intro(title))?;
     }
-    let _ = cliclack::outro("Ready to install");
-    args.scope = scope_arg(scope);
-    if !repair {
-        args.enable = components.iter().map(ToString::to_string).collect();
-        args.disable = installer
-            .components
-            .iter()
-            .filter(|component| !components.contains(&component.id))
-            .map(|component| component.id.to_string())
-            .collect();
-    } else {
-        args.enable.clear();
-        args.disable.clear();
+    if let Some(description) = &installer.app.description {
+        eprintln!("{}\n", text(description));
     }
-    args.install_directory = install_directory;
-    args.non_interactive = true;
-    args.yes = true;
-    let _ = context;
-    lifecycle::transition(
-        context,
-        zup_runtime::Operation::from(action),
-        &args,
-        ExecutionPolicy::Interactive,
-    )
+    Ok(())
 }
 
-fn confirm(question: &str) -> miette::Result<bool> {
-    cliclack::confirm(question)
-        .initial_value(true)
-        .interact()
-        .map_err(|error| miette::miette!("prompt: {error}"))
-}
-
-pub fn confirm_uninstall() -> miette::Result<bool> {
-    cliclack::set_theme(SetupTheme);
-    cliclack::confirm("Uninstall this application?")
-        .initial_value(false)
-        .interact()
-        .map_err(|error| miette::miette!("prompt: {error}"))
-}
-
-pub fn confirm_update() -> miette::Result<bool> {
-    cliclack::set_theme(SetupTheme);
-    cliclack::confirm("Install this update?")
-        .initial_value(true)
-        .interact()
-        .map_err(|error| miette::miette!("prompt: {error}"))
-}
-
-pub fn cancelled() -> miette::Report {
-    let _ = cliclack::outro_cancel("Cancelled");
-    miette::miette!("cancelled")
-}
-
-fn scope_arg(scope: SelectedScope) -> ScopeArg {
-    match scope {
-        SelectedScope::User => ScopeArg::User,
-        SelectedScope::Machine => ScopeArg::Machine,
-    }
-}
-
-fn find_installation(
-    installer: &Installer,
-    state_root: Option<&Path>,
-    requested: ScopeArg,
-) -> miette::Result<Option<(SelectedScope, zup_exec::InstallLedger)>> {
-    let scopes = match installer.install.scope {
-        InstallScope::User => vec![SelectedScope::User],
-        InstallScope::Machine => vec![SelectedScope::Machine],
-        InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
-    };
-    let mut found = Vec::new();
-    for scope in scopes {
-        if matches!(requested, ScopeArg::User) && scope != SelectedScope::User
-            || matches!(requested, ScopeArg::Machine) && scope != SelectedScope::Machine
-        {
-            continue;
-        }
-        let root = state::resolve_state_root(state_root.map(Path::to_path_buf), scope)?;
-        let ledger = zup_windows::InstallLedgerStore::new(&root)
-            .load(&installer.app.id, scope)
-            .map_err(|error| miette::miette!("ledger: {error}"))?;
-        if let Some(ledger) = ledger {
-            found.push((scope, ledger));
-        }
-    }
-    if found.len() > 1 {
-        return Err(miette::miette!(
-            "this application is installed in both scopes; choose --scope"
-        ));
-    }
-    Ok(found.pop())
-}
-
-fn choose_scope(
-    installer: &Installer,
-    requested: ScopeArg,
-    installed: Option<SelectedScope>,
-) -> miette::Result<SelectedScope> {
-    match installer.install.scope {
-        InstallScope::Machine => return Ok(SelectedScope::Machine),
-        InstallScope::User => return Ok(SelectedScope::User),
-        InstallScope::Either => {}
-    }
-    if let Some(scope) = installed {
-        return Ok(scope);
-    }
-    let initial = match requested {
-        ScopeArg::Machine => SelectedScope::Machine,
-        ScopeArg::User | ScopeArg::Either => SelectedScope::User,
-    };
-    cliclack::select("Install for")
-        .item(SelectedScope::User, "Current user", "")
-        .item(SelectedScope::Machine, "All users", "")
-        .initial_value(initial)
-        .interact()
-        .map_err(|error| miette::miette!("prompt: {error}"))
-}
-
-fn choose_components(
-    installer: &Installer,
-    requested_enable: &[String],
-    requested_disable: &[String],
-    installed: Option<&zup_exec::InstallLedger>,
-) -> miette::Result<Vec<ComponentId>> {
-    if installer.components.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut selected = installer
-        .components
+pub fn scope(discovery: &SessionDiscovery) -> miette::Result<SelectedScope> {
+    let scopes = discovery.installer().install.scope.scopes();
+    let items = scopes
         .iter()
-        .filter(|component| {
-            component.required
-                || component.default
-                || installed
-                    .is_some_and(|ledger| ledger.selected_components.contains(&component.id))
-                || requested_enable
-                    .iter()
-                    .any(|value| value == component.id.as_str())
-        })
-        .map(|component| component.id.clone())
-        .collect::<Vec<_>>();
-    for value in requested_disable {
-        if let Ok(id) = ComponentId::new(value) {
-            selected.retain(|component| component != &id);
-        }
-    }
-    if installer
-        .components
-        .iter()
-        .all(|component| component.required)
-        && selected.len() == installer.components.len()
-    {
-        return Ok(selected);
-    }
-    let items = installer
-        .components
-        .iter()
-        .map(|component| {
+        .map(|scope| {
+            let label = match scope {
+                SelectedScope::User => "Current user",
+                SelectedScope::Machine => "All users",
+            };
+            let installed = discovery
+                .installation(*scope)
+                .is_some_and(|installation| installation.ledger.is_some());
             (
-                component.id.clone(),
-                component.name.to_string(),
-                component.description.clone().unwrap_or_default(),
+                label.into(),
+                if installed {
+                    "Existing installation".into()
+                } else if *scope == SelectedScope::Machine {
+                    "Requires native administrator authorization".into()
+                } else {
+                    String::new()
+                },
             )
         })
         .collect::<Vec<_>>();
-    let mut prompt = cliclack::multiselect("Components").required(false);
-    for (id, name, description) in &items {
-        prompt = prompt.item(id.clone(), name, description);
-    }
-    let mut chosen = prompt
-        .initial_values(selected)
-        .interact()
-        .map_err(|error| miette::miette!("prompt: {error}"))?;
-    for component in &installer.components {
-        if component.required && !chosen.contains(&component.id) {
-            chosen.push(component.id.clone());
-        }
-    }
-    Ok(chosen)
+    Ok(scopes[choose("Install for", &items)?])
 }
 
-fn choose_install_directory(
+pub fn maintenance() -> miette::Result<Operation> {
+    let operations = [
+        Operation::Apply,
+        Operation::Modify,
+        Operation::Repair { force_files: false },
+        Operation::Uninstall,
+    ];
+    let items = [
+        (
+            "Install this version",
+            "Upgrade or modify using this package",
+        ),
+        (
+            "Change components",
+            "Keep the current installation settings",
+        ),
+        (
+            "Repair",
+            "Restore owned files without overwriting your edits",
+        ),
+        (
+            "Uninstall",
+            "Remove managed resources and preserve unowned files",
+        ),
+    ]
+    .map(|(label, hint)| (label.into(), hint.into()));
+    Ok(operations[choose("Maintenance", &items)?])
+}
+
+pub fn selection(
     installer: &Installer,
-    requested: Option<&Path>,
-    installed: Option<&zup_exec::InstallLedger>,
-) -> miette::Result<Option<PathBuf>> {
-    if !installer.install.allow_directory_override {
-        return Ok(requested.map(Path::to_path_buf));
+    context: &OperationContext,
+    action: LifecycleAction,
+    selection: &mut OperationSelection,
+) -> miette::Result<()> {
+    if matches!(
+        action,
+        LifecycleAction::Repair { .. } | LifecycleAction::Uninstall
+    ) {
+        return Ok(());
     }
-    if let Some(path) = requested {
-        return Ok(Some(path.to_path_buf()));
+    let request = zup_runtime::plan_request(
+        installer,
+        context.scope,
+        context.ledger.as_ref(),
+        selection,
+        action,
+        None,
+    )
+    .map_err(|error| miette::miette!("{error}"))?;
+    let mut selected = zup_plan::select_components(&installer.components, &request.components)
+        .map_err(|error| miette::miette!("{error}"))?;
+    let required = installer
+        .components
+        .iter()
+        .filter(|component| component.required)
+        .map(|component| text(&component.name))
+        .collect::<Vec<_>>();
+    if !required.is_empty() {
+        eprintln!("Required: {}", required.join(", "));
     }
-    let default = installed
-        .and_then(|ledger| ledger.install_directory.as_ref())
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    let value: String = cliclack::input("Install location")
-        .default_input(&default)
-        .interact()
-        .map_err(|error| miette::miette!("prompt: {error}"))?;
-    Ok((!value.trim().is_empty()).then(|| PathBuf::from(value)))
-}
-
-pub fn execute(prepared: PreparedRuntime, action: LifecycleAction) -> miette::Result<()> {
-    let mut pending = Some(prepared);
-    while let Some(prepared) = pending.take() {
-        let retry = prepared.clone();
-        let outcome = match execute_once(prepared, action) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                retry.backend.cleanup_overlay(&retry.request);
-                return Err(error);
-            }
-        };
-        match outcome {
-            InstallOutcome::Committed => {
-                println!("done");
-                return Ok(());
-            }
-            InstallOutcome::Cancelled => return Err(miette::miette!("cancelled")),
-            InstallOutcome::Failed(message) if message == BLOCKED => {
-                let choice = cliclack::select("Installation blocked")
-                    .item("retry", "Retry", "after closing the listed applications")
-                    .item("cancel", "Cancel", "stop without changing the installation")
-                    .initial_value("retry")
-                    .interact();
-                match choice {
-                    Ok("retry") => pending = Some(retry),
-                    Ok(_) => {
-                        retry.backend.cleanup_overlay(&retry.request);
-                        return Err(cancelled());
-                    }
-                    Err(error) => {
-                        retry.backend.cleanup_overlay(&retry.request);
-                        return Err(miette::miette!("prompt: {error}"));
-                    }
+    let mut groups = installer
+        .component_groups
+        .iter()
+        .map(|group| {
+            (
+                Some(group.id.as_str()),
+                group
+                    .label
+                    .as_ref()
+                    .map(|label| label.as_str())
+                    .unwrap_or(group.id.as_str()),
+                group.description.as_deref(),
+                group.selection == zup_core::SelectionRequirement::Explicit,
+            )
+        })
+        .collect::<Vec<_>>();
+    groups.push((None, "Components", None, false));
+    for (id, label, description, required) in groups {
+        let optional = installer
+            .components
+            .iter()
+            .filter(|component| {
+                !component.required && component.group.as_ref().map(|group| group.as_str()) == id
+            })
+            .collect::<Vec<_>>();
+        if optional.is_empty() {
+            continue;
+        }
+        if let Some(description) = description {
+            eprintln!("{}", text(description));
+        }
+        let chosen = if plain() {
+            let mut chosen = Vec::new();
+            for component in &optional {
+                if confirm(
+                    &format!("Include {}?", text(&component.name)),
+                    selected.contains(&component.id),
+                )? {
+                    chosen.push(component.id.clone());
                 }
             }
-            other => return Err(miette::miette!("transaction: {other:?}")),
+            chosen
+        } else {
+            let mut select = cliclack::multiselect(text(label))
+                .required(required)
+                .max_rows(8)
+                .filter_mode();
+            for component in &optional {
+                select = select.item(
+                    component.id.clone(),
+                    text(&component.name),
+                    text(component.description.as_deref().unwrap_or("")),
+                );
+            }
+            prompt(
+                select
+                    .initial_values(
+                        selected
+                            .iter()
+                            .filter(|id| optional.iter().any(|component| &component.id == *id))
+                            .cloned()
+                            .collect(),
+                    )
+                    .interact(),
+            )?
+        };
+        selected.retain(|id| !optional.iter().any(|component| &component.id == id));
+        selected.extend(chosen);
+    }
+    selection.enable = selected.iter().map(ToString::to_string).collect();
+    selection.disable = installer
+        .components
+        .iter()
+        .filter(|component| !selected.contains(&component.id))
+        .map(|component| component.id.to_string())
+        .collect();
+    if installer.install.allow_directory_override
+        && context.ledger.is_none()
+        && selection.install_directory.is_none()
+    {
+        let value = if plain() {
+            line("Install directory, or Enter for the configured location")?
+        } else {
+            prompt(
+                cliclack::input("Install directory")
+                    .placeholder("Enter to use the configured location")
+                    .required(false)
+                    .interact::<String>(),
+            )?
+        };
+        if !value.is_empty() {
+            selection.install_directory = Some(PathBuf::from(value));
         }
     }
-    Err(miette::miette!("cancelled"))
+    Ok(())
 }
 
-const BLOCKED: &str = "blocked by running applications";
-
-fn execute_once(
-    prepared: PreparedRuntime,
-    action: LifecycleAction,
-) -> miette::Result<InstallOutcome> {
-    let request = prepared.request.clone();
-    println!("{} {}", state::action_name(action), request.app_id);
-    let total = request.transaction_plan.total_work();
-    let progress = indicatif::ProgressBar::new(total);
-    progress.set_style(
-        indicatif::ProgressStyle::with_template("  {msg:.<28} {bar:30.cyan/blue} {percent:>3}%")
-            .unwrap_or_else(|_| indicatif::ProgressStyle::default_bar()),
+pub fn review(plan: &PlanPreview, action: LifecycleAction) -> miette::Result<()> {
+    eprintln!(
+        "\n{}\n  Scope: {}\n  Location: {}",
+        zup_runtime::Operation::from(action).name(),
+        plan.scope,
+        text(&plan.install_directory)
     );
-    let control = zup_runtime::OperationControl::new(ExecutionPolicy::Interactive);
-    let pump_progress = progress.clone();
-    let prepared = prepared.retaining_overlay();
-    let result = execute::execute_observing(prepared, &control, |event| match event {
-        zup_runtime::RuntimeEvent::Progress {
-            completed,
-            total,
-            action,
-        } => {
-            if *total > 0 {
-                pump_progress.set_length(*total);
+    if !plan.selected_components.is_empty() {
+        eprintln!(
+            "  Components: {}",
+            plan.selected_components
+                .iter()
+                .map(ComponentId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    for group in &plan.groups {
+        eprintln!("  {:?}: {} changes", group.category, group.changes.len());
+    }
+    eprintln!(
+        "  Managed content: {}",
+        indicatif::HumanBytes(plan.estimated_bytes)
+    );
+    if matches!(action, LifecycleAction::Repair { force_files: true }) {
+        eprintln!("  Forced repair can replace your edits to managed files.");
+    }
+    if plan.requires_authorization {
+        eprintln!("  The operating system will request administrator authorization.");
+    }
+    if !confirm("Proceed with these changes?", false)? {
+        return Err(cancelled());
+    }
+    Ok(())
+}
+
+pub fn confirm(question: &str, initial: bool) -> miette::Result<bool> {
+    if plain() {
+        loop {
+            let value = line(&format!(
+                "{} {}",
+                text(question),
+                if initial { "[Y/n/q]" } else { "[y/N/q]" }
+            ))?;
+            match value.to_ascii_lowercase().as_str() {
+                "" => return Ok(initial),
+                "y" | "yes" => return Ok(true),
+                "n" | "no" => return Ok(false),
+                "q" => return Err(cancelled()),
+                _ => eprintln!("Enter y or n, or q to cancel."),
             }
-            pump_progress.set_position((*completed).min((*total).max(1)));
-            pump_progress.set_message(action.clone());
         }
-        zup_runtime::RuntimeEvent::ResourceBlocked { detail, .. } => {
-            eprintln!("installation blocked by running applications\n{detail}");
+    }
+    prompt(
+        cliclack::confirm(text(question))
+            .initial_value(initial)
+            .interact(),
+    )
+}
+
+pub fn cancelled() -> miette::Report {
+    crate::terminal::Failure {
+        outcome: zup_presentation::ProcessOutcome::Cancelled,
+        message: "cancelled".into(),
+    }
+    .into()
+}
+
+pub struct Progress {
+    bar: indicatif::ProgressBar,
+    last: Instant,
+}
+impl Progress {
+    pub fn new() -> Self {
+        let bar = if plain() {
+            indicatif::ProgressBar::hidden()
+        } else {
+            indicatif::ProgressBar::with_draw_target(
+                None,
+                indicatif::ProgressDrawTarget::stderr_with_hz(10),
+            )
+        };
+        bar.set_style(
+            indicatif::ProgressStyle::with_template("  {wide_msg} {pos}/{len}")
+                .expect("static progress template"),
+        );
+        Self {
+            bar,
+            last: Instant::now(),
         }
-        zup_runtime::RuntimeEvent::Failed { message, .. } => {
-            eprintln!("{message}");
+    }
+    pub fn event(&mut self, event: &InstallerEvent) {
+        match event {
+            InstallerEvent::Progress {
+                completed,
+                total,
+                label,
+                ..
+            } => {
+                self.bar.set_length(*total);
+                self.bar.set_position(*completed);
+                self.bar.set_message(text(label));
+                if plain() && self.last.elapsed() >= Duration::from_secs(1) {
+                    eprintln!("  {completed}/{total} {}", text(label));
+                    self.last = Instant::now();
+                }
+            }
+            InstallerEvent::Phase { state }
+                if !state.starts_with("operation:") && !state.starts_with("staging:") =>
+            {
+                self.bar
+                    .suspend(|| eprintln!("  {}", text(state.replace('_', " "))));
+            }
+            InstallerEvent::Blocked { message, .. } => {
+                self.bar
+                    .suspend(|| eprintln!("  Blocked: {}", text(message)));
+            }
+            InstallerEvent::Cancelling { .. } => {
+                self.bar.suspend(|| {
+                    eprintln!("  Cancelling safely. Please wait for rollback to finish.")
+                });
+            }
+            InstallerEvent::PrerequisiteDownload {
+                id,
+                completed,
+                total,
+            } => {
+                self.bar.set_message(format!(
+                    "Downloading {}: {completed}/{}",
+                    text(id),
+                    total
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "?".into())
+                ));
+            }
+            InstallerEvent::PrerequisiteInstall { name, .. } => {
+                self.bar
+                    .suspend(|| eprintln!("  Installing prerequisite: {}", text(name)));
+            }
+            _ => {}
         }
-        zup_runtime::RuntimeEvent::StateChanged { state }
-            if *state == zup_runtime::RuntimeState::Cancelled =>
-        {
-            println!("Cancelling safely…");
-        }
-        _ => {}
-    });
-    progress.finish_and_clear();
-    result
+    }
+    pub fn finish(&mut self) {
+        self.bar.finish_and_clear();
+    }
 }

@@ -2,7 +2,7 @@
 mod acquire;
 #[cfg(windows)]
 mod cli;
-#[cfg(all(windows, feature = "console"))]
+#[cfg(feature = "console")]
 mod console;
 #[cfg(windows)]
 mod execute;
@@ -10,7 +10,7 @@ mod execute;
 mod frontend;
 #[cfg(windows)]
 mod handoff;
-#[cfg(all(windows, feature = "gui"))]
+#[cfg(windows)]
 pub mod host;
 #[cfg(windows)]
 mod lifecycle;
@@ -22,6 +22,8 @@ mod maintenance;
 mod package;
 #[cfg(any(windows, target_os = "linux"))]
 pub mod run;
+#[cfg(any(windows, target_os = "linux"))]
+mod terminal;
 
 use zup_presentation::ProcessOutcome;
 
@@ -29,6 +31,9 @@ use zup_presentation::ProcessOutcome;
 use crate::run::RuntimeContext;
 
 pub fn process_exit_code(error: &miette::Report) -> u8 {
+    if let Some(failure) = error.downcast_ref::<terminal::Failure>() {
+        return failure.outcome.code().clamp(1, 255) as u8;
+    }
     ProcessOutcome::from_message(&error.to_string())
         .code()
         .clamp(1, 255) as u8
@@ -37,6 +42,9 @@ pub fn process_exit_code(error: &miette::Report) -> u8 {
 pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
     #[cfg(windows)]
     {
+        if frontend != zup_core::Frontend::Gui && !native_command() {
+            return terminal::run(host::WindowsSessionHost::default(), frontend);
+        }
         let cli = cli::parse();
         let output = cli.output_format();
         let context = RuntimeContext::new(frontend).with_output(output);
@@ -64,7 +72,7 @@ pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
 pub fn command() -> clap::Command {
     #[cfg(windows)]
     {
-        cli::parser()
+        terminal::command()
     }
     #[cfg(target_os = "linux")]
     {
@@ -113,3 +121,19 @@ fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) 
 
 #[cfg(all(test, windows))]
 mod tests;
+
+#[cfg(windows)]
+fn native_command() -> bool {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    arguments.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "__worker" | "__recover" | "__uninstall_runner" | "__upgrade"
+        ) || matches!(
+            argument.as_str(),
+            "update" | "--handoff" | "--acquired" | "--source" | "--ui"
+        )
+    }) || (arguments.iter().any(|argument| argument == "uninstall")
+        && std::env::current_exe()
+            .is_ok_and(|executable| zup_transaction::is_maintenance_path(&executable)))
+}

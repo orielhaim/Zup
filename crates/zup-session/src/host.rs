@@ -119,6 +119,21 @@ pub trait SessionHost {
         launch: &SessionLaunch,
     ) -> Result<SessionDiscovery, String>;
 
+    fn acquire_content(
+        &mut self,
+        _discovery: &mut SessionDiscovery,
+        _context: &OperationContext,
+        _operation: zup_runtime::Operation,
+        _selection: &zup_runtime::OperationSelection,
+        _events: &mut (dyn FnMut(zup_presentation::InstallerEvent) + Send),
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn release_identity(&self) -> Option<zup_core::ReleaseIdentity> {
+        None
+    }
+
     fn bind<'a>(&'a self, context: &'a OperationContext) -> Result<Self::Bound<'a>, String>;
 
     fn backend(

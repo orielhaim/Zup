@@ -27,28 +27,9 @@ pub struct PreparedRuntime {
     pub(crate) action: LifecycleAction,
 }
 
-impl PreparedRuntime {
-    #[cfg(feature = "console")]
-    pub(crate) fn retaining_overlay(&self) -> Self {
-        let backend = self
-            .backend
-            .as_ref()
-            .clone()
-            .with_overlay_policy(zup_windows::OverlayPolicy::RetainOnBlocked);
-        Self {
-            request: self.request.clone(),
-            backend: Arc::new(backend),
-            action: self.action,
-        }
-    }
-}
-
 pub fn apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()> {
     if args.ui {
         return frontend::graphical_for(context, args);
-    }
-    if args.may_prompt(context) {
-        return frontend::console_apply(context, args);
     }
     transition(context, Operation::Apply, &args, policy_for(&args))
 }
@@ -61,9 +42,6 @@ pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::
         return Err(miette::miette!(
             "this build has no graphical surface; omit --ui"
         ));
-    }
-    if args.may_prompt(context) {
-        return frontend::console_verb(context, verb, args);
     }
     transition(context, verb.action(), &args, policy_for(&args))
 }
@@ -100,7 +78,9 @@ pub fn direct_launch(context: RuntimeContext) -> miette::Result<()> {
     })?;
     match context.frontend {
         zup_core::Frontend::Gui => frontend::graphical(context, &executable, &bundle),
-        zup_core::Frontend::Console => frontend::console_direct(&executable, &bundle),
+        zup_core::Frontend::Console => {
+            crate::terminal::run(crate::host::WindowsSessionHost::default(), context.frontend)
+        }
         zup_core::Frontend::Headless => Err(miette::miette!(
             "this runtime needs an operation.\n\n  Usage: {} <install|modify|repair|update|uninstall> [OPTIONS]",
             crate::cli::invoked_name()
@@ -148,7 +128,7 @@ pub fn transition(
 
 pub fn run_embedded(
     request: Operation,
-    context: RuntimeContext,
+    _context: RuntimeContext,
     scope: SelectedScope,
     args: &LifecycleArgs,
     policy: ExecutionPolicy,
@@ -163,10 +143,6 @@ pub fn run_embedded(
         args.install_directory.clone(),
     )?;
     if output == OutputFormat::Human {
-        if context.frontend == zup_core::Frontend::Console {
-            let action = prepared.action;
-            return frontend::execute_console(prepared, action);
-        }
         execute::execute_with_policy(prepared, policy).map_err(Into::into)
     } else {
         let action = prepared.action;

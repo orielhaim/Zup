@@ -132,7 +132,7 @@ pub async fn run_operation<H: SessionHost>(
         context.state_root.clone(),
         zup_runtime::RequestOptions {
             bootstrap: prepared.bootstrap().cloned(),
-            release: None,
+            release: host.release_identity(),
             recovery_id: None,
         },
     );

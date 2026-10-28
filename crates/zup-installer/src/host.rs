@@ -120,6 +120,8 @@ pub struct WindowsSessionHost {
     bundle: Option<zup_windows::EmbeddedBundle>,
     app_id: Option<zup_core::AppId>,
     frontend: Frontend,
+    acquired: Option<Arc<crate::acquire::Acquired>>,
+    payload: Option<Arc<zup_bundle::AcquiredPayloadSource>>,
 }
 
 impl WindowsSessionHost {
@@ -139,7 +141,12 @@ impl WindowsSessionHost {
             scope: context.scope,
             frontend: self.frontend,
             state_root: context.state_root.clone(),
-            content: zup_windows::WindowsContent::Embedded(bundle),
+            content: match (&self.acquired, &self.payload) {
+                (Some(acquired), Some(payload)) => {
+                    zup_windows::WindowsContent::Acquired(&acquired.manifest, payload)
+                }
+                _ => zup_windows::WindowsContent::Embedded(bundle),
+            },
             acquire_prerequisites: true,
         })
     }
@@ -147,6 +154,122 @@ impl WindowsSessionHost {
 
 impl SessionHost for WindowsSessionHost {
     type Bound<'a> = zup_windows::WindowsOperationHost<'a>;
+
+    fn acquire_content(
+        &mut self,
+        discovery: &mut SessionDiscovery,
+        context: &zup_session::OperationContext,
+        operation: zup_runtime::Operation,
+        selection: &zup_runtime::OperationSelection,
+        events: &mut (dyn FnMut(zup_presentation::InstallerEvent) + Send),
+    ) -> Result<(), String> {
+        if !self
+            .bundle
+            .as_ref()
+            .is_some_and(|bundle| bundle.package().is_plan_only())
+            || operation == zup_runtime::Operation::Uninstall
+        {
+            return Ok(());
+        }
+        let installer = discovery.installer();
+        let config = installer.updates.as_ref().ok_or_else(|| {
+            "this thin installer has no authenticated update repository".to_owned()
+        })?;
+        if matches!(operation, zup_runtime::Operation::Repair { .. })
+            && context
+                .ledger
+                .as_ref()
+                .and_then(zup_exec::InstallLedger::release_identity)
+                .is_none()
+        {
+            return Err(
+                "this installation has no authenticated release identity to repair from".into(),
+            );
+        }
+        let action = zup_runtime::resolve_operation(
+            operation,
+            context.ledger.as_ref().map(|ledger| &ledger.version),
+            &installer.app.version,
+        )
+        .map_err(|error| error.to_string())?;
+        let request = zup_runtime::plan_request(
+            installer,
+            context.scope,
+            context.ledger.as_ref(),
+            selection,
+            action,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let selected = zup_plan::select_components(&installer.components, &request.components)
+            .map_err(|error| error.to_string())?;
+        let selected_names = selected.iter().map(|id| id.as_str()).collect::<Vec<_>>();
+        let components = zup_update::ComponentSelection::Only(&selected_names);
+        let content_root = if context.scope == SelectedScope::Machine {
+            state::peer_user_state_root().map_err(|error| error.to_string())?
+        } else {
+            context.state_root.clone()
+        };
+        let trust = zup_update::TrustContext::from_update_config(
+            config,
+            installer.app.id.clone(),
+            content_root,
+        );
+        let (sink, mut receiver) = zup_acquire::ProgressSink::channel(128);
+        let acquired = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while let Some(event) = receiver.blocking_recv() {
+                    for event in zup_presentation::automation_events(&event) {
+                        events(event);
+                    }
+                }
+            });
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?
+                .block_on(crate::acquire::acquire(trust, components, None, &[], sink))
+                .map_err(|error| error.to_string())
+        })?;
+        if acquired.resolved.variant.target != installer.target
+            || acquired.resolved.descriptor.app_id != installer.app.id
+        {
+            return Err(
+                "the authenticated release does not match this installer's application and target"
+                    .into(),
+            );
+        }
+        if let Some(prior) = context
+            .ledger
+            .as_ref()
+            .and_then(zup_exec::InstallLedger::release_identity)
+            && prior.variant != acquired.resolved.variant.id
+        {
+            return Err("the authenticated release does not match the installed variant".into());
+        }
+        let payload =
+            crate::acquire::payload_source(&acquired).map_err(|error| error.to_string())?;
+        let package = zup_bundle::BundleWriter::encode_plan_only_plan(
+            &acquired.manifest.plan,
+            &acquired.manifest.plan.plugins,
+        )
+        .map_err(|error| error.to_string())?;
+        discovery.build = zup_bundle::Package::from_bytes(package)
+            .and_then(|package| package.build_plan())
+            .map_err(|error| error.to_string())?
+            .targets
+            .into_iter()
+            .next()
+            .ok_or_else(|| "the release contains no target plan".to_owned())?;
+        self.payload = Some(Arc::new(payload));
+        self.acquired = Some(Arc::new(acquired));
+        Ok(())
+    }
+
+    fn release_identity(&self) -> Option<zup_core::ReleaseIdentity> {
+        self.acquired.as_ref().map(|acquired| acquired.identity())
+    }
 
     fn bind<'a>(
         &'a self,
@@ -206,7 +329,18 @@ impl SessionHost for WindowsSessionHost {
         context: &zup_session::OperationContext,
         prepared: &zup_runtime::PreparedOperation,
     ) -> Result<Arc<dyn zup_runtime::RuntimeBackend>, String> {
-        let backend = if prepared.action == zup_exec::LifecycleAction::Uninstall {
+        let backend = if let Some(payload) = &self.payload {
+            zup_windows::WindowsRuntimeBackend::from_acquired(
+                Arc::clone(payload),
+                self.acquired
+                    .as_ref()
+                    .ok_or_else(|| "acquired content has no authenticated identity".to_owned())?
+                    .cache
+                    .root()
+                    .to_path_buf(),
+            )
+            .map_err(|error| error.to_string())?
+        } else if prepared.action == zup_exec::LifecycleAction::Uninstall {
             zup_windows::WindowsRuntimeBackend::from_path(self.executable.clone(), None)
                 .map_err(|error| error.to_string())?
         } else {
@@ -311,7 +445,13 @@ impl SessionHost for WindowsSessionHost {
             .as_ref()
             .ok_or_else(|| "the session host was not discovered".to_owned())?;
         zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if let Some(acquired) = &self.acquired {
+            acquired
+                .record_retention(zup_acquire::CachePolicy::Auto)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -420,6 +560,8 @@ impl Default for WindowsSessionHost {
             bundle: None,
             app_id: None,
             frontend: Frontend::Gui,
+            acquired: None,
+            payload: None,
         }
     }
 }
