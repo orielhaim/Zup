@@ -10,7 +10,7 @@ use zup_windows::Selection;
 
 /// Print or show the selected variant.
 pub fn describe(selection: &Selection, index: &ArtifactIndex) {
-    println!(
+    eprintln!(
         "{} {} → {} ({})",
         index.artifact.application.name,
         index.artifact.application.version,
@@ -52,7 +52,10 @@ pub fn choose_scope(graphical: bool) -> Result<zup_core::SelectedScope, String> 
         };
     }
     use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
+    if !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
         return Err(zup_core::ScopeSelectionError::ChoiceRequired.to_string());
     }
     eprint!("Install for your account [user] or everyone [machine]? ");

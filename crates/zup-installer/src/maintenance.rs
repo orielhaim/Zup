@@ -778,7 +778,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?,
         None => args
             .scope
-            .choice()
+            .map(Into::into)
             .ok_or_else(|| miette::miette!("recovery requires --scope user or --scope machine"))?,
     };
     let state_root = resolve_state_root(args.state_root, scope)?;
