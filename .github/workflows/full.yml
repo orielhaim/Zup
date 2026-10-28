@@ -6,6 +6,18 @@ on:
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
+    inputs:
+      measure_sizes:
+        description: Measure native installers instead of running full verification
+        type: boolean
+        default: false
+      revision:
+        description: Optional revision to measure
+        type: string
+      profile:
+        description: Cargo profile for size measurements
+        type: string
+        default: installer
 
 permissions:
   contents: read
@@ -20,8 +32,65 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  sizes:
+    name: Installer sizes (${{ matrix.runner }})
+    if: inputs.measure_sizes == true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, windows-2025, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Preserve the measurement tool
+        shell: bash
+        run: cp scripts/ci/installer-size.py "$RUNNER_TEMP/installer-size.py"
+      - uses: actions/checkout@v7
+        if: inputs.revision != ''
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sizes-${{ runner.os }}-${{ runner.arch }}
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev mold
+      - name: Build native toolchain and developer CLI
+        shell: bash
+        env:
+          SIZE_PROFILE: ${{ inputs.profile }}
+        run: |
+          cargo xtask toolchain build --profile "$SIZE_PROFILE"
+          cargo build -p zup --bin zup
+      - name: Measure composed installers
+        shell: bash
+        env:
+          SIZE_PROFILE: ${{ inputs.profile }}
+        run: |
+          directory="$SIZE_PROFILE"
+          if [ "$directory" = dev ]; then directory=debug; fi
+          suffix=''
+          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+          python "$RUNNER_TEMP/installer-size.py" --cli "target/debug/zup$suffix" --toolchain "target/$directory/toolchain/0.0.1" --output target/sizes
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sizes-${{ matrix.runner }}-${{ inputs.profile }}
+          path: |
+            target/sizes/sizes.json
+            target/sizes/*/inspection.json
+          if-no-files-found: error
   test:
     name: full test ${{ matrix.name }}
+    if: inputs.measure_sizes != true
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
