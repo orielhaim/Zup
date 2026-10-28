@@ -443,10 +443,10 @@ pub fn main_with(executable: Option<PathBuf>, options: Options) -> ExitCode {
         ),
     }
     let code = outcome.exit_code();
-    if code > 255 {
+    if !(0..=255).contains(&code) {
         std::process::exit(code);
     }
-    ExitCode::from(code.clamp(0, 255) as u8)
+    ExitCode::from(code as u8)
 }
 
 impl Outcome {
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(classify(7), Outcome::RecoveryRequired { code: 7 });
         assert_eq!(classify(3010), Outcome::RebootRequired { code: 3010 });
         assert_eq!(classify(255), Outcome::InstallerFailed { code: 255 });
-        for code in [1, 2, 3, 5, 7, 255, 3010] {
+        for code in [-1, 1, 2, 3, 5, 7, 255, 3010] {
             assert_eq!(classify(code).exit_code(), code);
         }
     }
