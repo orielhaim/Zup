@@ -110,6 +110,10 @@ impl RuntimeContext {
         self
     }
 
+    pub fn may_prompt(self, non_interactive: bool, yes: bool) -> bool {
+        !non_interactive && !yes && self.output == OutputFormat::Human && self.is_live_console()
+    }
+
     pub fn is_live_console(self) -> bool {
         self.frontend == Frontend::Console && console_is_a_terminal()
     }

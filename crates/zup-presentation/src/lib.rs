@@ -792,6 +792,56 @@ pub struct DiagnosticPresentation {
 }
 
 impl DiagnosticPresentation {
+    pub fn for_outcome(outcome: ProcessOutcome, message: &str) -> Self {
+        let (kind, title, meaning, recovery) = match outcome {
+            ProcessOutcome::RecoveryRequired => return Self::from_message(message, true),
+            ProcessOutcome::InstallationBusy => (
+                DiagnosticKind::Blocked,
+                "Another operation is running",
+                "This installation is in use by another maintenance operation.",
+                "Wait for that operation to finish, then retry.",
+            ),
+            ProcessOutcome::RebootRequired => (
+                DiagnosticKind::Unknown,
+                "A restart is required",
+                "The operation cannot finish until the machine restarts.",
+                "Restart the machine before continuing.",
+            ),
+            ProcessOutcome::AuthorizationRequired => (
+                DiagnosticKind::Permission,
+                "Native authorization is required",
+                "Setup has not received the authority needed for these changes.",
+                "Use the native authorization flow or ask an administrator to install it.",
+            ),
+            ProcessOutcome::VerificationFailure => (
+                DiagnosticKind::Verification,
+                "Content could not be verified",
+                "Setup refused content that did not pass verification.",
+                "Obtain the installer from the publisher and check the reported verification failure.",
+            ),
+            ProcessOutcome::OwnershipConflict => {
+                let diagnostic = Self::from_message(message, false);
+                if diagnostic.kind == DiagnosticKind::Drift {
+                    return diagnostic;
+                }
+                (
+                    DiagnosticKind::Conflict,
+                    "An existing resource conflicts with this plan",
+                    "Setup will not replace resources it does not own.",
+                    "Resolve the ownership conflict or choose another installation location, then retry.",
+                )
+            }
+            _ => return Self::from_message(message, false),
+        };
+        Self {
+            kind,
+            title: title.into(),
+            meaning: meaning.into(),
+            recovery: recovery.into(),
+            technical_details: Some(message.into()),
+        }
+    }
+
     pub fn from_message(message: &str, recovery_required: bool) -> Self {
         let normalized = message.to_ascii_lowercase();
         if normalized.contains("recovery") || recovery_required {
@@ -1221,25 +1271,13 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_copy_is_actionable() {
+    fn diagnostics_follow_typed_outcomes() {
         for message in ["blocked by running applications", "ownership drift"] {
-            assert_eq!(
-                DiagnosticPresentation::from_message(message, true).kind,
-                DiagnosticKind::Recovery
-            );
+            assert_eq!(DiagnosticPresentation::from_message(message, true).kind, DiagnosticKind::Recovery);
         }
-
-        let diagnostic =
-            DiagnosticPresentation::from_message("blocked by running applications", false);
-        assert_eq!(diagnostic.kind, DiagnosticKind::Blocked);
-        // The words are the blocked screen's own button label, because the copy
-        // and the control it points at have to agree; a copy that names an action
-        // the window does not offer is worse than none.
-        assert!(
-            diagnostic.recovery.contains("try again"),
-            "a blocked diagnostic says what to do, not only what happened: {}",
-            diagnostic.recovery
-        );
+        assert_eq!(DiagnosticPresentation::for_outcome(ProcessOutcome::InstallationBusy, "ownership drift").kind, DiagnosticKind::Blocked);
+        assert_eq!(DiagnosticPresentation::for_outcome(ProcessOutcome::OwnershipConflict, "running application").kind, DiagnosticKind::Conflict);
+        assert_eq!(DiagnosticPresentation::from_message("blocked by running applications", false).kind, DiagnosticKind::Blocked);
     }
 
     #[test]

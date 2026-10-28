@@ -391,9 +391,8 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<zup_presentation::Installe
                 outcome,
                 code: outcome.code(),
                 message: message.clone(),
-                diagnostic: Some(zup_presentation::DiagnosticPresentation::from_message(
-                    message,
-                    *kind == "recovery_required",
+                diagnostic: Some(zup_presentation::DiagnosticPresentation::for_outcome(
+                    outcome, message,
                 )),
             }]
         }

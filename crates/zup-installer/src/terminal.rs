@@ -192,11 +192,9 @@ pub(crate) fn run_cli<H: SessionHost>(
     cli: Cli,
 ) -> miette::Result<()> {
     let output = cli.output.into();
-    let interactive = frontend == Frontend::Console
-        && output == OutputFormat::Human
-        && !cli.non_interactive
-        && !cli.yes
-        && crate::run::console_is_a_terminal();
+    let interactive = crate::run::RuntimeContext::new(frontend)
+        .with_output(output)
+        .may_prompt(cli.non_interactive, cli.yes);
     let mut report = Report::new(
         output,
         interactive,
@@ -440,7 +438,7 @@ fn drive<H: SessionHost>(
         })
 }
 
-fn choose_scope(
+pub(crate) fn choose_scope(
     installer: &zup_core::Installer,
     requested: Option<SelectedScope>,
     interactive: bool,
@@ -564,12 +562,12 @@ impl Report {
                             .message
                             .clone()
                             .unwrap_or_else(|| format!("{:?}", self.result.outcome)),
-                        diagnostic: Some(zup_presentation::DiagnosticPresentation::from_message(
+                        diagnostic: Some(zup_presentation::DiagnosticPresentation::for_outcome(
+                            self.result.outcome,
                             self.result
                                 .message
                                 .as_deref()
                                 .unwrap_or("operation incomplete"),
-                            self.result.outcome == ProcessOutcome::RecoveryRequired,
                         )),
                     }
                 };
@@ -586,9 +584,9 @@ impl Report {
                         .message
                         .as_deref()
                         .unwrap_or("The operation did not complete.");
-                    let diagnostic = zup_presentation::DiagnosticPresentation::from_message(
+                    let diagnostic = zup_presentation::DiagnosticPresentation::for_outcome(
+                        self.result.outcome,
                         message,
-                        self.result.outcome == ProcessOutcome::RecoveryRequired,
                     );
                     let mut stderr = std::io::stderr().lock();
                     writeln!(stderr, "{message}\n{}", diagnostic.recovery).and_then(|_| {

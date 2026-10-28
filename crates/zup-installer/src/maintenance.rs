@@ -445,7 +445,6 @@ impl UpdateArgs {
 }
 
 pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<()> {
-    let _ = context;
     let executable = package::current_executable()?;
     let bundle = package::open_bundle(&executable).map_err(|error| {
         miette::miette!("an update needs this application's installer package: {error}")
@@ -460,7 +459,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     let check_only = args.command.is_some();
     let machine_run = output != OutputFormat::Human && !check_only;
 
-    let (scope, state_root, ledger) = committed_installation(installer, &args)?;
+    let (scope, state_root, ledger) = committed_installation(context, installer, &args)?;
     let update_root = if scope == SelectedScope::Machine && args.state_root.is_none() {
         peer_user_state_root()?
     } else {
@@ -538,7 +537,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
         );
     }
 
-    confirm(&args, output)?;
+    confirm(context, &args)?;
     if output == OutputFormat::Human {
         println!(
             "update available: {} → {}",
@@ -561,10 +560,10 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     if output == OutputFormat::Human {
         eprintln!("  {}", acquired.estimate());
     }
-    let policy = if args.non_interactive || output != OutputFormat::Human {
-        ExecutionPolicy::NonInteractive
-    } else {
+    let policy = if context.may_prompt(args.non_interactive, args.yes) {
         ExecutionPolicy::Interactive
+    } else {
+        ExecutionPolicy::NonInteractive
     };
     lifecycle::run_acquired_transition(
         acquire::Request {
@@ -650,41 +649,28 @@ pub fn from_maintenance_surface(
 }
 
 fn committed_installation(
+    context: RuntimeContext,
     installer: &zup_core::Installer,
     args: &UpdateArgs,
 ) -> miette::Result<(SelectedScope, PathBuf, zup_exec::InstallLedger)> {
-    let mut scope = if installer.install.scope == zup_core::InstallScope::Machine {
-        SelectedScope::Machine
-    } else {
-        args.scope
-            .map(SelectedScope::from)
-            .unwrap_or(SelectedScope::User)
-    };
-    let mut state_root = resolve_state_root(args.state_root.clone(), scope)?;
-    let store = zup_windows::InstallLedgerStore::new(&state_root);
-    let mut ledger = store
+    let scope = crate::terminal::choose_scope(
+        installer,
+        args.scope.and_then(ScopeArg::choice),
+        context.may_prompt(args.non_interactive, args.yes),
+        false,
+    )?;
+    let state_root = resolve_state_root(args.state_root.clone(), scope)?;
+    let ledger = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&installer.app.id, scope)
-        .map_err(|error| miette::miette!("installation ledger: {error}"))?;
-    if ledger.is_none()
-        && args.scope.is_none()
-        && args.state_root.is_none()
-        && scope == SelectedScope::User
-    {
-        scope = SelectedScope::Machine;
-        state_root = resolve_state_root(None, scope)?;
-        ledger = store
-            .load(&installer.app.id, scope)
-            .map_err(|error| miette::miette!("installation ledger: {error}"))?;
-    }
-    let ledger = ledger.ok_or_else(|| miette::miette!("this application is not installed"))?;
+        .map_err(|error| miette::miette!("installation ledger: {error}"))?
+        .ok_or_else(|| {
+            miette::miette!("this application is not installed in the selected scope")
+        })?;
     Ok((scope, state_root, ledger))
 }
 
-fn confirm(args: &UpdateArgs, output: OutputFormat) -> miette::Result<()> {
-    if args.yes || args.non_interactive || output != OutputFormat::Human {
-        return Ok(());
-    }
-    if crate::run::console_is_a_terminal() && !crate::frontend::confirm_update()? {
+fn confirm(context: RuntimeContext, args: &UpdateArgs) -> miette::Result<()> {
+    if context.may_prompt(args.non_interactive, args.yes) && !crate::frontend::confirm_update()? {
         return Err(crate::frontend::cancelled());
     }
     Ok(())
@@ -776,7 +762,7 @@ fn update_available(
 pub struct RecoveryArgs {
     #[arg(long)]
     pub transaction_id: uuid::Uuid,
-    #[arg(long, value_enum, default_value = "user")]
+    #[arg(long, value_enum, default_value = "either")]
     pub scope: ScopeArg,
     #[arg(long, value_enum, default_value = "human")]
     pub output: OutputArg,
@@ -794,10 +780,18 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     let executable = package::current_executable()?;
     let bundle = package::open_bundle_if_present(&executable)?;
     let embedded = bundle.as_ref().map(package::target_plan).transpose()?;
-    let scope = embedded.as_ref().map_or_else(
-        || SelectedScope::from(args.scope),
-        |build| default_install_scope(build.installer.install.scope),
-    );
+    let scope = match &embedded {
+        Some(build) => build
+            .installer
+            .install
+            .scope
+            .select(args.scope.choice())
+            .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?,
+        None => args
+            .scope
+            .choice()
+            .ok_or_else(|| miette::miette!("recovery requires --scope user or --scope machine"))?,
+    };
     let state_root = resolve_state_root(args.state_root, scope)?;
     let id = TransactionId::from_uuid(args.transaction_id);
     if scope == SelectedScope::Machine {
@@ -925,13 +919,6 @@ pub fn resolve_state_root(
 
 pub fn peer_user_state_root() -> miette::Result<PathBuf> {
     state_root(SelectedScope::User)
-}
-
-pub fn default_install_scope(scope: InstallScope) -> SelectedScope {
-    match scope {
-        InstallScope::Machine => SelectedScope::Machine,
-        InstallScope::User | InstallScope::Either => SelectedScope::User,
-    }
 }
 
 pub fn action_name(action: LifecycleAction) -> &'static str {

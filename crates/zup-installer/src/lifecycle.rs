@@ -104,11 +104,14 @@ pub fn transition(
         }
         Some(bundle) => {
             let build = package::target_plan(&bundle)?;
-            let scope = if build.installer.install.scope == zup_core::InstallScope::Machine {
-                SelectedScope::Machine
-            } else {
-                SelectedScope::from(args.scope)
-            };
+            let scope = build
+                .installer
+                .install
+                .scope
+                .select(args.scope.choice())
+                .map_err(|error| {
+                    miette::miette!("{error}; specify --scope user or --scope machine")
+                })?;
             run_embedded(
                 request,
                 context,
@@ -245,11 +248,11 @@ fn run_graph_transition(
              release graph to acquire from"
         )
     })?;
-    let scope = if installer.install.scope == zup_core::InstallScope::Machine {
-        SelectedScope::Machine
-    } else {
-        SelectedScope::from(args.scope)
-    };
+    let scope = installer
+        .install
+        .scope
+        .select(args.scope.choice())
+        .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?;
     let state_root = state::resolve_state_root(args.state_root.clone(), scope)?;
     let ledger = zup_windows::InstallLedgerStore::new(&state_root)
         .load(&installer.app.id, scope)
@@ -330,44 +333,13 @@ fn run_graph_transition(
     }
 
     let action = match request {
-        Operation::Apply => {
-            let action = resolve_request_operation(
-                Operation::Apply,
-                ledger.as_ref().map(|ledger| &ledger.version),
-                &acquired.resolved.descriptor.version,
-            )?;
-            if action == LifecycleAction::Install {
-                LifecycleAction::Upgrade
-            } else {
-                action
-            }
-        }
+        Operation::Apply => resolve_request_operation(
+            Operation::Apply,
+            ledger.as_ref().map(|ledger| &ledger.version),
+            &acquired.resolved.descriptor.version,
+        )?,
         named => named_action(named).expect("named operations resolve directly"),
     };
-
-    if let Some(installed) = ledger
-        .as_ref()
-        .and_then(zup_exec::InstallLedger::release_identity)
-        && installed.same_release(&acquired.identity())
-        && action != LifecycleAction::Uninstall
-    {
-        return match args.output {
-            crate::cli::OutputArg::Jsonl => {
-                println!(
-                    "{}",
-                    serde_json::to_string(&zup_presentation::InstallerEvent::Completed {
-                        outcome: zup_presentation::ProcessOutcome::Success,
-                    })
-                    .map_err(|error| miette::miette!("output: {error}"))?
-                );
-                Ok(())
-            }
-            _ => {
-                println!("up to date ({})", acquired.resolved.descriptor.version);
-                Ok(())
-            }
-        };
-    }
 
     run_acquired_transition(
         acquire::Request {
@@ -412,31 +384,11 @@ pub fn run_acquired_transition(
         acquire::target_plan(&acquired.manifest).map_err(|error| miette::miette!("{error}"))?;
     let installer = &build.installer;
 
-    let scope = match scope {
-        Some(scope) => scope,
-        None if installer.install.scope == zup_core::InstallScope::Machine => {
-            SelectedScope::Machine
-        }
-        None if installer.install.scope == zup_core::InstallScope::User => SelectedScope::User,
-        None => {
-            let committed = zup_windows::InstallLedgerStore::new(acquired.cache.root())
-                .load(&installer.app.id, SelectedScope::Machine)
-                .ok()
-                .flatten();
-            if committed.is_some() {
-                SelectedScope::Machine
-            } else {
-                SelectedScope::User
-            }
-        }
-    };
-    if installer.install.scope == zup_core::InstallScope::Machine && scope != SelectedScope::Machine
-    {
-        return Err(miette::miette!(
-            "this application installs machine-wide, not into the {} scope",
-            scope
-        ));
-    }
+    let scope = installer
+        .install
+        .scope
+        .select(scope)
+        .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?;
 
     let state_root = state::resolve_state_root(Some(acquired.cache.root().to_path_buf()), scope)?;
     let prior =

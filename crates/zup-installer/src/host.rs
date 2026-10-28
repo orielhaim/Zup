@@ -496,7 +496,7 @@ impl Launch {
         Self {
             maintenance: false,
             auto_uninstall: false,
-            scope: Some(SelectedScope::from(args.scope)),
+            scope: args.scope.choice(),
             state_root: args.state_root.clone(),
             preselected: (!args.enable.is_empty()).then(|| {
                 args.enable
@@ -511,7 +511,7 @@ impl Launch {
         Self {
             maintenance: true,
             auto_uninstall: true,
-            scope: args.scope.map(SelectedScope::from),
+            scope: args.scope.and_then(crate::cli::ScopeArg::choice),
             state_root: args.state_root.clone(),
             preselected: None,
         }

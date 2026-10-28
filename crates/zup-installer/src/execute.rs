@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use zup_session::{automation_events, process_outcome};
 
 use crate::lifecycle::PreparedRuntime;
 use zup_exec::LifecycleAction;
@@ -401,14 +402,6 @@ fn emit_line(line: &str) {
     if !captured {
         println!("{line}");
     }
-}
-
-pub fn process_outcome(outcome: &InstallOutcome) -> ProcessOutcome {
-    zup_session::process_outcome(outcome)
-}
-
-pub fn automation_events(event: &RuntimeEvent) -> Vec<InstallerEvent> {
-    zup_session::automation_events(event)
 }
 
 thread_local! {

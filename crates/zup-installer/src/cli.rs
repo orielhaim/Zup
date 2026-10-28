@@ -124,7 +124,7 @@ pub(crate) enum Commands {
 
 #[derive(Debug, Clone, Default, Args)]
 pub struct LifecycleArgs {
-    #[arg(long, value_enum, default_value = "user")]
+    #[arg(long, value_enum, default_value = "either")]
     pub scope: ScopeArg,
     #[arg(long = "enable", alias = "component", value_name = "ID")]
     pub enable: Vec<String>,
@@ -190,9 +190,9 @@ pub(crate) struct UninstallRunnerArgs {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum ScopeArg {
-    #[default]
     User,
     Machine,
+    #[default]
     Either,
 }
 
@@ -206,12 +206,12 @@ impl ScopeArg {
     }
 }
 
-impl From<ScopeArg> for zup_core::SelectedScope {
-    fn from(value: ScopeArg) -> Self {
-        match value {
-            ScopeArg::User => Self::User,
-            ScopeArg::Machine => Self::Machine,
-            ScopeArg::Either => Self::User,
+impl ScopeArg {
+    pub fn choice(self) -> Option<zup_core::SelectedScope> {
+        match self {
+            Self::User => Some(zup_core::SelectedScope::User),
+            Self::Machine => Some(zup_core::SelectedScope::Machine),
+            Self::Either => None,
         }
     }
 }
