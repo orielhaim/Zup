@@ -11937,6 +11937,7 @@ dependencies = [
  "rstest",
  "tempfile",
  "thiserror 2.0.21",
+ "zstd",
  "zup-binary",
  "zup-build",
  "zup-bundle",

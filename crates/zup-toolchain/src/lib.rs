@@ -412,8 +412,15 @@ pub fn resolve(root: &Path, relative: &str) -> PathBuf {
     root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetEncoding {
+    Zstd,
+}
+
 /// The compatibility identity of one component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComponentDescriptor {
     /// The contract version this descriptor was written against.
     pub format_version: u32,
@@ -426,6 +433,8 @@ pub struct ComponentDescriptor {
     /// The presentation the component presents, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_encoding: Option<PresetEncoding>,
     /// The launcher experience, when the component is a dispatcher.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subsystem: Option<String>,
@@ -453,6 +462,7 @@ impl ComponentDescriptor {
                 zup_version: zup_version.to_owned(),
                 target: target.as_str().to_owned(),
                 frontend: Some(frontend.as_str().to_owned()),
+                preset_encoding: Some(PresetEncoding::Zstd),
                 subsystem: None,
                 online: None,
                 digest,
@@ -464,6 +474,7 @@ impl ComponentDescriptor {
                 zup_version: zup_version.to_owned(),
                 target: DISPATCHER_TARGET.as_str().to_owned(),
                 frontend: None,
+                preset_encoding: None,
                 subsystem: Some(subsystem.as_str().to_owned()),
                 online: Some(*online),
                 digest,
@@ -476,6 +487,7 @@ impl ComponentDescriptor {
                 // A package holds every target, so there is no single one to name.
                 target: "*".to_owned(),
                 frontend: None,
+                preset_encoding: None,
                 subsystem: None,
                 online: None,
                 digest,
@@ -524,6 +536,11 @@ impl ComponentDescriptor {
             ToolchainComponent::Runtime { target, frontend } => {
                 if self.kind != ComponentKind::Runtime {
                     return Err(ToolchainError::WrongKind);
+                }
+                if self.preset_encoding != Some(PresetEncoding::Zstd) {
+                    return Err(ToolchainError::Incompatible(
+                        "runtime does not support compressed presets; rebuild the toolchain".into(),
+                    ));
                 }
                 if self.target != target.as_str() {
                     return Err(ToolchainError::WrongTarget {
@@ -747,6 +764,18 @@ mod tests {
             .expect_err("an arm64 runtime is not an x64 runtime")
             .to_string();
         assert!(error.contains("windows-arm64"), "{error}");
+
+        let descriptor_path = root
+            .path()
+            .join(descriptor_file_name(&component, EXECUTABLE_SUFFIX));
+        let mut descriptor: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+        descriptor
+            .as_object_mut()
+            .unwrap()
+            .remove("preset_encoding");
+        std::fs::write(&descriptor_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+        assert!(read(&path, &component, "0.1.0").is_err());
     }
 
     #[test]
@@ -816,6 +845,7 @@ mod tests {
             zup_version: "0.1.0".to_owned(),
             target: "windows-x64".to_owned(),
             frontend: Some("gui".to_owned()),
+            preset_encoding: Some(PresetEncoding::Zstd),
             subsystem: None,
             online: None,
             digest: hex(&[0; 32]),

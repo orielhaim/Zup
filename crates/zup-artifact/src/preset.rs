@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use zup_core::{Sha256Digest, Target};
+use zup_core::{MAX_PRESET_BINARY_BYTES, Sha256Digest, Target};
 use zup_preset_protocol::{Capabilities, Capability, PRESET_PROTOCOL_VERSION, PresetDescription};
 
 use crate::format::ArtifactError;
@@ -13,8 +13,6 @@ pub const HEADER_BYTES: usize = 32;
 pub const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 
 pub const MAX_BINARIES: usize = 64;
-
-pub const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 
 pub const MAX_TOTAL_BINARY_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -101,10 +99,10 @@ impl PresetPackage {
             }
         }
         for blob in &self.blobs {
-            if blob.size > MAX_BINARY_BYTES {
+            if blob.size > MAX_PRESET_BINARY_BYTES {
                 return Err(ArtifactError::BinaryTooLarge {
                     size: blob.size,
-                    limit: MAX_BINARY_BYTES,
+                    limit: MAX_PRESET_BINARY_BYTES,
                 });
             }
         }
@@ -154,7 +152,7 @@ impl PresetPackage {
         if self
             .binaries
             .iter()
-            .any(|binary| binary.size > MAX_BINARY_BYTES)
+            .any(|binary| binary.size > MAX_PRESET_BINARY_BYTES)
         {
             return Err(ArtifactError::BinaryTooLarge {
                 size: self
@@ -163,7 +161,7 @@ impl PresetPackage {
                     .map(|binary| binary.size)
                     .max()
                     .unwrap_or_default(),
-                limit: MAX_BINARY_BYTES,
+                limit: MAX_PRESET_BINARY_BYTES,
             });
         }
         Ok(())

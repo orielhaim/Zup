@@ -154,7 +154,7 @@ fn stage_dispatcher(
     let built = target_directory(root, dispatcher::TARGET.rust_triple())
         .join(output_directory(profile))
         .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
-    cargo_build(root, &args, LAUNCHER_PROFILE)?;
+    cargo(root, &args)?;
     let component = zup_toolchain::ToolchainComponent::Dispatcher {
         subsystem: match subsystem {
             "gui" => zup_toolchain::Subsystem::Gui,
@@ -434,7 +434,7 @@ fn build_and_stage_preset(
         "-p".to_owned(),
         CLI_PACKAGE.to_owned(),
         "--profile".to_owned(),
-        profile.to_owned(),
+        "dev".to_owned(),
         "--".to_owned(),
         "preset".to_owned(),
         "pack".to_owned(),
@@ -460,14 +460,6 @@ fn build_and_stage_preset(
         version,
     )
 }
-
-#[cfg(windows)]
-const LAUNCHER_PROFILE: &[(&str, &str)] = &[
-    ("CARGO_PROFILE_RELEASE_LTO", "fat"),
-    ("CARGO_PROFILE_RELEASE_OPT_LEVEL", "z"),
-    ("CARGO_PROFILE_RELEASE_PANIC", "abort"),
-    ("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1"),
-];
 
 pub fn staging_directory(root: &Path, profile: &str, version: &str) -> PathBuf {
     target_directory(root, profile)
@@ -718,6 +710,11 @@ pub fn package(
     }
     std::fs::create_dir_all(out).map_err(|error| format!("{}: {error}", out.display()))?;
 
+    let cli_profile = if profile == "installer" {
+        "release"
+    } else {
+        profile
+    };
     cargo(
         root,
         &[
@@ -727,10 +724,11 @@ pub fn package(
             "--bin",
             CLI_PACKAGE,
             "--profile",
-            profile,
+            cli_profile,
         ],
     )?;
-    let built = target_directory(root, profile).join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"));
+    let built =
+        target_directory(root, cli_profile).join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"));
     copy(
         &built,
         &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")),
@@ -797,15 +795,8 @@ fn copy(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 fn cargo(root: &Path, args: &[&str]) -> Result<(), String> {
-    cargo_build(root, args, &[])
-}
-
-fn cargo_build(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<(), String> {
     let mut command = Command::new(cargo_executable());
     command.current_dir(root);
-    for (name, value) in env {
-        command.env(name, value);
-    }
     for argument in args {
         command.arg(argument);
     }

@@ -43,11 +43,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 zup-core.workspace = true
 zup-presentation.workspace = true
+
+[target.'cfg(windows)'.dependencies]
 cliclack = { workspace = true, optional = true }
 console = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
-
-[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",

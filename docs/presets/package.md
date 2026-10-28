@@ -83,8 +83,9 @@ needs those libraries; only building the preset itself does.
 zup preset pack --build windows-x64 -o dist/aurora.zupui
 ```
 
-The default Cargo profile is `release`. `--force` permits replacing an existing
-package.
+The default Cargo profile is `release`. Generated presets configure that profile
+for size optimization, Thin LTO, and symbol stripping; `preset dev` still uses the
+fast development profile. `--force` permits replacing an existing package.
 
 ## Inspect without running
 

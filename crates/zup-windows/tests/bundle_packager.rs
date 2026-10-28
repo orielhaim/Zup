@@ -178,9 +178,39 @@ fn embedded_package_is_owned_after_the_executable_is_removed() {
 
 #[cfg(windows)]
 #[test]
-fn embedded_reader_reports_a_missing_index() {
+fn embedded_reader_distinguishes_absence_from_corruption() {
     let error = EmbeddedBundle::open(std::env::current_exe().unwrap()).unwrap_err();
     assert!(error.is_missing_resource(), "{error}");
+
+    let root = TempDir::new().unwrap();
+    let output = root.path().join("Setup.exe");
+    let package = root.path().join("package.zup");
+    fs::write(
+        &package,
+        BundleWriter::encode(&console_plan(root.path()), &[]).unwrap(),
+    )
+    .unwrap();
+    embed_bundle_file(&std::env::current_exe().unwrap(), &output, &package, None).unwrap();
+    let corrupt = zup_pe::resources::update_rcdata(
+        &fs::read(&output).unwrap(),
+        &[zup_pe::ResourceDocument {
+            id: zup_pe::RESOURCE_ID_BLOB_START,
+            bytes: vec![0],
+        }],
+    )
+    .unwrap();
+    fs::write(&output, corrupt).unwrap();
+    assert!(
+        !EmbeddedBundle::open(&output)
+            .unwrap_err()
+            .is_missing_resource()
+    );
+    fs::remove_file(&output).unwrap();
+    assert!(
+        !EmbeddedBundle::open(&output)
+            .unwrap_err()
+            .is_missing_resource()
+    );
 }
 
 #[cfg(windows)]

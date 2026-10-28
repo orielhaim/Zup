@@ -73,10 +73,7 @@ pub use capabilities::{
     is_supported_linux_target, linux_capability_errors, linux_selection_errors,
     operation_capability_errors,
 };
-pub use carrier::{
-    CARRIER_MAGIC, CARRIER_VERSION, Carrier, CarrierError, CarrierFooter, FOOTER_LEN, compose,
-    compose_with_preset,
-};
+pub use carrier::Carrier;
 pub use error::{ExecError, IpcError, PathError, PlanError};
 #[cfg(target_os = "linux")]
 pub use executor::{FileIntent, FileWork, LinuxFileExecutor, ServiceSupport, snapshot_target};

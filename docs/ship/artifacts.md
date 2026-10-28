@@ -8,6 +8,26 @@ Keep those concepts separate.
 
 With no `[build.artifacts]`, Zup builds one offline installer per selected target. This is the smallest release model.
 
+## Compact runtime templates
+
+When building Zup from source, prepare distribution templates once:
+
+```bash
+cargo xtask toolchain build --profile installer
+zup --toolchain target/installer/toolchain/0.0.1 build
+```
+
+The `installer` profile optimizes runtimes and native presets for size. It retains
+plugin execution, recovery, services, and the other supported lifecycle operations.
+GUI installers compress their native preset; Console and Headless carry no preset.
+The developer CLI, tests, preview, and preset development keep their ordinary
+profiles. `zup build` composes cached templates without compiling the engine.
+
+Use `cargo xtask toolchain build --profile dev` when changing the runtime itself.
+For a reproducible size breakdown, run `scripts/ci/installer-size.py` with
+`--cli`, `--toolchain`, and `--output`. The size-only mode in Full Verification
+can measure a selected revision on native Windows and Linux runners.
+
 ## Declare an artifact
 
 ```toml

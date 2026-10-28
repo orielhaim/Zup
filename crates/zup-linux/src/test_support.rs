@@ -1011,7 +1011,7 @@ pub fn package_bytes_full(
 }
 
 pub fn compose_installer(template: &Path, output: &Path, package: &[u8]) {
-    crate::carrier::compose(template, output, package).expect("compose");
+    zup_compose::compose_linux(template, output, package, None).expect("compose");
 }
 
 pub fn inert_template() -> &'static str {

@@ -30,7 +30,7 @@ fn driver_binary(name: &str) -> Vec<u8> {
 fn gui_installer(scratch: &std::path::Path, name: &str, preset: &[u8]) -> PathBuf {
     let package = gui_package_bytes(scratch, "1.0.0", &v1_files());
     let output = scratch.join(name);
-    zup_linux::compose_with_preset(&genuine_template("gui"), &output, &package, Some(preset))
+    zup_compose::compose_linux(&genuine_template("gui"), &output, &package, Some(preset))
         .expect("compose");
     output
 }

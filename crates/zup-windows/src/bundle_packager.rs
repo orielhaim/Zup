@@ -14,9 +14,7 @@ use zup_bundle::{
 };
 use zup_core::TargetBuildPlan;
 use zup_core::{Frontend, PLUGIN_PAYLOAD_ROOT, RelativePath, Sha256Digest, Target, hash_reader};
-use zup_pe::{
-    MAX_RESOURCE_SIZE, PeError, RESOURCE_ID_BLOB_START, RESOURCE_ID_INDEX, RESOURCE_ID_PRESET,
-};
+use zup_pe::{PeError, RESOURCE_ID_INDEX};
 
 #[derive(Debug, Error)]
 pub enum BundleError {
@@ -28,22 +26,12 @@ pub enum BundleError {
     Io(#[from] std::io::Error),
     #[error("bundle is truncated, corrupt, or unsupported")]
     Invalid,
-    #[error("executable has no embedded package index")]
-    MissingResource,
     #[error("bare runtime has no content store beside it at `{path}`")]
     MissingSidecar { path: String },
     #[error("`{path}` is a universal artifact; run it to install the variant this host needs")]
     UniversalArtifact { path: String },
-    #[error("package data is {size} bytes; the Windows resource limit is {limit} bytes")]
-    ResourceTooLarge { size: u64, limit: u64 },
-    #[error("package has {count} blobs; the Windows resource identifier limit is {limit}")]
-    TooManyBlobs { count: usize, limit: usize },
-    #[error("cannot allocate {size} bytes while processing executable resources")]
-    ResourceAllocation { size: u64 },
     #[error("image resources: {0}")]
     Resource(String),
-    #[error("runtime already has an Authenticode certificate table; embed before signing")]
-    RuntimeAlreadySigned,
     #[error("installer composition: {0}")]
     Compose(#[from] zup_compose::ComposeError),
     #[error("target mismatch: expected `{expected}`, found `{found}`")]
@@ -58,7 +46,10 @@ pub enum BundleError {
 
 impl BundleError {
     pub fn is_missing_resource(&self) -> bool {
-        matches!(self, Self::MissingResource)
+        matches!(
+            self,
+            Self::Compose(zup_compose::ComposeError::NoContent { .. })
+        )
     }
 }
 
@@ -69,14 +60,6 @@ impl From<PeError> for BundleError {
             other => Self::Portable(other),
         }
     }
-}
-
-fn read_resource(executable: &Path, id: usize) -> Result<Vec<u8>, BundleError> {
-    crate::pe_resources::read_resource(executable, id).map_err(|error| match error {
-        crate::pe_resources::ResourceError::Absent(_) => BundleError::MissingResource,
-        crate::pe_resources::ResourceError::Pe(error) => BundleError::Portable(error),
-        other => BundleError::Resource(other.to_string()),
-    })
 }
 
 #[derive(Debug, Clone)]
@@ -90,58 +73,11 @@ pub struct EmbeddedBundle {
 impl EmbeddedBundle {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, BundleError> {
         let executable = path.as_ref().to_path_buf();
-        let index = read_resource(&executable, RESOURCE_ID_INDEX)?;
-        let index_info = Package::parse_index(&index)?;
-        if index_info.blob_count() > zup_pe::MAX_RESOURCE_ID {
-            return Err(BundleError::TooManyBlobs {
-                count: index_info.blob_count(),
-                limit: zup_pe::MAX_RESOURCE_ID,
-            });
-        }
-        let mut blobs = Vec::new();
-        blobs
-            .try_reserve_exact(index_info.blob_count())
-            .map_err(|_| BundleError::ResourceAllocation {
-                size: index_info.blob_count() as u64,
-            })?;
-        let mut total_size = index.len() as u64;
-        for index in 0..index_info.blob_count() {
-            let expected = index_info
-                .compressed_size(index)
-                .ok_or(BundleError::Invalid)?;
-            if expected > MAX_RESOURCE_SIZE {
-                return Err(BundleError::ResourceTooLarge {
-                    size: expected,
-                    limit: MAX_RESOURCE_SIZE,
-                });
-            }
-            let blob = read_resource(&executable, index + RESOURCE_ID_BLOB_START)?;
-            if blob.len() as u64 != expected {
-                return Err(BundleError::Invalid);
-            }
-            total_size = total_size
-                .checked_add(blob.len() as u64)
-                .ok_or(BundleError::Invalid)?;
-            blobs.push(blob);
-        }
-        let total_size = usize::try_from(total_size).map_err(|_| BundleError::Invalid)?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(total_size)
-            .map_err(|_| BundleError::ResourceAllocation {
-                size: total_size as u64,
-            })?;
-        bytes.extend_from_slice(&index);
-        for blob in blobs {
-            bytes.extend_from_slice(&blob);
-        }
-        let package = Package::from_bytes(bytes)?;
-
-        let preset = read_resource(&executable, RESOURCE_ID_PRESET).ok();
+        let opened = zup_compose::open_windows(&executable)?;
         Ok(Self {
             executable,
-            package,
-            preset,
+            package: opened.package,
+            preset: opened.preset,
         })
     }
 
@@ -507,7 +443,7 @@ pub fn build_self_contained_executable(
 ) -> Result<(u64, u64), BundleError> {
     let package = BundleWriter::encode(plan, artifacts)?;
     let package_size = package.len() as u64;
-    zup_compose::compose_windows(executable, output, &package, preset).map_compose()?;
+    zup_compose::compose_windows(executable, output, &package, preset)?;
     apply_plan_icon(output, plan)?;
     Ok((std::fs::metadata(output)?.len(), package_size))
 }
@@ -532,7 +468,7 @@ pub fn plan_only_runtime_bytes(
     let package_size = package.len() as u64;
     let temporary = tempfile::tempdir()?;
     let out = temporary.path().join("runtime.exe");
-    zup_compose::compose_windows(executable, &out, &package, None).map_compose()?;
+    zup_compose::compose_windows(executable, &out, &package, None)?;
     apply_plan_icon(&out, plan)?;
     Ok((std::fs::read(&out)?, package_size))
 }
@@ -544,21 +480,8 @@ pub fn embed_bundle_file(
     preset: Option<&[u8]>,
 ) -> Result<(), BundleError> {
     let bytes = std::fs::read(package)?;
-    zup_compose::compose_windows(executable, output, &bytes, preset).map_compose()?;
+    zup_compose::compose_windows(executable, output, &bytes, preset)?;
     Ok(())
-}
-
-trait MapCompose<T> {
-    fn map_compose(self) -> Result<T, BundleError>;
-}
-
-impl<T> MapCompose<T> for Result<T, zup_compose::ComposeError> {
-    fn map_compose(self) -> Result<T, BundleError> {
-        self.map_err(|error| match error {
-            zup_compose::ComposeError::Inspect(inner) => BundleError::Inspect(inner),
-            other => BundleError::Compose(other),
-        })
-    }
 }
 
 pub fn is_executable_image(path: &Path) -> bool {

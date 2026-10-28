@@ -3,8 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
+use zup_compose::{CARRIER_FOOTER_LEN as FOOTER_LEN, ComposeError};
 use zup_core::{SelectedScope, Target};
-use zup_linux::{Carrier, CarrierError, ExecError, FOOTER_LEN, LinuxRunRequest, PathError, run};
+use zup_linux::{Carrier, ExecError, LinuxRunRequest, PathError, run};
 
 use rstest::rstest;
 use zup_linux::test_support::{
@@ -26,6 +27,7 @@ enum FooterFault {
     Length,
     Offset,
     Version,
+    Flags,
 }
 
 const VERSION_AT: usize = 17;
@@ -54,6 +56,7 @@ fn write_copy(scratch: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 #[case::length(FooterFault::Length)]
 #[case::offset(FooterFault::Offset)]
 #[case::version(FooterFault::Version)]
+#[case::flags(FooterFault::Flags)]
 fn a_corrupt_footer_is_refused_before_any_install(#[case] fault: FooterFault) {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let (_, mut bytes) = installer(scratch.path(), "setup");
@@ -68,17 +71,19 @@ fn a_corrupt_footer_is_refused_before_any_install(#[case] fault: FooterFault) {
             poke_u64(&mut bytes, OFFSET_AT, far);
         }
         FooterFault::Version => poke_u32(&mut bytes, VERSION_AT, 0xFFFF),
+        FooterFault::Flags => poke_u32(&mut bytes, 21, 1),
     }
     let path = write_copy(scratch.path(), "corrupt", &bytes);
 
     match (fault, Carrier::open(&path)) {
-        (FooterFault::Digest, Err(CarrierError::PackageDigestMismatch { .. }))
+        (FooterFault::Digest, Err(ComposeError::PackageDigestMismatch { .. }))
         | (
             FooterFault::Length,
-            Err(CarrierError::PackageOutsideFile { .. } | CarrierError::ImplausibleLength { .. }),
+            Err(ComposeError::ContentOutsideFile { .. } | ComposeError::ImplausibleLength { .. }),
         )
-        | (FooterFault::Offset, Err(CarrierError::PackageOutsideFile { .. }))
-        | (FooterFault::Version, Err(CarrierError::UnsupportedVersion { found: 0xFFFF, .. })) => {}
+        | (FooterFault::Offset, Err(ComposeError::ContentOutsideFile { .. }))
+        | (FooterFault::Version, Err(ComposeError::UnsupportedVersion { found: 0xFFFF, .. })) => {}
+        (FooterFault::Flags, Err(ComposeError::UnsupportedFlags { .. })) => {}
         (_, other) => panic!("a corrupt footer is refused: {other:?}"),
     }
 }
@@ -93,7 +98,7 @@ fn a_windows_package_in_a_linux_runtime_is_refused() {
     compose_installer(Path::new(inert_template()), &output, &package);
 
     match Carrier::open(&output) {
-        Err(CarrierError::TargetMismatch { .. }) => {}
+        Err(ComposeError::Target(_) | ComposeError::FormatMismatch { .. }) => {}
         other => panic!("a target mismatch is refused: {other:?}"),
     }
 
@@ -105,7 +110,7 @@ fn a_windows_package_in_a_linux_runtime_is_refused() {
         install_dir_override: None,
         selection: Default::default(),
     }) {
-        Err(ExecError::Carrier(CarrierError::TargetMismatch { .. })) => {}
+        Err(ExecError::Carrier(ComposeError::Target(_) | ComposeError::FormatMismatch { .. })) => {}
         other => panic!("a mismatched run is refused: {other:?}"),
     }
     assert!(

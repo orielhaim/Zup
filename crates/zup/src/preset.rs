@@ -666,6 +666,12 @@ publish = false
 [dependencies]
 zup-sdk = {{ version = "0.1.0", features = ["preset"] }}
 
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 # GPUI is a very large dependency tree, and compiling it at `opt-level = 0` is
 # both slow and, for a text and layout engine, surprisingly slow at run time.
 # These are the packages that dominate the cost; everything else stays at the

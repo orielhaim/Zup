@@ -88,7 +88,12 @@ pub fn command() -> clap::Command {
 
 pub fn run(frontend: Frontend) -> miette::Result<()> {
     if frontend == Frontend::Gui {
+        #[cfg(feature = "gui")]
         return run_gui();
+        #[cfg(not(feature = "gui"))]
+        return Err(miette::miette!(
+            "this setup runtime has no graphical frontend"
+        ));
     }
     // package: it authenticates and serves one session, never a lifecycle.
     if let Some((session, client_pid, socket_path)) = worker_session_args() {
@@ -203,6 +208,7 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
     }
 }
 
+#[cfg(feature = "gui")]
 fn run_gui() -> miette::Result<()> {
     if let Some((session, client_pid, socket_path)) = worker_session_args() {
         return run_worker(session, client_pid, socket_path);
