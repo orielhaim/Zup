@@ -126,10 +126,6 @@ pub fn command() -> clap::Command {
     Cli::command()
 }
 
-pub fn run<H: SessionHost>(host: H, frontend: Frontend) -> miette::Result<()> {
-    run_cli(host, frontend, Cli::parse())
-}
-
 #[cfg(windows)]
 pub fn uninstall<H: SessionHost>(
     host: H,

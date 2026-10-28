@@ -104,7 +104,11 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
             return run_recovery(&cli, args.clone());
         }
     }
-    crate::terminal::run(zup_linux::LinuxSessionHost::open(PathBuf::new()), frontend)
+    crate::terminal::run_cli(
+        zup_linux::LinuxSessionHost::open(PathBuf::new()),
+        frontend,
+        crate::terminal::Cli::parse(),
+    )
 }
 
 #[cfg(feature = "gui")]

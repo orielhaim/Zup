@@ -78,9 +78,7 @@ pub fn direct_launch(context: RuntimeContext) -> miette::Result<()> {
     })?;
     match context.frontend {
         zup_core::Frontend::Gui => frontend::graphical(context, &executable, &bundle),
-        zup_core::Frontend::Console => {
-            crate::terminal::run(crate::host::WindowsSessionHost::default(), context.frontend)
-        }
+        zup_core::Frontend::Console => crate::host::terminal(context.frontend),
         zup_core::Frontend::Headless => Err(miette::miette!(
             "this runtime needs an operation.\n\n  Usage: {} <install|modify|repair|update|uninstall> [OPTIONS]",
             crate::cli::invoked_name()

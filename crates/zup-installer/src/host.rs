@@ -428,6 +428,7 @@ impl SessionHost for WindowsSessionHost {
         })
     }
 
+    #[cfg(feature = "gui")]
     fn update(
         &self,
         scope: SelectedScope,
