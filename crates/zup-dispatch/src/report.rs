@@ -99,13 +99,14 @@ fn message_box(_message: &str, _style: u32) -> i32 {
 pub fn print_usage() {
     println!("zup installer launcher");
     println!();
-    println!("  [install | modify | repair | update | uninstall] [options]");
-    println!("  install is the default; installing a newer artifact upgrades");
+    println!("  [install | upgrade | modify | repair | update | uninstall] [options]");
+    println!("  install is the default; use upgrade for an installed application");
     println!();
     println!("  --scope <user|machine>   whose installation to affect");
     println!("  --state-root <dir>       where this machine records its installations");
     println!("  --source <dir>           a local release tree to read before the network");
     println!("  --non-interactive, --yes never ask a question");
+    println!("  --plain                  line prompts without terminal effects");
     println!("  --force-files            repair files even when nothing drifted");
     println!("  --enable <id>, --disable <id>");
     println!("                           components to include or skip");

@@ -273,6 +273,7 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
         frontend: resolved.variant.frontend.clone(),
         mode: match request.verb {
             crate::Verb::Install => HandoffMode::Install,
+            crate::Verb::Upgrade => HandoffMode::Upgrade,
             crate::Verb::Modify => HandoffMode::Modify,
             crate::Verb::Repair => HandoffMode::Repair,
             crate::Verb::Update | crate::Verb::Uninstall => {
