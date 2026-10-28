@@ -1,17 +1,4 @@
-//! Portable target-driven installer composition.
-//!
-//! One pipeline turns a runtime template and a portable package into an
-//! installer for an explicit target, on any build host. The target's own
-//! executable format decides how the bytes are carried: a Windows target is a
-//! PE image with the package and the preset as resources, a Linux target is an
-//! ELF image with the package and the preset appended beside a footer. The
-//! preset travels the same pipeline on both: `None` composes an installer
-//! without one, `Some` carries it, and the reader hands back whatever the
-//! image carries.
-//!
-//! Composition never executes the template and never touches native runtime
-//! APIs. It reads headers with `zup-binary`, writes PE resources with
-//! `zup-pe`, and appends Linux sections with plain file I/O.
+//! Portable installer composition and verified content extraction.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -26,11 +13,7 @@ use zup_pe::{
 
 pub const CARRIER_MAGIC: &[u8; 17] = b"ZUP-LINUX-CARRIER";
 
-pub const CARRIER_VERSION_V1: u32 = 1;
-
 pub const CARRIER_VERSION: u32 = 2;
-
-pub const CARRIER_FOOTER_V1_LEN: u64 = 81;
 
 pub const CARRIER_FOOTER_LEN: u64 = 121;
 
@@ -58,6 +41,8 @@ pub enum ComposeError {
     TooManyBlobs { count: usize, limit: usize },
     #[error("cannot allocate {size} bytes while processing executable resources")]
     ResourceAllocation { size: u64 },
+    #[error("required package resource {id} is missing or has an invalid size")]
+    InvalidResource { id: usize },
     #[error("runtime already has a certificate table; embed before signing")]
     RuntimeAlreadySigned,
     #[error("package installs `{expected}` and `{found}` was requested")]
@@ -78,6 +63,8 @@ pub enum ComposeError {
         found: u32,
         expected: u32,
     },
+    #[error("`{path}` declares unsupported carrier flags {flags:#x}")]
+    UnsupportedFlags { path: String, flags: u32 },
     #[error("`{path}` declares its package at {offset}..{end}, outside the {size}-byte file")]
     ContentOutsideFile {
         path: String,
@@ -103,6 +90,8 @@ pub enum ComposeError {
         expected: Sha256Digest,
         found: Sha256Digest,
     },
+    #[error("invalid compressed preset: {0}")]
+    Preset(String),
     #[error("refusing to compose an installer over its own runtime template")]
     OutputIsRuntime,
 }
@@ -200,7 +189,8 @@ pub fn compose_windows(
         return Err(ComposeError::RuntimeAlreadySigned);
     }
     let mut documents = package_documents(&parsed)?;
-    let preset_size = preset.map(|bytes| bytes.len() as u64).unwrap_or(0);
+    let preset = compress_preset(preset)?;
+    let preset_size = preset.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
     if let Some(bytes) = preset {
         if bytes.len() as u64 > MAX_RESOURCE_SIZE {
             return Err(ComposeError::ResourceTooLarge {
@@ -210,7 +200,7 @@ pub fn compose_windows(
         }
         documents.push(ResourceDocument {
             id: RESOURCE_ID_PRESET,
-            bytes: bytes.to_vec(),
+            bytes,
         });
     }
     zup_pe::check_documents(&documents, RESOURCE_ID_INDEX)?;
@@ -325,13 +315,13 @@ pub fn open_windows(path: &Path) -> Result<OpenedInstaller, ComposeError> {
                 path: path.display().to_string(),
             })?;
         let blob = read_windows_resource(&image, index + RESOURCE_ID_BLOB_START)?.ok_or(
-            ComposeError::NoContent {
-                path: path.display().to_string(),
+            ComposeError::InvalidResource {
+                id: index + RESOURCE_ID_BLOB_START,
             },
         )?;
         if blob.len() as u64 != expected {
-            return Err(ComposeError::NoContent {
-                path: path.display().to_string(),
+            return Err(ComposeError::InvalidResource {
+                id: index + RESOURCE_ID_BLOB_START,
             });
         }
         total_size = total_size
@@ -355,7 +345,9 @@ pub fn open_windows(path: &Path) -> Result<OpenedInstaller, ComposeError> {
         bytes.extend_from_slice(&blob);
     }
     let package = Package::from_bytes(bytes)?;
-    let preset = read_windows_resource(&image, RESOURCE_ID_PRESET)?;
+    let preset = read_windows_resource(&image, RESOURCE_ID_PRESET)?
+        .map(|bytes| decompress_preset(&bytes))
+        .transpose()?;
     Ok(OpenedInstaller { package, preset })
 }
 
@@ -391,26 +383,22 @@ fn read_footer(
     path: &Path,
     file_size: u64,
 ) -> Result<CarrierFooter, ComposeError> {
-    if file_size >= CARRIER_FOOTER_LEN {
-        file.seek(SeekFrom::Start(file_size - CARRIER_FOOTER_LEN))
-            .map_err(|error| ComposeError::io(path, error))?;
-        let mut tail = vec![0u8; CARRIER_FOOTER_LEN as usize];
-        file.read_exact(&mut tail)
-            .map_err(|error| ComposeError::io(path, error))?;
-        if tail[..CARRIER_MAGIC.len()] == *CARRIER_MAGIC {
-            return read_v2_footer(&tail, path, file_size);
-        }
-    }
-    if file_size < CARRIER_FOOTER_V1_LEN {
+    if file_size < CARRIER_FOOTER_LEN {
         return Err(ComposeError::TooShort {
             path: path.display().to_string(),
             size: file_size,
         });
     }
-    read_v1_footer(file, path, file_size)
-}
-
-fn read_v2_footer(tail: &[u8], path: &Path, file_size: u64) -> Result<CarrierFooter, ComposeError> {
+    file.seek(SeekFrom::Start(file_size - CARRIER_FOOTER_LEN))
+        .map_err(|error| ComposeError::io(path, error))?;
+    let mut tail = [0u8; CARRIER_FOOTER_LEN as usize];
+    file.read_exact(&mut tail)
+        .map_err(|error| ComposeError::io(path, error))?;
+    if tail[..CARRIER_MAGIC.len()] != *CARRIER_MAGIC {
+        return Err(ComposeError::NoContent {
+            path: path.display().to_string(),
+        });
+    }
     let version = u32::from_le_bytes(tail[17..21].try_into().expect("four bytes"));
     if version != CARRIER_VERSION {
         return Err(ComposeError::UnsupportedVersion {
@@ -440,52 +428,12 @@ fn read_v2_footer(tail: &[u8], path: &Path, file_size: u64) -> Result<CarrierFoo
             tail[81..113].try_into().expect("thirty-two bytes"),
         ),
     };
-    check_ranges(&footer, path, file_size)?;
-    Ok(footer)
-}
-
-fn read_v1_footer(
-    file: &mut std::fs::File,
-    path: &Path,
-    file_size: u64,
-) -> Result<CarrierFooter, ComposeError> {
-    file.seek(SeekFrom::Start(file_size - CARRIER_FOOTER_V1_LEN))
-        .map_err(|error| ComposeError::io(path, error))?;
-    let mut bytes = [0u8; CARRIER_FOOTER_V1_LEN as usize];
-    file.read_exact(&mut bytes)
-        .map_err(|error| ComposeError::io(path, error))?;
-    if bytes[..CARRIER_MAGIC.len()] != *CARRIER_MAGIC {
-        return Err(ComposeError::NoContent {
+    if footer.flags != 0 {
+        return Err(ComposeError::UnsupportedFlags {
             path: path.display().to_string(),
+            flags: footer.flags,
         });
     }
-    let version = u32::from_le_bytes(bytes[17..21].try_into().expect("four bytes"));
-    if version != CARRIER_VERSION_V1 {
-        return Err(ComposeError::UnsupportedVersion {
-            path: path.display().to_string(),
-            found: version,
-            expected: CARRIER_VERSION,
-        });
-    }
-    let declared_len = u64::from_le_bytes(bytes[73..81].try_into().expect("eight bytes"));
-    if declared_len != CARRIER_FOOTER_V1_LEN {
-        return Err(ComposeError::UnsupportedVersion {
-            path: path.display().to_string(),
-            found: declared_len as u32,
-            expected: CARRIER_VERSION,
-        });
-    }
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&bytes[41..73]);
-    let footer = CarrierFooter {
-        version: CARRIER_VERSION_V1,
-        flags: u32::from_le_bytes(bytes[21..25].try_into().expect("four bytes")),
-        package_offset: u64::from_le_bytes(bytes[25..33].try_into().expect("eight bytes")),
-        package_length: u64::from_le_bytes(bytes[33..41].try_into().expect("eight bytes")),
-        package_digest: Sha256Digest::from_bytes(digest),
-        preset_length: 0,
-        preset_digest: Sha256Digest::from_bytes([0; 32]),
-    };
     check_ranges(&footer, path, file_size)?;
     Ok(footer)
 }
@@ -509,12 +457,7 @@ fn check_ranges(footer: &CarrierFooter, path: &Path, file_size: u64) -> Result<(
                 end: u64::MAX,
                 size: file_size,
             })?;
-    let footer_len = if footer.version == CARRIER_VERSION {
-        CARRIER_FOOTER_LEN
-    } else {
-        CARRIER_FOOTER_V1_LEN
-    };
-    if preset_end.checked_add(footer_len) != Some(file_size) {
+    if preset_end.checked_add(CARRIER_FOOTER_LEN) != Some(file_size) {
         return Err(ComposeError::ContentOutsideFile {
             path: path.display().to_string(),
             offset: footer.package_offset,
@@ -566,7 +509,7 @@ pub fn compose_linux(
             expected: "a Linux runtime".to_owned(),
         });
     }
-    let preset = preset.unwrap_or_default();
+    let preset = compress_preset(preset)?.unwrap_or_default();
     let mut template =
         std::fs::File::open(runtime).map_err(|error| ComposeError::io(runtime, error))?;
     let runtime_len = template
@@ -580,7 +523,7 @@ pub fn compose_linux(
         package_length: package.len() as u64,
         package_digest: zup_core::hash_bytes(package),
         preset_length: preset.len() as u64,
-        preset_digest: zup_core::hash_bytes(preset),
+        preset_digest: zup_core::hash_bytes(&preset),
     };
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| ComposeError::io(parent, error))?;
@@ -589,7 +532,7 @@ pub fn compose_linux(
         let mut out = std::fs::File::create(&temporary)?;
         std::io::copy(&mut template, &mut out)?;
         out.write_all(package)?;
-        out.write_all(preset)?;
+        out.write_all(&preset)?;
         out.write_all(&footer.to_bytes())?;
         out.sync_all()
     })();
@@ -655,7 +598,7 @@ pub fn open_linux(path: &Path) -> Result<OpenedInstaller, ComposeError> {
                 found: zup_core::hash_bytes(&preset_bytes),
             });
         }
-        Some(preset_bytes)
+        Some(decompress_preset(&preset_bytes)?)
     } else {
         None
     };
@@ -674,10 +617,40 @@ pub fn open_linux(path: &Path) -> Result<OpenedInstaller, ComposeError> {
     Ok(OpenedInstaller { package, preset })
 }
 
+fn compress_preset(bytes: Option<&[u8]>) -> Result<Option<Vec<u8>>, ComposeError> {
+    bytes
+        .map(|bytes| {
+            if bytes.is_empty() || bytes.len() as u64 > zup_core::MAX_PRESET_BINARY_BYTES {
+                return Err(ComposeError::Preset(
+                    "executable size exceeds its bounds".into(),
+                ));
+            }
+            zstd::bulk::compress(bytes, 9).map_err(|error| ComposeError::Preset(error.to_string()))
+        })
+        .transpose()
+}
+
+fn decompress_preset(bytes: &[u8]) -> Result<Vec<u8>, ComposeError> {
+    let size = zstd::zstd_safe::get_frame_content_size(bytes)
+        .map_err(|error| ComposeError::Preset(error.to_string()))?
+        .filter(|size| *size > 0 && *size <= zup_core::MAX_PRESET_BINARY_BYTES)
+        .ok_or_else(|| ComposeError::Preset("executable size exceeds its bounds".into()))?;
+    zstd::bulk::decompress(bytes, size as usize)
+        .map_err(|error| ComposeError::Preset(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    fn compressed_presets_reject_malformed_and_oversized_frames() {
+        assert!(decompress_preset(b"not a compressed executable").is_err());
+        let mut header = vec![0x28, 0xb5, 0x2f, 0xfd, 0xe0];
+        header.extend_from_slice(&(zup_core::MAX_PRESET_BINARY_BYTES + 1).to_le_bytes());
+        assert!(decompress_preset(&header).is_err());
+    }
 
     fn runtime_bytes(marker: &str) -> Vec<u8> {
         let mut bytes = vec![0u8; 64];
@@ -753,10 +726,10 @@ destination = "${install}"
         let directory = tempfile::tempdir().expect("temp dir");
         let runtime = runtime_file(directory.path(), "zup-installer");
         let output = directory.path().join("Acme-Setup");
-        let preset = b"a preset".to_vec();
+        let preset = vec![b'x'; 64 * 1024];
         let report = compose(&target, &runtime, &output, &package, Some(&preset)).expect("compose");
         assert_eq!(report.package_size, package.len() as u64);
-        assert_eq!(report.preset_size, preset.len() as u64);
+        assert!(report.preset_size < preset.len() as u64);
         assert_eq!(
             std::fs::metadata(&output).expect("stat").len(),
             report.output_size,
@@ -837,30 +810,6 @@ destination = "${install}"
             open_linux(&path),
             Err(ComposeError::PresetDigestMismatch { .. })
         ));
-    }
-
-    #[test]
-    fn a_v1_linux_carrier_opens_with_no_preset() {
-        let directory = tempfile::tempdir().expect("temp dir");
-        let runtime = runtime_bytes("zup-installer");
-        let package = b"a package".to_vec();
-        let mut bytes = runtime.clone();
-        bytes.extend_from_slice(&package);
-        let mut footer = [0u8; CARRIER_FOOTER_V1_LEN as usize];
-        footer[..17].copy_from_slice(CARRIER_MAGIC);
-        footer[17..21].copy_from_slice(&CARRIER_VERSION_V1.to_le_bytes());
-        footer[25..33].copy_from_slice(&(runtime.len() as u64).to_le_bytes());
-        footer[33..41].copy_from_slice(&(package.len() as u64).to_le_bytes());
-        footer[41..73].copy_from_slice(zup_core::hash_bytes(&package).as_bytes());
-        footer[73..81].copy_from_slice(&CARRIER_FOOTER_V1_LEN.to_le_bytes());
-        bytes.extend_from_slice(&footer);
-        let path = directory.path().join("v1-carrier");
-        std::fs::write(&path, &bytes).expect("write");
-        let mut file = std::fs::File::open(&path).expect("open");
-        let size = file.metadata().expect("stat").len();
-        let footer = read_footer(&mut file, &path, size).expect("footer");
-        assert_eq!(footer.version, CARRIER_VERSION_V1);
-        assert_eq!(footer.preset_length, 0);
     }
 
     #[rstest]

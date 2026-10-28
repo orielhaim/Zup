@@ -65,7 +65,7 @@ pub enum InspectError {
     #[error(transparent)]
     Package(#[from] zup_bundle::PackageError),
     #[error(transparent)]
-    Carrier(#[from] zup_linux::CarrierError),
+    Carrier(#[from] zup_compose::ComposeError),
     #[error("artifact I/O: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -6,6 +6,41 @@ license.workspace = true
 repository.workspace = true
 description = "Shared installer session controller for zup"
 
+[features]
+test-support = ["zup-preset-ipc/test-support"]
+
+[[test]]
+name = "controller"
+required-features = ["test-support"]
+
+[[bin]]
+name = "close_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "install_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "install_close_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "protocol_fault_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "scope_install_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "uninstall_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "user_scope_install_preset"
+required-features = ["test-support"]
+
 [dependencies]
 miette.workspace = true
 opener.workspace = true

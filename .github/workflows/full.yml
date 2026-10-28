@@ -1,4 +1,5 @@
 name: Full Verification
+run-name: ${{ inputs.measure_sizes && 'Installer size measurements' || 'Full Verification' }}
 
 on:
   push:
@@ -6,12 +7,29 @@ on:
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
+    inputs:
+      measure_sizes:
+        description: Measure native installers instead of running full verification
+        type: boolean
+        default: false
+      revision:
+        description: Optional revision to measure
+        type: string
+      profile:
+        description: Cargo profile for size measurements
+        type: string
+        default: installer
+      size_runner:
+        description: Native runner for size measurements
+        type: choice
+        default: all
+        options: [all, ubuntu-24.04, ubuntu-24.04-arm, windows-2025, windows-11-arm]
 
 permissions:
   contents: read
 
 concurrency:
-  group: full-${{ github.ref }}
+  group: full-${{ github.ref }}-${{ inputs.measure_sizes && format('sizes-{0}-{1}-{2}', inputs.profile, inputs.revision, inputs.size_runner) || 'verification' }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
@@ -20,8 +38,78 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  sizes:
+    name: Installer sizes (${{ matrix.runner }})
+    if: inputs.measure_sizes == true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.size_runner == 'all' && '["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025", "windows-11-arm"]' || format('["{0}"]', inputs.size_runner)) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Preserve the measurement tool
+        shell: bash
+        run: cp scripts/ci/installer-size.py "$RUNNER_TEMP/installer-size.py"
+      - uses: actions/checkout@v7
+        if: inputs.revision != ''
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sizes-${{ runner.os }}-${{ runner.arch }}
+          cache-on-failure: true
+      - uses: ilammy/setup-nasm@v1
+        if: runner.os == 'Windows'
+        with:
+          platform: win64
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev mold
+      - name: Build native toolchain and developer CLI
+        shell: bash
+        env:
+          SIZE_PROFILE: ${{ inputs.profile }}
+        run: |
+          cargo xtask toolchain build --profile "$SIZE_PROFILE"
+          cargo build -p zup --bin zup
+      - name: Measure composed installers
+        shell: bash
+        env:
+          SIZE_PROFILE: ${{ inputs.profile }}
+        run: |
+          directory="$SIZE_PROFILE"
+          if [ "$directory" = dev ]; then directory=debug; fi
+          suffix=''
+          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+          python "$RUNNER_TEMP/installer-size.py" --cli "target/debug/zup$suffix" --toolchain "target/$directory/toolchain/0.0.1" --output target/sizes
+      - name: Windows runtime link map
+        if: runner.os == 'Windows' && inputs.profile == 'installer'
+        shell: pwsh
+        run: |
+          $map = Join-Path $env:GITHUB_WORKSPACE 'target/runtime.map'
+          cargo rustc -p zup-installer --no-default-features --features headless --bin zup-setup-headless --profile installer -- -C "link-arg=/MAP:$map"
+          if ($LASTEXITCODE -ne 0) { throw 'runtime link map failed' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sizes-${{ matrix.runner }}-${{ inputs.profile }}
+          path: |
+            target/sizes/sizes.json
+            target/sizes/*/inspection.json
+            target/runtime.map
+          if-no-files-found: error
   test:
     name: full test ${{ matrix.name }}
+    if: inputs.measure_sizes != true
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:

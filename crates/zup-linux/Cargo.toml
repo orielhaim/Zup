@@ -8,7 +8,7 @@ description = "Linux backend for zup"
 publish = false
 
 [features]
-test-support = ["dep:tempfile"]
+test-support = ["dep:tempfile", "dep:zup-preset-ipc", "zup-preset-ipc/test-support"]
 
 [[bin]]
 name = "test-gui-install-preset"
@@ -41,6 +41,7 @@ zup-exec.workspace = true
 zup-plan.workspace = true
 zup-platform.workspace = true
 zup-preset-host.workspace = true
+zup-preset-ipc = { workspace = true, optional = true }
 zup-preset-protocol.workspace = true
 zup-protocol.workspace = true
 zup-runtime.workspace = true

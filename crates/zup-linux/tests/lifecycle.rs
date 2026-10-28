@@ -1,8 +1,9 @@
 #![cfg(target_os = "linux")]
 #![cfg(feature = "test-support")]
 
+use zup_compose::CARRIER_FOOTER_LEN as FOOTER_LEN;
 use zup_core::{AppId, SelectedScope};
-use zup_linux::{FOOTER_LEN, LinuxLedgerStore, LinuxOutcome, LinuxRunRequest, run};
+use zup_linux::{LinuxLedgerStore, LinuxOutcome, LinuxRunRequest, run};
 
 use zup_linux::test_support::{
     IsolatedUser, compose_fixture, mode_of, run_installer, run_tool, tool_script, v1_files,

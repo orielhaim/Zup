@@ -1,3 +1,6 @@
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 use std::time::Duration;
 
 use ipc_channel::ipc::{IpcBytesReceiver, IpcBytesSender, IpcOneShotServer, IpcSender};

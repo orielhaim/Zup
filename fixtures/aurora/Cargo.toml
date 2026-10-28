@@ -19,3 +19,9 @@ path = "src/main.rs"
 # schema.
 [dependencies]
 zup-sdk = { version = "0.1.0", path = "../../crates/zup-sdk", features = ["preset"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

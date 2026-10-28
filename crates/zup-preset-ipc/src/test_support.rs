@@ -1,4 +1,4 @@
-use zup_preset_ipc::{Bootstrap, Channel};
+use crate::{Bootstrap, Channel};
 use zup_preset_protocol::{Action, Capabilities, InstallerState, Message, Session, SessionId};
 
 pub fn connect() -> (Channel, Session) {

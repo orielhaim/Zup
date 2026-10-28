@@ -185,7 +185,7 @@ pub enum ExecError {
     #[error("the confirmed plan went stale while the worker repaired state")]
     StalePlan,
     #[error("installer package: {0}")]
-    Carrier(#[from] crate::carrier::CarrierError),
+    Carrier(#[from] zup_compose::ComposeError),
     #[error("package: {0}")]
     Package(#[from] zup_bundle::PackageError),
     #[error("plan: {0}")]

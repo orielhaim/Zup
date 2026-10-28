@@ -1,3 +1,3 @@
 fn main() {
-    zup_session::driver::uninstall();
+    zup_preset_ipc::test_support::uninstall();
 }

@@ -23,7 +23,9 @@ pub use ids::{
     NonEmptyString, PluginId, ProtocolScheme, ResourceKey, ServiceId, SessionId, TransactionId,
     ValueError, base64_decode, base64_encode,
 };
-pub use installer::{InstalledPreset, Installer, PresetAsset, PresetRuntime, UpdateConfig};
+pub use installer::{
+    InstalledPreset, Installer, MAX_PRESET_BINARY_BYTES, PresetAsset, PresetRuntime, UpdateConfig,
+};
 pub use model::{
     App, Component, ComponentGroup, ComponentProminence, FileAssociation, FileExtension,
     FileMapping, Frontend, Install, InstallDirectory, InstallScope, Launcher, LauncherLocation,

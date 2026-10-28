@@ -9,6 +9,8 @@ use crate::prerequisite::Prerequisite;
 use crate::target::Target;
 use crate::{NonEmptyString, Sha256Digest};
 
+pub const MAX_PRESET_BINARY_BYTES: u64 = 256 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Installer {

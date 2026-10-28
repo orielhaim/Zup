@@ -1,3 +1,3 @@
 fn main() {
-    zup_session::driver::install();
+    zup_preset_ipc::test_support::install();
 }
