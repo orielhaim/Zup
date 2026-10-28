@@ -726,7 +726,7 @@ mod tests {
             Outcome::RebootRequired { code: 3010 },
             Outcome::RecoveryRequired { code: 7 },
         ];
-        let mut codes: Vec<u8> = outcomes.iter().map(Outcome::exit_code).collect();
+        let mut codes: Vec<_> = outcomes.iter().map(Outcome::exit_code).collect();
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), outcomes.len(), "{outcomes:?}");
