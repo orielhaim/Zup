@@ -330,24 +330,21 @@ pub(crate) fn retire_old_generations_for(
             continue;
         }
         let path = entry.path();
-        let is_dir = std::fs::symlink_metadata(&path)
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false);
-        if !is_dir {
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|source| PathError::io(&path, source))?;
+        if !metadata.is_dir() {
             continue;
         }
-
-        let owned = std::fs::read_dir(&path)
-            .map(|entries| {
-                entries.filter_map(|entry| entry.ok()).all(|entry| {
-                    entry.file_name().to_str().is_some_and(|name| {
-                        name == zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY
-                            || name == zup_transaction::MAINTENANCE_PACKAGE_NAME
-                            || name == zup_transaction::MAINTENANCE_INDEX_NAME
-                    })
-                })
-            })
-            .unwrap_or(false);
+        let entries = std::fs::read_dir(&path).map_err(|source| PathError::io(&path, source))?;
+        let mut owned = true;
+        for entry in entries {
+            let entry = entry.map_err(|source| PathError::io(&path, source))?;
+            owned &= entry.file_name().to_str().is_some_and(|name| {
+                name == zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY
+                    || name == zup_transaction::MAINTENANCE_PACKAGE_NAME
+                    || name == zup_transaction::MAINTENANCE_INDEX_NAME
+            });
+        }
         if !owned {
             continue;
         }

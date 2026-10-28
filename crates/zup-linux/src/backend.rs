@@ -244,7 +244,7 @@ impl LinuxRuntimeBackend {
         let ledger = ledger_store
             .load(&request.app_id, request.scope)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
-        let action = zup_runtime::resolve_operation(
+        zup_runtime::resolve_operation(
             self.operation,
             ledger.as_ref().map(|ledger| &ledger.version),
             &request.app_version,
@@ -310,26 +310,7 @@ impl LinuxRuntimeBackend {
                 record,
                 outcome: TransactionOutcome::Committed,
             }) => match ledger_store.publish_committed(&record, request.scope) {
-                Ok(ledger) => {
-                    if action == zup_exec::LifecycleAction::Uninstall {
-                    } else {
-                        if action == zup_exec::LifecycleAction::Upgrade
-                            && let Err(error) = crate::run::retire_old_generations_for(
-                                &request.state_root,
-                                &request.app_id,
-                                request.scope,
-                                &ledger.version,
-                            )
-                        {
-                            return Ok(ExecutionReport {
-                                outcome: InstallOutcome::CommittedPendingReconciliation {
-                                    detail: error.to_string(),
-                                },
-                                recovery_transaction: Some(record.transaction_id.to_string()),
-                            });
-                        }
-                        let _ = ledger;
-                    }
+                Ok(_) => {
                     observe_reap(&request.state_root, &request.app_id, request.scope, &_lock);
                     Ok(ExecutionReport {
                         outcome: InstallOutcome::Committed,

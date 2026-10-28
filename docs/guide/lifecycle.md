@@ -23,3 +23,5 @@ When `[updates]` is configured, maintenance can check the channel and move to a 
 ## Uninstall
 
 Uninstall removes resources Zup still owns. Declare resources rather than hiding them in install scripts: only declared resources participate in every operation above.
+
+On Linux, recovery retries failed cleanup of old maintenance generations after commit. A cleanup failure keeps completion pending; committed application changes are not rolled back.

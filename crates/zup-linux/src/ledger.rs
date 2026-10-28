@@ -214,6 +214,23 @@ impl LinuxLedgerStore {
         record: &TransactionRecord,
         scope: SelectedScope,
     ) -> Result<InstallLedger, ExecError> {
+        let ledger = self.publish_ledger(record, scope)?;
+        if !record.plan.uninstall {
+            crate::run::retire_old_generations_for(
+                &self.root,
+                &record.app_id,
+                scope,
+                &ledger.version,
+            )?;
+        }
+        Ok(ledger)
+    }
+
+    fn publish_ledger(
+        &self,
+        record: &TransactionRecord,
+        scope: SelectedScope,
+    ) -> Result<InstallLedger, ExecError> {
         if record.phase != TransactionPhase::Committed {
             return Err(ExecError::LedgerUncommitted);
         }
@@ -233,11 +250,22 @@ impl LinuxLedgerStore {
         {
             return Err(ExecError::Ownership("target identity".into()));
         }
+        let installed_transaction = previous
+            .as_ref()
+            .map(|ledger| ledger.committed_transaction.parse::<uuid::Uuid>())
+            .transpose()
+            .map_err(|_| ExecError::LedgerInvalid)?;
+        if installed_transaction.is_some_and(|id| id > record.transaction_id.as_uuid()) {
+            cleanup_committed_files(record)?;
+            cleanup_removed_directories(record)?;
+            return Ok(previous.expect("newer installation exists"));
+        }
         if previous
             .as_ref()
             .is_some_and(|ledger| ledger.committed_transaction == record.transaction_id.to_string())
         {
             cleanup_committed_files(record)?;
+            cleanup_removed_directories(record)?;
             return Ok(previous.expect("checked above"));
         }
         if record.plan.uninstall {
@@ -471,11 +499,15 @@ impl LinuxLedgerStore {
         for record in committed {
             let id = record.transaction_id.as_uuid();
             if latest.is_none_or(|previous| id > previous) {
-                self.publish_committed(&record, scope)?;
+                self.publish_ledger(&record, scope)?;
                 latest = Some(id);
             } else {
                 cleanup_committed_files(&record)?;
+                cleanup_removed_directories(&record)?;
             }
+        }
+        if let Some(ledger) = self.load(app_id, scope)? {
+            crate::run::retire_old_generations_for(&self.root, app_id, scope, &ledger.version)?;
         }
         Ok(())
     }

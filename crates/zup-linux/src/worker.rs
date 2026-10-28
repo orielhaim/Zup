@@ -1177,15 +1177,6 @@ fn finalize_committed(
         rustix::process::geteuid().as_raw(),
     )
     .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    if prepared.action == zup_exec::LifecycleAction::Upgrade {
-        crate::run::retire_old_generations_for(
-            &prepared.state_root,
-            &prepared.target_plan.app.id,
-            SelectedScope::Machine,
-            &ledger.version,
-        )
-        .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    }
     Ok(())
 }
 

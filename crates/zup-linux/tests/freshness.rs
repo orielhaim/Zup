@@ -332,3 +332,44 @@ fn reconciliation_rejects_a_corrupted_ledger_generation() {
     );
     assert_eq!(std::fs::read(&path).expect("ledger"), before);
 }
+
+#[test]
+fn committed_cleanup_is_retried_until_recovery_can_complete() {
+    let scratch = tempfile::tempdir().unwrap();
+    let installer = installer(scratch.path());
+    let state = scratch.path().join("state");
+    let root = zup_transaction::maintenance_root(&state, &app_id(), SelectedScope::User);
+    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+    std::fs::write(&root, b"blocked cleanup").unwrap();
+    let (_operation, control) = controls();
+    let backend = backend(&installer);
+    let mut request = request(&state, plan());
+    let report = backend.execute_blocking(&request, &control).unwrap();
+    assert!(matches!(
+        report.outcome,
+        InstallOutcome::CommittedPendingReconciliation { .. }
+    ));
+    let id = report.recovery_transaction.unwrap();
+    request.recovery_id = Some(zup_transaction::TransactionId::from_uuid(
+        id.parse().unwrap(),
+    ));
+    for _ in 0..2 {
+        let report = backend.execute_blocking(&request, &control).unwrap();
+        assert!(matches!(
+            report.outcome,
+            InstallOutcome::CommittedPendingReconciliation { .. }
+        ));
+        assert_eq!(report.recovery_transaction.as_deref(), Some(id.as_str()));
+    }
+    std::fs::remove_file(&root).unwrap();
+    let old = root.join("0.9.0");
+    let current = root.join("1.0.0");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&current).unwrap();
+    for _ in 0..2 {
+        let report = backend.execute_blocking(&request, &control).unwrap();
+        assert!(matches!(report.outcome, InstallOutcome::Committed));
+        assert!(!old.exists());
+        assert!(current.exists());
+    }
+}
