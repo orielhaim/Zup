@@ -390,17 +390,12 @@ fn build_and_stage_preset(
             PRESET_PACKAGE,
             "--bin",
             binary_name,
-            "--target",
-            host.rust_triple(),
             "--profile",
             profile,
         ],
     )?;
-    let built = root
-        .join("target")
-        .join(host.rust_triple())
-        .join(output_directory(profile))
-        .join(format!("{binary_name}{}", host.executable_suffix()));
+    let built =
+        target_directory(root, profile).join(format!("{binary_name}{}", host.executable_suffix()));
     if !built.is_file() {
         return Err(format!("the preset build wrote no `{}`", built.display()));
     }
