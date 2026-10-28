@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use zup_core::{Frontend, SelectedScope};
+use zup_core::Frontend;
+
+use crate::terminal::Scope;
 
 #[derive(Debug, Parser)]
 #[command(name = "setup", version)]
@@ -12,7 +14,7 @@ struct Cli {
     verb: Option<Verb>,
 
     #[arg(long, global = true)]
-    scope: Option<ScopeFlag>,
+    scope: Option<Scope>,
 
     /// scope only inside the machine program tree: an override never widens
     #[arg(long, global = true, value_name = "PATH")]
@@ -20,22 +22,6 @@ struct Cli {
 
     #[arg(long, global = true)]
     state_root: Option<PathBuf>,
-}
-
-/// The scope flag: an explicit choice, never a silent default to machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum ScopeFlag {
-    User,
-    Machine,
-}
-
-impl ScopeFlag {
-    fn selected(self) -> SelectedScope {
-        match self {
-            Self::User => SelectedScope::User,
-            Self::Machine => SelectedScope::Machine,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -151,7 +137,7 @@ fn run_gui() -> miette::Result<()> {
     }
     let executable =
         std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
-    let scope = cli.scope.map(ScopeFlag::selected);
+    let scope = cli.scope.map(Into::into);
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -176,8 +162,8 @@ fn run_recovery(cli: &Cli, args: RecoverArgs) -> miette::Result<()> {
     let id = zup_transaction::TransactionId::from_uuid(id);
     let scope = cli
         .scope
-        .map(ScopeFlag::selected)
-        .unwrap_or(SelectedScope::User);
+        .map(Into::into)
+        .ok_or_else(|| miette::miette!("recovery requires --scope user or --scope machine"))?;
     let state_root = match &cli.state_root {
         Some(root) => root.clone(),
         None => zup_linux::state_root(scope).map_err(|error| miette::miette!("{error}"))?,

@@ -179,6 +179,7 @@ pub(crate) fn parse_matches(command: clap::Command) -> clap::ArgMatches {
     })
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn parse() -> Cli {
     Cli::from_arg_matches(&parse_matches(command())).expect("validated terminal arguments")
 }
