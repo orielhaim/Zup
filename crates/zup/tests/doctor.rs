@@ -16,8 +16,8 @@ mod toolchain_fixture;
 const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 
-/// A Linux target Zup parses but no backend builds.
-const UNSUPPORTED_TARGET: &str = "linux-arm64";
+/// A Linux ABI Zup parses but no backend builds.
+const UNSUPPORTED_TARGET: &str = "linux-x64-musl";
 
 #[cfg(target_arch = "aarch64")]
 const OTHER_TARGET: &str = "windows-x64";

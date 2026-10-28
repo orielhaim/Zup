@@ -63,7 +63,7 @@ A Windows build embeds the package into the runtime template as PE resources —
 
 | Capability | Status |
 | --- | --- |
-| Target | `linux-x64` |
+| Targets | `linux-x64`, `linux-arm64` |
 | Frontends | `gui`, `console`, `headless` (`gui` needs a Wayland or X11 session) |
 | Scope | `user`, `machine`, `either` (`either` needs an explicit `--scope`) |
 | Artifact | one self-contained installer per target (no universal) |
@@ -75,6 +75,12 @@ A Windows build embeds the package into the runtime template as PE resources —
 | Machine prerequisites | refused |
 
 A Linux build writes one extensionless installer per target (for example `Acme-Setup`).
+Both architectures use the same backend and support GUI, console, headless, user,
+and machine operations. Native ARM64 CI runs the lifecycle suite and installers
+composed on Windows. Cross-build templates with
+`cargo xtask toolchain build --target linux-arm64 --profile release`; this needs
+`cargo-zigbuild`, Zig, and the `aarch64-unknown-linux-gnu` Rust target.
+Preset packages need a native binary for each GUI target.
 
 ## Linux machine scope
 

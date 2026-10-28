@@ -690,7 +690,7 @@ fn uninstall_retires_only_what_zup_owns() {
 
 #[test]
 fn a_planted_source_symlink_refuses() {
-    let mut fixture = Fixture::new();
+    let fixture = Fixture::new();
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
@@ -698,7 +698,7 @@ fn a_planted_source_symlink_refuses() {
     std::fs::write(&elsewhere, b"[Unit]\n").expect("a target");
     std::os::unix::fs::symlink(&elsewhere, fixture.systemd.unit_dir.join(&unit))
         .expect("a planted link");
-    let result = fixture.run(&plan, LifecycleAction::Install, false);
+    let result = snapshot_services(&plan, &mut fixture.manager.clone(), &fixture.systemd);
     assert!(
         result.is_err(),
         "a symlink source never installs: {result:?}"

@@ -82,7 +82,14 @@ fn the_two_thin_artifacts_authenticate_two_different_documents() {
     let app_id = common::app().id.clone();
 
     let address = |pin: ReleasePin| {
-        let trust = OnlineTrust::new(app_id.clone(), "stable", repository, trusted_root, pin);
+        let trust = OnlineTrust::new(
+            app_id.clone(),
+            "stable",
+            repository,
+            trusted_root,
+            pin,
+            zup_core::InstallScope::Either,
+        );
         trust.release_document().expect("addressable")
     };
 

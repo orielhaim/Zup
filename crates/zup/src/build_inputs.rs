@@ -342,9 +342,21 @@ pub fn check_target_lowering(
     build: &zup_build::BuildPlan,
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
+    let capabilities = zup_platform::capabilities(&config.target)
+        .ok_or_else(|| miette::miette!("unsupported target `{}`", config.target))?;
+    let plan = build
+        .by_target(&config.target)
+        .ok_or_else(|| miette::miette!("no materialized plan for `{}`", config.target))?;
+    for &scope in config.install.scope.scopes() {
+        let errors = capabilities.resource_errors(&plan.installer, scope);
+        if !errors.is_empty() {
+            return Err(miette::miette!("{}", errors.join("\n")));
+        }
+    }
     match config.target.operating_system() {
         TargetOperatingSystem::Linux => check_linux_lowering(build, config),
-        _ => check_windows_lowering(build, config),
+        TargetOperatingSystem::Windows => check_windows_lowering(build, config),
+        os => Err(miette::miette!("unsupported operating system `{os}`")),
     }
 }
 
@@ -359,11 +371,7 @@ fn check_linux_lowering(
     if !errors.is_empty() {
         return Err(miette::miette!("{}", errors.join("\n")));
     }
-    let scopes = match config.install.scope {
-        zup_core::InstallScope::User => vec![SelectedScope::User],
-        zup_core::InstallScope::Machine => vec![SelectedScope::Machine],
-        zup_core::InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
-    };
+    let scopes = config.install.scope.scopes().to_vec();
     for scope in &scopes {
         let request = zup_plan::PlanRequest::new(config.target, *scope);
         let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
@@ -384,11 +392,7 @@ fn check_windows_lowering(
     build: &zup_build::BuildPlan,
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
-    let scopes = match config.install.scope {
-        zup_core::InstallScope::User => vec![SelectedScope::User],
-        zup_core::InstallScope::Machine => vec![SelectedScope::Machine],
-        zup_core::InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
-    };
+    let scopes = config.install.scope.scopes().to_vec();
 
     for scope in &scopes {
         let request = zup_plan::PlanRequest::new(config.target, *scope);

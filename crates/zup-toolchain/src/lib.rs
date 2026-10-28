@@ -185,21 +185,24 @@ pub const DISPATCHER_TARGET: zup_core::Target = zup_core::Target::WINDOWS_X86;
 /// capabilities: a target without a GUI presenter needs no GUI runtime, no
 /// launcher to dispatch through, and no preset package to present with.
 pub fn components_for_target(target: &zup_core::Target) -> Vec<ToolchainComponent> {
+    let Some(capabilities) = zup_platform::capabilities(target) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for frontend in zup_platform::supported_frontends(target) {
+    for &frontend in capabilities.frontends {
         out.push(ToolchainComponent::Runtime {
             target: *target,
             frontend,
         });
     }
-    if zup_platform::supports_dispatcher(target) {
+    if capabilities.artifacts == zup_platform::ArtifactSupport::Universal {
         for subsystem in [Subsystem::Gui, Subsystem::Console] {
             for online in [false, true] {
                 out.push(ToolchainComponent::Dispatcher { subsystem, online });
             }
         }
     }
-    if zup_platform::supports_preset(target, zup_core::Frontend::Gui) {
+    if capabilities.supports_preset(zup_core::Frontend::Gui) {
         out.push(ToolchainComponent::Preset);
     }
     out

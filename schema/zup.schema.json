@@ -147,7 +147,6 @@
       "build": {
         "targets": {
           "windows-x64": {
-            "target": "x86_64-pc-windows-msvc",
             "source": {
               "directory": "dist/windows-x64"
             },
@@ -329,11 +328,19 @@
       ]
     },
     "TargetProfile": {
-      "description": "Build payload declared for one target profile.",
+      "description": "Build payload declared for one target profile.\n\n`target` is optional: a profile named for a Zup target, such as\n`[build.targets.windows-x64]`, infers it from its own name. A profile with\nany other name states it explicitly with `target = \"windows-x64\"`.",
       "type": "object",
       "properties": {
         "target": {
-          "type": "string"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Target"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "source": {
           "$ref": "#/$defs/Source"
@@ -363,8 +370,17 @@
       },
       "additionalProperties": false,
       "required": [
-        "target",
         "source"
+      ]
+    },
+    "Target": {
+      "description": "A Zup target such as `windows-x64` or `linux-x64`.",
+      "type": "string",
+      "examples": [
+        "windows-x64",
+        "windows-arm64",
+        "linux-x64",
+        "linux-arm64"
       ]
     },
     "Source": {
@@ -610,6 +626,10 @@
           "description": "A runtime that must be present, optionally within a version range.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "runtime"
+            },
             "id": {
               "type": "string"
             },
@@ -619,10 +639,6 @@
                 "null"
               ],
               "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "runtime"
             }
           },
           "additionalProperties": false,
@@ -635,6 +651,10 @@
           "description": "An installed package that must be present, optionally within a version range.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "installed_package"
+            },
             "id": {
               "type": "string"
             },
@@ -644,10 +664,6 @@
                 "null"
               ],
               "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "installed_package"
             }
           },
           "additionalProperties": false,
@@ -660,6 +676,10 @@
           "description": "A file that must exist, optionally with a matching file version.",
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file_version"
+            },
             "path": {
               "$ref": "#/$defs/Template"
             },
@@ -669,10 +689,6 @@
                 "null"
               ],
               "default": null
-            },
-            "kind": {
-              "type": "string",
-              "const": "file_version"
             }
           },
           "additionalProperties": false,
@@ -688,6 +704,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "embedded"
+            },
             "path": {
               "type": "string"
             },
@@ -698,10 +718,6 @@
               "type": "integer",
               "format": "uint64",
               "minimum": 0
-            },
-            "type": {
-              "type": "string",
-              "const": "embedded"
             }
           },
           "required": [
@@ -714,6 +730,10 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "remote"
+            },
             "url": {
               "type": "string"
             },
@@ -731,10 +751,6 @@
             },
             "filename": {
               "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "const": "remote"
             }
           },
           "required": [
@@ -1007,7 +1023,7 @@
           ]
         },
         "runners": {
-          "description": "Runner labels the project pinned itself, by target triple.",
+          "description": "Runner labels the project pinned itself, by Zup target.",
           "type": "object",
           "additionalProperties": {
             "type": "string"

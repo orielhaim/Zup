@@ -42,7 +42,10 @@ An offline artifact carries the content it needs. Use it when installation must 
 
 A thin artifact is a bootstrapper. It carries release trust information and acquires the matching release/runtime/content from the configured repository.
 
-Thin artifacts require update/repository configuration. They also require a fixed install scope; `scope = "either"` is refused because acquisition starts before an installer UI can ask the user to choose a scope.
+Thin artifacts require update/repository configuration. With `scope = "either"`,
+the launcher asks for a scope before downloading the runtime. Automation must pass
+`--scope user` or `--scope machine`. Component flags are forwarded to the runtime,
+which selects and verifies the required payload before installation.
 
 ## Universal
 

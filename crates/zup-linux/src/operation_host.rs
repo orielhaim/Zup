@@ -60,10 +60,10 @@ impl OperationHost for LinuxOperationHost {
         if let (Some(machine), Some(directory)) = (&self.machine, explicit) {
             crate::machine::authorize_machine_install_directory(directory, &machine.roots)
                 .map_err(|error| error.to_string())?;
-            let target = prior.map(|ledger| ledger.target).unwrap_or_else(|| {
-                zup_core::Target::parse(crate::capabilities::SUPPORTED_LINUX_TARGET)
-                    .expect("a supported target")
-            });
+            let target = match prior {
+                Some(ledger) => ledger.target,
+                None => zup_core::Target::host().map_err(|error| error.to_string())?,
+            };
             return crate::machine::host_to_install_template(directory, &machine.roots, &target)
                 .map(Some)
                 .map_err(|error| error.to_string());

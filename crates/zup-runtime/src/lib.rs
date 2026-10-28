@@ -9,7 +9,7 @@ pub use operation::{
     ContentAccess, Operation, OperationError, OperationHost, OperationInput, OperationSelection,
     PreparedOperation, RequestOptions, attach_maintenance_copy, choose_install_directory,
     install_directory_template, persisted_install_directory, plan_request, prepare_operation,
-    resolve_operation, resolve_scope, runtime_request,
+    resolve_operation, runtime_request,
 };
 
 pub use session::{

@@ -132,7 +132,7 @@ pub fn snapshot_services(
             unit_name(&service.id).map_err(|error| ExecError::refused("", error.to_string()))?;
         let path = authorize_systemd_unit(&unit, systemd)
             .map_err(|error| ExecError::refused(&unit, error.to_string()))?;
-        let state = observe_unit(&unit, &path, manager)?;
+        let state = observe_unit(&unit, &path, target.target, manager)?;
         out.push(ObservedService {
             key: service.key.clone(),
             id: service.id.clone(),
@@ -145,6 +145,7 @@ pub fn snapshot_services(
 fn observe_unit(
     unit: &str,
     path: &Path,
+    target: zup_core::Target,
     manager: &mut dyn SystemdManager,
 ) -> Result<ObservedServiceState, ExecError> {
     let bytes = read_regular_no_follow(path)?;
@@ -168,7 +169,7 @@ fn observe_unit(
         return Ok(ObservedServiceState::Absent);
     };
     let executable = argv[0].clone();
-    let target = zup_platform::TargetPath::new(target_for(&executable), &executable);
+    let target = zup_platform::TargetPath::new(target, &executable);
     let command = match target {
         Ok(executable) => zup_platform::CommandSpec::new(executable, argv[1..].to_vec()),
         Err(_) => return Ok(ObservedServiceState::Absent),
@@ -181,33 +182,56 @@ fn observe_unit(
     })
 }
 
-fn target_for(_executable: &str) -> zup_core::Target {
-    zup_core::Target::parse("linux-x64").expect("a Linux target")
-}
-
 pub fn read_canonical_source(canonical: &Path) -> Result<Option<Vec<u8>>, ExecError> {
     read_regular_no_follow(canonical)
 }
 
 fn read_regular_no_follow(path: &Path) -> Result<Option<Vec<u8>>, ExecError> {
-    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Ok(None);
-    };
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            ExecError::refused(
+                &path.to_string_lossy(),
+                "unit source has no parent directory",
+            )
+        })?;
     let directory = match OwnedDirectory::open(parent) {
         Ok(directory) => directory,
-        Err(_) => return Ok(None),
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
     };
-    let name = match path.file_name().map(|n| n.to_string_lossy().into_owned()) {
-        Some(name) if !name.is_empty() => name,
-        _ => return Ok(None),
-    };
-    match directory.kind_or_absent(&name) {
-        Ok(None) => Ok(None),
-        Ok(Some(EntryKind::Regular)) => match directory.read_regular(&name) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(_) => Ok(None),
-        },
-        Ok(Some(_)) | Err(_) => Ok(None),
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            ExecError::refused(
+                &path.to_string_lossy(),
+                "unit source has no valid file name",
+            )
+        })?;
+    match directory.kind_or_absent(name)? {
+        None => Ok(None),
+        Some(EntryKind::Regular) => {
+            let mut file = directory.open_regular_read(name)?;
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(MAX_UNIT_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| crate::error::PathError::io(path, error))?;
+            if bytes.len() > MAX_UNIT_BYTES {
+                return Err(ExecError::refused(
+                    name,
+                    "unit source exceeds its size limit",
+                ));
+            }
+            Ok(Some(bytes))
+        }
+        Some(_) => Err(ExecError::conflict(
+            name,
+            "unit source is not a regular file",
+        )),
     }
 }
 
@@ -216,7 +240,7 @@ pub fn check_no_full_override(unit: &str, dir: &Path) -> Result<(), ExecError> {
     let metadata = match std::fs::symlink_metadata(&override_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Ok(()),
+        Err(error) => return Err(crate::error::PathError::io(&override_path, error).into()),
     };
     if metadata.file_type().is_symlink()
         && std::fs::read_link(&override_path)
@@ -461,6 +485,21 @@ mod tests {
             zup_platform::TargetPath::new(target, executable).expect("a path"),
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn inspecting_service_sources_never_hides_unsafe_state() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.service");
+        assert!(read_canonical_source(&source).unwrap().is_none());
+        std::fs::write(&source, vec![b'x'; MAX_UNIT_BYTES + 1]).unwrap();
+        assert!(read_canonical_source(&source).is_err());
+        std::fs::remove_file(&source).unwrap();
+        std::os::unix::fs::symlink(root.path().join("foreign"), &source).unwrap();
+        assert!(read_canonical_source(&source).is_err());
+        std::fs::remove_file(&source).unwrap();
+        std::fs::write(&source, b"a file cannot be a parent directory").unwrap();
+        assert!(read_canonical_source(&source.join("child")).is_err());
     }
 
     #[test]

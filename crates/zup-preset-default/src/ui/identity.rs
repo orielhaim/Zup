@@ -135,6 +135,7 @@ impl RenderOnce for AppMark {
 #[derive(IntoElement)]
 pub struct AppIdentity {
     product: ProductIdentity,
+    heading: Option<String>,
     logo: Option<SharedString>,
     byline: SharedString,
     note: Option<SharedString>,
@@ -146,10 +147,23 @@ impl AppIdentity {
         Self {
             byline: crate::model::byline(product).into(),
             product: product.clone(),
+            heading: None,
             logo,
             note: None,
             compact: false,
         }
+    }
+
+    pub fn heading(mut self, heading: Option<String>) -> Self {
+        self.heading = heading;
+        self
+    }
+
+    pub fn description(mut self, description: Option<String>) -> Self {
+        if let Some(description) = description {
+            self.product.description = Some(description);
+        }
+        self
     }
 
     pub fn byline(mut self, byline: impl Into<SharedString>) -> Self {
@@ -191,7 +205,11 @@ impl RenderOnce for AppIdentity {
                             .font_weight(FontWeight::SEMIBOLD)
                             .line_height(relative(1.2))
                             .text_color(theme.foreground)
-                            .child(self.product.name.clone()),
+                            .child(
+                                self.heading
+                                    .clone()
+                                    .unwrap_or_else(|| self.product.name.clone()),
+                            ),
                     )
                     .child(muted(self.byline, cx))
                     .children(

@@ -49,8 +49,6 @@ pub enum PathError {
         scope: &'static str,
         reason: &'static str,
     },
-    #[error("the kernel reported the machine architecture `{0}`, which zup does not model")]
-    UnknownArchitecture(String),
 }
 
 impl PathError {

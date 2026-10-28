@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use zup_core::{ComponentId, InstallScope, ResourceKey, SelectedScope, TargetBuildPlan, Template};
+use zup_core::{ComponentId, ResourceKey, SelectedScope, TargetBuildPlan, Template};
 use zup_exec::{ExecutionPlan, HostSnapshot, InstallLedger, LifecycleAction, plan_lifecycle};
 use zup_plan::{CancellationQuery, InstallPlan, PlanRequest, PlannedInstallation};
 use zup_platform::TargetPlan;
@@ -110,34 +110,6 @@ pub fn resolve_operation(
                 }),
             }
         }
-    }
-}
-
-pub fn resolve_scope(
-    declared: InstallScope,
-    requested: Option<SelectedScope>,
-) -> Result<SelectedScope, OperationError> {
-    match (declared, requested) {
-        (_, Some(scope)) if declares(declared, scope) => Ok(scope),
-        (_, Some(_)) => Err(OperationError::refused(
-            "scope",
-            format!(
-                "this installer does not serve the requested scope (manifest scope: {declared})"
-            ),
-        )),
-        (InstallScope::User, None) => Ok(SelectedScope::User),
-        (InstallScope::Machine, None) => Ok(SelectedScope::Machine),
-        (InstallScope::Either, None) => Err(OperationError::refused(
-            "scope",
-            "this installer serves the current user or the whole machine: choose an explicit scope",
-        )),
-    }
-}
-
-fn declares(declared: InstallScope, scope: SelectedScope) -> bool {
-    match scope {
-        SelectedScope::User => declared.allows_user(),
-        SelectedScope::Machine => declared.allows_machine(),
     }
 }
 
@@ -286,6 +258,24 @@ pub fn prepare_operation<H: OperationHost>(
     input: &OperationInput,
     host: &H,
 ) -> Result<PreparedOperation, OperationError> {
+    input
+        .build
+        .installer
+        .install
+        .scope
+        .select(Some(input.scope))
+        .map_err(|error| OperationError::refused("scope", error))?;
+    let capabilities =
+        zup_platform::capabilities(&input.build.installer.target).ok_or_else(|| {
+            OperationError::refused(
+                "capabilities",
+                format!("unsupported target `{}`", input.build.installer.target),
+            )
+        })?;
+    let errors = capabilities.resource_errors(&input.build.installer, input.scope);
+    if !errors.is_empty() {
+        return Err(OperationError::refused("capabilities", errors.join("\n")));
+    }
     host.check_capabilities(input)
         .map_err(|message| OperationError::refused("capabilities", message))?;
     let installer = &input.build.installer;
@@ -655,29 +645,6 @@ mod tests {
         let error = resolve_operation(Operation::Apply, Some(&installed), &version("2.0.0"))
             .expect_err("a downgrade is refused");
         assert!(error.to_string().contains("downgrade"), "{error}");
-    }
-
-    #[rstest]
-    #[case(InstallScope::User, None, SelectedScope::User)]
-    #[case(InstallScope::Machine, None, SelectedScope::Machine)]
-    #[case(
-        InstallScope::Either,
-        Some(SelectedScope::Machine),
-        SelectedScope::Machine
-    )]
-    #[case(InstallScope::User, Some(SelectedScope::User), SelectedScope::User)]
-    fn scope_resolution_is_explicit(
-        #[case] declared: InstallScope,
-        #[case] requested: Option<SelectedScope>,
-        #[case] expected: SelectedScope,
-    ) {
-        assert_eq!(resolve_scope(declared, requested).expect("scope"), expected);
-    }
-
-    #[test]
-    fn an_either_installer_without_a_choice_is_refused() {
-        assert!(resolve_scope(InstallScope::Either, None).is_err());
-        assert!(resolve_scope(InstallScope::User, Some(SelectedScope::Machine)).is_err());
     }
 
     #[test]

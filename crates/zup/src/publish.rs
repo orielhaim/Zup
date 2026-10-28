@@ -4,7 +4,6 @@ use zup_automation::{
     Artifact, AutomationResult, ByteCount, Details, LogLevel, Publication, PublishStageDetails,
     StagedPackage,
 };
-use zup_core::InstallScope;
 
 use crate::cli::{PublishGithubCommand, PublishStageCommand};
 use crate::failure::Reporter;
@@ -349,18 +348,7 @@ fn stage_thin_windows(
         .filter(|character| !character.is_whitespace() && *character != '/')
         .collect();
 
-    let scope = match loaded.manifest.install.scope {
-        InstallScope::User => zup_acquire::ThinScope::User,
-        InstallScope::Machine => zup_acquire::ThinScope::Machine,
-        InstallScope::Either => {
-            return Err(crate::failure::error_with_help(
-                "zup.publish.thin_scope_ambiguous",
-                "a thin installer cannot be built for `install.scope = \"either\"`: a user \
-                 double-clicking it has no way to choose",
-                "Set the scope to `user` or `machine`, or publish an offline installer.",
-            ));
-        }
-    };
+    let scope = loaded.manifest.install.scope;
 
     let mut written: Vec<(&str, PathBuf)> = Vec::new();
     for (label, pin) in [
@@ -383,8 +371,8 @@ fn stage_thin_windows(
             &repository,
             &updates.trusted_root,
             pin,
-        )
-        .with_scope(scope);
+            scope,
+        );
         let request = zup_artifact::ArtifactRequest::thin_online(
             format!("{app_id}-{label}"),
             &loaded.manifest.app,

@@ -32,34 +32,60 @@ fn selection_word(compatibility: Compatibility) -> &'static str {
 /// The windowed dispatcher has no console to print to, so it shows a window; the
 /// console one shows the same text on the terminal and the same window. Both say
 /// the same thing, because one artifact is one launcher experience.
-pub fn error(message: &str) {
+pub fn error(message: &str, graphical: bool) {
     eprintln!("{message}");
-    show(message);
+    if graphical {
+        message_box(message, 0x10);
+    }
+}
+
+pub fn choose_scope(graphical: bool) -> Result<zup_core::SelectedScope, String> {
+    use zup_core::SelectedScope;
+    if graphical {
+        return match message_box(
+            "Install for everyone on this computer?\n\nYes: all users, administrator approval required.\nNo: only your account.",
+            0x03 | 0x20 | 0x100,
+        ) {
+            6 => Ok(SelectedScope::Machine),
+            7 => Ok(SelectedScope::User),
+            _ => Err("scope selection cancelled".into()),
+        };
+    }
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Err(zup_core::ScopeSelectionError::ChoiceRequired.to_string());
+    }
+    eprint!("Install for your account [user] or everyone [machine]? ");
+    std::io::stderr()
+        .flush()
+        .map_err(|error| error.to_string())?;
+    let mut choice = String::new();
+    std::io::stdin()
+        .read_line(&mut choice)
+        .map_err(|error| error.to_string())?;
+    match choice.trim().to_ascii_lowercase().as_str() {
+        "user" | "u" => Ok(SelectedScope::User),
+        "machine" | "m" => Ok(SelectedScope::Machine),
+        _ => Err(zup_core::ScopeSelectionError::ChoiceRequired.to_string()),
+    }
 }
 
 #[cfg(windows)]
-fn show(message: &str) {
+fn message_box(message: &str, style: u32) -> i32 {
     use std::ffi::c_void;
     use windows_link::link;
     type Handle = *mut c_void;
     type Wchar = u16;
     link!("user32.dll" "system" fn MessageBoxW(owner: Handle, text: *const Wchar, caption: *const Wchar, kind: u32) -> i32);
-    const MB_ICONERROR: u32 = 0x0000_0010;
-    const MB_OK: u32 = 0x0000_0000;
     let text: Vec<Wchar> = message.encode_utf16().chain(Some(0)).collect();
     let caption: Vec<Wchar> = "Application setup".encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        let _ = MessageBoxW(
-            std::ptr::null_mut(),
-            text.as_ptr(),
-            caption.as_ptr(),
-            MB_ICONERROR | MB_OK,
-        );
-    }
+    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), style) }
 }
 
 #[cfg(not(windows))]
-fn show(_message: &str) {}
+fn message_box(_message: &str, _style: u32) -> i32 {
+    0
+}
 
 /// What this launcher accepts.
 ///

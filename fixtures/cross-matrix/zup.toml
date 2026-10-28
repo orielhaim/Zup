@@ -28,6 +28,10 @@ frontend = "console"
 source = { directory = "payload" }
 frontend = "console"
 
+[build.targets.linux-arm64]
+source = { directory = "payload" }
+frontend = "console"
+
 [install]
 scope = "user"
 

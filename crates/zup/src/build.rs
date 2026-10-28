@@ -321,11 +321,10 @@ fn build_artifacts(
     resolver: &ToolchainResolver,
     reporter: &Reporter,
 ) -> miette::Result<BuildOutcome> {
-    if let Some(config) = loaded
-        .selected_targets
-        .iter()
-        .find(|config| !zup_platform::supports_universal_artifact(&config.target))
-    {
+    if let Some(config) = loaded.selected_targets.iter().find(|config| {
+        !zup_platform::capabilities(&config.target)
+            .is_some_and(|caps| caps.artifacts == zup_platform::ArtifactSupport::Universal)
+    }) {
         return Err(crate::failure::error_with_help(
             "zup.build.linux_composed_artifact",
             format!(

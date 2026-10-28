@@ -40,18 +40,23 @@ pub fn open(context: PresetContext<Settings>, cx: &mut App) {
     let settings: Entity<Settings> = (**context.settings()).clone();
     let capabilities = context.capabilities().clone();
     let environment = context.environment().clone();
-    let options = window_options(cx);
+    let options = window_options(settings.read(cx).initial_window_size, cx);
     zup_sdk::preset::gpui_kit::open_window(options, cx, move |window, cx| {
         cx.new(|cx| Installer::new(session, settings, capabilities, environment, window, cx))
     })
     .expect("open the installer window");
 }
 
-pub fn window_options(cx: &App) -> WindowOptions {
+pub fn window_options(window_size: crate::WindowSize, cx: &App) -> WindowOptions {
+    let (width, height) = match window_size {
+        crate::WindowSize::Compact => (px(520.), px(580.)),
+        crate::WindowSize::Standard => (theme::window::WIDTH, theme::window::HEIGHT),
+        crate::WindowSize::Wide => (px(1000.), px(680.)),
+    };
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(theme::window::WIDTH, theme::window::HEIGHT),
+            size(width, height),
             cx,
         ))),
         window_min_size: Some(size(theme::window::MIN_WIDTH, theme::window::MIN_HEIGHT)),
@@ -416,6 +421,8 @@ impl Installer {
             .gap(space::XL)
             .child(
                 AppIdentity::new(&snapshot.product, logo)
+                    .heading(self.settings.read(cx).heading.clone())
+                    .description(self.settings.read(cx).description.clone())
                     .note(model::install_subtitle(snapshot))
                     .compact(layout.is_compact()),
             )

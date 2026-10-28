@@ -4,6 +4,13 @@ use crate::private;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
+    #[error("cannot acquire installation lock `{key}`: {source}")]
+    Acquire {
+        key: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("I/O failed at `{path}`: {source}")]
     Io {
         path: String,
@@ -54,7 +61,8 @@ impl InstallationLock {
     pub fn try_lock(file: std::fs::File, key: String) -> Result<Option<Self>, LockError> {
         match file.try_lock() {
             Ok(()) => Ok(Some(Self { file, key })),
-            Err(_) => Ok(None),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(source)) => Err(LockError::Acquire { key, source }),
         }
     }
 
@@ -75,7 +83,11 @@ impl InstallationLock {
                 file,
                 key: key.to_owned(),
             })),
-            Err(_) => Ok(None),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(source)) => Err(LockError::Acquire {
+                key: key.to_owned(),
+                source,
+            }),
         }
     }
 

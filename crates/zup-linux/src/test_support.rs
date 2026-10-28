@@ -652,7 +652,7 @@ pub fn v2_files() -> Vec<FixtureFile> {
 pub fn package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -> Vec<u8> {
     package_bytes_for(
         scratch,
-        &Target::parse("linux-x64").expect("a Linux target"),
+        &Target::host().expect("a supported Linux host"),
         version,
         files,
     )
@@ -664,7 +664,7 @@ pub fn machine_package_bytes(
     files: &[FixtureFile],
     allow_directory_override: bool,
 ) -> Vec<u8> {
-    let target = Target::parse("linux-x64").expect("a Linux target");
+    let target = Target::host().expect("a supported Linux host");
     let payload_dir = scratch.join("payload");
     std::fs::create_dir_all(&payload_dir).expect("a payload directory");
     let resolved = files
@@ -795,9 +795,7 @@ pub fn machine_maintenance_path(state: &Path, version: &str) -> PathBuf {
         &AppId::new("com.example.tool").expect("an id"),
         SelectedScope::Machine,
         &semver::Version::parse(version).expect("a version"),
-        Target::parse("linux-x64")
-            .expect("a Linux target")
-            .executable_suffix(),
+        Target::host().expect("a Linux target").executable_suffix(),
     )
 }
 
@@ -892,7 +890,7 @@ pub fn package_bytes_for(
 }
 
 pub fn gui_package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -> Vec<u8> {
-    let target = Target::parse("linux-x64").expect("a Linux target");
+    let target = Target::host().expect("a supported Linux host");
     package_bytes_full(
         scratch,
         &target,
@@ -1043,7 +1041,7 @@ pub fn compose_integration_fixture(
     associations: &[FileAssociation],
     icons: &[FixtureIcon],
 ) -> PathBuf {
-    let target = Target::parse("linux-x64").expect("a Linux target");
+    let target = Target::host().expect("a supported Linux host");
     let package = package_bytes_full(
         scratch,
         &target,
@@ -1148,7 +1146,10 @@ pub fn genuine_template(frontend: &str) -> PathBuf {
         .and_then(|deps| deps.parent())
         .expect("a profile directory");
     let toolchain = profile.join("toolchain");
-    let name = format!("zup-setup-{frontend}-linux-x64");
+    let name = format!(
+        "zup-setup-{frontend}-{}",
+        Target::host().expect("a supported host")
+    );
     let mut found = Vec::new();
     if let Ok(versions) = std::fs::read_dir(&toolchain) {
         for version in versions.flatten() {

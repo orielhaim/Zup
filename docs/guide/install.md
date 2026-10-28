@@ -17,7 +17,9 @@ Valid scopes:
 | `machine` | Install for the machine |
 | `either` | Let the installer choose between user and machine scope |
 
-Use `either` only when that choice is part of the product. A thin bootstrapper cannot use `either`; it needs a fixed scope before it can acquire the runtime.
+Use `either` when the person installing should choose the scope. Thin and offline
+launchers collect that choice before acquisition. Automation must pass
+`--scope user` or `--scope machine`; it never receives a guessed scope.
 
 ## Default directories
 

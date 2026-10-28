@@ -25,8 +25,7 @@ pub use target_plan::{
     TargetPlanSummary, TargetPrerequisite, TargetProtocol, TargetService,
 };
 pub use target_support::{
-    SUPPORTED_LINUX_TARGET, is_linux_target, is_supported_target, supported_frontends,
-    supports_dispatcher, supports_frontend, supports_preset, supports_universal_artifact,
+    ArtifactSupport, Elevation, ScopeSupport, TargetCapabilities, capabilities,
 };
 
 pub use zup_core::SelectedScope;

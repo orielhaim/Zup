@@ -125,32 +125,8 @@ fn observe(
 }
 
 fn read_source(canonical: &std::path::Path) -> Result<Option<([u8; 32], u64)>, ExecError> {
-    let Some(parent) = canonical.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Ok(None);
-    };
-    let Ok(directory) = OwnedDirectory::open(parent) else {
-        return Ok(None);
-    };
-    let Some(name) = canonical
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-    else {
-        return Ok(None);
-    };
-    match directory.kind_or_absent(&name) {
-        Ok(Some(EntryKind::Regular)) => match directory.read_regular(&name) {
-            Ok(bytes) => {
-                let (size, digest) =
-                    zup_core::hash_reader(bytes.as_slice()).map_err(|_| ExecError::Ambiguous {
-                        unit: name.clone(),
-                        reason: "a unit source does not hash".into(),
-                    })?;
-                Ok(Some((*digest.as_bytes(), size)))
-            }
-            Err(_) => Ok(None),
-        },
-        _ => Ok(None),
-    }
+    crate::service_ops::read_canonical_source(canonical)
+        .map(|bytes| bytes.map(|bytes| digest_of(&bytes)))
 }
 
 fn digest_of(bytes: &[u8]) -> ([u8; 32], u64) {
@@ -732,38 +708,30 @@ fn restore_policy(
 }
 
 fn remove_file_no_follow(unit: &str, canonical: &std::path::Path) -> Result<(), ExecError> {
-    let Some(parent) = canonical.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Ok(());
+    let parent = canonical
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| ExecError::refused(unit, "unit source has no parent directory"))?;
+    let directory = match OwnedDirectory::open(parent) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
     };
-    let Ok(directory) = OwnedDirectory::open(parent) else {
-        return Ok(());
-    };
-    let Some(name) = canonical
+    let name = canonical
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-    else {
-        return Ok(());
-    };
-    match directory.kind_or_absent(&name) {
-        Ok(None) => Ok(()),
-        Ok(Some(EntryKind::Regular)) => {
-            directory
-                .remove_file(&name)
-                .map_err(|error| ExecError::Refused {
-                    unit: unit.to_owned(),
-                    reason: format!("the unit source cannot be removed: {error}"),
-                })?;
-            directory.sync().map_err(|error| ExecError::Refused {
-                unit: unit.to_owned(),
-                reason: format!("the unit directory does not flush: {error}"),
-            })?;
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ExecError::refused(unit, "unit source has no valid file name"))?;
+    match directory.kind_or_absent(name)? {
+        None => Ok(()),
+        Some(EntryKind::Regular) => {
+            directory.remove_file(name)?;
+            directory.sync()?;
             Ok(())
         }
-        Ok(Some(_)) => Err(ExecError::conflict(
+        Some(_) => Err(ExecError::conflict(
             unit,
-            "the unit source path is no longer a regular file",
+            "unit source is no longer a regular file",
         )),
-        Err(_) => Ok(()),
     }
 }
 

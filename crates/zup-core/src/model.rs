@@ -107,6 +107,35 @@ pub enum InstallScope {
 }
 
 impl InstallScope {
+    pub const fn scopes(self) -> &'static [crate::SelectedScope] {
+        use crate::SelectedScope;
+        match self {
+            Self::User => &[SelectedScope::User],
+            Self::Machine => &[SelectedScope::Machine],
+            Self::Either => &[SelectedScope::User, SelectedScope::Machine],
+        }
+    }
+
+    pub fn select(
+        self,
+        requested: Option<crate::SelectedScope>,
+    ) -> Result<crate::SelectedScope, ScopeSelectionError> {
+        use crate::SelectedScope;
+        match (self, requested) {
+            (Self::User | Self::Either, Some(SelectedScope::User)) => Ok(SelectedScope::User),
+            (Self::Machine | Self::Either, Some(SelectedScope::Machine)) => {
+                Ok(SelectedScope::Machine)
+            }
+            (_, Some(requested)) => Err(ScopeSelectionError::Unavailable {
+                declared: self,
+                requested,
+            }),
+            (Self::User, None) => Ok(SelectedScope::User),
+            (Self::Machine, None) => Ok(SelectedScope::Machine),
+            (Self::Either, None) => Err(ScopeSelectionError::ChoiceRequired),
+        }
+    }
+
     pub const fn allows_user(self) -> bool {
         matches!(self, Self::User | Self::Either)
     }
@@ -114,6 +143,17 @@ impl InstallScope {
     pub const fn allows_machine(self) -> bool {
         matches!(self, Self::Machine | Self::Either)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScopeSelectionError {
+    #[error("choose an installation scope with --scope user or --scope machine")]
+    ChoiceRequired,
+    #[error("this installer serves {declared} scope, not {requested}")]
+    Unavailable {
+        declared: InstallScope,
+        requested: crate::SelectedScope,
+    },
 }
 
 impl std::fmt::Display for InstallScope {

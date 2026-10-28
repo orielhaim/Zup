@@ -20,9 +20,19 @@ fn bus_available() -> bool {
 }
 
 fn privileged_available() -> bool {
-    rustix::process::geteuid().as_raw() == 0
-        && bus_available()
-        && std::env::var("ZUP_TEST_REAL_SYSTEMD").is_ok()
+    if std::env::var_os("ZUP_TEST_REAL_SYSTEMD").is_none() {
+        return false;
+    }
+    assert_eq!(
+        rustix::process::geteuid().as_raw(),
+        0,
+        "real service verification requires root"
+    );
+    assert!(
+        bus_available(),
+        "real service verification requires a systemd bus"
+    );
+    true
 }
 
 fn analyze_available() -> bool {
@@ -48,7 +58,7 @@ fn rendered_units_verify() {
         ServiceStart::Manual,
         ServiceStart::Disabled,
     ] {
-        let target = zup_core::Target::parse("linux-x64").expect("a target");
+        let target = zup_core::Target::host().expect("a supported Linux host");
         let executable = zup_platform::TargetPath::new(target, binary).expect("a path");
         let service = zup_platform::TargetService {
             key: zup_core::ResourceKey::Service {
@@ -170,7 +180,7 @@ impl RealWorld {
     }
 
     fn target() -> Target {
-        zup_core::Target::parse("linux-x64").expect("a target")
+        zup_core::Target::host().expect("a supported Linux host")
     }
 
     fn plan(&self, version: &str, start: ServiceStart) -> TargetPlan {

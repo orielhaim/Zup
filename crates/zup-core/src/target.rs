@@ -441,7 +441,7 @@ impl JsonSchema for Target {
         json_schema!({
             "type": "string",
             "description": "A Zup target such as `windows-x64` or `linux-x64`.",
-            "examples": ["windows-x64", "windows-arm64", "linux-x64"]
+            "examples": ["windows-x64", "windows-arm64", "linux-x64", "linux-arm64"]
         })
     }
 }
