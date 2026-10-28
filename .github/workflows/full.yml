@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: full-${{ github.ref }}
+  group: full-${{ github.ref }}-${{ inputs.measure_sizes && format('sizes-{0}-{1}-{2}', inputs.profile, inputs.revision, inputs.size_runner) || 'verification' }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
