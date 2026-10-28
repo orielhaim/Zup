@@ -60,7 +60,7 @@ Use `AssetRef` for a file the application supplies to the preset:
 logo = "branding/logo.svg"
 ```
 
-The build resolves the path, verifies it, hashes it, and stores it; the host materializes it and tells the preset where the file is. `ApplicationAssets::path(&asset_ref)` resolves a name to a verified file. The preset never learns a project path.
+The build resolves and verifies the source, then replaces the asset setting with its logical name (`logo` here). The host materializes the verified content. Use `ApplicationAssets::path(&asset_ref)` or pass `asset_ref.as_str()` to GPUI to load it. Each setting keeps its own name when several settings share the same content; project paths stay in the build.
 
 A preset asset is a different thing from a payload file:
 

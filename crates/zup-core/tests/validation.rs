@@ -517,3 +517,22 @@ mod template_substitute {
         assert_eq!(resolved.to_string(), "${location.user_data}/Programs/Acme");
     }
 }
+
+#[test]
+fn scope_selection_requires_a_permitted_explicit_choice() {
+    use zup_core::{InstallScope, ScopeSelectionError, SelectedScope};
+    assert_eq!(InstallScope::User.select(None), Ok(SelectedScope::User));
+    assert_eq!(
+        InstallScope::Either.select(None),
+        Err(ScopeSelectionError::ChoiceRequired)
+    );
+    assert!(
+        InstallScope::User
+            .select(Some(SelectedScope::Machine))
+            .is_err()
+    );
+    assert_eq!(
+        InstallScope::Either.select(Some(SelectedScope::Machine)),
+        Ok(SelectedScope::Machine)
+    );
+}

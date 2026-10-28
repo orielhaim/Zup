@@ -165,14 +165,6 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
         };
     }
 
-    // A thin artifact has no bytes of its own beyond the index, so there is
-    // nothing to select from locally. The release graph decides.
-    //
-    // The scope comes from the artifact's own trust block rather than from a
-    // constant here. A thin artifact carries no variant manifest, so the scope the
-    // application's plan declares has nowhere else to travel - and a launcher
-    // that defaulted it would install a `machine`-scoped application into the
-    // user's profile and call it a success.
     #[cfg(feature = "online")]
     if index.artifact.mode == zup_artifact::ArtifactMode::Thin {
         let Some(trust) = index.artifact.trust.as_ref() else {
@@ -180,16 +172,11 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
                 detail: "a thin artifact must carry a trust block".to_owned(),
             };
         };
-        return online::run(
-            index,
-            &online::BootstrapRequest {
-                source: options.source.clone(),
-                state_root: options.state_root.clone(),
-                machine_readable: options.machine_readable,
-            },
-            trust.scope.selected(),
-            is_gui(),
-        );
+        let scope = match select_scope(trust.scope, options) {
+            Ok(scope) => scope,
+            Err(detail) => return Outcome::Refused { detail },
+        };
+        return online::run(index, options, scope, is_gui());
     }
     #[cfg(not(feature = "online"))]
     if index.artifact.mode == zup_artifact::ArtifactMode::Thin {
@@ -222,7 +209,7 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
             };
         }
     };
-    let scope = match requested_scope(&manifest, options.scope) {
+    let scope = match select_scope(manifest.plan.installer.install.scope, options) {
         Ok(scope) => scope,
         Err(detail) => {
             return Outcome::Refused { detail };
@@ -345,45 +332,22 @@ pub fn classify(code: i32) -> Outcome {
     }
 }
 
-/// The scope the selected variant installs into.
-fn scope_of(manifest: &zup_artifact::VariantManifest) -> zup_core::SelectedScope {
-    match manifest.plan.installer.install.scope {
-        zup_core::InstallScope::Machine => zup_core::SelectedScope::Machine,
-        zup_core::InstallScope::User | zup_core::InstallScope::Either => {
-            zup_core::SelectedScope::User
-        }
-    }
-}
-
-/// The scope the user asked for, checked against the manifest up front.
-///
-/// The staged runtime re-validates authoritatively; refusing here first keeps
-/// a mistyped scope from staging an artifact it cannot use.
-fn requested_scope(
-    manifest: &zup_artifact::VariantManifest,
-    requested: Option<zup_core::SelectedScope>,
+fn select_scope(
+    declared: zup_core::InstallScope,
+    options: &Options,
 ) -> Result<zup_core::SelectedScope, String> {
-    let declared = manifest.plan.installer.install.scope;
-    let compatible = matches!(
-        (declared, requested),
-        (_, None)
-            | (
-                zup_core::InstallScope::Machine,
-                Some(zup_core::SelectedScope::Machine)
-            )
-            | (
-                zup_core::InstallScope::User,
-                Some(zup_core::SelectedScope::User)
-            )
-            | (zup_core::InstallScope::Either, Some(_))
-    );
-    if !compatible {
-        return Err(format!(
-            "this installer does not serve the {} scope (manifest scope: {declared})",
-            requested.map(|scope| scope.to_string()).unwrap_or_default()
-        ));
+    match declared.select(options.scope) {
+        Ok(scope) => Ok(scope),
+        Err(zup_core::ScopeSelectionError::ChoiceRequired)
+            if !options.non_interactive
+                && !options.yes
+                && !options.machine_readable
+                && options.output.is_none() =>
+        {
+            report::choose_scope(is_gui())
+        }
+        Err(error) => Err(error.to_string()),
     }
-    Ok(requested.unwrap_or_else(|| scope_of(manifest)))
 }
 
 /// The digest that makes a content store belong to exactly one artifact.
@@ -448,7 +412,7 @@ fn own_program() -> Result<Option<zup_binary::ProgramKind>, String> {
 /// Printed and, on Windows, shown, like every other dispatcher failure: a
 /// windowed launcher has no terminal to read stderr from.
 pub fn usage_error(error: &str) -> ExitCode {
-    report::error(error);
+    report::error(error, is_gui());
     report::print_usage();
     ExitCode::from(2)
 }
@@ -462,14 +426,24 @@ pub fn main_with(executable: Option<PathBuf>, options: Options) -> ExitCode {
     let executable = match executable.or_else(|| std::env::current_exe().ok()) {
         Some(executable) => executable,
         None => {
-            report::error("the dispatcher's own path is unavailable");
+            report::error(
+                "the dispatcher's own path is unavailable",
+                is_gui() && !options.non_interactive,
+            );
             return ExitCode::from(70);
         }
     };
     let outcome = dispatch(&executable, &options);
     match &outcome {
         Outcome::Completed { .. } => {}
-        other => report::error(&other.describe()),
+        other => report::error(
+            &other.describe(),
+            is_gui()
+                && !options.non_interactive
+                && !options.yes
+                && !options.machine_readable
+                && options.output.is_none(),
+        ),
     }
     ExitCode::from(outcome.exit_code())
 }

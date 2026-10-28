@@ -161,7 +161,7 @@ impl TrustContext {
                 // configuration rather than from a default that would have to be
                 // guessed. `User` here is the value a client is constructed with
                 // by `zup`, which passes the manifest's declared scope.
-                scope: zup_acquire::ThinScope::User,
+                scope: zup_core::InstallScope::User,
             },
             state_root: state_root.into(),
             pin: channel,
@@ -730,6 +730,7 @@ mod tests {
                 ReleasePin::Channel {
                     channel: channel.to_owned(),
                 },
+                zup_core::InstallScope::User,
             ),
             state_root: PathBuf::from("/state"),
             pin: ReleasePin::Channel {

@@ -205,6 +205,7 @@ pub fn prepare(
 ) -> Result<Prepared, PresetProblem> {
     let mut assets = Vec::with_capacity(selected.asset_settings.len());
     let mut declared = Vec::with_capacity(selected.asset_settings.len());
+    let mut settings = selected.settings.clone();
 
     for setting in &selected.asset_settings {
         let Some(value) = selected
@@ -238,18 +239,14 @@ pub fn prepare(
             setting: setting.clone(),
             reason: error.to_string(),
         })?;
-        if !assets
-            .iter()
-            .any(|asset: &ResolvedAsset| asset.sha256 == sha256)
-        {
-            assets.push(ResolvedAsset {
-                name: asset_name(setting)?,
-                source: Some(path),
-                source_relative: Some(relative),
-                size,
-                sha256,
-            });
-        }
+        assets.push(ResolvedAsset {
+            name: asset_name(setting)?,
+            source: Some(path),
+            source_relative: Some(relative),
+            size,
+            sha256,
+        });
+        settings[setting] = serde_json::Value::String(setting.clone());
         declared.push(PresetAsset {
             name: asset_name(setting)?,
             size,
@@ -273,7 +270,7 @@ pub fn prepare(
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect(),
-            settings: selected.settings.clone(),
+            settings,
             assets: declared,
         },
         assets,

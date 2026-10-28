@@ -20,9 +20,19 @@ fn bus_available() -> bool {
 }
 
 fn privileged_available() -> bool {
-    rustix::process::geteuid().as_raw() == 0
-        && bus_available()
-        && std::env::var("ZUP_TEST_REAL_SYSTEMD").is_ok()
+    if std::env::var_os("ZUP_TEST_REAL_SYSTEMD").is_none() {
+        return false;
+    }
+    assert_eq!(
+        rustix::process::geteuid().as_raw(),
+        0,
+        "real service verification requires root"
+    );
+    assert!(
+        bus_available(),
+        "real service verification requires a systemd bus"
+    );
+    true
 }
 
 fn analyze_available() -> bool {
@@ -48,7 +58,7 @@ fn rendered_units_verify() {
         ServiceStart::Manual,
         ServiceStart::Disabled,
     ] {
-        let target = zup_core::Target::parse("linux-x64").expect("a target");
+        let target = zup_core::Target::host().expect("a supported Linux host");
         let executable = zup_platform::TargetPath::new(target, binary).expect("a path");
         let service = zup_platform::TargetService {
             key: zup_core::ResourceKey::Service {
@@ -89,6 +99,21 @@ fn real_systemd_service_lifecycle() {
     }
     let tag = uuid::Uuid::now_v7().simple().to_string();
     let mut world = RealWorld::stage(&tag);
+    let plan = world.plan("1.0.0", ServiceStart::Automatic);
+    world.resolve_unit(&plan);
+    let mask = PathBuf::from("/etc/systemd/system").join(&world.unit);
+    std::os::unix::fs::symlink("/dev/null", &mask).expect("a foreign mask");
+    world.foreign.push(mask.clone());
+    assert!(
+        world
+            .drive(&plan, zup_exec::LifecycleAction::Install, false)
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_link(&mask).expect("the mask survives"),
+        PathBuf::from("/dev/null")
+    );
+    world.remove_foreign_links();
     world.install(ServiceStart::Automatic, "1.0.0");
     world.assert_policy("enabled");
     world.assert_fragment();
@@ -170,7 +195,7 @@ impl RealWorld {
     }
 
     fn target() -> Target {
-        zup_core::Target::parse("linux-x64").expect("a target")
+        zup_core::Target::host().expect("a supported Linux host")
     }
 
     fn plan(&self, version: &str, start: ServiceStart) -> TargetPlan {
@@ -412,7 +437,7 @@ impl RealWorld {
         self.resolve_unit(&plan);
         let outcome = self
             .drive(&plan, zup_exec::LifecycleAction::Upgrade, false)
-            .expect("upgrade plans and executes");
+            .unwrap_or_else(|error| panic!("upgrade {version} ({start:?}): {error}"));
         assert_eq!(outcome, TransactionOutcome::Committed);
     }
 

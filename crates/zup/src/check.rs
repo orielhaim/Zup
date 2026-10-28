@@ -110,10 +110,10 @@ fn composition(
         .map(|config| config.profile.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    if borrowed
-        .iter()
-        .any(|variant| !zup_platform::supports_universal_artifact(variant.target()))
-    {
+    if borrowed.iter().any(|variant| {
+        !zup_platform::capabilities(variant.target())
+            .is_some_and(|caps| caps.artifacts == zup_platform::ArtifactSupport::Universal)
+    }) {
         let linux = loaded
             .selected_targets
             .iter()

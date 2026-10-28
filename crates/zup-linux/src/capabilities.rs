@@ -3,14 +3,14 @@
 //! Build tooling calls these before artifact composition; the installer calls
 //! them again through operation preparation when it runs.
 
-use zup_core::{
-    Frontend, InstallScope, ResolvedTargetConfig, SelectedScope, Target, TargetBuildPlan,
-};
+use zup_core::{Frontend, ResolvedTargetConfig, SelectedScope, Target, TargetBuildPlan};
 
-pub use zup_platform::{SUPPORTED_LINUX_TARGET, is_linux_target};
+fn is_linux_target(target: &Target) -> bool {
+    target.operating_system() == zup_core::TargetOperatingSystem::Linux
+}
 
 pub fn is_supported_linux_target(target: &Target) -> bool {
-    is_linux_target(target) && zup_platform::is_supported_target(target)
+    is_linux_target(target) && zup_platform::capabilities(target).is_some()
 }
 
 pub fn linux_selection_errors(target: &Target, frontend: Frontend) -> Vec<String> {
@@ -25,11 +25,10 @@ fn linux_target_errors(target: &Target) -> Vec<String> {
     if is_supported_linux_target(target) {
         return Vec::new();
     }
-    // assertion covers every refusal that never touched the filesystem.
     vec![if is_linux_target(target) {
         format!(
             "unsupported backend for target `{target}`: this Zup version builds Linux \
-             installers for `{SUPPORTED_LINUX_TARGET}` only"
+             installers for `linux-x64` and `linux-arm64`"
         )
     } else {
         format!("unsupported backend for target `{target}`: not a Linux target")
@@ -37,7 +36,7 @@ fn linux_target_errors(target: &Target) -> Vec<String> {
 }
 
 fn linux_frontend_errors(target: &Target, frontend: Frontend) -> Vec<String> {
-    if zup_platform::supports_frontend(target, frontend) {
+    if zup_platform::capabilities(target).is_some_and(|caps| caps.frontends.contains(&frontend)) {
         return Vec::new();
     }
     vec![format!(
@@ -45,7 +44,6 @@ fn linux_frontend_errors(target: &Target, frontend: Frontend) -> Vec<String> {
     )]
 }
 
-/// when the installer runs, never at build time - and either-scope
 pub fn linux_capability_errors(
     config: &ResolvedTargetConfig,
     plan: &TargetBuildPlan,
@@ -55,11 +53,7 @@ pub fn linux_capability_errors(
     errors.extend(linux_selection_errors(target, config.frontend));
     errors.extend(resource_errors(
         &plan.installer,
-        matches!(
-            config.install.scope,
-            InstallScope::Machine | InstallScope::Either
-        ),
-        !matches!(config.install.scope, InstallScope::Machine),
+        config.install.scope.scopes(),
         config.profile.as_str(),
         plan,
     ));
@@ -75,118 +69,25 @@ pub fn operation_capability_errors(build: &TargetBuildPlan, scope: SelectedScope
     ));
     errors.extend(resource_errors(
         installer,
-        scope == SelectedScope::Machine,
-        scope == SelectedScope::User,
+        &[scope],
         installer.app.name.as_str(),
         build,
     ));
-    if scope == SelectedScope::Machine && !installer.plugins.is_empty() {
-        errors.push(
-            "machine scope refuses projects that need plugin execution: the privileged worker \
-             never executes plugins as root"
-                .to_owned(),
-        );
-    }
-    if scope == SelectedScope::Machine && !installer.prerequisites.is_empty() {
-        errors.push("machine scope runs no prerequisite installers".to_owned());
-    }
+
     errors
 }
 
 fn resource_errors(
     installer: &zup_core::Installer,
-    machine_leg: bool,
-    user_scope: bool,
+    scopes: &[SelectedScope],
     name: &str,
     plan: &TargetBuildPlan,
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    // privileged worker never executes plugins as root.
-    if user_scope && !installer.services.is_empty() {
-        errors.push(format!(
-            "{} service resource{} {} not supported by the Linux backend yet: system services \
-             need machine scope (systemd system units); user services are deferred past this \
-             phase",
-            installer.services.len(),
-            if installer.services.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
-            if installer.services.len() == 1 {
-                "is"
-            } else {
-                "are"
-            },
-        ));
-    }
-    if machine_leg && !installer.plugins.is_empty() && !installer.services.is_empty() {
-        errors.push(
-            "services combined with plugins are not supported for a machine installation: \
-             static manifest services run through systemd, but plugin-generated privileged \
-             services remain refused until a separately designed trust model exists"
-                .to_owned(),
-        );
-    }
-    {
-        let mut unsupported = |kind: &str, count: usize| {
-            if count > 0 {
-                errors.push(format!(
-                    "{count} {kind} resource{} {} not supported by the Linux backend yet",
-                    if count == 1 { "" } else { "s" },
-                    if count == 1 { "is" } else { "are" },
-                ));
-            }
-        };
-        unsupported(
-            "package-manager prerequisite",
-            installer.prerequisites.len(),
-        );
-    }
-    if machine_leg {
-        let mut machine_unsupported = |kind: &str, count: usize| {
-            if count > 0 {
-                errors.push(format!(
-                    "{count} {kind} resource{} {} not supported for a machine installation: \
-                     machine desktop integration is deferred past this phase",
-                    if count == 1 { "" } else { "s" },
-                    if count == 1 { "is" } else { "are" },
-                ));
-            }
-        };
-        machine_unsupported("menu launcher", installer.launchers.len());
-        machine_unsupported("URI protocol", installer.protocols.len());
-        machine_unsupported("file association", installer.file_associations.len());
-    }
-    let desktop_launchers = installer
-        .launchers
-        .iter()
-        .filter(|launcher| launcher.location == zup_core::LauncherLocation::Desktop)
-        .count();
-    if desktop_launchers > 0 {
-        errors.push(format!(
-            "{desktop_launchers} `desktop` launcher resource{} {} not supported by the Linux \
-             backend yet: a file in `$XDG_DATA_HOME/applications` makes an application \
-             discoverable, which the `menu` location provides, but placing a trusted icon on \
-             the user's desktop has no desktop-neutral implementation",
-            if desktop_launchers == 1 { "" } else { "s" },
-            if desktop_launchers == 1 { "is" } else { "are" },
-        ));
-    }
-    if !installer.path.is_empty() {
-        errors.push(format!(
-            "{} PATH entry resource{} {} not supported by the Linux backend yet: a \
-             directory-level PATH mutation is not command exposure, and Linux command exposure \
-             without editing shell configuration needs a portable `command` semantic this phase \
-             does not add",
-            installer.path.len(),
-            if installer.path.len() == 1 { "" } else { "s" },
-            if installer.path.len() == 1 {
-                "is"
-            } else {
-                "are"
-            },
-        ));
+    if let Some(capabilities) = zup_platform::capabilities(&installer.target) {
+        for &scope in scopes {
+            errors.extend(capabilities.resource_errors(installer, scope));
+        }
     }
     errors.extend(protocol_errors(&installer.protocols));
     errors.extend(association_errors(&installer.file_associations));
@@ -267,6 +168,7 @@ fn main_executable_errors(name: &str, plan: &TargetBuildPlan) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zup_core::InstallScope;
 
     fn config(target: &str, frontend: Frontend, scope: InstallScope) -> ResolvedTargetConfig {
         ResolvedTargetConfig {
@@ -297,7 +199,7 @@ mod tests {
                     main: None,
                     description: None,
                 },
-                target: Target::parse(SUPPORTED_LINUX_TARGET).unwrap(),
+                target: Target::parse("linux-x64").unwrap(),
                 frontend: Frontend::Console,
                 updates: None,
                 install: zup_core::Install {
@@ -332,20 +234,12 @@ mod tests {
     #[test]
     fn a_plain_console_user_plan_is_accepted() {
         let errors = linux_capability_errors(
-            &config(
-                SUPPORTED_LINUX_TARGET,
-                Frontend::Console,
-                InstallScope::User,
-            ),
+            &config("linux-x64", Frontend::Console, InstallScope::User),
             &plan(),
         );
         assert!(errors.is_empty(), "{errors:?}");
         let errors = linux_capability_errors(
-            &config(
-                SUPPORTED_LINUX_TARGET,
-                Frontend::Headless,
-                InstallScope::User,
-            ),
+            &config("linux-x64", Frontend::Headless, InstallScope::User),
             &plan(),
         );
         assert!(errors.is_empty(), "{errors:?}");
@@ -353,7 +247,7 @@ mod tests {
 
     #[test]
     fn a_gui_plan_with_a_preset_is_accepted() {
-        let config = config(SUPPORTED_LINUX_TARGET, Frontend::Gui, InstallScope::User);
+        let config = config("linux-x64", Frontend::Gui, InstallScope::User);
         let mut plan = plan();
         plan.installer.frontend = Frontend::Gui;
         plan.installer.preset = Some(zup_core::PresetRuntime {
@@ -372,11 +266,7 @@ mod tests {
 
     #[test]
     fn protocols_without_one_placeholder_are_refused() {
-        let config = config(
-            SUPPORTED_LINUX_TARGET,
-            Frontend::Console,
-            InstallScope::User,
-        );
+        let config = config("linux-x64", Frontend::Console, InstallScope::User);
         let mut plan = plan();
         plan.installer.protocols.push(zup_core::Protocol {
             scheme: zup_core::ProtocolScheme::new("acme").unwrap(),
@@ -391,11 +281,7 @@ mod tests {
 
     #[test]
     fn desktop_launchers_and_path_entries_stay_refused() {
-        let config = config(
-            SUPPORTED_LINUX_TARGET,
-            Frontend::Console,
-            InstallScope::User,
-        );
+        let config = config("linux-x64", Frontend::Console, InstallScope::User);
         let mut plan = plan();
         plan.installer.launchers.push(zup_core::Launcher {
             location: zup_core::LauncherLocation::Desktop,
@@ -413,7 +299,7 @@ mod tests {
         });
         let errors = linux_capability_errors(&config, &plan);
         let text = errors.join("\n");
-        assert!(text.contains("`desktop` launcher"), "{text}");
+        assert!(text.contains("desktop launcher"), "{text}");
         assert!(text.contains("PATH entry"), "{text}");
         assert!(
             !text.contains("zup-linux"),
@@ -422,11 +308,7 @@ mod tests {
     }
     #[test]
     fn every_unsupported_dimension_is_named() {
-        let config = config(
-            SUPPORTED_LINUX_TARGET,
-            Frontend::Console,
-            InstallScope::User,
-        );
+        let config = config("linux-x64", Frontend::Console, InstallScope::User);
         let mut plan = plan();
         plan.installer.services.push(zup_core::Service {
             id: zup_core::ServiceId::new("tool").unwrap(),
@@ -450,7 +332,7 @@ mod tests {
     #[test]
     fn user_and_either_services_stay_refused() {
         for scope in [InstallScope::User, InstallScope::Either] {
-            let config = config(SUPPORTED_LINUX_TARGET, Frontend::Console, scope);
+            let config = config("linux-x64", Frontend::Console, scope);
             let mut plan = plan();
             plan.installer.services.push(machine_service());
             let errors = linux_capability_errors(&config, &plan);
@@ -464,11 +346,7 @@ mod tests {
 
     #[test]
     fn machine_services_with_plugins_stay_refused() {
-        let config = config(
-            SUPPORTED_LINUX_TARGET,
-            Frontend::Console,
-            InstallScope::Machine,
-        );
+        let config = config("linux-x64", Frontend::Console, InstallScope::Machine);
         let mut plan = plan();
         plan.installer.services.push(machine_service());
         plan.installer.plugins.push(zup_core::PluginBinding {
@@ -497,7 +375,7 @@ mod tests {
     #[test]
     fn machine_scope_refuses_desktop_integration() {
         for scope in [InstallScope::Machine, InstallScope::Either] {
-            let config = config(SUPPORTED_LINUX_TARGET, Frontend::Console, scope);
+            let config = config("linux-x64", Frontend::Console, scope);
             let mut plan = plan();
             plan.installer.launchers.push(zup_core::Launcher {
                 location: zup_core::LauncherLocation::Menu,
@@ -518,13 +396,13 @@ mod tests {
     }
 
     #[test]
-    fn another_linux_architecture_names_the_supported_target() {
+    fn an_unsupported_linux_abi_names_the_supported_targets() {
         let errors = linux_capability_errors(
-            &config("linux-arm64", Frontend::Console, InstallScope::User),
+            &config("linux-x64-musl", Frontend::Console, InstallScope::User),
             &plan(),
         );
         let text = errors.join("\n");
-        assert!(text.contains(SUPPORTED_LINUX_TARGET), "{text}");
+        assert!(text.contains("linux-x64"), "{text}");
     }
 
     #[test]

@@ -115,8 +115,7 @@ pub use machine::{
 };
 #[cfg(target_os = "linux")]
 pub use paths::{
-    LinuxSourceFilePolicy, SourceEntryKind, additional_architectures, host_execution, host_version,
-    machine_state_root, native_architecture, state_root, user_state_root,
+    LinuxSourceFilePolicy, SourceEntryKind, machine_state_root, state_root, user_state_root,
 };
 #[cfg(target_os = "linux")]
 pub use pkexec::{LaunchOutcome, PkexecLauncher, SystemPkexec, WorkerChild, map_launch};

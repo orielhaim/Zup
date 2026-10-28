@@ -27,8 +27,8 @@ pub use installer::{InstalledPreset, Installer, PresetAsset, PresetRuntime, Upda
 pub use model::{
     App, Component, ComponentGroup, ComponentProminence, FileAssociation, FileExtension,
     FileMapping, Frontend, Install, InstallDirectory, InstallScope, Launcher, LauncherLocation,
-    MAX_PRESET_SETTINGS_BYTES, PathEntry, PluginBinding, Privilege, Protocol, SelectionRequirement,
-    Service, ServiceStart, Source, Ui, uri_placeholder_count,
+    MAX_PRESET_SETTINGS_BYTES, PathEntry, PluginBinding, Privilege, Protocol, ScopeSelectionError,
+    SelectionRequirement, Service, ServiceStart, Source, Ui, uri_placeholder_count,
 };
 pub use path::{ProjectPath, RelativePath, RelativePathError};
 pub use prerequisite::{

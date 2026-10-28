@@ -4,19 +4,32 @@ pub mod theme;
 pub mod ui;
 pub mod window;
 
-#[cfg(test)]
-mod tests;
-
 use zup_sdk::preset::gpui_kit::AssetSource;
 use zup_sdk::preset::prelude::*;
 use zup_sdk::preset::{AssetRef, PresetContext};
 
 #[derive(Debug, Clone, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     pub logo: Option<AssetRef>,
     pub accent: Option<Accent>,
     #[serde(default)]
     pub appearance: Appearance,
+    #[schemars(length(max = 120))]
+    pub heading: Option<String>,
+    #[schemars(length(max = 500))]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub initial_window_size: WindowSize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowSize {
+    Compact,
+    #[default]
+    Standard,
+    Wide,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]

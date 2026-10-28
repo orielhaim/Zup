@@ -71,14 +71,16 @@ pub fn select_scope(
     installations: &[ScopedInstallation],
 ) -> Result<SelectedScope, String> {
     if !launch.interactive {
-        return zup_runtime::resolve_scope(declared, launch.scope)
+        return declared
+            .select(launch.scope)
             .map_err(|error| error.to_string());
     }
     if let Some(scope) = launch.scope {
-        return zup_runtime::resolve_scope(declared, Some(scope))
+        return declared
+            .select(Some(scope))
             .map_err(|error| error.to_string());
     }
-    let permitted = permitted_scopes(declared);
+    let permitted = declared.scopes();
     let installed: Vec<SelectedScope> = permitted
         .iter()
         .copied()
@@ -94,14 +96,6 @@ pub fn select_scope(
             .first()
             .copied()
             .ok_or_else(|| "this installer declares no installation scope".to_owned()),
-    }
-}
-
-fn permitted_scopes(declared: InstallScope) -> Vec<SelectedScope> {
-    match declared {
-        InstallScope::User => vec![SelectedScope::User],
-        InstallScope::Machine => vec![SelectedScope::Machine],
-        InstallScope::Either => vec![SelectedScope::User, SelectedScope::Machine],
     }
 }
 

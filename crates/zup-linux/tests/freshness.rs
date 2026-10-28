@@ -315,3 +315,20 @@ fn store_ledger(path: &Path, ledger: &InstallLedger) {
     zup_transaction::publish_private(path, &serde_json::to_vec_pretty(ledger).expect("ledger"))
         .expect("ledger");
 }
+
+#[test]
+fn reconciliation_rejects_a_corrupted_ledger_generation() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let store = zup_linux::LinuxLedgerStore::new(scratch.path());
+    let mut ledger = InstallLedger::new(app_id(), Target::LINUX_X64, SelectedScope::User);
+    ledger.committed_transaction = "invalid".into();
+    let path = store.path_for(&app_id(), SelectedScope::User);
+    store_ledger(&path, &ledger);
+    let before = std::fs::read(&path).expect("ledger");
+    assert!(
+        store
+            .repair_committed(&app_id(), SelectedScope::User)
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&path).expect("ledger"), before);
+}

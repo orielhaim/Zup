@@ -265,16 +265,6 @@ pub fn compile_machine_execution_plan(
     }
 
     if !execution.services.is_empty() || !service_removals.is_empty() {
-        manager
-            .unit_file_state("zup-preflight.service")
-            .map(|_| ())
-            .or_else(|error| match &error {
-                crate::error::IpcError::SystemdRefused { .. } => Ok(()),
-                _ => Err(PlanError::Service {
-                    unit: String::new(),
-                    reason: format!("systemd is unavailable: {error}"),
-                }),
-            })?;
         crate::service_ops::require_exec_baseline(manager).map_err(into_service)?;
     }
 
@@ -298,6 +288,7 @@ pub fn compile_machine_execution_plan(
             &unit,
             &canonical,
             &crate::service_ops::load_path_dirs(),
+            Some(op),
         )
         .map_err(into_service)?;
         check_no_full_override(&unit).map_err(into_service)?;
@@ -318,15 +309,17 @@ pub fn compile_machine_execution_plan(
             });
         }
 
-        if matches!(op.kind, ServiceOperationKind::Create) {
-            let existing =
-                crate::service_ops::read_canonical_source(&canonical).map_err(into_service)?;
-            if existing.is_some_and(|bytes| bytes != derived.bytes) {
-                return Err(PlanError::Service {
-                    unit,
-                    reason: "the canonical unit path contains unrelated bytes".into(),
-                });
-            }
+        let previous_source =
+            crate::service_ops::read_canonical_source(&canonical).map_err(into_service)?;
+        if matches!(op.kind, ServiceOperationKind::Create)
+            && previous_source
+                .as_ref()
+                .is_some_and(|bytes| bytes != &derived.bytes)
+        {
+            return Err(PlanError::Service {
+                unit,
+                reason: "the canonical unit path contains unrelated bytes".into(),
+            });
         }
 
         let previous_policy =
@@ -344,15 +337,12 @@ pub fn compile_machine_execution_plan(
                     &derived.bytes,
                     true,
                     &previous_policy,
-                    false,
+                    previous_source.as_deref(),
                 )
                 .map_err(into_service)?
             }
             ServiceOperationKind::RestoreOwned => {
-                let present = crate::service_ops::read_canonical_source(&canonical)
-                    .map_err(into_service)?
-                    .is_some();
-                if present && !force_services {
+                if previous_source.is_some() && !force_services {
                     return Err(PlanError::Service {
                         unit,
                         reason: "the planner could not decide, so there is no transaction to run"
@@ -365,7 +355,7 @@ pub fn compile_machine_execution_plan(
                     &derived.bytes,
                     true,
                     &previous_policy,
-                    force_services,
+                    previous_source.as_deref(),
                 )
                 .map_err(into_service)?
             }
@@ -375,7 +365,7 @@ pub fn compile_machine_execution_plan(
                 &derived.bytes,
                 true,
                 &previous_policy,
-                true,
+                previous_source.as_deref(),
             )
             .map_err(into_service)?,
             ServiceOperationKind::NoOp => continue,

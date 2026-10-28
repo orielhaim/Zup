@@ -60,10 +60,10 @@ impl OperationHost for LinuxOperationHost {
         if let (Some(machine), Some(directory)) = (&self.machine, explicit) {
             crate::machine::authorize_machine_install_directory(directory, &machine.roots)
                 .map_err(|error| error.to_string())?;
-            let target = prior.map(|ledger| ledger.target).unwrap_or_else(|| {
-                zup_core::Target::parse(crate::capabilities::SUPPORTED_LINUX_TARGET)
-                    .expect("a supported target")
-            });
+            let target = match prior {
+                Some(ledger) => ledger.target,
+                None => zup_core::Target::host().map_err(|error| error.to_string())?,
+            };
             return crate::machine::host_to_install_template(directory, &machine.roots, &target)
                 .map(Some)
                 .map_err(|error| error.to_string());
@@ -111,7 +111,12 @@ impl OperationHost for LinuxOperationHost {
         let target =
             target.ok_or_else(|| "a Linux transaction compiles against its target".to_owned())?;
         match &self.machine {
-            Some(machine) => {
+            Some(machine)
+                if !execution.services.is_empty()
+                    || execution.removals.iter().any(|removal| {
+                        matches!(removal.owned, zup_exec::OwnedResource::Service { .. })
+                    }) =>
+            {
                 let mut manager = crate::systemd::RealSystemd::connect()
                     .map_err(|error| format!("systemd is unavailable: {error}"))?;
                 crate::input::compile_machine_execution_plan(
@@ -128,7 +133,7 @@ impl OperationHost for LinuxOperationHost {
                     },
                 )
             }
-            None => crate::input::compile_execution_plan(execution, target),
+            _ => crate::input::compile_execution_plan(execution, target),
         }
         .map_err(|error| error.to_string())
         .map(|mut input| {

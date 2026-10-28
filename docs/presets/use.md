@@ -27,6 +27,24 @@ logo = "branding/logo.svg"
 
 Those key names come from the preset's schema, not from Zup. `zup check` validates them and names the failing path.
 
+## Configure the default preset
+
+The shipped preset accepts these settings without custom UI code:
+
+```toml
+[ui.settings]
+logo = "branding/logo.svg"
+accent = "#695cff"
+appearance = "system"
+heading = "Welcome to Acme"
+description = "Install the tools for your workspace."
+initial_window_size = "wide"
+```
+
+`appearance` is `system`, `light`, or `dark`. The initial window size is `compact`,
+`standard`, or `wide`; the layout still adapts when resized. Heading and description
+customize the welcome screen. The product identity remains in the window title.
+
 ## Preview application changes
 
 ```bash

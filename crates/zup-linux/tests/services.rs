@@ -622,6 +622,20 @@ fn repair_restores_the_source() {
             .starts_with(b"[Unit]\n#"),
         "nothing was overwritten without force"
     );
+    let damaged = fixture.source(&unit).expect("damaged source");
+    fixture
+        .manager
+        .borrow_mut()
+        .fail_next
+        .insert("reload".into(), "injected failure".into());
+    let (outcome, _) = fixture
+        .run(&plan, LifecycleAction::Repair { force_files: true }, true)
+        .expect("failed repair settles");
+    assert_eq!(outcome, TransactionOutcome::RolledBack);
+    assert_eq!(
+        fixture.source(&unit).expect("previous source survives"),
+        damaged
+    );
     fixture.commit(&plan, LifecycleAction::Repair { force_files: true }, true);
     assert_eq!(fixture.source(&unit).expect("force restores"), healthy);
 }
@@ -690,7 +704,7 @@ fn uninstall_retires_only_what_zup_owns() {
 
 #[test]
 fn a_planted_source_symlink_refuses() {
-    let mut fixture = Fixture::new();
+    let fixture = Fixture::new();
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
@@ -698,7 +712,7 @@ fn a_planted_source_symlink_refuses() {
     std::fs::write(&elsewhere, b"[Unit]\n").expect("a target");
     std::os::unix::fs::symlink(&elsewhere, fixture.systemd.unit_dir.join(&unit))
         .expect("a planted link");
-    let result = fixture.run(&plan, LifecycleAction::Install, false);
+    let result = snapshot_services(&plan, &mut fixture.manager.clone(), &fixture.systemd);
     assert!(
         result.is_err(),
         "a symlink source never installs: {result:?}"

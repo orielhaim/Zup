@@ -6,8 +6,7 @@
 # installers' full lifecycle on their target operating system.
 #
 # Nothing here is special: one payload file, user scope, no services, no
-# launchers, no preset settings beyond the shipped default for the GUI
-# target.
+# launchers or custom preset settings.
 
 schema = 1
 
@@ -28,6 +27,10 @@ frontend = "console"
 source = { directory = "payload" }
 frontend = "console"
 
+[build.targets.linux-arm64]
+source = { directory = "payload" }
+frontend = "console"
+
 [install]
 scope = "user"
 
@@ -37,7 +40,3 @@ user = "${location.user_data}/Cross Matrix"
 [[files]]
 source = "**/*"
 destination = "${install}"
-
-[ui]
-[ui.settings]
-hero = "Install Cross Matrix"

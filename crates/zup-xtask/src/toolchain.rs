@@ -17,7 +17,9 @@ pub const PRESET_DIRECTORY: &str = "crates/zup-preset-default";
 pub const TEST_PRESET_PACKAGE: &str = "zup-preset-test";
 
 pub fn frontends_for(target: &zup_core::Target) -> Vec<(&'static str, &'static str)> {
-    zup_platform::supported_frontends(target)
+    zup_platform::capabilities(target)
+        .map(|caps| caps.frontends)
+        .unwrap_or_default()
         .iter()
         .map(|frontend| match frontend {
             zup_core::Frontend::Gui => ("gui", "zup-setup-gui"),
@@ -71,6 +73,9 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
     let mut written = Vec::new();
     let host = zup_core::Target::host().map_err(|error| error.to_string())?;
+    if zup_platform::capabilities(&host).is_none() {
+        return Err(format!("unsupported toolchain host `{host}`"));
+    }
 
     for (feature, binary) in frontends_for(&host) {
         cargo(
@@ -183,16 +188,14 @@ fn build_cross_linux(
     profile: &str,
     target: &zup_core::Target,
 ) -> Result<Vec<PathBuf>, String> {
-    if target.architecture() != zup_core::TargetArchitecture::X86_64 {
-        return Err(format!(
-            "cross toolchain builds support `{SUPPORTED_CROSS_TARGET}`; `{target}` is not one"
-        ));
+    if zup_platform::capabilities(target).is_none() {
+        return Err(format!("unsupported Linux toolchain target `{target}`"));
     }
     let version = version()?;
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
     let mut written = Vec::new();
-    for frontend in ["gui", "console", "headless"] {
+    for (frontend, _) in frontends_for(target) {
         let binary = format!("zup-setup-{frontend}");
         zigbuild(
             root,
@@ -303,8 +306,6 @@ fn build_cross_windows(
     Ok(written)
 }
 
-const SUPPORTED_CROSS_TARGET: &str = "linux-x64";
-
 fn zigbuild(root: &Path, args: &[&str]) -> Result<(), String> {
     let mut command = Command::new(cargo_executable());
     command.current_dir(root).arg("zigbuild");
@@ -389,17 +390,12 @@ fn build_and_stage_preset(
             PRESET_PACKAGE,
             "--bin",
             binary_name,
-            "--target",
-            host.rust_triple(),
             "--profile",
             profile,
         ],
     )?;
-    let built = root
-        .join("target")
-        .join(host.rust_triple())
-        .join(output_directory(profile))
-        .join(format!("{binary_name}{}", host.executable_suffix()));
+    let built =
+        target_directory(root, profile).join(format!("{binary_name}{}", host.executable_suffix()));
     if !built.is_file() {
         return Err(format!("the preset build wrote no `{}`", built.display()));
     }
@@ -906,43 +902,6 @@ mod tests {
             zup_toolchain::file_name(&offline, EXECUTABLE_SUFFIX),
             zup_toolchain::file_name(&online, EXECUTABLE_SUFFIX)
         );
-    }
-
-    #[test]
-    fn a_cross_staged_linux_toolchain_is_named_by_its_target() {
-        let target = zup_core::Target::parse(SUPPORTED_CROSS_TARGET).expect("a Linux target");
-        let wanted: Vec<String> = zup_toolchain::supported_components(&target)
-            .iter()
-            .filter_map(|component| match component {
-                zup_toolchain::ToolchainComponent::Runtime { .. } => Some(
-                    zup_toolchain::file_name(component, component_suffix(component)),
-                ),
-                zup_toolchain::ToolchainComponent::Preset => None,
-                other => panic!("a Linux target stages no {other:?}"),
-            })
-            .collect();
-        assert_eq!(
-            wanted,
-            vec![
-                format!("zup-setup-gui-{SUPPORTED_CROSS_TARGET}"),
-                format!("zup-setup-console-{SUPPORTED_CROSS_TARGET}"),
-                format!("zup-setup-headless-{SUPPORTED_CROSS_TARGET}"),
-            ],
-            "gui, console and headless, extensionless"
-        );
-        assert!(
-            zup_toolchain::supported_components(&target)
-                .iter()
-                .any(|component| matches!(component, zup_toolchain::ToolchainComponent::Preset)),
-            "the preset package is a component; cross staging skips packing it, it does not \
-             drop it from the contract"
-        );
-        for name in &wanted {
-            assert!(
-                !name.ends_with(".exe"),
-                "a Linux component carries no executable suffix: {name}"
-            );
-        }
     }
 
     #[test]

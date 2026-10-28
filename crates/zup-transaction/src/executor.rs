@@ -10,6 +10,8 @@ use crate::plan::TransactionNode;
 pub enum ReconcileResult {
     #[default]
     NotApplied,
+    /// Safe to resume, but effects remain and cannot be skipped during rollback.
+    Incomplete,
     Applied,
     AppliedWithReceipt(OperationReceipt),
     Ambiguous,

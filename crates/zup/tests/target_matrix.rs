@@ -16,8 +16,8 @@ fn host_target() -> String {
     zup_core::Target::host().unwrap().to_string()
 }
 
-/// A Linux target Zup parses but no backend builds.
-const UNSUPPORTED_TARGET: &str = "linux-arm64";
+/// A Linux ABI Zup parses but no backend builds.
+const UNSUPPORTED_TARGET: &str = "linux-x64-musl";
 
 /// The frontend every fixture project declares.
 ///

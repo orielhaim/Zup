@@ -340,6 +340,7 @@ fn context(fixture: &Fixture) -> TrustContext {
             ReleasePin::Channel {
                 channel: CHANNEL.to_owned(),
             },
+            zup_core::InstallScope::User,
         ),
         state_root: fixture.state.clone(),
         pin: ReleasePin::Channel {

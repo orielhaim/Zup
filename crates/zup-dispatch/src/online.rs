@@ -1,29 +1,4 @@
-//! The thin path: resolve a release, verify a runtime, start it.
-//!
-//! This is a bootstrapper, and the whole of what it is allowed to do is here:
-//!
-//! ```text
-//! load its embedded trust block and durable TUF state
-//! resolve an authenticated release
-//! select the one variant this host can run
-//! acquire the native runtime into a verified cache
-//! verify it against the digest the release named
-//! write a handoff, start the runtime, forward its outcome
-//! ```
-//!
-//! It installs nothing. It touches no registry, creates no service, elevates
-//! nothing, and runs no prerequisite. Every one of those is inside the selected
-//! native runtime, under the transaction engine, in its own architecture - which
-//! is why this program can be small enough to run under an emulation layer on a
-//! machine whose native variant is something else.
-//!
-//! # What it is not allowed to believe
-//!
-//! The bootstrapper is the *untrusted* half of the pair, because it is the half
-//! that talked to a network. It verifies everything it hands over, and the
-//! runtime verifies all of it again. The handoff it writes carries only digests,
-//! names, and counts; the runtime checks `handoff.runtime` against the hash of
-//! its own file, which is what makes the rest of the document meaningful.
+//! Acquires a verified runtime. The runtime independently validates its handoff.
 
 use std::path::{Path, PathBuf};
 
@@ -39,36 +14,12 @@ use crate::Outcome;
 
 use crate::events;
 
-/// What the bootstrapper needs from whoever is running it.
-///
-/// These are the only two inputs, and both are *configuration* rather than
-/// authority: where the machine keeps its state, and an optional local tree to
-/// satisfy the closure from. A hostile value for either produces content that
-/// fails its digest check, never content that passes one.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct BootstrapRequest {
-    /// A local web tree to read first, for a USB stick or an enterprise share.
-    pub source: Option<PathBuf>,
-    /// Where the machine keeps TUF state and the content cache.
-    pub state_root: Option<PathBuf>,
-    /// Report acquisition events on stdout as JSONL.
-    pub machine_readable: bool,
-}
-
 /// A local source name that appears in diagnostics.
 const SEED_NAME: &str = "local source";
 
-/// Run the thin path for the artifact described by `index`.
-///
-/// `scope` is the installation scope the artifact's trust block declares, which
-/// the bootstrapper knows from the artifact rather than from a command line
-/// argument - a user double-clicking the artifact never chose one. It is the same
-/// scope the launcher passes to the runtime it starts, and the same scope that
-/// decides which state root this process reads, so a thin install lands where the
-/// project said it would.
 pub fn run(
     index: &ArtifactIndex,
-    request: &BootstrapRequest,
+    request: &crate::Options,
     scope: zup_core::SelectedScope,
     subsystem_gui: bool,
 ) -> Outcome {
@@ -81,26 +32,28 @@ pub fn run(
     )
 }
 
-/// Run the thin path, starting the runtime through `launcher`.
-///
-/// The seam exists so the whole path - resolve, select, acquire, verify, stage,
-/// hand over - can be exercised without a child process, which is the only way to
-/// assert on the thing that matters most about the handoff: exactly which
-/// executable is started, with exactly which arguments, and with which
-/// inheritance. Those are properties of a value, and a value has to be
-/// inspectable to be testable.
 pub fn run_with(
     launcher: &dyn zup_windows::Launcher,
     index: &ArtifactIndex,
-    request: &BootstrapRequest,
+    request: &crate::Options,
     scope: zup_core::SelectedScope,
     subsystem_gui: bool,
 ) -> Outcome {
+    if matches!(request.verb, crate::Verb::Update | crate::Verb::Uninstall) {
+        return Outcome::Refused {
+            detail: "use the installed maintenance entry for update or uninstall".into(),
+        };
+    }
     let Some(trust) = index.artifact.trust.clone() else {
         return Outcome::Refused {
             detail: "this installer carries no trust block".to_owned(),
         };
     };
+    if let Err(error) = trust.scope.select(Some(scope)) {
+        return Outcome::Refused {
+            detail: error.to_string(),
+        };
+    }
     if let Err(detail) = index.artifact.validate() {
         return Outcome::Refused {
             detail: detail.to_owned(),
@@ -151,16 +104,10 @@ pub fn run_with(
     outcome
 }
 
-/// Everything the thin path was told, in one value.
-///
-/// These are the bootstrapper's inputs, and they are inputs rather than a
-/// conversation: nothing in the path changes them after they are read, and
-/// passing them as one value is what stops a positional list from growing a
-/// silent reordering.
 struct ThinPath<'a> {
     launcher: &'a dyn zup_windows::Launcher,
     trust: OnlineTrust,
-    request: &'a BootstrapRequest,
+    request: &'a crate::Options,
     state_root: PathBuf,
     scope: zup_core::SelectedScope,
     /// Whether this build is a windowed one, which decides the handoff: a GUI
@@ -324,7 +271,14 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
         runtime: runtime_descriptor.digest,
         target: resolved.variant.target,
         frontend: resolved.variant.frontend.clone(),
-        mode: HandoffMode::Install,
+        mode: match request.verb {
+            crate::Verb::Install => HandoffMode::Install,
+            crate::Verb::Modify => HandoffMode::Modify,
+            crate::Verb::Repair => HandoffMode::Repair,
+            crate::Verb::Update | crate::Verb::Uninstall => {
+                unreachable!("refused before acquisition")
+            }
+        },
         scope: scope.to_string(),
         session: summary,
         components: Vec::new(),
@@ -343,6 +297,7 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
     // read. Both are locations. Everything else it re-derives and re-verifies.
     let cache_root = resolver.context().cache_dir();
     let arguments = handoff_arguments(
+        &resolver.context().state_root,
         &cache_root,
         &handoff_path,
         Some(handoff_digest),
@@ -375,31 +330,34 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
 }
 
 fn handoff_arguments(
+    state_root: &Path,
     cache_root: &Path,
     handoff_path: &Path,
     handoff_digest: Option<zup_core::Sha256Digest>,
-    request: &BootstrapRequest,
+    request: &crate::Options,
     scope: zup_core::SelectedScope,
     subsystem_gui: bool,
 ) -> Vec<String> {
-    let mut arguments = vec![
-        "install".to_owned(),
+    let mut arguments = crate::staged_arguments(request, state_root, scope);
+    arguments.extend([
         "--acquired".to_owned(),
         cache_root.display().to_string(),
         "--handoff".to_owned(),
         handoff_path.display().to_string(),
-        "--scope".to_owned(),
-        scope.to_string(),
-    ];
+    ]);
     if let Some(digest) = handoff_digest {
         arguments.push("--handoff-digest".to_owned());
         arguments.push(digest.to_hex());
     }
-    if subsystem_gui {
+    if subsystem_gui
+        && !request.non_interactive
+        && !request.yes
+        && !request.machine_readable
+        && request.output.is_none()
+    {
         arguments.push("--ui".to_owned());
-        arguments.push("--non-interactive".to_owned());
     }
-    if request.machine_readable {
+    if request.machine_readable && request.output.is_none() {
         arguments.push("--output".to_owned());
         arguments.push("jsonl".to_owned());
     }
@@ -451,13 +409,18 @@ mod tests {
     #[test]
     fn the_handoff_passes_locations_and_nothing_else() {
         let arguments = handoff_arguments(
+            std::path::Path::new(r"C:\state"),
             std::path::Path::new(r"C:\state\content"),
             std::path::Path::new(r"C:\state\content\handoff\abc.json"),
             Some(zup_core::Sha256Digest::from_bytes([1; 32])),
-            &BootstrapRequest {
+            &crate::Options {
                 source: Some(std::path::PathBuf::from(r"X:\Mirror")),
                 state_root: None,
                 machine_readable: true,
+                verb: crate::Verb::Repair,
+                enable: vec!["documentation".into()],
+                force_files: true,
+                ..Default::default()
             },
             zup_core::SelectedScope::User,
             true,
@@ -481,7 +444,14 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--output", "jsonl"])
         );
-        assert!(arguments.contains(&"--ui".to_owned()));
+        assert_eq!(arguments.first().map(String::as_str), Some("repair"));
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--enable", "documentation"])
+        );
+        assert!(arguments.contains(&"--force-files".to_owned()));
+        assert!(!arguments.contains(&"--ui".to_owned()));
     }
 
     /// The scope a thin artifact installs into is the one its **trust block**
@@ -496,18 +466,20 @@ mod tests {
     #[test]
     fn a_thin_artifacts_scope_travels_to_the_runtime_it_starts() {
         for (trust, expected) in [
-            (zup_acquire::ThinScope::User, "user"),
-            (zup_acquire::ThinScope::Machine, "machine"),
+            (zup_core::InstallScope::User, "user"),
+            (zup_core::InstallScope::Machine, "machine"),
         ] {
-            let scope = trust.selected();
+            let scope = trust.select(None).unwrap();
             let arguments = handoff_arguments(
+                std::path::Path::new(r"C:\state"),
                 std::path::Path::new(r"C:\state\content"),
                 std::path::Path::new(r"C:\state\content\handoff\abc.json"),
                 Some(zup_core::Sha256Digest::from_bytes([1; 32])),
-                &BootstrapRequest {
+                &crate::Options {
                     source: None,
                     state_root: None,
                     machine_readable: false,
+                    ..Default::default()
                 },
                 scope,
                 false,

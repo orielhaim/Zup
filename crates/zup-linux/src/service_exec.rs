@@ -118,39 +118,13 @@ fn observe(
     manager: &mut dyn SystemdManager,
 ) -> Result<Observed, ExecError> {
     let source = read_source(canonical)?;
-    let policy = manager
-        .unit_file_state(unit)
-        .unwrap_or_else(|_| "unknown".to_owned());
+    let policy = manager.unit_file_state(unit).map_err(ExecError::from)?;
     Ok(Observed { source, policy })
 }
 
 fn read_source(canonical: &std::path::Path) -> Result<Option<([u8; 32], u64)>, ExecError> {
-    let Some(parent) = canonical.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Ok(None);
-    };
-    let Ok(directory) = OwnedDirectory::open(parent) else {
-        return Ok(None);
-    };
-    let Some(name) = canonical
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-    else {
-        return Ok(None);
-    };
-    match directory.kind_or_absent(&name) {
-        Ok(Some(EntryKind::Regular)) => match directory.read_regular(&name) {
-            Ok(bytes) => {
-                let (size, digest) =
-                    zup_core::hash_reader(bytes.as_slice()).map_err(|_| ExecError::Ambiguous {
-                        unit: name.clone(),
-                        reason: "a unit source does not hash".into(),
-                    })?;
-                Ok(Some((*digest.as_bytes(), size)))
-            }
-            Err(_) => Ok(None),
-        },
-        _ => Ok(None),
-    }
+    crate::service_ops::read_canonical_source(canonical)
+        .map(|bytes| bytes.map(|bytes| digest_of(&bytes)))
 }
 
 fn digest_of(bytes: &[u8]) -> ([u8; 32], u64) {
@@ -162,54 +136,26 @@ fn hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn previous_source_bytes(unit: &str, op: &ServiceOperation) -> Result<Option<Vec<u8>>, ExecError> {
-    match &op.previous {
-        ObservedServiceState::Absent => Ok(None),
-        ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => {
-            let name =
-                zup_core::NonEmptyString::new(&op.name).map_err(|error| ExecError::Refused {
-                    unit: unit.to_owned(),
-                    reason: format!("service name: {error}"),
-                })?;
-            let id = zup_core::ServiceId::new(&op.id).map_err(|error| ExecError::Refused {
-                unit: unit.to_owned(),
-                reason: format!("service id: {error}"),
-            })?;
-            render_registration(unit, display_name, command, *start, &op.key, &id, &name).map(Some)
-        }
-    }
-}
-
 fn check_unchanged_resume(
     derived: &Derived,
     before: &Observed,
-    op: &ServiceOperation,
+    previous_source: Option<&[u8]>,
     previous_policy: &str,
-    force: bool,
 ) -> Result<(), ExecError> {
     if before.source.map(|(d, _)| hex(&d)) == Some(hex(&digest_of(&derived.bytes).0)) {
         return Ok(());
     }
 
-    if force {
-        return Ok(());
-    }
-    check_unchanged(&derived.unit, before, op, previous_policy)
+    check_unchanged(&derived.unit, before, previous_source, previous_policy)
 }
 
 fn check_unchanged(
     unit: &str,
     before: &Observed,
-    op: &ServiceOperation,
+    previous_source: Option<&[u8]>,
     previous_policy: &str,
 ) -> Result<(), ExecError> {
-    let wanted_source = previous_source_bytes(unit, op)?;
-    let wanted_digest = wanted_source.as_ref().map(|bytes| hex(&digest_of(bytes).0));
+    let wanted_digest = previous_source.map(|bytes| hex(&digest_of(bytes).0));
     if before.source.map(|(d, _)| hex(&d)) != wanted_digest || before.policy != previous_policy {
         return Err(ExecError::Refused {
             unit: unit.to_owned(),
@@ -259,7 +205,7 @@ pub fn apply(
     let (derived, payload) = prepare(op, payload_bytes)?;
     let ServicePayload::Apply {
         previous_policy: planned_policy,
-        force: planned_force,
+        previous_source: planned_source,
         ..
     } = &payload
     else {
@@ -269,7 +215,7 @@ pub fn apply(
         });
     };
     let planned_policy = planned_policy.clone();
-    let planned_force = *planned_force;
+    let planned_source = planned_source.as_deref();
     let canonical = authorize_systemd_unit(&derived.unit, context.systemd).map_err(|error| {
         ExecError::Refused {
             unit: derived.unit.clone(),
@@ -277,26 +223,27 @@ pub fn apply(
         }
     })?;
     refuse_source_symlink(&derived.unit, &canonical)?;
-    check_collisions(&derived.unit, &canonical, &load_path_dirs())?;
+    check_collisions(&derived.unit, &canonical, &load_path_dirs(), Some(op))?;
 
     validate_executable_live(&derived.command, context.roots, context.expected_uid)?;
-
-    let probe = context
-        .manager
-        .unit_file_state(&derived.unit)
-        .map_err(ExecError::from)?;
-    if policy_for_state(&probe).is_none() {
-        return Err(ExecError::Refused {
-            unit: derived.unit.clone(),
-            reason: format!("systemd reports unit-file state `{probe}`, which Zup does not own"),
-        });
-    }
 
     crate::service_ops::require_exec_baseline(context.manager)?;
     refuse_foreign_integration(&derived.unit, &canonical)?;
     let before = observe(&derived.unit, &canonical, context.manager)?;
+    let absent = before.policy == "not-found"
+        && before.source.is_none()
+        && matches!(op.previous, ObservedServiceState::Absent);
+    if policy_for_state(&before.policy).is_none() && !absent {
+        return Err(ExecError::Refused {
+            unit: derived.unit.clone(),
+            reason: format!(
+                "systemd reports unit-file state `{}`, which Zup does not own",
+                before.policy
+            ),
+        });
+    }
 
-    let previous_source = before.source.map(|(digest, _)| hex(&digest));
+    let previous_source = planned_source.map(|bytes| hex(&digest_of(bytes).0));
 
     let wanted_digest = hex(&digest_of(&derived.bytes).0);
     let wanted_policy = desired_policy(derived.start).to_owned();
@@ -314,19 +261,24 @@ pub fn apply(
             changes: Vec::new(),
         });
     }
-    check_unchanged_resume(&derived, &before, op, &planned_policy, planned_force)?;
+    check_unchanged_resume(&derived, &before, planned_source, &planned_policy)?;
     let must_be_absent = before.source.is_none();
 
-    let previous_bytes_rendered = previous_source_bytes(&derived.unit, op)?;
     write_source(&derived.unit, &canonical, &derived.bytes, must_be_absent)?;
     let mutated = apply_reload_policy_verify(&derived, &canonical, context);
     if let Err(error) = mutated {
-        compensate_source(
+        if let Err(compensation) = restore_before_image(
             &derived.unit,
             &canonical,
-            previous_bytes_rendered.as_deref(),
+            planned_source,
+            &planned_policy,
             context,
-        );
+        ) {
+            return Err(ExecError::refused(
+                &derived.unit,
+                format!("{error}; restoring the previous source failed: {compensation}"),
+            ));
+        }
         return Err(error);
     }
     let changes = mutated.expect("compensated above on error");
@@ -363,21 +315,22 @@ fn apply_reload_policy_verify(
     Ok(changes)
 }
 
-fn compensate_source(
+fn restore_before_image(
     unit: &str,
     canonical: &std::path::Path,
     previous: Option<&[u8]>,
+    previous_policy: &str,
     context: &mut ServiceContext<'_>,
-) {
+) -> Result<(), ExecError> {
     match previous {
         None => {
-            let _ = remove_file_no_follow(unit, canonical);
+            remove_file_no_follow(unit, canonical)?;
         }
         Some(bytes) => {
-            let _ = write_source(unit, canonical, bytes, false);
+            write_source(unit, canonical, bytes, false)?;
         }
     }
-    let _ = context.manager.reload();
+    restore_policy(unit, canonical, previous_policy, context.manager)
 }
 
 fn write_source(
@@ -632,6 +585,8 @@ pub fn rollback_apply(
     let ServicePayload::Apply {
         service: op,
         unit: payload_unit,
+        previous_source,
+        previous_policy,
         ..
     } = payload
     else {
@@ -662,43 +617,21 @@ pub fn rollback_apply(
             reason: "the service changed after installation".into(),
         });
     }
-    match &op.previous {
-        ObservedServiceState::Absent => {
-            remove_file_no_follow(&derived.unit, &canonical)?;
-        }
-        ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => {
-            let name =
-                zup_core::NonEmptyString::new(&op.name).map_err(|error| ExecError::Refused {
-                    unit: derived.unit.clone(),
-                    reason: format!("service name: {error}"),
-                })?;
-            let id = zup_core::ServiceId::new(&op.id).map_err(|error| ExecError::Refused {
-                unit: derived.unit.clone(),
-                reason: format!("service id: {error}"),
-            })?;
-            let bytes = render_registration(
-                &derived.unit,
-                display_name,
-                command,
-                *start,
-                &op.key,
-                &id,
-                &name,
-            )?;
-            write_source(&derived.unit, &canonical, &bytes, false)?;
-        }
+    let previous_source = previous_source.as_deref();
+    if receipt.previous_source_sha256 != previous_source.map(|bytes| hex(&digest_of(bytes).0))
+        || receipt.previous_policy != *previous_policy
+    {
+        return Err(ExecError::refused(
+            &derived.unit,
+            "the receipt does not match its before-image",
+        ));
     }
-    context.manager.reload().map_err(ExecError::from)?;
-    restore_policy(
+    restore_before_image(
         &derived.unit,
         &canonical,
-        &receipt.previous_policy,
-        context.manager,
+        previous_source,
+        previous_policy,
+        context,
     )?;
     Ok(())
 }
@@ -714,7 +647,7 @@ fn restore_policy(
             manager.unmask(unit).map_err(ExecError::from)?;
             manager.enable(unit).map_err(ExecError::from)?;
         }
-        "disabled" => {
+        "disabled" | "not-found" => {
             manager.unmask(unit).map_err(ExecError::from)?;
             manager
                 .remove_owned_enablement(unit, &canonical.to_string_lossy())
@@ -724,7 +657,10 @@ fn restore_policy(
             manager.mask(unit).map_err(ExecError::from)?;
         }
         _ => {
-            manager.unmask(unit).map_err(ExecError::from)?;
+            return Err(ExecError::refused(
+                unit,
+                format!("cannot restore unit-file state `{previous}`"),
+            ));
         }
     }
     manager.reload().map_err(ExecError::from)?;
@@ -732,38 +668,30 @@ fn restore_policy(
 }
 
 fn remove_file_no_follow(unit: &str, canonical: &std::path::Path) -> Result<(), ExecError> {
-    let Some(parent) = canonical.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Ok(());
+    let parent = canonical
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| ExecError::refused(unit, "unit source has no parent directory"))?;
+    let directory = match OwnedDirectory::open(parent) {
+        Ok(directory) => directory,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => return Err(error.into()),
     };
-    let Ok(directory) = OwnedDirectory::open(parent) else {
-        return Ok(());
-    };
-    let Some(name) = canonical
+    let name = canonical
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-    else {
-        return Ok(());
-    };
-    match directory.kind_or_absent(&name) {
-        Ok(None) => Ok(()),
-        Ok(Some(EntryKind::Regular)) => {
-            directory
-                .remove_file(&name)
-                .map_err(|error| ExecError::Refused {
-                    unit: unit.to_owned(),
-                    reason: format!("the unit source cannot be removed: {error}"),
-                })?;
-            directory.sync().map_err(|error| ExecError::Refused {
-                unit: unit.to_owned(),
-                reason: format!("the unit directory does not flush: {error}"),
-            })?;
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ExecError::refused(unit, "unit source has no valid file name"))?;
+    match directory.kind_or_absent(name)? {
+        None => Ok(()),
+        Some(EntryKind::Regular) => {
+            directory.remove_file(name)?;
+            directory.sync()?;
             Ok(())
         }
-        Ok(Some(_)) => Err(ExecError::conflict(
+        Some(_) => Err(ExecError::conflict(
             unit,
-            "the unit source path is no longer a regular file",
+            "unit source is no longer a regular file",
         )),
-        Err(_) => Ok(()),
     }
 }
 
@@ -967,12 +895,14 @@ pub fn verify_receipt(
 pub enum ServiceReconcile {
     Applied,
     NotApplied,
+    Incomplete,
     Ambiguous,
 }
 
 pub fn reconcile_apply(
     op: &ServiceOperation,
     previous_policy: &str,
+    previous_source: Option<&[u8]>,
     receipt: Option<&ServiceReceipt>,
     context: &mut ServiceContext<'_>,
 ) -> Result<(ServiceReconcile, Option<ServiceReceipt>), ExecError> {
@@ -983,12 +913,23 @@ pub fn reconcile_apply(
             reason: error.to_string(),
         }
     })?;
+    context.manager.reload().map_err(ExecError::from)?;
     let current = observe(&derived.unit, &canonical, context.manager)?;
     let intended_digest = hex(&digest_of(&derived.bytes).0);
     let intended_policy = desired_policy(derived.start).to_owned();
     let current_digest = current.source.map(|(d, _)| hex(&d));
     let installed = current_digest.clone() == Some(intended_digest.clone())
         && current.policy == intended_policy;
+    let previous_digest = previous_source.map(|bytes| hex(&digest_of(bytes).0));
+    if receipt.is_some_and(|receipt| {
+        receipt.previous_source_sha256 != previous_digest
+            || receipt.previous_policy != previous_policy
+    }) {
+        return Err(ExecError::refused(
+            &derived.unit,
+            "the receipt does not match its before-image",
+        ));
+    }
     match receipt {
         Some(receipt) => {
             if current_digest.clone() == receipt.installed_source_sha256
@@ -996,16 +937,12 @@ pub fn reconcile_apply(
             {
                 Ok((ServiceReconcile::Applied, Some(receipt.clone())))
             } else {
-                let previous_source = previous_source_bytes(&derived.unit, op)?;
-                let previous_digest = previous_source
-                    .as_ref()
-                    .map(|bytes| hex(&digest_of(bytes).0));
                 if current_digest.clone() == previous_digest && current.policy == previous_policy {
                     Ok((ServiceReconcile::NotApplied, None))
                 } else if installed {
                     Ok((ServiceReconcile::Applied, Some(receipt.clone())))
                 } else if current_digest == Some(intended_digest.clone()) {
-                    Ok((ServiceReconcile::NotApplied, None))
+                    Ok((ServiceReconcile::Incomplete, None))
                 } else {
                     Ok((ServiceReconcile::Ambiguous, None))
                 }
@@ -1013,14 +950,11 @@ pub fn reconcile_apply(
         }
         None => {
             if installed {
-                let previous_source = previous_source_bytes(&derived.unit, op)?;
                 Ok((
                     ServiceReconcile::Applied,
                     Some(ServiceReceipt {
                         unit: derived.unit.clone(),
-                        previous_source_sha256: previous_source
-                            .as_ref()
-                            .map(|bytes| hex(&digest_of(bytes).0)),
+                        previous_source_sha256: previous_digest,
                         installed_source_sha256: Some(intended_digest),
                         previous_policy: previous_policy.to_owned(),
                         installed_policy: intended_policy,
@@ -1029,16 +963,10 @@ pub fn reconcile_apply(
                     }),
                 ))
             } else {
-                let previous_source = previous_source_bytes(&derived.unit, op)?;
-                let previous_digest = previous_source
-                    .as_ref()
-                    .map(|bytes| hex(&digest_of(bytes).0));
-
-                let resume = current_digest.clone() == previous_digest
-                    && current.policy == previous_policy
-                    || current_digest == Some(intended_digest.clone());
-                if resume {
+                if current_digest == previous_digest && current.policy == previous_policy {
                     Ok((ServiceReconcile::NotApplied, None))
+                } else if current_digest == Some(intended_digest) {
+                    Ok((ServiceReconcile::Incomplete, None))
                 } else {
                     Ok((ServiceReconcile::Ambiguous, None))
                 }
@@ -1075,7 +1003,7 @@ pub fn verify_remove_receipt(
 
 pub fn reconcile_remove(
     unit: &str,
-    _owned: &OwnedResource,
+    owned: &OwnedResource,
     receipt: Option<&ServiceReceipt>,
     context: &mut ServiceContext<'_>,
 ) -> Result<(ServiceReconcile, Option<ServiceReceipt>), ExecError> {
@@ -1084,6 +1012,7 @@ pub fn reconcile_remove(
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
+    context.manager.reload().map_err(ExecError::from)?;
     let current = observe(unit, &canonical, context.manager)?;
     match receipt {
         Some(receipt) => {
@@ -1093,7 +1022,25 @@ pub fn reconcile_remove(
                 Ok((ServiceReconcile::Ambiguous, None))
             }
         }
-        None => Ok((ServiceReconcile::NotApplied, None)),
+        None => {
+            let OwnedResource::Service {
+                installed: zup_exec::ServiceState::Registration { start, .. },
+                ..
+            } = owned
+            else {
+                return Err(ExecError::refused(
+                    unit,
+                    "a removal must own a service registration",
+                ));
+            };
+            if current.source.is_some() && current.policy == desired_policy(*start) {
+                Ok((ServiceReconcile::NotApplied, None))
+            } else if policy_for_state(&current.policy).is_some() || current.policy == "not-found" {
+                Ok((ServiceReconcile::Incomplete, None))
+            } else {
+                Ok((ServiceReconcile::Ambiguous, None))
+            }
+        }
     }
 }
 
@@ -1130,7 +1077,7 @@ pub fn apply_operation(
     unit_bytes: &[u8],
     binary_owned: bool,
     previous_policy: &str,
-    force: bool,
+    previous_source: Option<&[u8]>,
 ) -> Result<zup_transaction::BackendOperation, ExecError> {
     let key = crate::service_ops::backend_key_for_unit(unit);
     let id = crate::service_ops::backend_id_for_unit(unit);
@@ -1140,7 +1087,7 @@ pub fn apply_operation(
         unit_bytes: unit_bytes.to_vec(),
         binary_owned,
         previous_policy: previous_policy.to_owned(),
-        force,
+        previous_source: previous_source.map(<[u8]>::to_vec),
     };
     Ok(zup_transaction::BackendOperation {
         key,
@@ -1225,10 +1172,18 @@ mod tests {
         let (executable, _) = isolated_binary(&dir);
         let op = operation_at("tool", &executable, ServiceStart::Automatic);
         let unit = unit_name(&zup_core::ServiceId::new("tool").unwrap()).unwrap();
-        let backend = apply_operation(&op, &unit, b"[Unit]\n", true, "disabled", false).unwrap();
+        let backend = apply_operation(&op, &unit, b"[Unit]\n", true, "disabled", None).unwrap();
         assert_eq!(backend.key, crate::service_ops::backend_key_for_unit(&unit));
         let payload = crate::service_ops::decode_payload(&backend.payload).unwrap();
         assert_eq!(crate::service_ops::ledger_key_for_payload(&payload), op.key);
+        let mut incomplete = serde_json::to_value(&payload).unwrap();
+        incomplete
+            .as_object_mut()
+            .unwrap()
+            .remove("previous_source");
+        assert!(
+            crate::service_ops::decode_payload(&serde_json::to_vec(&incomplete).unwrap()).is_err()
+        );
     }
 
     #[test]
@@ -1245,7 +1200,7 @@ mod tests {
         let op = operation_at("tool", &executable, ServiceStart::Automatic);
         let derived = derive_operation(&op).unwrap();
         let backend =
-            apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", false).unwrap();
+            apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", None).unwrap();
         let node_payload = backend.payload.clone();
         let mut manager = FakeSystemd::default();
         manager.seed_fragment(
@@ -1288,7 +1243,7 @@ mod tests {
         let op = operation_at("tool", &executable, ServiceStart::Automatic);
         let derived = derive_operation(&op).unwrap();
         let backend =
-            apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", false).unwrap();
+            apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", None).unwrap();
         let node_payload = backend.payload.clone();
         let mut manager = FakeSystemd::default();
         manager.seed(&derived.unit, "enabled-runtime", "/nowhere.service");
@@ -1325,7 +1280,7 @@ mod tests {
             let op = operation_at("tool", &executable, start);
             let derived = derive_operation(&op).unwrap();
             let backend =
-                apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", false)
+                apply_operation(&op, &derived.unit, &derived.bytes, true, "disabled", None)
                     .unwrap();
             let node_payload = backend.payload.clone();
             let mut manager = FakeSystemd::default();

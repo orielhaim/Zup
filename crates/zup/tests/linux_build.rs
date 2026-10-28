@@ -19,7 +19,11 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 use zup_core::{AppId, SelectedScope};
 
-const LINUX_TARGET: &str = "linux-x64";
+fn linux_target() -> &'static str {
+    zup_core::Target::host()
+        .expect("a supported Linux host")
+        .as_str()
+}
 
 const MANIFEST: &str = r#"
 schema = 1
@@ -32,7 +36,7 @@ version = "1.0.0"
 [build]
 
 [build.targets.linux]
-target = "linux-x64"
+target = "@target@"
 frontend = "console"
 source = { directory = "dist" }
 
@@ -70,7 +74,11 @@ impl Project {
         fs::create_dir_all(&dist).expect("a source directory");
         fs::write(dist.join("tool"), TOOL).expect("the tool source");
         fs::write(dist.join("keep.dat"), b"keep-v1").expect("the data source");
-        fs::write(root.path().join("zup.toml"), manifest).expect("a manifest");
+        fs::write(
+            root.path().join("zup.toml"),
+            manifest.replace("@target@", linux_target()),
+        )
+        .expect("a manifest");
         Self { root }
     }
 
@@ -189,7 +197,7 @@ fn build_produces_a_real_linux_installer() {
     let image = zup_binary::Executable::read(&installer).expect("the image reads");
     assert_eq!(image.format(), zup_binary::BinaryFormat::Elf);
     let carrier = zup_linux::Carrier::open(&installer).expect("the carrier opens");
-    assert_eq!(carrier.target().as_str(), LINUX_TARGET);
+    assert_eq!(carrier.target().as_str(), linux_target());
     let plan = carrier.package().build_plan().expect("the package decodes");
     assert_eq!(plan.targets.len(), 1);
     assert_eq!(plan.targets[0].files.len(), 2);
@@ -209,7 +217,7 @@ fn build_produces_a_real_linux_installer() {
     )
     .expect("the release description parses");
     assert_eq!(release.variants.len(), 1);
-    assert_eq!(release.variants[0].target.as_str(), LINUX_TARGET);
+    assert_eq!(release.variants[0].target.as_str(), linux_target());
     assert_eq!(
         release.variants[0].frontend,
         zup_core::Frontend::Console,

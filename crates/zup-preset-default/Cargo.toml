@@ -10,11 +10,7 @@ publish = false
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 schemars.workspace = true
-zup-sdk = { workspace = true, features = ["preset", "test-support"] }
-
-[package.metadata.cargo-machete]
-ignored = ["gpui-kit"]
+zup-sdk = { workspace = true, features = ["preset"] }
 
 [dev-dependencies]
-gpui-kit = { version = "0.7", features = ["test-support"] }
 rstest.workspace = true

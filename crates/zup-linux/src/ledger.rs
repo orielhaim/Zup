@@ -465,7 +465,9 @@ impl LinuxLedgerStore {
         committed.sort_by_key(|record| record.transaction_id.as_uuid());
         let mut latest = self
             .load(app_id, scope)?
-            .and_then(|ledger| ledger.committed_transaction.parse::<uuid::Uuid>().ok());
+            .map(|ledger| ledger.committed_transaction.parse::<uuid::Uuid>())
+            .transpose()
+            .map_err(|_| ExecError::LedgerInvalid)?;
         for record in committed {
             let id = record.transaction_id.as_uuid();
             if latest.is_none_or(|previous| id > previous) {

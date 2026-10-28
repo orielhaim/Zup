@@ -31,9 +31,15 @@ jobs:
           - name: Windows
             runner: windows-2025
             platform: windows
+            artifact: windows
           - name: Linux
             runner: ubuntu-24.04
             platform: linux
+            artifact: linux
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            artifact: linux-arm64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -76,6 +82,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
 
+      - name: Linux native service lifecycle
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo env PATH="$PATH" RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" \
+            ZUP_TEST_REAL_SYSTEMD=1 CARGO_INCREMENTAL=0 \
+            cargo nextest run -p zup-linux --all-features --test services_systemd --no-fail-fast
+
       - name: Toolchain
         run: cargo xtask toolchain build
 
@@ -95,7 +109,7 @@ jobs:
       - name: Upload staged toolchain
         uses: actions/upload-artifact@v7
         with:
-          name: toolchain-${{ matrix.platform }}
+          name: toolchain-${{ matrix.artifact }}
           path: target/debug/toolchain
           if-no-files-found: error
 
@@ -130,13 +144,18 @@ jobs:
           name: toolchain-linux
           path: tc-linux
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-linux-arm64
+          path: tc-arm64
+
       - name: Build the developer CLI
         run: cargo build -p zup --bin zup --profile dev
 
       - name: Merge both toolchains
         shell: pwsh
         run: |
-          cargo xtask toolchain assemble --source tc-win --source tc-linux --out merged
+          cargo xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
 
       - name: Build every fixture target
         shell: pwsh
@@ -144,13 +163,14 @@ jobs:
           $zup = 'target/debug/zup.exe'
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
+          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-arm64 --output dist/arm64.bin --force
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
 
       - name: Verify every artifact
         shell: pwsh
         run: |
           $zup = 'target/debug/zup.exe'
-          foreach ($artifact in @('dist/win.exe', 'dist/lnx.bin', 'dist/uni.exe')) {
+          foreach ($artifact in @('dist/win.exe', 'dist/lnx.bin', 'dist/arm64.bin', 'dist/uni.exe')) {
             & $zup artifact inspect $artifact | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "inspect of $artifact failed" }
           }
@@ -168,6 +188,13 @@ jobs:
         with:
           name: installer-linux-from-windows
           path: dist/lnx.bin
+          if-no-files-found: error
+
+      - name: Upload the cross-built ARM64 installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-arm64-from-windows
+          path: dist/arm64.bin
           if-no-files-found: error
 
   cross-build-linux:
@@ -206,6 +233,11 @@ jobs:
           name: toolchain-linux
           path: tc-linux
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-linux-arm64
+          path: tc-arm64
+
       - name: Build the developer CLI
         shell: bash
         run: cargo build -p zup --bin zup --profile dev
@@ -214,7 +246,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo xtask toolchain assemble --source tc-win --source tc-linux --out merged
+          cargo xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
           mkdir -p dist
 
       - name: Build every fixture target
@@ -224,6 +256,7 @@ jobs:
           zup=target/debug/zup
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
+          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-arm64 --output dist/arm64.bin --force
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
 
       - name: Verify every artifact
@@ -231,7 +264,7 @@ jobs:
         run: |
           set -euo pipefail
           zup=target/debug/zup
-          for artifact in dist/win.exe dist/lnx.bin dist/uni.exe; do
+          for artifact in dist/win.exe dist/lnx.bin dist/arm64.bin dist/uni.exe; do
             $zup artifact inspect "$artifact" > /dev/null
           done
 
@@ -289,6 +322,24 @@ jobs:
           chmod +x foreign/lnx.bin
           sh scripts/ci/e2e-linux.sh foreign/lnx.bin
 
+  cross-e2e-arm64:
+    name: Run the Windows-built ARM64 installer
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    needs: [cross-build-windows]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer-arm64-from-windows
+          path: foreign
+      - name: Native ARM64 lifecycle
+        run: |
+          chmod +x foreign/arm64.bin
+          sh scripts/ci/e2e-linux.sh foreign/arm64.bin
+
   release:
     name: release material
     runs-on: windows-2025
@@ -320,10 +371,15 @@ jobs:
           name: toolchain-linux
           path: tc-linux
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: toolchain-linux-arm64
+          path: tc-arm64
+
       - name: Merge and package the multi-platform release
         shell: pwsh
         run: |
-          cargo xtask toolchain package --profile dev --source tc-win --source tc-linux
+          cargo xtask toolchain package --profile dev --source tc-win --source tc-linux --source tc-arm64
 
       - name: Release clean-room
         shell: pwsh

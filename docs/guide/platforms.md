@@ -63,7 +63,7 @@ A Windows build embeds the package into the runtime template as PE resources —
 
 | Capability | Status |
 | --- | --- |
-| Target | `linux-x64` |
+| Targets | `linux-x64`, `linux-arm64` |
 | Frontends | `gui`, `console`, `headless` (`gui` needs a Wayland or X11 session) |
 | Scope | `user`, `machine`, `either` (`either` needs an explicit `--scope`) |
 | Artifact | one self-contained installer per target (no universal) |
@@ -75,11 +75,17 @@ A Windows build embeds the package into the runtime template as PE resources —
 | Machine prerequisites | refused |
 
 A Linux build writes one extensionless installer per target (for example `Acme-Setup`).
+Both architectures use the same backend and support GUI, console, headless, user,
+and machine operations. Native ARM64 CI runs the lifecycle suite and installers
+composed on Windows. Cross-build templates with
+`cargo xtask toolchain build --target linux-arm64 --profile release`; this needs
+`cargo-zigbuild`, Zig, and the `aarch64-unknown-linux-gnu` Rust target.
+Preset packages need a native binary for each GUI target.
 
 ## Linux machine scope
 
 Machine installs run through a short-lived privileged worker: the installer plans without authority, requests administrator authorization through `pkexec` at execution time, and the worker re-verifies the package and executes inside `/opt`, `/var/opt`, `/var/lib/zup`, and the owned unit sources. User installs never elevate. `zup build` never needs authority. Zup never handles an administrator password.
 
-A machine project may declare static `[[services]]`. Each becomes a systemd system unit owned at `/usr/local/lib/systemd/system/<unit>.service`. Installing, upgrading, repairing, or uninstalling never starts, stops, or restarts a service: Zup registers boot policy (`automatic` enables for boot, `manual` installs without enabling, `disabled` masks) and systemd decides when the process runs. The service binary must be a Zup-owned payload executable; anything else is refused.
+A machine project may declare static `[[services]]`. Each becomes a systemd system unit owned at `/usr/local/lib/systemd/system/<unit>.service`. Installing, upgrading, repairing, or uninstalling never starts, stops, or restarts a service: Zup registers boot policy (`automatic` enables for boot, `manual` installs without enabling, `disabled` masks) and systemd decides when the process runs. The service binary must be a Zup-owned payload executable; anything else is refused. Failed service changes restore prior unit contents and boot policy; incomplete restoration reports recovery required.
 
 `zup check` and `zup build` accept services on any host without systemd. The installing machine needs systemd 240+ only when services are present; `zup doctor` reports that readiness.

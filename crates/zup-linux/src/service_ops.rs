@@ -17,7 +17,7 @@ pub const SERVICE_BACKEND_PREFIX: &str = "linux:service:";
 pub const MAX_UNIT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServicePayload {
     Apply {
         service: ServiceOperation,
@@ -27,8 +27,9 @@ pub enum ServicePayload {
         binary_owned: bool,
 
         previous_policy: String,
-
-        force: bool,
+        // Require an explicit absence so incomplete journals fail closed.
+        #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+        previous_source: Option<Vec<u8>>,
     },
     Remove {
         key: ResourceKey,
@@ -66,11 +67,37 @@ pub fn ledger_key_for_payload(payload: &ServicePayload) -> ResourceKey {
     }
 }
 
-pub fn encode_payload(payload: &ServicePayload) -> Result<Vec<u8>, ExecError> {
-    if matches!(payload, ServicePayload::Apply { unit_bytes, .. } if unit_bytes.len() > MAX_UNIT_BYTES)
+fn validate_payload(payload: &ServicePayload) -> Result<(), ExecError> {
+    if let ServicePayload::Apply {
+        unit_bytes,
+        previous_source,
+        ..
+    } = payload
+        && (unit_bytes.len() > MAX_UNIT_BYTES
+            || previous_source
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() > MAX_UNIT_BYTES))
     {
         return Err(ExecError::refused("", "a unit source exceeds its bound"));
     }
+    if let ServicePayload::Apply {
+        previous_policy, ..
+    } = payload
+        && !matches!(
+            previous_policy.as_str(),
+            "enabled" | "disabled" | "masked" | "not-found"
+        )
+    {
+        return Err(ExecError::refused(
+            "",
+            "the unit before-image has an unsupported policy",
+        ));
+    }
+    Ok(())
+}
+
+pub fn encode_payload(payload: &ServicePayload) -> Result<Vec<u8>, ExecError> {
+    validate_payload(payload)?;
     serde_json::to_vec(payload)
         .map_err(|error| ExecError::refused("", format!("service payload: {error}")))
 }
@@ -82,8 +109,10 @@ pub fn decode_payload(bytes: &[u8]) -> Result<ServicePayload, ExecError> {
             "a service payload exceeds its bound",
         ));
     }
-    serde_json::from_slice(bytes)
-        .map_err(|error| ExecError::refused("", format!("invalid service payload: {error}")))
+    let payload = serde_json::from_slice(bytes)
+        .map_err(|error| ExecError::refused("", format!("invalid service payload: {error}")))?;
+    validate_payload(&payload)?;
+    Ok(payload)
 }
 
 pub fn desired_policy(start: ServiceStart) -> &'static str {
@@ -132,7 +161,7 @@ pub fn snapshot_services(
             unit_name(&service.id).map_err(|error| ExecError::refused("", error.to_string()))?;
         let path = authorize_systemd_unit(&unit, systemd)
             .map_err(|error| ExecError::refused(&unit, error.to_string()))?;
-        let state = observe_unit(&unit, &path, manager)?;
+        let state = observe_unit(&unit, &path, target.target, manager)?;
         out.push(ObservedService {
             key: service.key.clone(),
             id: service.id.clone(),
@@ -145,6 +174,7 @@ pub fn snapshot_services(
 fn observe_unit(
     unit: &str,
     path: &Path,
+    target: zup_core::Target,
     manager: &mut dyn SystemdManager,
 ) -> Result<ObservedServiceState, ExecError> {
     let bytes = read_regular_no_follow(path)?;
@@ -168,7 +198,7 @@ fn observe_unit(
         return Ok(ObservedServiceState::Absent);
     };
     let executable = argv[0].clone();
-    let target = zup_platform::TargetPath::new(target_for(&executable), &executable);
+    let target = zup_platform::TargetPath::new(target, &executable);
     let command = match target {
         Ok(executable) => zup_platform::CommandSpec::new(executable, argv[1..].to_vec()),
         Err(_) => return Ok(ObservedServiceState::Absent),
@@ -181,33 +211,56 @@ fn observe_unit(
     })
 }
 
-fn target_for(_executable: &str) -> zup_core::Target {
-    zup_core::Target::parse("linux-x64").expect("a Linux target")
-}
-
 pub fn read_canonical_source(canonical: &Path) -> Result<Option<Vec<u8>>, ExecError> {
     read_regular_no_follow(canonical)
 }
 
 fn read_regular_no_follow(path: &Path) -> Result<Option<Vec<u8>>, ExecError> {
-    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Ok(None);
-    };
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            ExecError::refused(
+                &path.to_string_lossy(),
+                "unit source has no parent directory",
+            )
+        })?;
     let directory = match OwnedDirectory::open(parent) {
         Ok(directory) => directory,
-        Err(_) => return Ok(None),
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => return Err(error.into()),
     };
-    let name = match path.file_name().map(|n| n.to_string_lossy().into_owned()) {
-        Some(name) if !name.is_empty() => name,
-        _ => return Ok(None),
-    };
-    match directory.kind_or_absent(&name) {
-        Ok(None) => Ok(None),
-        Ok(Some(EntryKind::Regular)) => match directory.read_regular(&name) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(_) => Ok(None),
-        },
-        Ok(Some(_)) | Err(_) => Ok(None),
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            ExecError::refused(
+                &path.to_string_lossy(),
+                "unit source has no valid file name",
+            )
+        })?;
+    match directory.kind_or_absent(name)? {
+        None => Ok(None),
+        Some(EntryKind::Regular) => {
+            let mut file = directory.open_regular_read(name)?;
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(MAX_UNIT_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| crate::error::PathError::io(path, error))?;
+            if bytes.len() > MAX_UNIT_BYTES {
+                return Err(ExecError::refused(
+                    name,
+                    "unit source exceeds its size limit",
+                ));
+            }
+            Ok(Some(bytes))
+        }
+        Some(_) => Err(ExecError::conflict(
+            name,
+            "unit source is not a regular file",
+        )),
     }
 }
 
@@ -216,7 +269,7 @@ pub fn check_no_full_override(unit: &str, dir: &Path) -> Result<(), ExecError> {
     let metadata = match std::fs::symlink_metadata(&override_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Ok(()),
+        Err(error) => return Err(crate::error::PathError::io(&override_path, error).into()),
     };
     if metadata.file_type().is_symlink()
         && std::fs::read_link(&override_path)
@@ -246,7 +299,27 @@ pub fn load_path_dirs() -> Vec<PathBuf> {
     .collect()
 }
 
-pub fn check_collisions(unit: &str, canonical: &Path, dirs: &[PathBuf]) -> Result<(), ExecError> {
+pub fn check_collisions(
+    unit: &str,
+    canonical: &Path,
+    dirs: &[PathBuf],
+    service: Option<&ServiceOperation>,
+) -> Result<(), ExecError> {
+    let owns_mask = service.is_some_and(|service| {
+        matches!(
+            service.kind,
+            zup_exec::ServiceOperationKind::UpdateOwned
+                | zup_exec::ServiceOperationKind::RestoreOwned
+                | zup_exec::ServiceOperationKind::NoOp
+                | zup_exec::ServiceOperationKind::Drift
+        ) && matches!(
+            service.previous,
+            ObservedServiceState::Service {
+                start: ServiceStart::Disabled,
+                ..
+            }
+        )
+    });
     for dir in dirs {
         let candidate = dir.join(unit);
         if candidate == canonical {
@@ -261,6 +334,15 @@ pub fn check_collisions(unit: &str, canonical: &Path, dirs: &[PathBuf]) -> Resul
                 });
             }
             Ok(metadata) => {
+                if owns_mask
+                    && candidate == admin_override_dir().join(unit)
+                    && metadata.file_type().is_symlink()
+                    && std::fs::read_link(&candidate)
+                        .map_err(|error| crate::error::PathError::io(&candidate, error))?
+                        == Path::new("/dev/null")
+                {
+                    continue;
+                }
                 if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
                     return Err(ExecError::conflict(
                         unit,
@@ -464,6 +546,21 @@ mod tests {
     }
 
     #[test]
+    fn inspecting_service_sources_never_hides_unsafe_state() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.service");
+        assert!(read_canonical_source(&source).unwrap().is_none());
+        std::fs::write(&source, vec![b'x'; MAX_UNIT_BYTES + 1]).unwrap();
+        assert!(read_canonical_source(&source).is_err());
+        std::fs::remove_file(&source).unwrap();
+        std::os::unix::fs::symlink(root.path().join("foreign"), &source).unwrap();
+        assert!(read_canonical_source(&source).is_err());
+        std::fs::remove_file(&source).unwrap();
+        std::fs::write(&source, b"a file cannot be a parent directory").unwrap();
+        assert!(read_canonical_source(&source.join("child")).is_err());
+    }
+
+    #[test]
     fn persistent_states_map_and_runtime_variants_do_not() {
         assert_eq!(policy_for_state("enabled"), Some(ServiceStart::Automatic));
         assert_eq!(policy_for_state("disabled"), Some(ServiceStart::Manual));
@@ -522,7 +619,7 @@ mod tests {
                 _base.path().join("usr-lib"),
             ];
             assert!(
-                check_collisions(unit, &canonical, &dirs).is_err(),
+                check_collisions(unit, &canonical, &dirs, None).is_err(),
                 "a unit in {dir} must conflict"
             );
             std::fs::remove_file(other.join(unit)).expect("cleanup");
@@ -533,7 +630,7 @@ mod tests {
             systemd.unit_dir.clone(),
             _base.path().join("usr-lib"),
         ];
-        assert!(check_collisions(unit, &canonical, &dirs).is_ok());
+        assert!(check_collisions(unit, &canonical, &dirs, None).is_ok());
     }
 
     #[test]

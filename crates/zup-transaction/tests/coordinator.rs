@@ -415,8 +415,10 @@ fn failure_rolls_back_applied_work_in_reverse_order(
     }
 }
 
-#[test]
-fn rollback_failure_requires_recovery() {
+#[rstest]
+#[case::rollback_failure(FakeExecutor::new().fail_on_apply(6).fail_on_rollback(0))]
+#[case::incomplete_mutation(FakeExecutor::new().fail_on_apply(6).reconcile_with(ReconcileResult::Incomplete))]
+fn failed_mutation_or_rollback_requires_recovery(#[case] mut exec: FakeExecutor) {
     let (_dir, coord) = coord();
     let plan = compile_transaction(&chain_input()).unwrap();
     let open = coord
@@ -427,7 +429,6 @@ fn rollback_failure_requires_recovery() {
             plan,
         )
         .unwrap();
-    let mut exec = FakeExecutor::new().fail_on_apply(6).fail_on_rollback(0);
     let settled = open.execute(&mut exec).unwrap();
     let (final_record, outcome) = (settled.record, settled.outcome);
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
@@ -550,6 +551,12 @@ fn interrupted_rollback_never_rolls_forward() {
 #[rstest]
 #[case::not_applied_retries(
     ReconcileResult::NotApplied,
+    TransactionOutcome::Committed,
+    TransactionPhase::Committed,
+    1
+)]
+#[case::incomplete_resumes(
+    ReconcileResult::Incomplete,
     TransactionOutcome::Committed,
     TransactionPhase::Committed,
     1
