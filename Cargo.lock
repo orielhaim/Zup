@@ -12094,6 +12094,7 @@ dependencies = [
  "zup-plan",
  "zup-platform",
  "zup-preset-host",
+ "zup-preset-ipc",
  "zup-preset-protocol",
  "zup-protocol",
  "zup-runtime",

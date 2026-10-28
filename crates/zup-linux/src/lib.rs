@@ -1,22 +1,6 @@
 #![deny(unsafe_code)]
 
-//! Linux installation backend and Linux installer composition.
-//!
-//! Two responsibilities share this crate, and the build host decides which one
-//! compiles:
-//!
-//! - **Composition** turns a runtime template and a portable package into an
-//!   installer for a Linux target by appending the package, the preset, and a
-//!   footer. It is plain file I/O, so it runs on any host. [`compose`] and
-//!   [`compose_with_preset`] are thin adapters over the portable
-//!   [`zup_compose`] pipeline, which owns the target-driven composition both
-//!   hosts share. The target plan is validated with [`resolve_target`], which
-//!   answers user roots from fixed build roots instead of the build host's
-//!   environment. These modules have no `cfg` gate.
-//! - **The native runtime** installs, repairs, and removes software through
-//!   filesystem ownership, systemd, D-Bus, and a privileged worker. It
-//!   executes only on Linux, and every module it needs is gated on
-//!   `cfg(target_os = "linux")`.
+//! Linux lifecycle backend and installer package reader.
 
 #[cfg(target_os = "linux")]
 mod backend;

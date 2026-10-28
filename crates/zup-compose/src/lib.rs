@@ -1,17 +1,4 @@
-//! Portable target-driven installer composition.
-//!
-//! One pipeline turns a runtime template and a portable package into an
-//! installer for an explicit target, on any build host. The target's own
-//! executable format decides how the bytes are carried: a Windows target is a
-//! PE image with the package and the preset as resources, a Linux target is an
-//! ELF image with the package and the preset appended beside a footer. The
-//! preset travels the same pipeline on both: `None` composes an installer
-//! without one, `Some` carries it, and the reader hands back whatever the
-//! image carries.
-//!
-//! Composition never executes the template and never touches native runtime
-//! APIs. It reads headers with `zup-binary`, writes PE resources with
-//! `zup-pe`, and appends Linux sections with plain file I/O.
+//! Portable installer composition and verified content extraction.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};

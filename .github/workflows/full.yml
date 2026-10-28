@@ -92,12 +92,20 @@ jobs:
           suffix=''
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
           python "$RUNNER_TEMP/installer-size.py" --cli "target/debug/zup$suffix" --toolchain "target/$directory/toolchain/0.0.1" --output target/sizes
+      - name: Windows runtime link map
+        if: runner.os == 'Windows' && inputs.profile == 'installer'
+        shell: pwsh
+        run: |
+          $map = Join-Path $env:GITHUB_WORKSPACE 'target/runtime.map'
+          cargo rustc -p zup-installer --no-default-features --features headless --bin zup-setup-headless --profile installer -- -C "link-arg=/MAP:$map"
+          if ($LASTEXITCODE -ne 0) { throw 'runtime link map failed' }
       - uses: actions/upload-artifact@v7
         with:
           name: sizes-${{ matrix.runner }}-${{ inputs.profile }}
           path: |
             target/sizes/sizes.json
             target/sizes/*/inspection.json
+            target/runtime.map
           if-no-files-found: error
   test:
     name: full test ${{ matrix.name }}

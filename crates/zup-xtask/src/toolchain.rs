@@ -31,8 +31,8 @@ pub fn frontends_for(target: &zup_core::Target) -> Vec<(&'static str, &'static s
 
 pub const DISPATCHERS: &[(&str, &str, &str)] = &[
     ("", "zup-dispatch", "gui"),
-    ("online", "zup-dispatch", "gui"),
     ("", "zup-dispatch-console", "console"),
+    ("online", "zup-dispatch", "gui"),
     ("online", "zup-dispatch-console", "console"),
 ];
 
@@ -135,6 +135,11 @@ fn stage_dispatcher(
     subsystem: &str,
 ) -> Result<PathBuf, String> {
     let online = !feature.is_empty();
+    let build_profile = if profile == "installer" {
+        "bootstrap"
+    } else {
+        profile
+    };
     let mut args = vec![
         "build".to_owned(),
         "-p".to_owned(),
@@ -144,7 +149,7 @@ fn stage_dispatcher(
         "--target".to_owned(),
         dispatcher::TARGET.rust_triple().to_owned(),
         "--profile".to_owned(),
-        profile.to_owned(),
+        build_profile.to_owned(),
     ];
     if online {
         args.push("--features".to_owned());
@@ -152,7 +157,7 @@ fn stage_dispatcher(
     }
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     let built = target_directory(root, dispatcher::TARGET.rust_triple())
-        .join(output_directory(profile))
+        .join(output_directory(build_profile))
         .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
     cargo(root, &args)?;
     let component = zup_toolchain::ToolchainComponent::Dispatcher {

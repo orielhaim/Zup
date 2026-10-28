@@ -8,12 +8,12 @@ description = "Portable process transport for zup installer presets"
 publish = true
 
 [features]
-test-launcher = []
+test-support = []
 
 [[bin]]
 name = "zup-preset-ipc-test-preset"
 path = "src/bin/test_preset.rs"
-required-features = ["test-launcher"]
+required-features = ["test-support"]
 
 [dependencies]
 zup-preset-protocol = { path = "../zup-preset-protocol", version = "0.1.0" }
