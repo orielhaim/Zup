@@ -20,23 +20,26 @@ use zup_session::{SessionDiscovery, SessionHost, SessionLaunch};
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
-    operation: Option<Command>,
+    pub(crate) operation: Option<Command>,
     #[arg(long, global = true, value_enum)]
-    scope: Option<Scope>,
+    pub(crate) scope: Option<Scope>,
     #[arg(long, alias = "install-dir", global = true, value_name = "PATH")]
-    install_directory: Option<PathBuf>,
+    pub(crate) install_directory: Option<PathBuf>,
     #[arg(long, global = true, hide = true)]
-    state_root: Option<PathBuf>,
+    pub(crate) state_root: Option<PathBuf>,
     #[arg(long, global = true, value_enum, default_value = "human")]
-    output: Output,
+    pub(crate) output: Output,
     #[arg(long, global = true)]
-    non_interactive: bool,
+    pub(crate) non_interactive: bool,
     #[arg(long, global = true)]
-    yes: bool,
+    pub(crate) yes: bool,
+    /// Use line prompts without terminal effects, suitable for screen readers.
+    #[arg(long, global = true)]
+    pub(crate) plain: bool,
 }
 
 #[derive(Debug, Subcommand)]
-enum Command {
+pub(crate) enum Command {
     Install(Components),
     Upgrade(Components),
     Modify(Components),
@@ -48,15 +51,15 @@ enum Command {
 }
 
 #[derive(Debug, Default, Args)]
-struct Components {
+pub(crate) struct Components {
     #[arg(long, value_name = "ID")]
-    enable: Vec<String>,
+    pub(crate) enable: Vec<String>,
     #[arg(long, value_name = "ID")]
-    disable: Vec<String>,
+    pub(crate) disable: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum Scope {
+pub(crate) enum Scope {
     User,
     Machine,
 }
@@ -70,7 +73,7 @@ impl From<Scope> for SelectedScope {
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
-enum Output {
+pub(crate) enum Output {
     #[default]
     Human,
     Json,
@@ -92,7 +95,32 @@ pub(crate) struct Failure {
     pub outcome: ProcessOutcome,
     pub message: String,
 }
-impl miette::Diagnostic for Failure {}
+impl miette::Diagnostic for Failure {
+    fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
+        Some(Box::new(
+            format!("zup_installer::{:?}", self.outcome).to_ascii_lowercase(),
+        ))
+    }
+}
+impl From<zup_runtime::OperationError> for Failure {
+    fn from(error: zup_runtime::OperationError) -> Self {
+        let message = error.to_string();
+        let inferred = ProcessOutcome::from_message(&message);
+        let outcome = if inferred == ProcessOutcome::Failure {
+            match error {
+                zup_runtime::OperationError::Downgrade { .. } => ProcessOutcome::Configuration,
+                zup_runtime::OperationError::Refused {
+                    stage: "scope" | "selection" | "capabilities" | "plan" | "resolve",
+                    ..
+                } => ProcessOutcome::Configuration,
+                _ => inferred,
+            }
+        } else {
+            inferred
+        };
+        Self { outcome, message }
+    }
+}
 
 pub fn command() -> clap::Command {
     Cli::command()
@@ -110,6 +138,7 @@ pub fn uninstall<H: SessionHost>(
     state_root: Option<PathBuf>,
     non_interactive: bool,
     yes: bool,
+    plain: bool,
 ) -> miette::Result<()> {
     run_cli(
         host,
@@ -124,6 +153,7 @@ pub fn uninstall<H: SessionHost>(
             install_directory: None,
             non_interactive,
             yes,
+            plain,
             output: match context.output {
                 OutputFormat::Human => Output::Human,
                 OutputFormat::Json => Output::Json,
@@ -133,14 +163,18 @@ pub fn uninstall<H: SessionHost>(
     )
 }
 
-fn run_cli<H: SessionHost>(mut host: H, frontend: Frontend, cli: Cli) -> miette::Result<()> {
+pub(crate) fn run_cli<H: SessionHost>(
+    mut host: H,
+    frontend: Frontend,
+    cli: Cli,
+) -> miette::Result<()> {
     let output = cli.output.into();
     let interactive = frontend == Frontend::Console
         && output == OutputFormat::Human
         && !cli.non_interactive
         && !cli.yes
         && crate::run::console_is_a_terminal();
-    let mut report = Report::new(output, interactive);
+    let mut report = Report::new(output, interactive, cli.plain);
 
     let result = drive(&mut host, &cli, interactive, &mut report);
     let outcome = match &result {
@@ -202,9 +236,14 @@ fn drive<H: SessionHost>(
     ))?;
     #[cfg(feature = "console")]
     if interactive {
-        crate::console::intro(installer)?;
+        crate::console::Console::new(cli.plain).intro(installer)?;
     }
-    let scope = choose_scope(&discovery, cli.scope.map(Into::into), interactive)?;
+    let scope = choose_scope(
+        &discovery,
+        cli.scope.map(Into::into),
+        interactive,
+        cli.plain,
+    )?;
     report.result.scope = Some(scope);
     let context = discovery
         .context(scope)
@@ -228,8 +267,13 @@ fn drive<H: SessionHost>(
         }
     };
     #[cfg(feature = "console")]
-    let operation = if interactive && cli.operation.is_none() && context.ledger.is_some() {
-        crate::console::maintenance()?
+    let operation = if interactive
+        && cli.operation.is_none()
+        && let Some(ledger) = &context.ledger
+    {
+        crate::console::Console::new(cli.plain).maintenance(
+            &zup_runtime::maintenance_operations(&ledger.version, &installer.app.version),
+        )?
     } else {
         operation
     };
@@ -258,7 +302,12 @@ fn drive<H: SessionHost>(
     let selection = {
         let mut selection = selection;
         if interactive {
-            crate::console::selection(installer, &context, action, &mut selection)?;
+            crate::console::Console::new(cli.plain).selection(
+                installer,
+                &context,
+                action,
+                &mut selection,
+            )?;
         }
         selection
     };
@@ -301,7 +350,7 @@ fn drive<H: SessionHost>(
         },
         &bound,
     )
-    .map_err(|error| miette::miette!("{error}"))?;
+    .map_err(Failure::from)?;
     let mut plan = PlanPreview::from_transaction_plan(&prepared.transaction_plan, scope);
     if let Some(target) = prepared.target_plan() {
         plan.install_directory = target.install_directory.to_string();
@@ -318,7 +367,7 @@ fn drive<H: SessionHost>(
         (!plan.install_directory.is_empty()).then(|| plan.install_directory.clone());
     #[cfg(feature = "console")]
     if interactive {
-        crate::console::review(&plan, action)?;
+        crate::console::Console::new(cli.plain).review(&plan, action)?;
     }
     let control = OperationControl::new(if interactive {
         ExecutionPolicy::Interactive
@@ -360,6 +409,7 @@ fn choose_scope(
     discovery: &SessionDiscovery,
     requested: Option<SelectedScope>,
     interactive: bool,
+    _plain: bool,
 ) -> miette::Result<SelectedScope> {
     let declared = discovery.installer().install.scope;
     if requested.is_some() || !interactive || declared.scopes().len() == 1 {
@@ -371,7 +421,7 @@ fn choose_scope(
         });
     }
     #[cfg(feature = "console")]
-    return crate::console::scope(discovery);
+    return crate::console::Console::new(_plain).scope(discovery);
     #[cfg(not(feature = "console"))]
     Err(miette::miette!("this runtime has no interactive frontend"))
 }
@@ -384,13 +434,13 @@ struct Report {
     progress: Option<crate::console::Progress>,
 }
 impl Report {
-    fn new(output: OutputFormat, _interactive: bool) -> Self {
+    fn new(output: OutputFormat, _interactive: bool, _plain: bool) -> Self {
         Self {
             output,
             started: false,
             result: InstallerResult::new(ProcessOutcome::Failure, "", ""),
             #[cfg(feature = "console")]
-            progress: _interactive.then(crate::console::Progress::new),
+            progress: _interactive.then(|| crate::console::Progress::new(_plain)),
         }
     }
     fn event(&mut self, event: &InstallerEvent) -> miette::Result<()> {

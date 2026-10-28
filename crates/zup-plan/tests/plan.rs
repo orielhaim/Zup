@@ -846,3 +846,34 @@ destination = "${install}"
     .unwrap_err();
     assert!(matches!(error, PlanError::UnknownBuildTarget { .. }));
 }
+
+#[test]
+fn an_explicit_group_requires_an_optional_component_in_every_frontend() {
+    let mut build = build_plan_from(&with(GRAPH), &[("dist/a.txt", b"a")]);
+    let installer = &mut build.targets[0].installer;
+    let group = zup_core::NonEmptyString::new("tools").unwrap();
+    installer.component_groups.push(zup_core::ComponentGroup {
+        id: group.clone(),
+        label: None,
+        description: None,
+        prominence: Default::default(),
+        selection: zup_core::SelectionRequirement::Explicit,
+    });
+    let cli = installer
+        .components
+        .iter_mut()
+        .find(|component| component.id.as_str() == "cli")
+        .unwrap();
+    cli.group = Some(group);
+    cli.default = false;
+    let mut request = PlanRequest::new(target(), SelectedScope::User);
+    assert!(matches!(
+        plan(&build, &request),
+        Err(PlanError::ComponentGroupSelectionRequired { .. })
+    ));
+    request
+        .components
+        .enable
+        .insert(ComponentId::new("cli").unwrap());
+    assert!(plan(&build, &request).is_ok());
+}

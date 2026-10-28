@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use zup_exec::LifecycleAction;
-use zup_presentation::OutputFormat;
 use zup_runtime::{InstallOutcome, OperationControl, PreparedOperation, runtime_request};
 
 use crate::host::{OperationContext, SessionDiscovery, SessionHost, selection_of};
@@ -141,58 +140,4 @@ pub async fn run_operation<H: SessionHost>(
 
 fn session_error(message: String) -> zup_runtime::SessionError {
     zup_runtime::SessionError::Transaction(message)
-}
-
-pub struct Reporter {
-    output: OutputFormat,
-}
-
-impl Reporter {
-    pub fn new(output: OutputFormat) -> Self {
-        Self { output }
-    }
-
-    pub fn emit(&self, event: &zup_runtime::RuntimeEvent) {
-        if self.output == OutputFormat::Human {
-            return;
-        }
-        for automation in crate::host::automation_events(event) {
-            match serde_json::to_string(&automation) {
-                Ok(value) => println!("{value}"),
-                Err(_) => return,
-            }
-        }
-    }
-
-    pub fn finish(&self, outcome: &InstallOutcome, action: &str) {
-        let process = crate::host::process_outcome(outcome);
-        match self.output {
-            OutputFormat::Human => {
-                println!("{action} {}", process_human(outcome));
-            }
-            OutputFormat::Json | OutputFormat::Jsonl => {
-                let event = zup_presentation::InstallerEvent::Completed { outcome: process };
-                if let Ok(value) = serde_json::to_string(&event) {
-                    println!("{value}");
-                }
-            }
-        }
-    }
-}
-
-fn process_human(outcome: &InstallOutcome) -> &'static str {
-    match outcome {
-        InstallOutcome::Committed => "committed",
-        InstallOutcome::RolledBack => "rolled back",
-        InstallOutcome::RecoveryRequired => "requires recovery",
-        InstallOutcome::CommittedPendingReconciliation { .. } => {
-            "committed, reconciliation required"
-        }
-        InstallOutcome::AuthorizationRequired => "authorization required",
-        InstallOutcome::AuthorizationCancelled => "authorization cancelled",
-        InstallOutcome::Busy { .. } => "busy",
-        InstallOutcome::Cancelled => "cancelled",
-        InstallOutcome::RebootRequired { .. } => "reboot required",
-        InstallOutcome::Failed(_) => "failed",
-    }
 }

@@ -36,24 +36,6 @@ pub fn parse() -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
 }
 
-#[cfg(test)]
-pub fn public_commands() -> Vec<String> {
-    parser()
-        .get_subcommands()
-        .filter(|command| !command.is_hide_set())
-        .map(|command| command.get_name().to_owned())
-        .collect()
-}
-
-#[cfg(test)]
-pub fn internal_commands() -> Vec<String> {
-    parser()
-        .get_subcommands()
-        .filter(|command| command.is_hide_set())
-        .map(|command| command.get_name().to_owned())
-        .collect()
-}
-
 pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
     match cli.command {
         Some(Commands::Install(args)) => lifecycle::apply(context, args),
@@ -68,6 +50,21 @@ pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
         Some(Commands::Update(args)) => crate::maintenance::run_update(context, args),
         Some(Commands::Uninstall(args)) => crate::maintenance::run_uninstall(context, args),
         Some(Commands::Worker { bootstrap }) => crate::run::run_worker(&bootstrap),
+        Some(Commands::TerminalRunner(args)) => {
+            zup_windows::wait_for_process_exit(args.wait_pid)
+                .map_err(|error| miette::miette!("wait for maintenance process: {error}"))?;
+            let executable = crate::package::current_executable()?;
+            let parsed = crate::terminal::Cli::parse_from(
+                std::iter::once(executable.clone().into_os_string()).chain(args.arguments),
+            );
+            let result = crate::terminal::run_cli(
+                crate::host::WindowsSessionHost::default(),
+                context.frontend,
+                parsed,
+            );
+            crate::maintenance::schedule_runner_cleanup(&executable);
+            result
+        }
         Some(Commands::UninstallRunner(args)) => {
             zup_windows::wait_for_process_exit(args.wait_pid)
                 .map_err(|error| miette::miette!("wait for maintenance process: {error}"))?;
@@ -117,6 +114,8 @@ pub(crate) enum Commands {
     },
     #[command(name = "__uninstall_runner", hide = true)]
     UninstallRunner(UninstallRunnerArgs),
+    #[command(name = "__terminal_runner", hide = true)]
+    TerminalRunner(TerminalRunnerArgs),
     #[command(name = "__upgrade", hide = true)]
     Upgrade(LifecycleArgs),
     #[command(name = "__recover", hide = true)]
@@ -169,6 +168,14 @@ pub struct RepairArgs {
     pub install: LifecycleArgs,
     #[arg(long)]
     pub force_files: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct TerminalRunnerArgs {
+    #[arg(long)]
+    wait_pid: u32,
+    #[arg(last = true)]
+    arguments: Vec<std::ffi::OsString>,
 }
 
 #[derive(Debug, Args)]

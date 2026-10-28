@@ -27,6 +27,8 @@ pub struct UninstallArgs {
     pub non_interactive: bool,
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub plain: bool,
 
     #[arg(long, hide = true)]
     pub app_id: Option<String>,
@@ -66,6 +68,7 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
             args.state_root,
             args.non_interactive,
             args.yes,
+            args.plain,
         );
     }
 
@@ -275,15 +278,11 @@ pub fn launch_runner(
     args: &UninstallArgs,
     ui: bool,
 ) -> miette::Result<std::process::Child> {
-    let temporary =
-        std::env::temp_dir().join(format!("zup-uninstall-{}.exe", uuid::Uuid::now_v7()));
-    zup_windows::copy_new_durable(executable, &temporary)
-        .map_err(|error| miette::miette!("prepare the uninstall runner: {error}"))?;
-    let mut command = std::process::Command::new(&temporary);
-    command
-        .arg("__uninstall_runner")
-        .arg("--wait-pid")
-        .arg(std::process::id().to_string());
+    let interactive = crate::run::console_is_a_terminal()
+        && !args.non_interactive
+        && !args.yes
+        && args.output == OutputArg::Human;
+    let mut command = runner_command(executable, "__uninstall_runner", interactive)?;
     if ui {
         command.arg("--ui");
     }
@@ -305,18 +304,49 @@ pub fn launch_runner(
     if args.yes {
         command.arg("--yes");
     }
+    if args.plain {
+        command.arg("--plain");
+    }
     if args.output != OutputArg::Human {
         command.arg("--output").arg(args.output.as_str());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        command.creation_flags(DETACHED_PROCESS);
     }
     command
         .spawn()
         .map_err(|error| miette::miette!("start the uninstall runner: {error}"))
+}
+
+fn runner_command(
+    executable: &Path,
+    kind: &str,
+    interactive: bool,
+) -> miette::Result<std::process::Command> {
+    use std::os::windows::process::CommandExt;
+    let temporary =
+        std::env::temp_dir().join(format!("zup-maintenance-{}.exe", uuid::Uuid::now_v7()));
+    zup_windows::copy_new_durable(executable, &temporary)
+        .map_err(|error| miette::miette!("prepare the maintenance helper: {error}"))?;
+    let mut command = std::process::Command::new(temporary);
+    command
+        .arg(kind)
+        .arg("--wait-pid")
+        .arg(std::process::id().to_string());
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    command.creation_flags(if interactive {
+        CREATE_NEW_CONSOLE
+    } else {
+        DETACHED_PROCESS
+    });
+    Ok(command)
+}
+
+pub fn launch_terminal_runner(executable: &Path) -> miette::Result<()> {
+    runner_command(executable, "__terminal_runner", true)?
+        .arg("--")
+        .args(std::env::args_os().skip(1))
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| miette::miette!("start the maintenance terminal: {error}"))
 }
 
 pub fn schedule_runner_cleanup(path: &Path) {

@@ -12,7 +12,7 @@ pub fn gui() -> ExitCode {
             if was_launched_interactively() {
                 show_error(&error.to_string());
             }
-            ExitCode::from(crate::process_exit_code(&error))
+            failure_exit(&error)
         }
     }
 }
@@ -22,7 +22,7 @@ pub fn console() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
-            ExitCode::from(crate::process_exit_code(&error))
+            failure_exit(&error)
         }
     }
 }
@@ -32,9 +32,18 @@ pub fn headless() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
-            ExitCode::from(crate::process_exit_code(&error))
+            failure_exit(&error)
         }
     }
+}
+
+fn failure_exit(error: &miette::Report) -> ExitCode {
+    let code = crate::process_exit_code(error);
+    #[cfg(windows)]
+    if code > 255 {
+        std::process::exit(code);
+    }
+    ExitCode::from(code.clamp(1, 255) as u8)
 }
 
 fn run_frontend(frontend: Frontend) -> miette::Result<()> {

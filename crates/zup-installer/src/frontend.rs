@@ -62,7 +62,7 @@ pub fn graphical_for(context: RuntimeContext, args: LifecycleArgs) -> miette::Re
 pub fn confirm_uninstall() -> miette::Result<bool> {
     #[cfg(feature = "console")]
     {
-        crate::console::confirm("Uninstall this application?", false)
+        crate::console::Console::new(false).confirm("Uninstall this application?", false)
     }
     #[cfg(not(feature = "console"))]
     {
@@ -73,7 +73,7 @@ pub fn confirm_uninstall() -> miette::Result<bool> {
 pub fn confirm_update() -> miette::Result<bool> {
     #[cfg(feature = "console")]
     {
-        crate::console::confirm("Install this update?", false)
+        crate::console::Console::new(false).confirm("Install this update?", false)
     }
     #[cfg(not(feature = "console"))]
     {

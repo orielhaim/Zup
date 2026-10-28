@@ -120,8 +120,13 @@ pub struct WindowsSessionHost {
     bundle: Option<zup_windows::EmbeddedBundle>,
     app_id: Option<zup_core::AppId>,
     frontend: Frontend,
-    acquired: Option<Arc<crate::acquire::Acquired>>,
-    payload: Option<Arc<zup_bundle::AcquiredPayloadSource>>,
+    acquired: Option<AcquiredContent>,
+}
+
+#[derive(Clone)]
+struct AcquiredContent {
+    release: Arc<crate::acquire::Acquired>,
+    payload: Arc<zup_bundle::AcquiredPayloadSource>,
 }
 
 impl WindowsSessionHost {
@@ -141,11 +146,12 @@ impl WindowsSessionHost {
             scope: context.scope,
             frontend: self.frontend,
             state_root: context.state_root.clone(),
-            content: match (&self.acquired, &self.payload) {
-                (Some(acquired), Some(payload)) => {
-                    zup_windows::WindowsContent::Acquired(&acquired.manifest, payload)
-                }
-                _ => zup_windows::WindowsContent::Embedded(bundle),
+            content: match &self.acquired {
+                Some(content) => zup_windows::WindowsContent::Acquired(
+                    &content.release.manifest,
+                    &content.payload,
+                ),
+                None => zup_windows::WindowsContent::Embedded(bundle),
             },
             acquire_prerequisites: true,
         })
@@ -262,13 +268,17 @@ impl SessionHost for WindowsSessionHost {
             .into_iter()
             .next()
             .ok_or_else(|| "the release contains no target plan".to_owned())?;
-        self.payload = Some(Arc::new(payload));
-        self.acquired = Some(Arc::new(acquired));
+        self.acquired = Some(AcquiredContent {
+            release: Arc::new(acquired),
+            payload: Arc::new(payload),
+        });
         Ok(())
     }
 
     fn release_identity(&self) -> Option<zup_core::ReleaseIdentity> {
-        self.acquired.as_ref().map(|acquired| acquired.identity())
+        self.acquired
+            .as_ref()
+            .map(|content| content.release.identity())
     }
 
     fn bind<'a>(
@@ -329,15 +339,10 @@ impl SessionHost for WindowsSessionHost {
         context: &zup_session::OperationContext,
         prepared: &zup_runtime::PreparedOperation,
     ) -> Result<Arc<dyn zup_runtime::RuntimeBackend>, String> {
-        let backend = if let Some(payload) = &self.payload {
+        let backend = if let Some(content) = &self.acquired {
             zup_windows::WindowsRuntimeBackend::from_acquired(
-                Arc::clone(payload),
-                self.acquired
-                    .as_ref()
-                    .ok_or_else(|| "acquired content has no authenticated identity".to_owned())?
-                    .cache
-                    .root()
-                    .to_path_buf(),
+                Arc::clone(&content.payload),
+                content.release.cache.root().to_path_buf(),
             )
             .map_err(|error| error.to_string())?
         } else if prepared.action == zup_exec::LifecycleAction::Uninstall {
@@ -448,6 +453,7 @@ impl SessionHost for WindowsSessionHost {
             .map_err(|error| error.to_string())?;
         if let Some(acquired) = &self.acquired {
             acquired
+                .release
                 .record_retention(zup_acquire::CachePolicy::Auto)
                 .map_err(|error| error.to_string())?;
         }
@@ -561,7 +567,53 @@ impl Default for WindowsSessionHost {
             app_id: None,
             frontend: Frontend::Gui,
             acquired: None,
-            payload: None,
         }
     }
+}
+
+pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
+    use clap::Parser;
+    let cli = crate::terminal::Cli::parse();
+    if cli.operation.is_none()
+        && frontend == Frontend::Console
+        && !cli.non_interactive
+        && !cli.yes
+        && matches!(cli.output, crate::terminal::Output::Human)
+        && crate::run::console_is_a_terminal()
+    {
+        let executable =
+            std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
+        if zup_transaction::is_maintenance_path(&executable) {
+            return crate::maintenance::launch_terminal_runner(&executable);
+        }
+    }
+    if matches!(&cli.operation, Some(crate::terminal::Command::Uninstall))
+        && std::env::current_exe()
+            .is_ok_and(|executable| zup_transaction::is_maintenance_path(&executable))
+    {
+        let output = zup_presentation::OutputFormat::from(cli.output);
+        let args = crate::maintenance::UninstallArgs {
+            scope: cli.scope.map(|scope| match SelectedScope::from(scope) {
+                SelectedScope::User => crate::cli::ScopeArg::User,
+                SelectedScope::Machine => crate::cli::ScopeArg::Machine,
+            }),
+            output: match output {
+                zup_presentation::OutputFormat::Human => crate::cli::OutputArg::Human,
+                zup_presentation::OutputFormat::Json => crate::cli::OutputArg::Json,
+                zup_presentation::OutputFormat::Jsonl => crate::cli::OutputArg::Jsonl,
+            },
+            non_interactive: cli.non_interactive,
+            yes: cli.yes,
+            plain: cli.plain,
+            state_root: cli.state_root,
+            app_id: None,
+            work_root: None,
+            ui: false,
+        };
+        return crate::maintenance::run_uninstall(
+            crate::run::RuntimeContext::new(frontend).with_output(output),
+            args,
+        );
+    }
+    crate::terminal::run_cli(WindowsSessionHost::default(), frontend, cli)
 }

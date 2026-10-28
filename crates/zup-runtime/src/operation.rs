@@ -113,6 +113,21 @@ pub fn resolve_operation(
     }
 }
 
+pub fn maintenance_operations(
+    installed: &semver::Version,
+    package: &semver::Version,
+) -> Vec<Operation> {
+    let mut operations = match package.cmp(installed) {
+        std::cmp::Ordering::Greater => vec![Operation::Upgrade],
+        std::cmp::Ordering::Equal => {
+            vec![Operation::Modify, Operation::Repair { force_files: false }]
+        }
+        std::cmp::Ordering::Less => Vec::new(),
+    };
+    operations.push(Operation::Uninstall);
+    operations
+}
+
 pub struct OperationInput<'a> {
     pub build: &'a TargetBuildPlan,
     pub installer: &'a Path,

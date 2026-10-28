@@ -194,6 +194,20 @@ fn real_terminal_selects_components_confirms_and_cancels_without_mutation() {
     assert!(fixture.root.path().join("application/docs.txt").exists());
     assert_eq!(
         fixture.terminal(
+            &["--scope", "user"],
+            &[
+                ("Maintenance", "\r"),
+                ("Components", "\r"),
+                ("Proceed with these changes?", "y")
+            ],
+            80,
+            "xterm-256color"
+        ),
+        0
+    );
+
+    assert_eq!(
+        fixture.terminal(
             &["uninstall", "--scope", "user"],
             &[("Proceed with these changes?", "n")],
             80,
