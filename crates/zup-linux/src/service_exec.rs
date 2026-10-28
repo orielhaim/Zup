@@ -118,9 +118,7 @@ fn observe(
     manager: &mut dyn SystemdManager,
 ) -> Result<Observed, ExecError> {
     let source = read_source(canonical)?;
-    let policy = manager
-        .unit_file_state(unit)
-        .unwrap_or_else(|_| "unknown".to_owned());
+    let policy = manager.unit_file_state(unit).map_err(ExecError::from)?;
     Ok(Observed { source, policy })
 }
 
@@ -257,20 +255,21 @@ pub fn apply(
 
     validate_executable_live(&derived.command, context.roots, context.expected_uid)?;
 
-    let probe = context
-        .manager
-        .unit_file_state(&derived.unit)
-        .map_err(ExecError::from)?;
-    if policy_for_state(&probe).is_none() {
-        return Err(ExecError::Refused {
-            unit: derived.unit.clone(),
-            reason: format!("systemd reports unit-file state `{probe}`, which Zup does not own"),
-        });
-    }
-
     crate::service_ops::require_exec_baseline(context.manager)?;
     refuse_foreign_integration(&derived.unit, &canonical)?;
     let before = observe(&derived.unit, &canonical, context.manager)?;
+    let absent = before.policy == "not-found"
+        && before.source.is_none()
+        && matches!(op.previous, ObservedServiceState::Absent);
+    if policy_for_state(&before.policy).is_none() && !absent {
+        return Err(ExecError::Refused {
+            unit: derived.unit.clone(),
+            reason: format!(
+                "systemd reports unit-file state `{}`, which Zup does not own",
+                before.policy
+            ),
+        });
+    }
 
     let previous_source = before.source.map(|(digest, _)| hex(&digest));
 
@@ -690,7 +689,7 @@ fn restore_policy(
             manager.unmask(unit).map_err(ExecError::from)?;
             manager.enable(unit).map_err(ExecError::from)?;
         }
-        "disabled" => {
+        "disabled" | "not-found" => {
             manager.unmask(unit).map_err(ExecError::from)?;
             manager
                 .remove_owned_enablement(unit, &canonical.to_string_lossy())
@@ -700,7 +699,10 @@ fn restore_policy(
             manager.mask(unit).map_err(ExecError::from)?;
         }
         _ => {
-            manager.unmask(unit).map_err(ExecError::from)?;
+            return Err(ExecError::refused(
+                unit,
+                format!("cannot restore unit-file state `{previous}`"),
+            ));
         }
     }
     manager.reload().map_err(ExecError::from)?;

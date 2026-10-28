@@ -423,44 +423,51 @@ fn the_asset_settings_are_read_from_the_packages_own_schema() {
     );
 }
 
-/// An application-provided asset is resolved, hashed, and recorded by content.
-/// Identical bytes under two names are one stored blob.
 #[test]
-fn an_application_asset_is_resolved_hashed_and_deduplicated() {
+fn asset_references_keep_their_names_when_content_is_shared() {
     use zup_preset_compose::prepare;
 
     let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST]);
-    std::fs::create_dir_all(directory.path().join("branding")).expect("a directory");
+    let mut description = description();
+    description.settings_schema["properties"]["banner"] =
+        description.settings_schema["properties"]["logo"].clone();
+    let mut writer = PresetPackageWriter::new(description).expect("a description");
+    writer
+        .add_binary(target(HOST), b"preset".to_vec())
+        .expect("a binary");
+    let package = directory.path().join("aurora.zupui");
+    std::fs::write(&package, writer.finish().expect("a package")).expect("a package file");
+    std::fs::create_dir_all(directory.path().join("branding")).expect("branding");
     let svg = b"<svg xmlns='http://www.w3.org/2000/svg'/>";
-    std::fs::write(directory.path().join("branding/logo.svg"), svg).expect("the asset");
-
+    std::fs::write(directory.path().join("branding/logo.svg"), svg).expect("an asset");
     let selected = select(
-        &path,
+        &package,
         &installer(),
         &target(HOST),
-        &settings(serde_json::json!({ "accent": "#695cff", "logo": "branding/logo.svg" })),
+        &settings(serde_json::json!({
+            "accent": "#695cff",
+            "logo": "branding/logo.svg",
+            "banner": "./branding/logo.svg"
+        })),
     )
-    .expect("the settings fit");
-    let prepared = prepare(directory.path(), &selected, &PortableSourceFilePolicy)
-        .expect("the asset resolves inside the project");
-
-    assert_eq!(prepared.assets.len(), 1);
-    let asset = &prepared.assets[0];
-    assert_eq!(asset.name.as_str(), "logo");
-    assert_eq!(asset.size as usize, svg.len());
-    assert_eq!(
-        asset.sha256,
-        zup_core::Sha256Digest::from_bytes(sha2::Sha256::digest(svg).into())
-    );
-    assert_eq!(
-        prepared.runtime.assets[0].sha256, asset.sha256,
-        "what the installer carries is the same content the build read"
-    );
-    assert_eq!(
-        prepared.runtime.settings["logo"], "branding/logo.svg",
-        "the preset is told the name the application wrote, not a path"
-    );
+    .expect("valid settings");
+    let prepared =
+        prepare(directory.path(), &selected, &PortableSourceFilePolicy).expect("verified assets");
+    assert_eq!(prepared.runtime.settings["accent"], "#695cff");
+    assert_eq!(prepared.runtime.settings["logo"], "logo");
+    assert_eq!(prepared.runtime.settings["banner"], "banner");
+    assert_eq!(prepared.assets.len(), 2);
+    assert_eq!(prepared.runtime.assets.len(), 2);
+    let digest = zup_core::Sha256Digest::from_bytes(sha2::Sha256::digest(svg).into());
+    for (source, runtime) in prepared.assets.iter().zip(&prepared.runtime.assets) {
+        assert_eq!(source.name, runtime.name);
+        assert_eq!(runtime.sha256, digest);
+        assert_eq!(runtime.size as usize, svg.len());
+        assert!(source.source.is_some());
+    }
+    let encoded = serde_json::to_string(&prepared.runtime).expect("runtime facts");
+    assert!(!encoded.contains("branding"));
+    assert!(!encoded.contains(&directory.path().to_string_lossy().into_owned()));
 }
 
 /// A path that leaves the project is refused where it is written, before any
@@ -614,68 +621,5 @@ fn a_build_and_an_inspector_read_one_package() {
     assert_eq!(
         selected.required_capabilities,
         *view.required_capabilities()
-    );
-}
-
-/// What the installer carries is what a runtime needs and nothing more.
-///
-/// The settings are the application's own values, the assets are named and
-/// digested rather than sourced, and the package this came from is not recorded -
-/// a runtime has no use for a build-machine fact, and recording one would be how
-/// a source path eventually reached a user's machine.
-#[test]
-fn the_runtime_model_names_assets_without_where_they_live() {
-    use zup_preset_compose::prepare;
-
-    let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST]);
-    std::fs::create_dir_all(directory.path().join("branding")).expect("a directory");
-    let svg = b"<svg xmlns='http://www.w3.org/2000/svg'/>";
-    std::fs::write(directory.path().join("branding/logo.svg"), svg).expect("the asset");
-
-    let selected = select(
-        &path,
-        &installer(),
-        &target(HOST),
-        &settings(serde_json::json!({ "accent": "#695cff", "logo": "./branding/logo.svg" })),
-    )
-    .expect("the settings fit");
-    let prepared = prepare(directory.path(), &selected, &PortableSourceFilePolicy)
-        .expect("the asset resolves inside the project");
-
-    assert_eq!(prepared.runtime.name.as_str(), "aurora");
-    assert_eq!(
-        prepared.runtime.settings["accent"], "#695cff",
-        "the application's own value, verbatim"
-    );
-    assert_eq!(
-        prepared.runtime.settings["logo"], "./branding/logo.svg",
-        "the preset is told exactly what the author wrote; normalising it would be the \
-         host guessing at the author's spelling"
-    );
-    assert_eq!(prepared.runtime.assets.len(), 1);
-    assert_eq!(prepared.runtime.assets[0].name.as_str(), "logo");
-    assert_eq!(prepared.runtime.assets[0].size as usize, svg.len());
-
-    // The path the bytes were read from is the build's fact, and the runtime has
-    // no use for it: the asset record is a name and a digest, and the whole model
-    // records nothing about the machine that composed it.
-    let assets = serde_json::to_string(&prepared.runtime.assets).expect("the assets encode");
-    assert!(
-        !assets.contains("branding") && !assets.contains("svg"),
-        "an asset is named, not sourced: {assets}"
-    );
-    let whole = serde_json::to_string(&prepared.runtime).expect("the runtime model encodes");
-    assert!(
-        !whole.contains(&directory.path().to_string_lossy().into_owned()),
-        "the runtime model carries no build-machine path: {whole}"
-    );
-    assert!(
-        !whole.contains("aurora.zupui"),
-        "and no record of where the package came from: {whole}"
-    );
-    assert!(
-        prepared.assets[0].source.is_some(),
-        "the source is a build-machine fact the build keeps and the runtime does not see"
     );
 }

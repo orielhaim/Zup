@@ -215,7 +215,6 @@ impl RenderOnce for AppIdentity {
                         self.product
                             .description
                             .clone()
-                            .filter(|_| !self.compact)
                             .map(|description| muted(description, cx).line_clamp(2)),
                     )
                     .children(self.note.map(|note| caption(note, cx))),

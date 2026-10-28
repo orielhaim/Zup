@@ -169,13 +169,18 @@ impl SystemdManager for RealSystemd {
         let proxy = self.manager()?;
         let unit = unit.to_owned();
         self.call("unit-file-state", async {
-            proxy
-                .get_unit_file_state(unit.clone())
-                .await
-                .map_err(|error| IpcError::SystemdRefused {
+            match proxy.get_unit_file_state(unit.clone()).await {
+                Ok(state) => Ok(state),
+                Err(zbus_systemd::zbus::Error::MethodError(name, _, _))
+                    if name.as_str() == "org.freedesktop.DBus.Error.FileNotFound" =>
+                {
+                    Ok("not-found".into())
+                }
+                Err(error) => Err(IpcError::SystemdRefused {
                     unit: unit.clone(),
                     reason: format!("unit-file state: {error}"),
-                })
+                }),
+            }
         })
     }
 

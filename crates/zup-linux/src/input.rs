@@ -265,16 +265,6 @@ pub fn compile_machine_execution_plan(
     }
 
     if !execution.services.is_empty() || !service_removals.is_empty() {
-        manager
-            .unit_file_state("zup-preflight.service")
-            .map(|_| ())
-            .or_else(|error| match &error {
-                crate::error::IpcError::SystemdRefused { .. } => Ok(()),
-                _ => Err(PlanError::Service {
-                    unit: String::new(),
-                    reason: format!("systemd is unavailable: {error}"),
-                }),
-            })?;
         crate::service_ops::require_exec_baseline(manager).map_err(into_service)?;
     }
 

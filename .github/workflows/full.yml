@@ -82,6 +82,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
 
+      - name: Linux native service lifecycle
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo env PATH="$PATH" RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" \
+            ZUP_TEST_REAL_SYSTEMD=1 CARGO_INCREMENTAL=0 \
+            cargo nextest run -p zup-linux --all-features --test services_systemd --no-fail-fast
+
       - name: Toolchain
         run: cargo xtask toolchain build
 
@@ -97,14 +105,6 @@ jobs:
         if: matrix.platform == 'linux'
         shell: bash
         run: cargo nextest run --all-features --no-fail-fast $PORTABLE $LINUX
-
-      - name: Linux native service lifecycle
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          sudo env PATH="$PATH" RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" \
-            ZUP_TEST_REAL_SYSTEMD=1 CARGO_INCREMENTAL=0 \
-            cargo nextest run -p zup-linux --all-features --test services_systemd --no-fail-fast
 
       - name: Upload staged toolchain
         uses: actions/upload-artifact@v7
