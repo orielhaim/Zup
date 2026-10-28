@@ -177,6 +177,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: terminal-${{ runner.os }}-${{ runner.arch }}
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+          cache-on-failure: true
       - name: Terminal and automation lifecycle
         run: cargo test -p zup-installer --no-default-features --features console,headless --test terminal

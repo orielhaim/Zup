@@ -388,7 +388,7 @@ impl Progress {
             plain,
         }
     }
-    pub fn event(&mut self, event: &InstallerEvent) {
+    pub fn event(&mut self, event: &InstallerEvent) -> io::Result<()> {
         let plain = self.console.plain();
         if plain != self.plain {
             self.bar.set_draw_target(if plain {
@@ -410,24 +410,20 @@ impl Progress {
                 self.bar.set_position(*completed);
                 self.bar.set_message(text(label));
                 if plain && self.last.elapsed() >= Duration::from_secs(1) {
-                    eprintln!("  {completed}/{total} {}", text(label));
+                    self.status(format_args!("  {completed}/{total} {}", text(label)))?;
                     self.last = Instant::now();
                 }
             }
             InstallerEvent::Phase { state }
                 if !state.starts_with("operation:") && !state.starts_with("staging:") =>
             {
-                self.bar
-                    .suspend(|| eprintln!("  {}", text(state.replace('_', " "))));
+                self.status(format_args!("  {}", text(state.replace('_', " "))))?;
             }
             InstallerEvent::Blocked { message, .. } => {
-                self.bar
-                    .suspend(|| eprintln!("  Blocked: {}", text(message)));
+                self.status(format_args!("  Blocked: {}", text(message)))?;
             }
             InstallerEvent::Cancelling { .. } => {
-                self.bar.suspend(|| {
-                    eprintln!("  Cancelling safely. Please wait for rollback to finish.")
-                });
+                self.status("  Cancelling safely. Please wait for rollback to finish.")?;
             }
             InstallerEvent::PrerequisiteDownload {
                 id,
@@ -443,11 +439,15 @@ impl Progress {
                 ));
             }
             InstallerEvent::PrerequisiteInstall { name, .. } => {
-                self.bar
-                    .suspend(|| eprintln!("  Installing prerequisite: {}", text(name)));
+                self.status(format_args!("  Installing prerequisite: {}", text(name)))?;
             }
             _ => {}
         }
+        Ok(())
+    }
+    fn status(&self, message: impl std::fmt::Display) -> io::Result<()> {
+        self.bar
+            .suspend(|| writeln!(io::stderr().lock(), "{message}"))
     }
     pub fn finish(&mut self) {
         self.bar.finish_and_clear();

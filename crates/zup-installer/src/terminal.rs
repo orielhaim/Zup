@@ -227,7 +227,17 @@ pub(crate) fn run_cli<H: SessionHost>(
         }
         (message, detail) => message.or(detail),
     };
-    report.finish()?;
+    if let Err(error) = report.finish() {
+        return Err(Failure {
+            outcome: if outcome == ProcessOutcome::Success {
+                ProcessOutcome::Failure
+            } else {
+                outcome
+            },
+            message: error.to_string(),
+        }
+        .into());
+    }
     if outcome == ProcessOutcome::Success {
         Ok(())
     } else {
@@ -422,7 +432,10 @@ fn drive<H: SessionHost>(
                 let message = report.result.message.get_or_insert_with(String::new);
                 message.push_str(&format!("\nTransaction state: {}\n{details}", context.state_root.display()));
             }
-            if let Some(error) = reporting_error { return Err(error); }
+            if let Some(error) = reporting_error {
+                let process = zup_session::process_outcome(&outcome);
+                return Err(Failure { outcome: if process == ProcessOutcome::Success { ProcessOutcome::Failure } else { process }, message: format!("reporting failed: {error}") }.into());
+            }
             Ok(outcome)
         })
 }
@@ -479,7 +492,8 @@ impl Report {
             #[cfg(not(feature = "console"))]
             let rendered = false;
             if !rendered && !state.starts_with("operation:") && !state.starts_with("staging:") {
-                eprintln!("  {}", state.replace('_', " "));
+                writeln!(std::io::stderr().lock(), "  {}", state.replace('_', " "))
+                    .map_err(|error| miette::miette!("terminal output: {error}"))?;
             }
         }
         if self.output == OutputFormat::Jsonl {
@@ -487,7 +501,9 @@ impl Report {
         }
         #[cfg(feature = "console")]
         if let Some(progress) = &mut self.progress {
-            progress.event(event);
+            progress
+                .event(event)
+                .map_err(|error| miette::miette!("terminal output: {error}"))?;
         }
         Ok(())
     }
@@ -560,26 +576,30 @@ impl Report {
                 self.event(&event)?;
             }
             OutputFormat::Human => {
-                if self.result.outcome == ProcessOutcome::Success {
-                    println!("Completed successfully.");
+                let output = if self.result.outcome == ProcessOutcome::Success {
+                    writeln!(std::io::stdout().lock(), "Completed successfully.")
                 } else if self.result.outcome == ProcessOutcome::Cancelled {
-                    eprintln!("Cancelled safely.");
+                    writeln!(std::io::stderr().lock(), "Cancelled safely.")
                 } else {
                     let message = self
                         .result
                         .message
                         .as_deref()
                         .unwrap_or("The operation did not complete.");
-                    eprintln!("{message}");
                     let diagnostic = zup_presentation::DiagnosticPresentation::from_message(
                         message,
                         self.result.outcome == ProcessOutcome::RecoveryRequired,
                     );
-                    eprintln!("{}", diagnostic.recovery);
-                    if let Some(log) = &self.result.log_path {
-                        eprintln!("Log: {log}");
-                    }
-                }
+                    let mut stderr = std::io::stderr().lock();
+                    writeln!(stderr, "{message}\n{}", diagnostic.recovery).and_then(|_| {
+                        if let Some(log) = &self.result.log_path {
+                            writeln!(stderr, "Log: {log}")
+                        } else {
+                            Ok(())
+                        }
+                    })
+                };
+                output.map_err(|error| miette::miette!("terminal output: {error}"))?;
             }
         }
         Ok(())
@@ -589,8 +609,9 @@ impl Report {
 fn write_json(value: &impl serde::Serialize) -> miette::Result<()> {
     let mut line = serde_json::to_vec(value).map_err(|error| miette::miette!("output: {error}"))?;
     line.push(b'\n');
-    std::io::stdout()
-        .lock()
+    let mut output = std::io::stdout().lock();
+    output
         .write_all(&line)
+        .and_then(|_| output.flush())
         .map_err(|error| miette::miette!("output: {error}"))
 }
