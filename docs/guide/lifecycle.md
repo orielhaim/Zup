@@ -6,7 +6,7 @@ A fresh installer resolves scope, components, install directory, prerequisites a
 
 ## Upgrade
 
-Running a newer package against an existing installation upgrades it. A lower version is refused.
+An interactive newer package offers Upgrade for the existing installation. Automation runs `upgrade --scope user` or `upgrade --scope machine`. A lower version is refused.
 
 ## Modify
 
