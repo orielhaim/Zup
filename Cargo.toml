@@ -17,6 +17,9 @@ strip = "symbols"
 [profile.dev.package.zstd-sys]
 opt-level = 3
 
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
