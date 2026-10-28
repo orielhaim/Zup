@@ -47,6 +47,8 @@ The common operation interface is:
 
 Use the `.exe` executable on Windows. An installer declaring `scope = "either"` requires `--scope` outside interactive mode. Fixed-scope installers do not ask. `--install-directory PATH` is accepted only when the manifest permits it. Repair uses the committed location and component selection. `repair --force-files` explicitly permits restoring edited managed files; ordinary repair preserves them or reports a conflict.
 
-Thin installers collect choices before acquiring selected content. Acquisition still authenticates release metadata and verifies content before mutation. Windows maintenance may open a staged helper terminal so uninstall can remove the installed runtime after its original process exits. For automation that must observe the final process exit code, run the downloaded installer rather than its installed self-uninstall entry.
+Thin runtimes collect component choices before acquiring selected content. Their launcher selects scope before acquiring the runtime. Acquisition still authenticates release metadata and verifies content before mutation. Windows maintenance may open a staged helper terminal so uninstall can remove the installed runtime after its original process exits. For automation that must observe the final process exit code, run the downloaded installer rather than its installed self-uninstall entry.
 
 See [automation output](/reference/automation) for JSON and live JSONL results. `--yes` or `--non-interactive` also suppresses Console prompts. Neither flag replaces native authorization.
+
+See [terminal installer measurements](/ship/terminal-size) for dependency choices, distribution sizes, and verification limits.
