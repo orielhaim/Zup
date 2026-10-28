@@ -17,7 +17,7 @@ pub const SERVICE_BACKEND_PREFIX: &str = "linux:service:";
 pub const MAX_UNIT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServicePayload {
     Apply {
         service: ServiceOperation,
@@ -27,8 +27,9 @@ pub enum ServicePayload {
         binary_owned: bool,
 
         previous_policy: String,
-
-        force: bool,
+        // Require an explicit absence so incomplete journals fail closed.
+        #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+        previous_source: Option<Vec<u8>>,
     },
     Remove {
         key: ResourceKey,
@@ -66,11 +67,37 @@ pub fn ledger_key_for_payload(payload: &ServicePayload) -> ResourceKey {
     }
 }
 
-pub fn encode_payload(payload: &ServicePayload) -> Result<Vec<u8>, ExecError> {
-    if matches!(payload, ServicePayload::Apply { unit_bytes, .. } if unit_bytes.len() > MAX_UNIT_BYTES)
+fn validate_payload(payload: &ServicePayload) -> Result<(), ExecError> {
+    if let ServicePayload::Apply {
+        unit_bytes,
+        previous_source,
+        ..
+    } = payload
+        && (unit_bytes.len() > MAX_UNIT_BYTES
+            || previous_source
+                .as_ref()
+                .is_some_and(|bytes| bytes.len() > MAX_UNIT_BYTES))
     {
         return Err(ExecError::refused("", "a unit source exceeds its bound"));
     }
+    if let ServicePayload::Apply {
+        previous_policy, ..
+    } = payload
+        && !matches!(
+            previous_policy.as_str(),
+            "enabled" | "disabled" | "masked" | "not-found"
+        )
+    {
+        return Err(ExecError::refused(
+            "",
+            "the unit before-image has an unsupported policy",
+        ));
+    }
+    Ok(())
+}
+
+pub fn encode_payload(payload: &ServicePayload) -> Result<Vec<u8>, ExecError> {
+    validate_payload(payload)?;
     serde_json::to_vec(payload)
         .map_err(|error| ExecError::refused("", format!("service payload: {error}")))
 }
@@ -82,8 +109,10 @@ pub fn decode_payload(bytes: &[u8]) -> Result<ServicePayload, ExecError> {
             "a service payload exceeds its bound",
         ));
     }
-    serde_json::from_slice(bytes)
-        .map_err(|error| ExecError::refused("", format!("invalid service payload: {error}")))
+    let payload = serde_json::from_slice(bytes)
+        .map_err(|error| ExecError::refused("", format!("invalid service payload: {error}")))?;
+    validate_payload(&payload)?;
+    Ok(payload)
 }
 
 pub fn desired_policy(start: ServiceStart) -> &'static str {

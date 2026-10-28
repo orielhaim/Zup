@@ -622,6 +622,20 @@ fn repair_restores_the_source() {
             .starts_with(b"[Unit]\n#"),
         "nothing was overwritten without force"
     );
+    let damaged = fixture.source(&unit).expect("damaged source");
+    fixture
+        .manager
+        .borrow_mut()
+        .fail_next
+        .insert("reload".into(), "injected failure".into());
+    let (outcome, _) = fixture
+        .run(&plan, LifecycleAction::Repair { force_files: true }, true)
+        .expect("failed repair settles");
+    assert_eq!(outcome, TransactionOutcome::RolledBack);
+    assert_eq!(
+        fixture.source(&unit).expect("previous source survives"),
+        damaged
+    );
     fixture.commit(&plan, LifecycleAction::Repair { force_files: true }, true);
     assert_eq!(fixture.source(&unit).expect("force restores"), healthy);
 }

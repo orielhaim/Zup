@@ -101,9 +101,10 @@ quit                        stop the preview
 zup build
 ```
 
-Writes `Demo App-Setup.exe` and `zup-release.json` here. The executable is about
-90 MiB, almost all of it the installer runtime and the preset; the payload is
-2.7 KiB.
+Writes `Demo App-Setup.exe` and `zup-release.json` here. Run
+`zup artifact inspect "Demo App-Setup.exe"` to measure the artifact and its payload.
+GUI builds include a native preset; console and headless builds omit it. Build
+profile and target also affect size.
 
 Run the installer, and work through:
 

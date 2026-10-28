@@ -407,7 +407,7 @@ where
                 },
             )?;
         }
-        Ok(ReconcileResult::Ambiguous) | Err(_) => {
+        Ok(ReconcileResult::Incomplete | ReconcileResult::Ambiguous) | Err(_) => {
             commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
         }
     }
@@ -474,7 +474,7 @@ where
                 operation: op_id.to_string(),
                 message: error.to_string(),
             })? {
-            ReconcileResult::NotApplied => {
+            ReconcileResult::NotApplied | ReconcileResult::Incomplete => {
                 commit_node(record, store, op_id, NodeState::Pending)?;
             }
             ReconcileResult::Applied => {

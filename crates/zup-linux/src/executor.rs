@@ -2340,11 +2340,13 @@ impl LinuxFileExecutor {
             ServicePayload::Apply {
                 service,
                 previous_policy,
+                previous_source,
                 ..
             } => {
                 let (outcome, receipt) = crate::service_exec::reconcile_apply(
                     service,
                     previous_policy,
+                    previous_source.as_deref(),
                     decoded.as_ref(),
                     &mut context,
                 )?;
@@ -2356,6 +2358,9 @@ impl LinuxFileExecutor {
                     }
                     crate::service_exec::ServiceReconcile::NotApplied => {
                         ReconcileResult::NotApplied
+                    }
+                    crate::service_exec::ServiceReconcile::Incomplete => {
+                        ReconcileResult::Incomplete
                     }
                     crate::service_exec::ServiceReconcile::Ambiguous => ReconcileResult::Ambiguous,
                 })
@@ -2375,6 +2380,9 @@ impl LinuxFileExecutor {
                     }
                     crate::service_exec::ServiceReconcile::NotApplied => {
                         ReconcileResult::NotApplied
+                    }
+                    crate::service_exec::ServiceReconcile::Incomplete => {
+                        ReconcileResult::Incomplete
                     }
                     crate::service_exec::ServiceReconcile::Ambiguous => ReconcileResult::Ambiguous,
                 })
