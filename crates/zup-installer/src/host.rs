@@ -496,7 +496,7 @@ impl Launch {
         Self {
             maintenance: false,
             auto_uninstall: false,
-            scope: args.scope.choice(),
+            scope: args.scope.map(Into::into),
             state_root: args.state_root.clone(),
             preselected: (!args.enable.is_empty()).then(|| {
                 args.enable
@@ -511,7 +511,7 @@ impl Launch {
         Self {
             maintenance: true,
             auto_uninstall: true,
-            scope: args.scope.and_then(crate::cli::ScopeArg::choice),
+            scope: args.scope.map(Into::into),
             state_root: args.state_root.clone(),
             preselected: None,
         }
@@ -585,8 +585,59 @@ impl Default for WindowsSessionHost {
     }
 }
 
+pub(crate) fn command() -> clap::Command {
+    crate::terminal::command().subcommand(
+        clap::Command::new("update")
+            .about("Check for and install authenticated updates")
+            .subcommand(clap::Command::new("check"))
+            .arg(
+                clap::Arg::new("source")
+                    .long("source")
+                    .value_name("PATH")
+                    .value_parser(clap::value_parser!(PathBuf))
+                    .value_hint(clap::ValueHint::DirPath),
+            ),
+    )
+}
+
 pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
-    let cli = crate::terminal::parse();
+    use clap::FromArgMatches;
+    let mut matches = crate::terminal::parse_matches(command());
+    if matches.subcommand_name() == Some("update") {
+        let (_, update) = matches
+            .remove_subcommand()
+            .expect("selected native operation");
+        let cli =
+            crate::terminal::Cli::from_arg_matches(&matches).expect("validated terminal arguments");
+        let output = cli.output.into();
+        let args = crate::maintenance::UpdateArgs {
+            command: update
+                .subcommand_name()
+                .map(|_| crate::maintenance::UpdateCommand::Check),
+            scope: cli.scope,
+            output: cli.output,
+            non_interactive: cli.non_interactive,
+            yes: cli.yes,
+            plain: cli.plain,
+            state_root: cli.state_root,
+            source: update.get_one::<PathBuf>("source").cloned(),
+        };
+        let result = crate::maintenance::run_update(
+            crate::run::RuntimeContext::new(frontend).with_output(output),
+            args,
+        );
+        if let Err(error) = &result
+            && !crate::execute::already_reported(error)
+            && error
+                .downcast_ref::<crate::terminal::ReportedFailure>()
+                .is_none()
+        {
+            crate::emit_failure(output, error);
+        }
+        return result;
+    }
+    let cli =
+        crate::terminal::Cli::from_arg_matches(&matches).expect("validated terminal arguments");
     if cli.operation.is_none()
         && frontend == Frontend::Console
         && !cli.non_interactive
@@ -606,15 +657,8 @@ pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
     {
         let output = zup_presentation::OutputFormat::from(cli.output);
         let args = crate::maintenance::UninstallArgs {
-            scope: cli.scope.map(|scope| match SelectedScope::from(scope) {
-                SelectedScope::User => crate::cli::ScopeArg::User,
-                SelectedScope::Machine => crate::cli::ScopeArg::Machine,
-            }),
-            output: match output {
-                zup_presentation::OutputFormat::Human => crate::cli::OutputArg::Human,
-                zup_presentation::OutputFormat::Json => crate::cli::OutputArg::Json,
-                zup_presentation::OutputFormat::Jsonl => crate::cli::OutputArg::Jsonl,
-            },
+            scope: cli.scope,
+            output: cli.output,
             non_interactive: cli.non_interactive,
             yes: cli.yes,
             plain: cli.plain,
@@ -672,11 +716,7 @@ pub(crate) fn terminal_handoff(
         non_interactive: args.non_interactive,
         yes: args.yes,
         plain: args.plain,
-        output: match args.output() {
-            zup_presentation::OutputFormat::Human => crate::terminal::Output::Human,
-            zup_presentation::OutputFormat::Json => crate::terminal::Output::Json,
-            zup_presentation::OutputFormat::Jsonl => crate::terminal::Output::Jsonl,
-        },
+        output: args.output,
     };
     let host = WindowsSessionHost {
         handoff: Some(Arc::new(accepted)),

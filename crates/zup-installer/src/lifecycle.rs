@@ -108,7 +108,7 @@ pub fn transition(
                 .installer
                 .install
                 .scope
-                .select(args.scope.choice())
+                .select(args.scope.map(Into::into))
                 .map_err(|error| {
                     miette::miette!("{error}; specify --scope user or --scope machine")
                 })?;
@@ -175,7 +175,7 @@ fn run_handoff(
         miette::miette!("{error}")
     })?;
     let resume = accepted.session.resume_line();
-    if args.output == crate::cli::OutputArg::Human && !resume.is_empty() {
+    if args.output == crate::terminal::Output::Human && !resume.is_empty() {
         eprintln!("{resume}");
     }
     let expected = match accepted.mode {
@@ -251,7 +251,7 @@ fn run_graph_transition(
     let scope = installer
         .install
         .scope
-        .select(args.scope.choice())
+        .select(args.scope.map(Into::into))
         .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?;
     let state_root = state::resolve_state_root(args.state_root.clone(), scope)?;
     let ledger = zup_windows::InstallLedgerStore::new(&state_root)
@@ -289,8 +289,11 @@ fn run_graph_transition(
     let seeds: Vec<PathBuf> = args.source.iter().cloned().collect();
     let (sink, receiver) = zup_acquire::ProgressSink::channel(256);
     let emitter = match args.output {
-        crate::cli::OutputArg::Jsonl => Some(zup_presentation::acquisition_thread(receiver)),
-        _ => None,
+        crate::terminal::Output::Jsonl => Some(zup_presentation::acquisition_thread(receiver)),
+        _ => {
+            drop(receiver);
+            None
+        }
     };
     let tokio = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

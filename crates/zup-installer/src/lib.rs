@@ -82,7 +82,7 @@ pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
 pub fn command() -> clap::Command {
     #[cfg(windows)]
     {
-        terminal::command()
+        host::command()
     }
     #[cfg(target_os = "linux")]
     {
@@ -132,13 +132,20 @@ fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) 
 #[cfg(windows)]
 fn native_command() -> bool {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.iter().any(|argument| argument == "--source")
+        && host::command()
+            .try_get_matches_from(std::env::args_os())
+            .is_ok()
+    {
+        return false;
+    }
     arguments.iter().any(|argument| {
         matches!(
             argument.as_str(),
             "__worker" | "__recover" | "__uninstall_runner" | "__terminal_runner" | "__upgrade"
         ) || matches!(
             argument.as_str(),
-            "update" | "--handoff" | "--acquired" | "--source" | "--ui"
+            "--handoff" | "--acquired" | "--source" | "--ui"
         )
     })
 }

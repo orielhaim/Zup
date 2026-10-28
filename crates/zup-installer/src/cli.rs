@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum, ValueHint};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueHint};
 
 use zup_presentation::OutputFormat;
 
 use crate::frontend;
 use crate::lifecycle;
 use crate::run::RuntimeContext;
+use crate::terminal::{Output, Scope};
 
 pub fn invoked_name() -> String {
     std::env::args_os()
@@ -124,8 +125,8 @@ pub(crate) enum Commands {
 
 #[derive(Debug, Clone, Default, Args)]
 pub struct LifecycleArgs {
-    #[arg(long, value_enum, default_value = "either")]
-    pub scope: ScopeArg,
+    #[arg(long, value_enum)]
+    pub scope: Option<Scope>,
     #[arg(long = "enable", alias = "component", value_name = "ID")]
     pub enable: Vec<String>,
     #[arg(long = "disable", value_name = "ID")]
@@ -133,7 +134,7 @@ pub struct LifecycleArgs {
     #[arg(long, alias = "install-dir", value_name = "PATH", value_hint = ValueHint::DirPath)]
     pub install_directory: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "human")]
-    pub output: OutputArg,
+    pub output: Output,
     /// Never ask a question.
     #[arg(long)]
     pub non_interactive: bool,
@@ -186,62 +187,6 @@ pub(crate) struct UninstallRunnerArgs {
     wait_pid: u32,
     #[command(flatten)]
     uninstall: crate::maintenance::UninstallArgs,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum ScopeArg {
-    User,
-    Machine,
-    #[default]
-    Either,
-}
-
-impl ScopeArg {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Machine => "machine",
-            Self::Either => "either",
-        }
-    }
-}
-
-impl ScopeArg {
-    pub fn choice(self) -> Option<zup_core::SelectedScope> {
-        match self {
-            Self::User => Some(zup_core::SelectedScope::User),
-            Self::Machine => Some(zup_core::SelectedScope::Machine),
-            Self::Either => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum OutputArg {
-    #[default]
-    Human,
-    Json,
-    Jsonl,
-}
-
-impl OutputArg {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Human => "human",
-            Self::Json => "json",
-            Self::Jsonl => "jsonl",
-        }
-    }
-}
-
-impl From<OutputArg> for OutputFormat {
-    fn from(value: OutputArg) -> Self {
-        match value {
-            OutputArg::Human => Self::Human,
-            OutputArg::Json => Self::Json,
-            OutputArg::Jsonl => Self::Jsonl,
-        }
-    }
 }
 
 impl Cli {

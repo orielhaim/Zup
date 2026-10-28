@@ -3,25 +3,25 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueHint};
 use zup_acquire::CachePolicy;
-use zup_core::{AppId, Frontend, InstallScope, SelectedScope};
+use zup_core::{AppId, Frontend, SelectedScope};
 use zup_exec::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{ExecutionPolicy, RuntimeRequest};
 use zup_transaction::{NodeKind, TransactionId, TransactionStore};
 use zup_update::{ComponentSelection, TrustContext};
 
-use crate::cli::{OutputArg, ScopeArg};
 use crate::lifecycle::{self, PreparedRuntime};
 use crate::package;
 use crate::run::RuntimeContext;
+use crate::terminal::{Output, Scope};
 use crate::{acquire, execute};
 
 #[derive(Debug, Clone, Args)]
 pub struct UninstallArgs {
     #[arg(long, value_enum)]
-    pub scope: Option<ScopeArg>,
+    pub scope: Option<Scope>,
     #[arg(long, value_enum, default_value = "human")]
-    pub output: OutputArg,
+    pub output: Output,
     /// Never ask a question.
     #[arg(long)]
     pub non_interactive: bool,
@@ -56,11 +56,7 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
 
     if context.frontend != Frontend::Gui && package::open_bundle_if_present(&executable)?.is_some()
     {
-        let scope = match args.scope {
-            Some(ScopeArg::User) => Some(SelectedScope::User),
-            Some(ScopeArg::Machine) => Some(SelectedScope::Machine),
-            Some(ScopeArg::Either) | None => None,
-        };
+        let scope = args.scope.map(Into::into);
         return crate::terminal::uninstall(
             crate::host::WindowsSessionHost::default(),
             context.with_output(args.output()),
@@ -101,7 +97,7 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
     let (scope, state_root) = resolve_scope(
         &app_id,
         build.as_ref().map(|build| &build.installer),
-        args.scope.unwrap_or(ScopeArg::Either),
+        args.scope.map(Into::into),
         args.state_root.as_deref(),
     )?;
     let output = args.output();
@@ -204,38 +200,30 @@ fn prepare_from_ledger(
 fn resolve_scope(
     app_id: &AppId,
     installer: Option<&zup_core::Installer>,
-    requested: ScopeArg,
+    requested: Option<SelectedScope>,
     state_root: Option<&Path>,
 ) -> miette::Result<(SelectedScope, PathBuf)> {
-    let declared = installer.map(|installer| installer.install.scope);
-    let allowed: &[SelectedScope] = match declared {
-        Some(InstallScope::User) => &[SelectedScope::User],
-        Some(InstallScope::Machine) => &[SelectedScope::Machine],
-        Some(InstallScope::Either) | None => &[SelectedScope::User, SelectedScope::Machine],
-    };
-    if declared == Some(InstallScope::Machine) {
-        return Ok((
-            SelectedScope::Machine,
-            resolve_state_root(state_root.map(Path::to_path_buf), SelectedScope::Machine)?,
-        ));
-    }
-    let named = match requested {
-        ScopeArg::User => Some(SelectedScope::User),
-        ScopeArg::Machine => Some(SelectedScope::Machine),
-        ScopeArg::Either => None,
-    };
-    if let Some(scope) = named {
-        if !allowed.contains(&scope) {
-            return Err(miette::miette!(
-                "this application does not install into the {scope} scope"
-            ));
-        }
+    if let Some(installer) = installer {
+        let scope =
+            installer.install.scope.select(requested).map_err(|error| {
+                miette::miette!("{error}; specify --scope user or --scope machine")
+            })?;
         return Ok((
             scope,
             resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
         ));
     }
-    discover_scope(app_id, allowed, state_root)
+    if let Some(scope) = requested {
+        return Ok((
+            scope,
+            resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
+        ));
+    }
+    discover_scope(
+        app_id,
+        &[SelectedScope::User, SelectedScope::Machine],
+        state_root,
+    )
 }
 
 fn discover_scope(
@@ -262,10 +250,8 @@ fn discover_scope(
     if let Some(result) = found.pop() {
         return Ok(result);
     }
-    let scope = SelectedScope::User;
-    Ok((
-        scope,
-        resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
+    Err(miette::miette!(
+        "this application is not installed; specify --scope to inspect one installation"
     ))
 }
 
@@ -279,7 +265,7 @@ pub fn launch_runner(
     let interactive = crate::run::console_is_a_terminal()
         && !args.non_interactive
         && !args.yes
-        && args.output == OutputArg::Human;
+        && args.output == Output::Human;
     let mut command = runner_command(executable, "__uninstall_runner", interactive)?;
     if ui {
         command.arg("--ui");
@@ -305,7 +291,7 @@ pub fn launch_runner(
     if args.plain {
         command.arg("--plain");
     }
-    if args.output != OutputArg::Human {
+    if args.output != Output::Human {
         command.arg("--output").arg(args.output.as_str());
     }
     command
@@ -380,7 +366,7 @@ mod tests {
             frontend: Frontend::Headless,
             updates: None,
             install: zup_core::Install {
-                scope: InstallScope::Machine,
+                scope: zup_core::InstallScope::Machine,
                 directory: zup_core::InstallDirectory {
                     user: None,
                     machine: None,
@@ -398,13 +384,14 @@ mod tests {
             protocols: Vec::new(),
             file_associations: Vec::new(),
         };
-        let (scope, root) = resolve_scope(&app, Some(&installer), ScopeArg::User, None)
+        let (scope, root) = resolve_scope(&app, Some(&installer), None, None)
             .expect("a machine-wide application resolves without asking");
         assert!(
             root.ends_with("zup"),
             "machine scope uses the authoritative state root"
         );
         assert_eq!(scope, SelectedScope::Machine);
+        assert!(resolve_scope(&app, Some(&installer), Some(SelectedScope::User), None).is_err());
     }
 }
 
@@ -416,16 +403,18 @@ pub struct UpdateArgs {
     #[command(subcommand)]
     pub command: Option<UpdateCommand>,
     #[arg(long, value_enum)]
-    pub scope: Option<ScopeArg>,
+    pub scope: Option<Scope>,
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub source: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "human")]
-    pub output: OutputArg,
+    pub output: Output,
     /// Never ask a question.
     #[arg(long)]
     pub non_interactive: bool,
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub plain: bool,
 
     #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
@@ -486,11 +475,11 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     }
 
     let installed = ledger.release_identity().cloned();
-    let (sink, _receiver) = zup_acquire::ProgressSink::channel(256);
-    let context =
+    let sink = zup_acquire::ProgressSink::discard();
+    let trust =
         TrustContext::from_update_config(config, installer.app.id.clone(), update_root.clone());
     let mut resolver = zup_update::ReleaseResolver::new(
-        context,
+        trust,
         zup_acquire::HostProfile::native(),
         CachePolicy::Auto,
         sink.clone(),
@@ -653,9 +642,9 @@ fn committed_installation(
 ) -> miette::Result<(SelectedScope, PathBuf, zup_exec::InstallLedger)> {
     let scope = crate::terminal::choose_scope(
         installer,
-        args.scope.and_then(ScopeArg::choice),
+        args.scope.map(Into::into),
         context.may_prompt(args.non_interactive, args.yes),
-        false,
+        args.plain,
     )?;
     let state_root = resolve_state_root(args.state_root.clone(), scope)?;
     let ledger = zup_windows::InstallLedgerStore::new(&state_root)
@@ -668,7 +657,9 @@ fn committed_installation(
 }
 
 fn confirm(context: RuntimeContext, args: &UpdateArgs) -> miette::Result<()> {
-    if context.may_prompt(args.non_interactive, args.yes) && !crate::frontend::confirm_update()? {
+    if context.may_prompt(args.non_interactive, args.yes)
+        && !crate::frontend::confirm_update(args.plain)?
+    {
         return Err(crate::frontend::cancelled());
     }
     Ok(())
@@ -760,10 +751,10 @@ fn update_available(
 pub struct RecoveryArgs {
     #[arg(long)]
     pub transaction_id: uuid::Uuid,
-    #[arg(long, value_enum, default_value = "either")]
-    pub scope: ScopeArg,
+    #[arg(long, value_enum)]
+    pub scope: Option<Scope>,
     #[arg(long, value_enum, default_value = "human")]
-    pub output: OutputArg,
+    pub output: Output,
 
     #[arg(long, hide = true, value_hint = clap::ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
@@ -783,7 +774,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             .installer
             .install
             .scope
-            .select(args.scope.choice())
+            .select(args.scope.map(Into::into))
             .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?,
         None => args
             .scope

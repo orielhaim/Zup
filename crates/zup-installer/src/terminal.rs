@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use zup_core::{Frontend, SelectedScope};
 use zup_presentation::{
     InstallerEvent, InstallerResult, OutputFormat, PlanPreview, ProcessOutcome,
@@ -58,11 +58,21 @@ pub(crate) struct Components {
     pub(crate) disable: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum Scope {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Scope {
     User,
     Machine,
 }
+#[cfg(windows)]
+impl Scope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Machine => "machine",
+        }
+    }
+}
+
 impl From<Scope> for SelectedScope {
     fn from(scope: Scope) -> Self {
         match scope {
@@ -72,13 +82,24 @@ impl From<Scope> for SelectedScope {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
-pub(crate) enum Output {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum Output {
     #[default]
     Human,
     Json,
     Jsonl,
 }
+#[cfg(windows)]
+impl Output {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Json => "json",
+            Self::Jsonl => "jsonl",
+        }
+    }
+}
+
 impl From<Output> for OutputFormat {
     fn from(output: Output) -> Self {
         match output {
@@ -146,8 +167,8 @@ pub fn command() -> clap::Command {
     Cli::command()
 }
 
-pub(crate) fn parse() -> Cli {
-    Cli::try_parse().unwrap_or_else(|error| {
+pub(crate) fn parse_matches(command: clap::Command) -> clap::ArgMatches {
+    command.try_get_matches().unwrap_or_else(|error| {
         let code = if error.exit_code() == 0 {
             0
         } else {
@@ -156,6 +177,10 @@ pub(crate) fn parse() -> Cli {
         let _ = error.print();
         std::process::exit(code)
     })
+}
+
+pub(crate) fn parse() -> Cli {
+    Cli::from_arg_matches(&parse_matches(command())).expect("validated terminal arguments")
 }
 
 #[cfg(windows)]
@@ -264,7 +289,7 @@ fn drive<H: SessionHost>(
         .describe(&executable)
         .map_err(|error| miette::miette!("{error}"))?;
     let installer = &build.installer;
-    report.result.application = installer.app.name.to_string();
+    report.result.application = installer.app.id.to_string();
     report.result.version = installer.app.version.to_string();
     report.event(&InstallerEvent::started(
         &report.result.application,
@@ -350,7 +375,7 @@ fn drive<H: SessionHost>(
     if let Some(error) = reporting_error {
         return Err(error);
     }
-    report.result.application = build.installer.app.name.to_string();
+    report.result.application = build.installer.app.id.to_string();
     report.result.version = build.installer.app.version.to_string();
     let bound = host
         .bind(&context)

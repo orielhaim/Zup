@@ -70,10 +70,10 @@ pub fn confirm_uninstall() -> miette::Result<bool> {
     }
 }
 
-pub fn confirm_update() -> miette::Result<bool> {
+pub fn confirm_update(_plain: bool) -> miette::Result<bool> {
     #[cfg(feature = "console")]
     {
-        crate::console::Console::new(false).confirm("Install this update?", false)
+        crate::console::Console::new(_plain).confirm("Install this update?", false)
     }
     #[cfg(not(feature = "console"))]
     {

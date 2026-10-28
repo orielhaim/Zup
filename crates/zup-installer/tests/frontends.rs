@@ -105,13 +105,16 @@ fn the_hidden_verbs_are_reachable_and_unadvertised() {
             "{hidden} is advertised to a person:\n{text}"
         );
     }
-    for public in ["install", "modify", "repair", "update", "uninstall"] {
+    for public in [
+        "install",
+        "upgrade",
+        "modify",
+        "repair",
+        "update",
+        "uninstall",
+    ] {
         assert!(text.contains(public), "{public} is missing:\n{text}");
     }
-    assert!(
-        !text.contains("upgrade"),
-        "`upgrade` is not a thing a person types; `install` resolves it:\n{text}"
-    );
 
     // The upgrade contract still works, which is why the verb exists.
     let next = app.at_version("2.0.0");
@@ -147,7 +150,14 @@ fn the_persisted_maintenance_copy_has_the_same_surface() {
         .expect("the help is printed");
     assert!(help.status.success());
     let text = String::from_utf8_lossy(&help.stdout);
-    for public in ["install", "modify", "repair", "update", "uninstall"] {
+    for public in [
+        "install",
+        "upgrade",
+        "modify",
+        "repair",
+        "update",
+        "uninstall",
+    ] {
         assert!(text.contains(public), "{public} is missing:\n{text}");
     }
     for internal in ["--state-root", "--app-id", "--handoff"] {
