@@ -23,7 +23,7 @@ fn digest(bytes: &[u8]) -> (u64, Sha256Digest) {
     zup_core::hash_reader(bytes).expect("hash")
 }
 
-fn plan_for(bytes: &[u8]) -> zup_transaction::TransactionPlan {
+fn plan_for(bytes: &[u8], source: &str) -> zup_transaction::TransactionPlan {
     let (size, sha256) = digest(bytes);
     let destination = "/tmp/zup-generated-ownership.desktop";
     let mut input = TransactionInput::new(target());
@@ -31,8 +31,7 @@ fn plan_for(bytes: &[u8]) -> zup_transaction::TransactionPlan {
         key: ResourceKey::File {
             destination: destination.into(),
         },
-        source_relative: RelativePath::new("__zup_generated__/applications/app.desktop")
-            .expect("source"),
+        source_relative: RelativePath::new(source).expect("source"),
         destination: TargetPath::new(target(), destination).expect("destination"),
         precondition: FilePrecondition::Absent,
         expected_sha256: sha256,
@@ -73,13 +72,14 @@ fn object(root: &Path, bytes: &[u8]) -> std::path::PathBuf {
         .join(sha.to_hex())
 }
 
-#[test]
-fn a_later_operation_cannot_replace_an_unsettled_transactions_inputs() {
+#[rstest::rstest]
+#[case("__zup_generated__/applications/app.desktop")]
+#[case("__zup_plugins__/generated.bin")]
+fn a_later_operation_cannot_replace_an_unsettled_transactions_inputs(#[case] source: &str) {
     let scratch = tempfile::tempdir().expect("scratch");
     let root = scratch.path();
     let original = b"[Desktop Entry]\nName=Original\n";
-    let source = "__zup_generated__/applications/app.desktop";
-    let plan = plan_for(original);
+    let plan = plan_for(original, source);
     stage(root, source, original);
     let object = object(root, original);
     let mut record = zup_transaction::TransactionRecord::new(
@@ -124,7 +124,7 @@ fn a_corrupt_object_is_left_in_place() {
     let scratch = tempfile::tempdir().expect("scratch");
     let root = scratch.path();
     let bytes = b"[Desktop Entry]\nName=Complete\n";
-    let plan = plan_for(bytes);
+    let plan = plan_for(bytes, "__zup_generated__/applications/app.desktop");
     let (_, sha) = digest(bytes);
     let key = InstallationLock::lock_key(app().as_str(), "user");
     let directory = private_fs::PrivateDir::ensure(root.join("objects"))
@@ -288,7 +288,7 @@ fn a_prepared_journal_does_not_keep_objects_an_applying_journal_does() {
     let root = scratch.path();
     let bytes = b"needed-for-replay";
     stage(root, "payload", bytes);
-    let plan = plan_for(bytes);
+    let plan = plan_for(bytes, "__zup_generated__/applications/app.desktop");
     let mut prepared = zup_transaction::TransactionRecord::new(
         zup_transaction::TransactionId::new_v7(),
         app(),

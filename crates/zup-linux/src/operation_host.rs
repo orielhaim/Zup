@@ -13,10 +13,39 @@ pub struct MachineHost {
 }
 
 pub struct LinuxOperationHost {
+    pub installer: std::path::PathBuf,
     pub machine: Option<MachineHost>,
 }
 
 impl OperationHost for LinuxOperationHost {
+    fn plan_build(
+        &self,
+        build: &zup_core::TargetBuildPlan,
+        request: &zup_plan::PlanRequest,
+        cancellation: &dyn zup_plan::CancellationQuery,
+    ) -> Result<zup_plan::PlannedInstallation, String> {
+        let planning = zup_core::BuildPlan {
+            targets: vec![build.clone()],
+        };
+        if build.installer.plugins.is_empty() {
+            return zup_plan::plan(&planning, request)
+                .map(|plan| zup_plan::PlannedInstallation {
+                    plan,
+                    generated_files: Vec::new(),
+                })
+                .map_err(|error| error.to_string());
+        }
+        let carrier =
+            crate::carrier::Carrier::open(&self.installer).map_err(|error| error.to_string())?;
+        let mut executor = zup_plugin_runtime::WasmtimePluginExecutor::load(
+            carrier.into_package(),
+            &build.installer.target,
+        )
+        .map_err(|error| error.to_string())?;
+        zup_plan::plan_with_plugins(&planning, request, &mut executor, cancellation)
+            .map_err(|error| error.to_string())
+    }
+
     fn check_capabilities(&self, input: &OperationInput) -> Result<(), String> {
         if input.scope == SelectedScope::User {
             crate::run::refuse_redirected_hierarchy(input.state_root)
@@ -261,4 +290,22 @@ fn attach_ui_runtime(
         executable: executable_digest,
     });
     Ok(())
+}
+
+pub(crate) fn generated_content(
+    prepared: &zup_runtime::PreparedOperation,
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut generated = prepared
+        .install_plan()
+        .map(crate::integration::generated_map)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    generated.extend(
+        prepared
+            .generated_files()
+            .iter()
+            .map(|file| (file.source_relative.to_string(), file.bytes.clone())),
+    );
+    Ok(generated)
 }

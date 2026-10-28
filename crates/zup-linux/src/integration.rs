@@ -10,6 +10,12 @@ use crate::locations::user_data_home;
 
 pub const GENERATED_PREFIX: &str = "__zup_generated__";
 
+pub(crate) fn is_generated_content(source: &str) -> bool {
+    source
+        .split_once('/')
+        .is_some_and(|(root, _)| root == GENERATED_PREFIX || root == zup_core::PLUGIN_PAYLOAD_ROOT)
+}
+
 #[derive(Debug, Clone)]
 pub struct GeneratedFile {
     pub key: ResourceKey,
@@ -413,7 +419,7 @@ pub fn generated_for_plan(
         let Some(source) = node.meta.source_relative.as_ref() else {
             continue;
         };
-        if !source.as_str().starts_with(GENERATED_PREFIX) {
+        if !is_generated_content(source.as_str()) {
             continue;
         }
         let Some(digest) = node.meta.expected_sha256 else {
@@ -551,7 +557,7 @@ fn retained_objects(
                 .meta
                 .source_relative
                 .as_ref()
-                .is_some_and(|source| source.as_str().starts_with(GENERATED_PREFIX));
+                .is_some_and(|source| is_generated_content(source.as_str()));
             if generated && let Some(digest) = node.meta.expected_sha256 {
                 retained.insert(digest.to_hex());
             }

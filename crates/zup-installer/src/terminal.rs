@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use zup_core::{Frontend, SelectedScope};
 use zup_presentation::{
     InstallerEvent, InstallerResult, OutputFormat, PlanPreview, ProcessOutcome,
@@ -181,7 +181,8 @@ pub(crate) fn parse_matches(command: clap::Command) -> clap::ArgMatches {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn parse() -> Cli {
-    Cli::from_arg_matches(&parse_matches(command())).expect("validated terminal arguments")
+    <Cli as clap::FromArgMatches>::from_arg_matches(&parse_matches(command()))
+        .expect("validated terminal arguments")
 }
 
 #[cfg(windows)]

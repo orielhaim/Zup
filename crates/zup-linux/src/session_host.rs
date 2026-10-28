@@ -25,7 +25,10 @@ impl LinuxSessionHost {
             }),
             SelectedScope::User => None,
         };
-        LinuxOperationHost { machine }
+        LinuxOperationHost {
+            installer: self.installer.clone(),
+            machine,
+        }
     }
 }
 
@@ -85,12 +88,7 @@ impl SessionHost for LinuxSessionHost {
         let _target = prepared
             .target_plan()
             .ok_or_else(|| "a Linux transaction resolves its target".to_owned())?;
-        let generated = match prepared.install_plan() {
-            Some(install) => {
-                crate::integration::generated_map(install).map_err(|error| error.to_string())?
-            }
-            None => std::collections::BTreeMap::new(),
-        };
+        let generated = crate::operation_host::generated_content(prepared)?;
         Ok(Arc::new(crate::backend::LinuxRuntimeBackend {
             installer: self.installer.clone(),
             operation: prepared.operation,
