@@ -10,6 +10,7 @@ use crate::locations::user_data_home;
 
 pub const GENERATED_PREFIX: &str = "__zup_generated__";
 
+#[cfg(target_os = "linux")]
 pub(crate) fn is_generated_content(source: &str) -> bool {
     source
         .split_once('/')
