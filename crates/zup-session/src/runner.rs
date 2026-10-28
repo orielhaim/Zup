@@ -15,7 +15,6 @@ pub struct OperationLaunch<'a> {
     pub id: zup_runtime::Uuid,
     pub action: LifecycleAction,
     pub selection: &'a zup_preset_host::Selection,
-    pub cleanup_lock: bool,
     pub control: OperationControl,
 }
 
@@ -44,7 +43,6 @@ async fn drive_operation<H: SessionHost>(
     let OperationLaunch {
         action,
         selection,
-        cleanup_lock,
         control,
         ..
     } = launch;
@@ -79,24 +77,30 @@ async fn drive_operation<H: SessionHost>(
             Err(error) => return (InstallOutcome::Failed(error.to_string()), Vec::new()),
         }
     };
-    let drifted = prepared
-        .transaction_plan
-        .retired_keys
-        .iter()
-        .map(|key| format!("{key:?}"))
-        .collect::<Vec<_>>();
     let executed = run_operation(host, &context, discovery, &prepared, &control).await;
-    let mut outcome = zup_runtime::outcome_of(executed);
-    if cleanup_lock
-        && matches!(outcome, InstallOutcome::Committed)
-        && let Err(error) = host.after_commit(&context, &prepared)
+    reconcile_operation(host, &context, &prepared, zup_runtime::outcome_of(executed))
+}
+
+pub fn reconcile_operation<H: SessionHost>(
+    host: &H,
+    context: &OperationContext,
+    prepared: &PreparedOperation,
+    mut outcome: InstallOutcome,
+) -> (InstallOutcome, Vec<String>) {
+    if matches!(outcome, InstallOutcome::Committed)
+        && let Err(detail) = host.after_commit(context, prepared)
     {
-        outcome = InstallOutcome::CommittedPendingReconciliation { detail: error };
+        outcome = InstallOutcome::CommittedPendingReconciliation { detail };
     }
-    let drift = if matches!(action, LifecycleAction::Repair { .. })
+    let drift = if matches!(prepared.action, LifecycleAction::Repair { .. })
         && matches!(outcome, InstallOutcome::Committed)
     {
-        drifted
+        prepared
+            .transaction_plan
+            .retired_keys
+            .iter()
+            .map(|key| format!("{key:?}"))
+            .collect()
     } else {
         Vec::new()
     };

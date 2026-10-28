@@ -794,7 +794,15 @@ pub struct DiagnosticPresentation {
 impl DiagnosticPresentation {
     pub fn from_message(message: &str, recovery_required: bool) -> Self {
         let normalized = message.to_ascii_lowercase();
-        if normalized.contains("running") || normalized.contains("blocked by") {
+        if normalized.contains("recovery") || recovery_required {
+            Self {
+                kind: DiagnosticKind::Recovery,
+                title: "The last change didn't finish".into(),
+                meaning: "Setup must reconcile transaction state before making further changes.".into(),
+                recovery: "Keep the installer and transaction state. Complete recovery before starting another operation.".into(),
+                technical_details: Some(message.into()),
+            }
+        } else if normalized.contains("running") || normalized.contains("blocked by") {
             Self {
                 kind: DiagnosticKind::Blocked,
                 title: "An application is still open".into(),
@@ -812,14 +820,6 @@ impl DiagnosticPresentation {
                     .into(),
                 technical_details: Some(message.into()),
             }
-        } else if normalized.contains("recovery") || recovery_required {
-            Self {
-                kind: DiagnosticKind::Recovery,
-                title: "The last change didn't finish".into(),
-                meaning: "Setup was interrupted while it was changing this computer.".into(),
-                recovery: "Let setup finish restoring it before you make other changes.".into(),
-                technical_details: Some(message.into()),
-            }
         } else if normalized.contains("permission")
             || normalized.contains("access")
             || normalized.contains("authorization")
@@ -832,7 +832,7 @@ impl DiagnosticPresentation {
                 meaning: "Part of this installation changes settings that are shared by \
                           everyone on this computer."
                     .into(),
-                recovery: "Try again and approve the Windows prompt, or ask an administrator \
+                recovery: "Try again and approve the native authorization prompt, or ask an administrator \
                            to install it."
                     .into(),
                 technical_details: Some(message.into()),
@@ -846,9 +846,9 @@ impl DiagnosticPresentation {
             Self {
                 kind: DiagnosticKind::Verification,
                 title: "The download couldn't be verified".into(),
-                meaning: "A file didn't match what the publisher released, so setup didn't \
-                          use it. Nothing on this computer was changed."
-                    .into(),
+                meaning:
+                    "A file did not match what the publisher released. Setup refused to use it."
+                        .into(),
                 recovery: "Check your connection and try again. If it keeps happening, \
                            download the installer again from the publisher."
                     .into(),
@@ -858,9 +858,7 @@ impl DiagnosticPresentation {
             Self {
                 kind: DiagnosticKind::Unknown,
                 title: "Setup couldn't finish".into(),
-                meaning: "Something went wrong before any changes were kept, so this \
-                          computer is as it was."
-                    .into(),
+                meaning: "Setup could not confirm that this operation completed.".into(),
                 recovery: "Try again. If it happens again, copy the details for the \
                            publisher."
                     .into(),
@@ -1224,6 +1222,13 @@ mod tests {
 
     #[test]
     fn diagnostic_copy_is_actionable() {
+        for message in ["blocked by running applications", "ownership drift"] {
+            assert_eq!(
+                DiagnosticPresentation::from_message(message, true).kind,
+                DiagnosticKind::Recovery
+            );
+        }
+
         let diagnostic =
             DiagnosticPresentation::from_message("blocked by running applications", false);
         assert_eq!(diagnostic.kind, DiagnosticKind::Blocked);

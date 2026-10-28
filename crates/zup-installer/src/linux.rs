@@ -107,7 +107,7 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
     crate::terminal::run_cli(
         zup_linux::LinuxSessionHost::open(PathBuf::new()),
         frontend,
-        crate::terminal::Cli::parse(),
+        crate::terminal::parse(),
     )
 }
 

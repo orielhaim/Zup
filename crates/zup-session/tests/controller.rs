@@ -441,7 +441,6 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
             id: zup_runtime::Uuid::now_v7(),
             action: zup_exec::LifecycleAction::Uninstall,
             selection: &selection,
-            cleanup_lock: true,
             control,
         },
     )

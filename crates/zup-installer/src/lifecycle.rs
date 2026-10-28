@@ -95,7 +95,7 @@ pub fn transition(
     let executable = package::current_executable()?;
 
     if let Some(handoff_path) = &args.handoff {
-        return run_handoff(&executable, request, args, policy, handoff_path);
+        return run_handoff(context, &executable, request, args, policy, handoff_path);
     }
 
     match package::open_bundle_if_present(&executable)? {
@@ -149,6 +149,7 @@ pub fn run_embedded(
 }
 
 fn run_handoff(
+    context: RuntimeContext,
     executable: &Path,
     request: Operation,
     args: &LifecycleArgs,
@@ -190,6 +191,9 @@ fn run_handoff(
             accepted.mode.verb(),
             state::action_name(action)
         ));
+    }
+    if context.frontend != zup_core::Frontend::Gui {
+        return crate::host::terminal_handoff(context, expected, args, accepted);
     }
     run_acquired_transition(
         acquire::Request {
@@ -404,20 +408,8 @@ pub fn run_acquired_transition(
     } = request;
     let action =
         action.ok_or_else(|| miette::miette!("a graph transition needs a lifecycle verb"))?;
-    let build = zup_bundle::Package::from_bytes(
-        zup_bundle::BundleWriter::encode_plan_only_plan(
-            &acquired.manifest.plan,
-            &acquired.manifest.plan.plugins,
-        )
-        .map_err(|error| miette::miette!("graph plan: {error}"))?,
-    )
-    .and_then(|package| package.build_plan())
-    .map_err(|error| miette::miette!("graph plan: {error}"))?;
-    let build = build
-        .targets
-        .into_iter()
-        .next()
-        .ok_or_else(|| miette::miette!("the release plan names no target"))?;
+    let build =
+        acquire::target_plan(&acquired.manifest).map_err(|error| miette::miette!("{error}"))?;
     let installer = &build.installer;
 
     let scope = match scope {

@@ -52,6 +52,21 @@ Machine integrations should branch on diagnostic `code`, not on English message 
 
 Branch on the `status` field and diagnostic `code` in `--format json`, not on the exit code: failures without typed metadata are classified from their message, so CLI codes are best-effort. The installed runtime reports a typed outcome for every case.
 
+## Generated Console and Headless installers
+
+Generated installers use `--output`, independently of the developer CLI's `--format` protocol:
+
+```sh
+./Acme-Setup install --scope user --non-interactive --output json
+./Acme-Setup repair --scope user --output jsonl
+```
+
+`json` writes one `InstallerResult` document. It includes `protocol_version`, `outcome`, `code`, application/version, scope, install directory, log path, message, and preserved repair drift. `jsonl` begins with `started`, streams `phase`, `progress`, prerequisite and cancellation events, then ends with exactly one `completed` or `failed` event. Failed events carry the typed outcome, numeric code, message, and diagnostic. JSON modes never prompt. Stdout contains only this protocol; diagnostics belong on stderr.
+
+Branch on `outcome` and `code`. A committed transaction with incomplete reconciliation reports `recovery_required`, not success. Preserve transaction state and the installer when recovery is required. The reported state directory, transaction identifiers when inspectable, and log path help locate the interrupted operation. Failure to inspect state remains an error.
+
+Windows preserves the native reboot exit code `3010`; on Unix, where process exit codes are limited to eight bits, use the full numeric code and outcome in the structured result. Windows installed self-uninstall entries hand off to a helper; invoke the downloaded installer when a supervising process needs the final exit status.
+
 ## Paths
 
 Protocol paths are release/project-relative and use `/` separators unless a command explicitly reports a local machine path.

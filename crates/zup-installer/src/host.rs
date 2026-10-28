@@ -121,6 +121,8 @@ pub struct WindowsSessionHost {
     app_id: Option<zup_core::AppId>,
     frontend: Frontend,
     acquired: Option<AcquiredContent>,
+    handoff: Option<Arc<crate::handoff::Accepted>>,
+    seed: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -173,6 +175,7 @@ impl SessionHost for WindowsSessionHost {
             .bundle
             .as_ref()
             .is_some_and(|bundle| bundle.package().is_plan_only())
+            && self.handoff.is_none()
             || operation == zup_runtime::Operation::Uninstall
         {
             return Ok(());
@@ -230,13 +233,37 @@ impl SessionHost for WindowsSessionHost {
                     }
                 }
             });
-            tokio::runtime::Builder::new_multi_thread()
+            let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
                 .build()
-                .map_err(|error| error.to_string())?
-                .block_on(crate::acquire::acquire(trust, components, None, &[], sink))
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            if let Some(handoff) = &self.handoff {
+                let mut resolver = zup_update::ReleaseResolver::new(
+                    trust,
+                    zup_acquire::HostProfile::native(),
+                    zup_acquire::CachePolicy::Auto,
+                    sink,
+                )
+                .map_err(|error| error.to_string())?;
+                if let Some(seed) = &self.seed {
+                    resolver = resolver.with_seed("local source", seed.clone());
+                }
+                runtime
+                    .block_on(crate::acquire::acquire_closure(
+                        &resolver,
+                        handoff.acquired.resolved.clone(),
+                        components,
+                    ))
+                    .map_err(|error| error.to_string())
+            } else {
+                let seeds = self.seed.iter().cloned().collect::<Vec<_>>();
+                runtime
+                    .block_on(crate::acquire::acquire(
+                        trust, components, None, &seeds, sink,
+                    ))
+                    .map_err(|error| error.to_string())
+            }
         })?;
         if acquired.resolved.variant.target != installer.target
             || acquired.resolved.descriptor.app_id != installer.app.id
@@ -256,18 +283,8 @@ impl SessionHost for WindowsSessionHost {
         }
         let payload =
             crate::acquire::payload_source(&acquired).map_err(|error| error.to_string())?;
-        let package = zup_bundle::BundleWriter::encode_plan_only_plan(
-            &acquired.manifest.plan,
-            &acquired.manifest.plan.plugins,
-        )
-        .map_err(|error| error.to_string())?;
-        discovery.build = zup_bundle::Package::from_bytes(package)
-            .and_then(|package| package.build_plan())
-            .map_err(|error| error.to_string())?
-            .targets
-            .into_iter()
-            .next()
-            .ok_or_else(|| "the release contains no target plan".to_owned())?;
+        discovery.build =
+            crate::acquire::target_plan(&acquired.manifest).map_err(|error| error.to_string())?;
         self.acquired = Some(AcquiredContent {
             release: Arc::new(acquired),
             payload: Arc::new(payload),
@@ -299,7 +316,11 @@ impl SessionHost for WindowsSessionHost {
                 "this file carries no installer package; run the installer you downloaded"
                     .to_owned()
             })?;
-        let build = package::target_plan(&bundle).map_err(|error| error.to_string())?;
+        let build = match &self.handoff {
+            Some(handoff) => crate::acquire::target_plan(&handoff.acquired.manifest)
+                .map_err(|error| error.to_string())?,
+            None => package::target_plan(&bundle).map_err(|error| error.to_string())?,
+        };
         let installer = build.installer.clone();
         let mut installations = Vec::new();
         for scope in zup_preset_host::surface::scopes(&installer)
@@ -444,14 +465,16 @@ impl SessionHost for WindowsSessionHost {
     fn after_commit(
         &self,
         context: &zup_session::OperationContext,
-        _prepared: &zup_runtime::PreparedOperation,
+        prepared: &zup_runtime::PreparedOperation,
     ) -> Result<(), String> {
         let app_id = self
             .app_id
             .as_ref()
             .ok_or_else(|| "the session host was not discovered".to_owned())?;
-        zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
-            .map_err(|error| error.to_string())?;
+        if prepared.action == zup_exec::LifecycleAction::Uninstall {
+            zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
+                .map_err(|error| error.to_string())?;
+        }
         if let Some(acquired) = &self.acquired {
             acquired
                 .release
@@ -568,13 +591,14 @@ impl Default for WindowsSessionHost {
             app_id: None,
             frontend: Frontend::Gui,
             acquired: None,
+            handoff: None,
+            seed: None,
         }
     }
 }
 
 pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
-    use clap::Parser;
-    let cli = crate::terminal::Cli::parse();
+    let cli = crate::terminal::parse();
     if cli.operation.is_none()
         && frontend == Frontend::Console
         && !cli.non_interactive
@@ -617,4 +641,59 @@ pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
         );
     }
     crate::terminal::run_cli(WindowsSessionHost::default(), frontend, cli)
+}
+
+pub(crate) fn terminal_handoff(
+    context: crate::run::RuntimeContext,
+    action: zup_exec::LifecycleAction,
+    args: &crate::cli::LifecycleArgs,
+    accepted: crate::handoff::Accepted,
+) -> miette::Result<()> {
+    let operation = match action {
+        zup_exec::LifecycleAction::Install => {
+            crate::terminal::Command::Install(crate::terminal::Components {
+                enable: args.enable.clone(),
+                disable: args.disable.clone(),
+            })
+        }
+        zup_exec::LifecycleAction::Upgrade => {
+            crate::terminal::Command::Upgrade(crate::terminal::Components {
+                enable: args.enable.clone(),
+                disable: args.disable.clone(),
+            })
+        }
+        zup_exec::LifecycleAction::Modify => {
+            crate::terminal::Command::Modify(crate::terminal::Components {
+                enable: args.enable.clone(),
+                disable: args.disable.clone(),
+            })
+        }
+        zup_exec::LifecycleAction::Repair { force_files } => {
+            crate::terminal::Command::Repair { force_files }
+        }
+        zup_exec::LifecycleAction::Uninstall => crate::terminal::Command::Uninstall,
+    };
+    let cli = crate::terminal::Cli {
+        operation: Some(operation),
+        scope: Some(match accepted.scope {
+            SelectedScope::User => crate::terminal::Scope::User,
+            SelectedScope::Machine => crate::terminal::Scope::Machine,
+        }),
+        state_root: args.state_root.clone(),
+        install_directory: args.install_directory.clone(),
+        non_interactive: args.non_interactive,
+        yes: args.yes,
+        plain: args.plain,
+        output: match args.output() {
+            zup_presentation::OutputFormat::Human => crate::terminal::Output::Human,
+            zup_presentation::OutputFormat::Json => crate::terminal::Output::Json,
+            zup_presentation::OutputFormat::Jsonl => crate::terminal::Output::Jsonl,
+        },
+    };
+    let host = WindowsSessionHost {
+        handoff: Some(Arc::new(accepted)),
+        seed: args.source.clone(),
+        ..Default::default()
+    };
+    crate::terminal::run_cli(host, context.frontend, cli)
 }

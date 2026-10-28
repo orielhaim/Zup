@@ -89,6 +89,21 @@ impl From<Output> for OutputFormat {
     }
 }
 
+impl Cli {
+    fn requested_operation(&self) -> Operation {
+        match &self.operation {
+            Some(Command::Install(_)) => Operation::Install,
+            Some(Command::Upgrade(_)) => Operation::Upgrade,
+            Some(Command::Modify(_)) => Operation::Modify,
+            Some(Command::Repair { force_files }) => Operation::Repair {
+                force_files: *force_files,
+            },
+            Some(Command::Uninstall) => Operation::Uninstall,
+            None => Operation::Apply,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub(crate) struct Failure {
@@ -124,6 +139,18 @@ impl From<zup_runtime::OperationError> for Failure {
 
 pub fn command() -> clap::Command {
     Cli::command()
+}
+
+pub(crate) fn parse() -> Cli {
+    Cli::try_parse().unwrap_or_else(|error| {
+        let code = if error.exit_code() == 0 {
+            0
+        } else {
+            ProcessOutcome::InvalidInvocation.code()
+        };
+        let _ = error.print();
+        std::process::exit(code)
+    })
 }
 
 #[cfg(windows)]
@@ -170,7 +197,12 @@ pub(crate) fn run_cli<H: SessionHost>(
         && !cli.non_interactive
         && !cli.yes
         && crate::run::console_is_a_terminal();
-    let mut report = Report::new(output, interactive, cli.plain);
+    let mut report = Report::new(
+        output,
+        interactive,
+        cli.plain,
+        cli.requested_operation().name(),
+    );
 
     let result = drive(&mut host, &cli, interactive, &mut report);
     let outcome = match &result {
@@ -189,7 +221,12 @@ pub(crate) fn run_cli<H: SessionHost>(
     };
     report.result.outcome = outcome;
     report.result.code = outcome.code();
-    report.result.message = message;
+    report.result.message = match (message, report.result.message.take()) {
+        (Some(message), Some(detail)) if !message.contains(&detail) => {
+            Some(format!("{message}\n{detail}"))
+        }
+        (message, detail) => message.or(detail),
+    };
     report.finish()?;
     if outcome == ProcessOutcome::Success {
         Ok(())
@@ -228,7 +265,7 @@ fn drive<H: SessionHost>(
     report.event(&InstallerEvent::started(
         &report.result.application,
         &report.result.version,
-        "maintenance",
+        report.action,
     ))?;
     #[cfg(feature = "console")]
     if interactive {
@@ -244,24 +281,14 @@ fn drive<H: SessionHost>(
     let context = discovery
         .context(scope)
         .map_err(|error| miette::miette!("{error}"))?;
-    let operation = match &cli.operation {
-        Some(Command::Install(_)) => Operation::Install,
-        Some(Command::Upgrade(_)) => Operation::Upgrade,
-        Some(Command::Modify(_)) => Operation::Modify,
-        Some(Command::Repair { force_files }) => Operation::Repair {
-            force_files: *force_files,
-        },
-        Some(Command::Uninstall) => Operation::Uninstall,
-        None if interactive => Operation::Apply,
-        None => {
-            return Err(Failure {
-                outcome: ProcessOutcome::InvalidInvocation,
-                message: "choose an operation: install, upgrade, modify, repair, or uninstall"
-                    .into(),
-            }
-            .into());
+    if cli.operation.is_none() && !interactive {
+        return Err(Failure {
+            outcome: ProcessOutcome::InvalidInvocation,
+            message: "choose an operation: install, upgrade, modify, repair, or uninstall".into(),
         }
-    };
+        .into());
+    }
+    let operation = cli.requested_operation();
     #[cfg(feature = "console")]
     let operation = if interactive
         && cli.operation.is_none()
@@ -308,7 +335,7 @@ fn drive<H: SessionHost>(
         selection
     };
     report.event(&InstallerEvent::Phase {
-        state: "acquiring_content".into(),
+        state: "checking_content".into(),
     })?;
     let mut reporting_error = None;
     host.acquire_content(
@@ -330,6 +357,8 @@ fn drive<H: SessionHost>(
     if let Some(error) = reporting_error {
         return Err(error);
     }
+    report.result.application = discovery.installer().app.name.to_string();
+    report.result.version = discovery.installer().app.version.to_string();
     let bound = host
         .bind(&context)
         .map_err(|error| miette::miette!("{error}"))?;
@@ -363,7 +392,7 @@ fn drive<H: SessionHost>(
         (!plan.install_directory.is_empty()).then(|| plan.install_directory.clone());
     #[cfg(feature = "console")]
     if interactive {
-        crate::console::Console::new(cli.plain).review(&plan, action)?;
+        crate::console::Console::new(cli.plain).review(&plan, prepared.action)?;
     }
     let control = OperationControl::new(if interactive {
         ExecutionPolicy::Interactive
@@ -392,9 +421,21 @@ fn drive<H: SessionHost>(
                 }
             };
             while let Ok(event) = events.try_recv() { if let Err(error) = report.runtime_event(&event) { reporting_error = Some(error); } }
-            let mut outcome = zup_runtime::outcome_of(executed);
-            if matches!(outcome, InstallOutcome::Committed) && let Err(detail) = host.after_commit(&context, &prepared) {
-                outcome = InstallOutcome::CommittedPendingReconciliation { detail };
+            let (outcome, drift) = zup_session::reconcile_operation(host, &context, &prepared, zup_runtime::outcome_of(executed));
+            report.result.drift = drift;
+            if matches!(outcome, InstallOutcome::RecoveryRequired | InstallOutcome::CommittedPendingReconciliation { .. }) {
+                let details = match zup_runtime::discover_recovery(&context.state_root) {
+                    Ok(states) => states.into_iter().filter_map(|state| match state {
+                        zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id }
+                        | zup_runtime::RecoveryStatus::PreparedTransaction { transaction_id }
+                        | zup_runtime::RecoveryStatus::InterruptedApplyingTransaction { transaction_id } => Some(transaction_id),
+                        zup_runtime::RecoveryStatus::CommittedTransaction { transaction_id } if matches!(outcome, InstallOutcome::CommittedPendingReconciliation { .. }) => Some(transaction_id),
+                        _ => None,
+                    }).collect::<Vec<_>>().join(", "),
+                    Err(error) => format!("cannot inspect transaction state: {error}"),
+                };
+                let message = report.result.message.get_or_insert_with(String::new);
+                message.push_str(&format!("\nTransaction state: {}\n{details}", context.state_root.display()));
             }
             if let Some(error) = reporting_error { return Err(error); }
             Ok(outcome)
@@ -425,15 +466,17 @@ fn choose_scope(
 struct Report {
     output: OutputFormat,
     started: bool,
+    action: &'static str,
     result: InstallerResult,
     #[cfg(feature = "console")]
     progress: Option<crate::console::Progress>,
 }
 impl Report {
-    fn new(output: OutputFormat, _interactive: bool, _plain: bool) -> Self {
+    fn new(output: OutputFormat, _interactive: bool, _plain: bool, action: &'static str) -> Self {
         Self {
             output,
             started: false,
+            action,
             result: InstallerResult::new(ProcessOutcome::Failure, "", ""),
             #[cfg(feature = "console")]
             progress: _interactive.then(|| crate::console::Progress::new(_plain)),
@@ -464,6 +507,21 @@ impl Report {
         Ok(())
     }
     fn runtime_event(&mut self, event: &zup_runtime::RuntimeEvent) -> miette::Result<()> {
+        if let zup_runtime::RuntimeEvent::Failed { message, .. }
+        | zup_runtime::RuntimeEvent::ResourceBlocked {
+            detail: message, ..
+        } = event
+        {
+            match &mut self.result.message {
+                Some(detail) if !detail.contains(message) => {
+                    detail.push('\n');
+                    detail.push_str(message);
+                }
+                None => self.result.message = Some(message.clone()),
+                _ => {}
+            }
+        }
+
         if let zup_runtime::RuntimeEvent::LogPath { path } = event {
             self.result.log_path = Some(path.clone());
         }
@@ -482,7 +540,7 @@ impl Report {
             self.event(&InstallerEvent::started(
                 &self.result.application,
                 &self.result.version,
-                "maintenance",
+                self.action,
             ))?;
         }
         #[cfg(feature = "console")]
@@ -519,10 +577,23 @@ impl Report {
             OutputFormat::Human => {
                 if self.result.outcome == ProcessOutcome::Success {
                     println!("Completed successfully.");
-                } else if self.result.outcome == ProcessOutcome::RecoveryRequired {
-                    eprintln!(
-                        "Recovery is required. Keep this installer and its transaction state; do not delete or retry over that state."
+                } else if self.result.outcome == ProcessOutcome::Cancelled {
+                    eprintln!("Cancelled safely.");
+                } else {
+                    let message = self
+                        .result
+                        .message
+                        .as_deref()
+                        .unwrap_or("The operation did not complete.");
+                    eprintln!("{message}");
+                    let diagnostic = zup_presentation::DiagnosticPresentation::from_message(
+                        message,
+                        self.result.outcome == ProcessOutcome::RecoveryRequired,
                     );
+                    eprintln!("{}", diagnostic.recovery);
+                    if let Some(log) = &self.result.log_path {
+                        eprintln!("Log: {log}");
+                    }
                 }
             }
         }

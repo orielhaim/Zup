@@ -175,9 +175,12 @@ impl Console {
             action,
             None,
         )
-        .map_err(|error| miette::miette!("{error}"))?;
+        .map_err(crate::terminal::Failure::from)?;
         let mut selected = zup_plan::select_components(&installer.components, &request.components)
-            .map_err(|error| miette::miette!("{error}"))?;
+            .map_err(|error| crate::terminal::Failure {
+                outcome: zup_presentation::ProcessOutcome::Configuration,
+                message: error.to_string(),
+            })?;
         let required = installer
             .components
             .iter()
@@ -361,11 +364,13 @@ pub struct Progress {
     bar: indicatif::ProgressBar,
     last: Instant,
     console: Console,
+    plain: bool,
 }
 impl Progress {
     pub fn new(plain: bool) -> Self {
         let console = Console::new(plain);
-        let bar = if console.plain() {
+        let plain = console.plain();
+        let bar = if plain {
             indicatif::ProgressBar::hidden()
         } else {
             indicatif::ProgressBar::with_draw_target(
@@ -383,9 +388,20 @@ impl Progress {
             bar,
             last: Instant::now(),
             console,
+            plain,
         }
     }
     pub fn event(&mut self, event: &InstallerEvent) {
+        let plain = self.console.plain();
+        if plain != self.plain {
+            self.bar.set_draw_target(if plain {
+                indicatif::ProgressDrawTarget::hidden()
+            } else {
+                indicatif::ProgressDrawTarget::stderr_with_hz(10)
+            });
+            self.plain = plain;
+        }
+
         match event {
             InstallerEvent::Progress {
                 completed,
@@ -396,7 +412,7 @@ impl Progress {
                 self.bar.set_length(*total);
                 self.bar.set_position(*completed);
                 self.bar.set_message(text(label));
-                if self.console.plain() && self.last.elapsed() >= Duration::from_secs(1) {
+                if plain && self.last.elapsed() >= Duration::from_secs(1) {
                     eprintln!("  {completed}/{total} {}", text(label));
                     self.last = Instant::now();
                 }

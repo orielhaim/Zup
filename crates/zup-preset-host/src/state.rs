@@ -44,7 +44,6 @@ pub enum HostDecision {
     Run {
         action: LifecycleAction,
         selection: Selection,
-        cleanup_lock: bool,
     },
     Plan(Selection),
     Update,
@@ -174,12 +173,10 @@ impl HostState {
                 self.set_install_directory(Some(directory))
             }
             Action::ResetInstallDirectory => self.set_install_directory(None),
-            Action::Install => self.start(LifecycleAction::Install, false),
+            Action::Install => self.start(LifecycleAction::Install),
             Action::Update => self.update(),
-            Action::Modify => self.maintenance_op(LifecycleAction::Modify, false),
-            Action::Repair => {
-                self.maintenance_op(LifecycleAction::Repair { force_files: false }, false)
-            }
+            Action::Modify => self.maintenance_op(LifecycleAction::Modify),
+            Action::Repair => self.maintenance_op(LifecycleAction::Repair { force_files: false }),
             Action::RequestUninstall => self.request_uninstall(),
             Action::ConfirmUninstall => self.confirm_uninstall(),
             Action::DismissUninstall => self.dismiss_uninstall(),
@@ -278,7 +275,7 @@ impl HostState {
         }
     }
 
-    fn start(&mut self, action: LifecycleAction, cleanup_lock: bool) -> HostDecision {
+    fn start(&mut self, action: LifecycleAction) -> HostDecision {
         if self.running {
             return HostDecision::Refused(ActionRefusal::Busy);
         }
@@ -286,18 +283,14 @@ impl HostState {
         self.retry = Some((action, selection.clone()));
         self.snapshot.operation = Some(self.operation_kind(action));
         self.begin();
-        HostDecision::Run {
-            action,
-            selection,
-            cleanup_lock,
-        }
+        HostDecision::Run { action, selection }
     }
 
-    fn maintenance_op(&mut self, action: LifecycleAction, cleanup_lock: bool) -> HostDecision {
+    fn maintenance_op(&mut self, action: LifecycleAction) -> HostDecision {
         if !self.capabilities.contains(Capability::Maintenance) {
             return HostDecision::Refused(ActionRefusal::UnsupportedSurface);
         }
-        self.start(action, cleanup_lock)
+        self.start(action)
     }
 
     fn update(&mut self) -> HostDecision {
@@ -325,7 +318,7 @@ impl HostState {
         if self.snapshot.state != InstallerState::ConfirmUninstall {
             return HostDecision::Refused(ActionRefusal::NothingToConfirm);
         }
-        self.start(LifecycleAction::Uninstall, true)
+        self.start(LifecycleAction::Uninstall)
     }
 
     fn dismiss_uninstall(&mut self) -> HostDecision {
@@ -356,11 +349,7 @@ impl HostState {
         }
         self.snapshot.operation = Some(self.operation_kind(action));
         self.begin();
-        HostDecision::Run {
-            action,
-            selection,
-            cleanup_lock: matches!(action, LifecycleAction::Uninstall),
-        }
+        HostDecision::Run { action, selection }
     }
 
     pub fn begin(&mut self) {

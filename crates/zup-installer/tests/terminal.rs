@@ -132,7 +132,7 @@ fn automation_is_one_document_or_a_framed_stream_and_never_prompts() {
             .args(["install", "--output", "json"])
             .output()
             .unwrap();
-        assert!(!missing.status.success());
+        assert_eq!(missing.status.code(), Some(3));
         let failure: Value = serde_json::from_slice(&missing.stdout).unwrap();
         assert_ne!(failure["outcome"], "success");
         assert!(!fixture.root.path().join("application").exists());
@@ -179,6 +179,11 @@ fn automation_is_one_document_or_a_framed_stream_and_never_prompts() {
 fn real_terminal_selects_components_confirms_and_cancels_without_mutation() {
     let fixture = Fixture::new(Frontend::Console);
     assert_eq!(
+        fixture.terminal(&["install"], &[("Install for", "q\n")], 36, "dumb"),
+        2
+    );
+    assert!(!fixture.root.path().join("application").exists());
+    assert_eq!(
         fixture.terminal(
             &["install"],
             &[
@@ -218,7 +223,7 @@ fn real_terminal_selects_components_confirms_and_cancels_without_mutation() {
     assert!(fixture.root.path().join("application/core.txt").exists());
     assert_eq!(
         fixture.terminal(
-            &["uninstall", "--scope", "user"],
+            &["uninstall", "--scope", "user", "--plain"],
             &[("Proceed with these changes?", "y\n")],
             36,
             "dumb"

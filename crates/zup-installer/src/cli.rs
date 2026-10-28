@@ -139,6 +139,8 @@ pub struct LifecycleArgs {
     pub non_interactive: bool,
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub plain: bool,
 
     #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,

@@ -397,7 +397,7 @@ mod tests {
             crate::classify(3010),
             Outcome::RebootRequired { code: 3010 }
         );
-        assert_eq!(crate::classify(255), Outcome::RebootRequired { code: 255 });
+        assert_eq!(crate::classify(255), Outcome::InstallerFailed { code: 255 });
         assert_eq!(crate::classify(7), Outcome::RecoveryRequired { code: 7 });
         assert_eq!(crate::classify(1), Outcome::InstallerFailed { code: 1 });
         assert_eq!(

@@ -343,6 +343,19 @@ async fn barrier(
     })
 }
 
+pub fn target_plan(manifest: &VariantManifest) -> Result<zup_core::TargetBuildPlan, GraphError> {
+    let bytes =
+        zup_bundle::BundleWriter::encode_plan_only_plan(&manifest.plan, &manifest.plan.plugins)
+            .map_err(|error| GraphError::Manifest(error.to_string()))?;
+    zup_bundle::Package::from_bytes(bytes)
+        .and_then(|package| package.build_plan())
+        .map_err(|error| GraphError::Manifest(error.to_string()))?
+        .targets
+        .into_iter()
+        .next()
+        .ok_or_else(|| GraphError::Manifest("the release contains no target plan".into()))
+}
+
 pub fn payload_source(
     acquired: &Acquired,
 ) -> Result<zup_bundle::AcquiredPayloadSource, GraphError> {

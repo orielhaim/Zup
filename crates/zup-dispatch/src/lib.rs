@@ -317,16 +317,11 @@ fn staged_arguments(
     arguments
 }
 
-/// Turn a native runtime's exit code into a typed outcome.
-///
-/// The codes are the ones `zup` already uses for machine output, so a script
-/// that reads them needs no second table. 255 is the reboot code 3010 clamped
-/// to a byte by the runtime's exit mapping; without this arm a reboot would
-/// come back as a generic failure.
+/// Preserve native runtime outcomes at the bootstrapper boundary.
 pub fn classify(code: i32) -> Outcome {
     match code {
         0 => Outcome::Completed { code: 0 },
-        3010 | 255 => Outcome::RebootRequired { code },
+        3010 => Outcome::RebootRequired { code },
         7 => Outcome::RecoveryRequired { code },
         _ => Outcome::InstallerFailed { code },
     }
@@ -694,7 +689,7 @@ mod tests {
         assert_eq!(classify(1), Outcome::InstallerFailed { code: 1 });
         assert_eq!(classify(7), Outcome::RecoveryRequired { code: 7 });
         assert_eq!(classify(3010), Outcome::RebootRequired { code: 3010 });
-        assert_eq!(classify(255), Outcome::RebootRequired { code: 255 });
+        assert_eq!(classify(255), Outcome::InstallerFailed { code: 255 });
         for outcome in [classify(1), classify(7), classify(255), classify(3010)] {
             assert_ne!(outcome.exit_code(), 0, "{outcome:?}");
         }
