@@ -35,7 +35,7 @@ def measure(cli, toolchain, output):
         (directory / "app.txt").write_bytes(b"hello installer sizes\n")
         manifest = directory / "zup.toml"
         manifest.write_text(
-            '[app]\nid = "com.example.sizes"\nname = "Installer Sizes"\n'
+            'schema = 1\n[app]\nid = "com.example.sizes"\nname = "Installer Sizes"\n'
             'version = "1.0.0"\npublisher = "Example"\n'
             f'[build.targets.{target}]\nsource = {{ directory = "." }}\n'
             f'frontend = "{frontend}"\n'
