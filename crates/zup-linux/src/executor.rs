@@ -2174,6 +2174,7 @@ impl LinuxFileExecutor {
                     &derived,
                     &canonical,
                     &crate::service_ops::load_path_dirs(),
+                    Some(&service),
                 )?;
 
                 let manager = context.manager;

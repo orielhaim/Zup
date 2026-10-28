@@ -270,7 +270,27 @@ pub fn load_path_dirs() -> Vec<PathBuf> {
     .collect()
 }
 
-pub fn check_collisions(unit: &str, canonical: &Path, dirs: &[PathBuf]) -> Result<(), ExecError> {
+pub fn check_collisions(
+    unit: &str,
+    canonical: &Path,
+    dirs: &[PathBuf],
+    service: Option<&ServiceOperation>,
+) -> Result<(), ExecError> {
+    let owns_mask = service.is_some_and(|service| {
+        matches!(
+            service.kind,
+            zup_exec::ServiceOperationKind::UpdateOwned
+                | zup_exec::ServiceOperationKind::RestoreOwned
+                | zup_exec::ServiceOperationKind::NoOp
+                | zup_exec::ServiceOperationKind::Drift
+        ) && matches!(
+            service.previous,
+            ObservedServiceState::Service {
+                start: ServiceStart::Disabled,
+                ..
+            }
+        )
+    });
     for dir in dirs {
         let candidate = dir.join(unit);
         if candidate == canonical {
@@ -285,6 +305,15 @@ pub fn check_collisions(unit: &str, canonical: &Path, dirs: &[PathBuf]) -> Resul
                 });
             }
             Ok(metadata) => {
+                if owns_mask
+                    && candidate == admin_override_dir().join(unit)
+                    && metadata.file_type().is_symlink()
+                    && std::fs::read_link(&candidate)
+                        .map_err(|error| crate::error::PathError::io(&candidate, error))?
+                        == Path::new("/dev/null")
+                {
+                    continue;
+                }
                 if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
                     return Err(ExecError::conflict(
                         unit,
@@ -561,7 +590,7 @@ mod tests {
                 _base.path().join("usr-lib"),
             ];
             assert!(
-                check_collisions(unit, &canonical, &dirs).is_err(),
+                check_collisions(unit, &canonical, &dirs, None).is_err(),
                 "a unit in {dir} must conflict"
             );
             std::fs::remove_file(other.join(unit)).expect("cleanup");
@@ -572,7 +601,7 @@ mod tests {
             systemd.unit_dir.clone(),
             _base.path().join("usr-lib"),
         ];
-        assert!(check_collisions(unit, &canonical, &dirs).is_ok());
+        assert!(check_collisions(unit, &canonical, &dirs, None).is_ok());
     }
 
     #[test]

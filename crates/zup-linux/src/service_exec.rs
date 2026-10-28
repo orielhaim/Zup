@@ -251,7 +251,7 @@ pub fn apply(
         }
     })?;
     refuse_source_symlink(&derived.unit, &canonical)?;
-    check_collisions(&derived.unit, &canonical, &load_path_dirs())?;
+    check_collisions(&derived.unit, &canonical, &load_path_dirs(), Some(op))?;
 
     validate_executable_live(&derived.command, context.roots, context.expected_uid)?;
 

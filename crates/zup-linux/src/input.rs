@@ -288,6 +288,7 @@ pub fn compile_machine_execution_plan(
             &unit,
             &canonical,
             &crate::service_ops::load_path_dirs(),
+            Some(op),
         )
         .map_err(into_service)?;
         check_no_full_override(&unit).map_err(into_service)?;

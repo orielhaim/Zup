@@ -99,6 +99,21 @@ fn real_systemd_service_lifecycle() {
     }
     let tag = uuid::Uuid::now_v7().simple().to_string();
     let mut world = RealWorld::stage(&tag);
+    let plan = world.plan("1.0.0", ServiceStart::Automatic);
+    world.resolve_unit(&plan);
+    let mask = PathBuf::from("/etc/systemd/system").join(&world.unit);
+    std::os::unix::fs::symlink("/dev/null", &mask).expect("a foreign mask");
+    world.foreign.push(mask.clone());
+    assert!(
+        world
+            .drive(&plan, zup_exec::LifecycleAction::Install, false)
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read_link(&mask).expect("the mask survives"),
+        PathBuf::from("/dev/null")
+    );
+    world.remove_foreign_links();
     world.install(ServiceStart::Automatic, "1.0.0");
     world.assert_policy("enabled");
     world.assert_fragment();
@@ -422,7 +437,7 @@ impl RealWorld {
         self.resolve_unit(&plan);
         let outcome = self
             .drive(&plan, zup_exec::LifecycleAction::Upgrade, false)
-            .expect("upgrade plans and executes");
+            .unwrap_or_else(|error| panic!("upgrade {version} ({start:?}): {error}"));
         assert_eq!(outcome, TransactionOutcome::Committed);
     }
 
