@@ -15,12 +15,11 @@ pub use operation::{
 pub use session::{
     BootstrapRequest, CancellationHandle, ExecutionPolicy, InstallOutcome, OperationControl,
     OperationProgress, RecoveryStatus, RuntimeBackend, RuntimeControl, RuntimeEvent, RuntimeFuture,
-    RuntimePayloadSource, RuntimeRequest, RuntimeState, SessionError, SessionLog, TokenProbe,
-    discover_recovery, execute, outcome_of,
+    RuntimeRequest, RuntimeState, SessionError, SessionLog, TokenProbe, discover_recovery, execute,
+    outcome_of,
 };
 pub use simulate::{SimulatedJob, SimulatedLifecycle, run_simulated};
 pub use telemetry::{EventingExecutor, operation_action, operation_work};
 
 pub use uuid::Uuid;
-pub use zup_bundle::PayloadSource;
 pub use zup_protocol::SessionId;

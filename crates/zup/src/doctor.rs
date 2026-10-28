@@ -318,7 +318,7 @@ fn inspect(
         .collect::<Vec<_>>();
     Ok(DoctorReport {
         manifest: manifest_name,
-        host: zup_core::Target::host().to_string(),
+        host: zup_plugin_contract::HOST_TARGET.to_owned(),
         status: if targets.iter().all(TargetReport::is_ready) {
             CheckStatus::Pass
         } else {

@@ -178,9 +178,12 @@ impl JournalVolume for PrivateJournals {
             .entries()
             .map_err(|error| store_fs(self.root.join("transactions"), error))?
         {
-            let Ok(id) = name.to_string_lossy().parse::<TransactionId>() else {
-                continue;
-            };
+            let id = name
+                .to_str()
+                .and_then(|name| name.parse::<TransactionId>().ok())
+                .ok_or_else(|| StoreError::InvalidDirectory {
+                    name: name.to_string_lossy().into_owned(),
+                })?;
             ids.push(id);
         }
         Ok(ids)
@@ -227,7 +230,13 @@ impl TransactionStore for FilesystemTransactionStore {
 
     fn load(&self, id: &TransactionId) -> Result<TransactionRecord, StoreError> {
         match self.volume.read_journal(id)? {
-            Some(bytes) => decode_record(&bytes),
+            Some(bytes) => {
+                let record = decode_record(&bytes)?;
+                if record.transaction_id != *id {
+                    return Err(CorruptReason::IdentityMismatch.into());
+                }
+                Ok(record)
+            }
             None => Err(StoreError::Corrupt(CorruptReason::Missing)),
         }
     }

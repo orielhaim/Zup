@@ -171,6 +171,7 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
         }
         Ok(zup_runtime::InstallOutcome::RecoveryRequired) => {
             let transaction = zup_runtime::discover_recovery(&state_root)
+                .map_err(|error| miette::miette!("cannot inspect recovery state: {error}"))?
                 .into_iter()
                 .find_map(|status| match status {
                     zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id } => {

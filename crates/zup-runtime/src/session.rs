@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use zup_bootstrap::BoundBootstrapPlan;
-use zup_bundle::PayloadSource;
 use zup_core::{AppId, ReleaseIdentity, SelectedScope, Target};
 use zup_transaction::{
     CancellationProbe, FilesystemTransactionStore, TransactionId, TransactionPlan, TransactionStore,
@@ -142,51 +141,39 @@ impl CancellationProbe for TokenProbe {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryStatus {
     NoRecoveryNeeded,
+    CommittedTransaction { transaction_id: String },
     PreparedTransaction { transaction_id: String },
     InterruptedApplyingTransaction { transaction_id: String },
     RecoveryRequired { transaction_id: String },
 }
 
-pub fn discover_recovery(state_root: &Path) -> Vec<RecoveryStatus> {
+pub fn discover_recovery(
+    state_root: &Path,
+) -> Result<Vec<RecoveryStatus>, zup_transaction::StoreError> {
     let store = FilesystemTransactionStore::private_at(state_root);
     let mut out = Vec::new();
-    let tx_dir = state_root.join("transactions");
-    let Ok(entries) = std::fs::read_dir(&tx_dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Ok(uuid) = name.parse::<uuid::Uuid>() else {
-            continue;
-        };
-        let id = TransactionId::from_uuid(uuid);
-        let Ok(record) = store.load(&id) else {
-            continue;
-        };
-        match record.phase {
+    for id in store.list_ids()? {
+        let record = store.load(&id)?;
+        let transaction_id = id.to_string();
+        out.push(match record.phase {
             zup_transaction::TransactionPhase::Prepared => {
-                out.push(RecoveryStatus::PreparedTransaction {
-                    transaction_id: id.to_string(),
-                });
+                RecoveryStatus::PreparedTransaction { transaction_id }
             }
             zup_transaction::TransactionPhase::Applying
             | zup_transaction::TransactionPhase::RollingBack => {
-                out.push(RecoveryStatus::InterruptedApplyingTransaction {
-                    transaction_id: id.to_string(),
-                });
+                RecoveryStatus::InterruptedApplyingTransaction { transaction_id }
             }
             zup_transaction::TransactionPhase::RecoveryRequired => {
-                out.push(RecoveryStatus::RecoveryRequired {
-                    transaction_id: id.to_string(),
-                });
+                RecoveryStatus::RecoveryRequired { transaction_id }
             }
-            _ => out.push(RecoveryStatus::NoRecoveryNeeded),
-        }
+            zup_transaction::TransactionPhase::Committed => {
+                RecoveryStatus::CommittedTransaction { transaction_id }
+            }
+            zup_transaction::TransactionPhase::RolledBack => RecoveryStatus::NoRecoveryNeeded,
+        });
     }
-    out
+    Ok(out)
 }
-
-pub type RuntimePayloadSource = Arc<dyn PayloadSource + Send + Sync>;
 
 pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -290,8 +277,6 @@ impl OperationControl {
 }
 
 pub trait RuntimeBackend: Send + Sync {
-    fn payload_source(&self, request: &RuntimeRequest) -> RuntimePayloadSource;
-
     fn execute<'a>(
         &'a self,
         request: RuntimeRequest,
@@ -336,7 +321,6 @@ pub async fn execute(
     let result = if control.cancellation.is_cancelled() {
         Ok(InstallOutcome::Cancelled)
     } else {
-        let _ = backend.payload_source(&request);
         let runtime = RuntimeControl::new(
             control.cancellation.clone(),
             control.events.clone(),

@@ -136,10 +136,7 @@ jobs:
       - name: Merge both toolchains
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force merged | Out-Null
-          Get-ChildItem tc-win, tc-linux -Recurse -File |
-            Copy-Item -Destination merged/ -Force
-          Get-ChildItem merged/ | Select-Object Name, Length
+          cargo xtask toolchain assemble --source tc-win --source tc-linux --out merged
 
       - name: Build every fixture target
         shell: pwsh
@@ -217,9 +214,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p merged dist
-          find tc-win tc-linux -type f -exec cp {} merged/ \;
-          ls -la merged/
+          cargo xtask toolchain assemble --source tc-win --source tc-linux --out merged
+          mkdir -p dist
 
       - name: Build every fixture target
         shell: bash
@@ -327,10 +323,7 @@ jobs:
       - name: Merge and package the multi-platform release
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force target/debug/toolchain | Out-Null
-          Get-ChildItem tc-win, tc-linux -Recurse -File |
-            Copy-Item -Destination target/debug/toolchain/ -Force
-          cargo xtask toolchain package --profile dev
+          cargo xtask toolchain package --profile dev --source tc-win --source tc-linux
 
       - name: Release clean-room
         shell: pwsh

@@ -1,45 +1,16 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use rstest::rstest;
-use zup_bundle::DirectoryPayloadSource;
-use zup_core::{RelativePath, SelectedScope, Target, hash_reader};
+use zup_core::{SelectedScope, Target};
 use zup_runtime::{
     ExecutionPolicy, InstallOutcome, OperationControl, RuntimeBackend, RuntimeControl,
-    RuntimeEvent, RuntimeFuture, RuntimePayloadSource, RuntimeRequest, SessionError, execute,
+    RuntimeEvent, RuntimeFuture, RuntimeRequest, SessionError, execute,
 };
 use zup_transaction::{TransactionInput, compile_transaction};
 
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("zup-runtime-{}", zup_runtime::Uuid::now_v7()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-struct FakeBackend {
-    source: RuntimePayloadSource,
-}
+struct FakeBackend;
 
 impl RuntimeBackend for FakeBackend {
-    fn payload_source(&self, _request: &RuntimeRequest) -> RuntimePayloadSource {
-        self.source.clone()
-    }
-
     fn execute<'a>(
         &'a self,
         _request: RuntimeRequest,
@@ -86,12 +57,6 @@ fn request() -> RuntimeRequest {
     }
 }
 
-fn backend(root: &TestDir) -> FakeBackend {
-    FakeBackend {
-        source: Arc::new(DirectoryPayloadSource::new(root.path())),
-    }
-}
-
 #[derive(Clone, Copy)]
 enum Expectation {
     Committed,
@@ -122,8 +87,7 @@ async fn the_operation_outcome_is_independent_of_progress_delivery(
     #[case] mismatch: bool,
     #[case] expected: Expectation,
 ) {
-    let root = TestDir::new();
-    let backend = backend(&root);
+    let backend = FakeBackend;
     let mut request = request();
     if mismatch {
         request.target = Target::parse("arm64-pc-windows-msvc").unwrap();
@@ -151,28 +115,4 @@ async fn the_operation_outcome_is_independent_of_progress_delivery(
     }
     assert!(!ExecutionPolicy::NonInteractive.allows_authorization());
     assert!(ExecutionPolicy::Interactive.allows_authorization());
-}
-
-#[tokio::test]
-async fn execution_opens_the_verified_payload() {
-    let root = TestDir::new();
-    std::fs::write(root.path().join("payload.bin"), b"payload").unwrap();
-    let backend = backend(&root);
-    let mut request = request();
-    request.state_root = root.path().join("state");
-    request.work_root = root.path().join("work");
-    let control = OperationControl::new(ExecutionPolicy::Interactive);
-    let outcome = execute(&backend, request.clone(), &control).await.unwrap();
-    assert_eq!(outcome, InstallOutcome::Committed);
-    let relative = RelativePath::new("payload.bin").unwrap();
-    let (size, digest) = hash_reader(&b"payload"[..]).unwrap();
-    let mut bytes = Vec::new();
-    use std::io::Read;
-    backend
-        .payload_source(&request)
-        .open(&relative, &digest, size)
-        .unwrap()
-        .read_to_end(&mut bytes)
-        .unwrap();
-    assert_eq!(bytes, b"payload");
 }

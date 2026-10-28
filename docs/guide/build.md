@@ -26,6 +26,19 @@ cargo xtask toolchain build
 
 Without it, builds fail with `zup.toolchain.component_missing`.
 
+To package toolchains downloaded from separate Windows and Linux builds:
+
+```bash
+cargo xtask toolchain package --source tc-win --source tc-linux
+```
+
+Each source contains the version directory uploaded from `target/debug/toolchain`.
+Packaging preserves that layout, combines native preset binaries, and rejects conflicting components.
+Without `--source`, packaging uses the locally staged toolchain for the selected profile.
+For a combined build toolchain without packaging a CLI, use
+`cargo xtask toolchain assemble --source tc-win --source tc-linux --out merged`,
+then `zup --toolchain merged build`. The assembly destination must be empty.
+
 ## Select targets
 
 ```bash

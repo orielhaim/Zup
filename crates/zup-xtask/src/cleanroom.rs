@@ -67,7 +67,8 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
     verify_components_come_from_the_release(&zup, work, material)?;
     step(&zup, work, &["build"], "build")?;
 
-    let artifact = work.join("Acme-Setup.exe");
+    let target = zup_core::Target::host().map_err(|error| error.to_string())?;
+    let artifact = work.join(format!("Acme-Setup{}", target.executable_suffix()));
     if !artifact.is_file() {
         return Err(format!(
             "`zup build` reported success but wrote no `{}`",
@@ -88,9 +89,14 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
             artifact.display()
         )
     })?;
-    if image.format() != zup_binary::BinaryFormat::Pe {
+    let expected_format = match target.operating_system() {
+        zup_core::TargetOperatingSystem::Windows => zup_binary::BinaryFormat::Pe,
+        zup_core::TargetOperatingSystem::Linux => zup_binary::BinaryFormat::Elf,
+        os => return Err(format!("unsupported clean-room operating system {os}")),
+    };
+    if image.format() != expected_format {
         return Err(format!(
-            "`{}` is a {image:?} file, and this release builds Windows images",
+            "`{}` is a {image:?} file; expected {expected_format:?} for {target}",
             artifact.display()
         ));
     }

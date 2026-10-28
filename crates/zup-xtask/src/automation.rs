@@ -221,7 +221,7 @@ fn doctor() -> AutomationResult {
         ))
         .with_details(Details::Doctor(DoctorDetails {
             manifest: "zup.toml".to_owned(),
-            host: "windows-x64".to_owned(),
+            host: "x86_64-pc-windows-msvc".to_owned(),
             ready: false,
             checks: 3,
             targets: vec![DoctorTarget::new(
@@ -436,7 +436,7 @@ fn toolchain_status() -> AutomationResult {
     AutomationResult::new(zup_automation::OPERATION_TOOLCHAIN_STATUS)
         .with_details(Details::ToolchainStatus(ToolchainStatusDetails {
             zup_version: "0.0.1".to_owned(),
-            host: "windows-x64".to_owned(),
+            host: "x86_64-pc-windows-msvc".to_owned(),
             cache: "%LOCALAPPDATA%\\zup\\toolchain\\0.0.1".to_owned(),
             complete: false,
             components: vec![ToolchainComponentStatus {

@@ -433,28 +433,15 @@ impl LinuxLedgerStore {
     }
 
     pub fn repair_committed(&self, app_id: &AppId, scope: SelectedScope) -> Result<(), ExecError> {
-        let directory = self.root.join("transactions");
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
-                return Err(PathError::io(&(directory), source).into());
-            }
-        };
         let journals = zup_transaction::FilesystemTransactionStore::private_at(&self.root);
+        let ids = journals
+            .list_ids()
+            .map_err(|error| ExecError::Executor(error.to_string()))?;
         let mut committed = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|source| PathError::io(&(directory.clone()), source))?;
-            let Some(id) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<uuid::Uuid>().ok())
-            else {
-                continue;
-            };
+        for id in ids {
             let record = journals
-                .load(&zup_transaction::TransactionId::from_uuid(id))
-                .map_err(|_| ExecError::LedgerInvalid)?;
+                .load(&id)
+                .map_err(|error| ExecError::Executor(error.to_string()))?;
             if record.app_id != *app_id || record.scope != scope {
                 continue;
             }
@@ -849,27 +836,14 @@ fn cleanup_removed_directories(record: &TransactionRecord) -> Result<(), ExecErr
 }
 
 fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Result<(), ExecError> {
-    let transactions = root.join("transactions");
-    let entries = match std::fs::read_dir(&transactions) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(PathError::io(&(transactions), source).into());
-        }
-    };
     let store = zup_transaction::FilesystemTransactionStore::private_at(root);
-    for entry in entries {
-        let entry = entry.map_err(|source| PathError::io(&(transactions.clone()), source))?;
-        let Some(id) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<uuid::Uuid>().ok())
-        else {
-            continue;
-        };
+    let ids = store
+        .list_ids()
+        .map_err(|error| ExecError::Executor(error.to_string()))?;
+    for id in ids {
         let record = store
-            .load(&zup_transaction::TransactionId::from_uuid(id))
-            .map_err(|_| ExecError::LedgerInvalid)?;
+            .load(&id)
+            .map_err(|error| ExecError::Executor(error.to_string()))?;
         if record.app_id != uninstall.app_id || record.scope != uninstall.scope {
             continue;
         }
@@ -881,7 +855,7 @@ fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Resu
                 record.transaction_id.to_string(),
             ));
         }
-        let directory = entry.path();
+        let directory = root.join("transactions").join(id.to_string());
         if std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
             std::fs::remove_dir_all(&directory)
                 .map_err(|source| PathError::io(&(directory.clone()), source))?;

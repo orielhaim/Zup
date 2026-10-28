@@ -51,3 +51,17 @@ Paths are templates with `${...}` placeholders. There is no nesting, escaping, o
 `${app.*}` and `${install}` resolve at build time. `${location.*}` resolves on the target machine. `${install}` cannot appear in `[install.directory]` itself.
 
 Prefer `${install}` for payload destinations. Do not hard-code a Windows known-folder path when a location template expresses the intent.
+
+## Interrupted operations
+
+Zup journals filesystem and system changes before reporting completion. A committed
+transaction can still require ownership publication or cleanup. Until that work
+succeeds, the installer reports pending reconciliation rather than success.
+
+Recovery verifies persisted state before continuing. Missing, corrupt, inaccessible,
+or misidentified journals stop the operation. Keep the state directory intact when
+reporting a recovery failure. Deleting it discards ownership and rollback information.
+
+Filesystem changes, services, and other system integrations do not commit atomically
+together. Recovery reconciles recorded work with the machine. An ambiguous change
+requires intervention rather than an unsafe overwrite or removal.

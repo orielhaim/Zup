@@ -13,7 +13,7 @@ const OTHER_TARGET: &str = "windows-x64";
 const OTHER_TARGET: &str = "windows-arm64";
 
 fn host_target() -> String {
-    zup_core::Target::host().to_string()
+    zup_core::Target::host().unwrap().to_string()
 }
 
 /// A Linux target Zup parses but no backend builds.

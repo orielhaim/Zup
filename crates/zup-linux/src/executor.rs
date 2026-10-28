@@ -2449,6 +2449,7 @@ fn observe_file(file: &zup_platform::TargetFile) -> ObservedFileState {
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use zup_core::hash_reader;
 
     fn digest(bytes: &[u8]) -> Sha256Digest {
@@ -2503,7 +2504,10 @@ mod fallback_tests {
     }
 
     fn plant_staged(install: &Path, key: &ResourceKey, bytes: &[u8]) {
-        std::fs::write(install.join(staged_test_name(key)), bytes).expect("a staged file");
+        let path = install.join(staged_test_name(key));
+        std::fs::write(&path, bytes).expect("a staged file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("staged mode");
     }
 
     fn staged_test_name(key: &ResourceKey) -> String {
