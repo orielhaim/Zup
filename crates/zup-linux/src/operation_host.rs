@@ -111,7 +111,12 @@ impl OperationHost for LinuxOperationHost {
         let target =
             target.ok_or_else(|| "a Linux transaction compiles against its target".to_owned())?;
         match &self.machine {
-            Some(machine) => {
+            Some(machine)
+                if !execution.services.is_empty()
+                    || execution.removals.iter().any(|removal| {
+                        matches!(removal.owned, zup_exec::OwnedResource::Service { .. })
+                    }) =>
+            {
                 let mut manager = crate::systemd::RealSystemd::connect()
                     .map_err(|error| format!("systemd is unavailable: {error}"))?;
                 crate::input::compile_machine_execution_plan(
@@ -128,7 +133,7 @@ impl OperationHost for LinuxOperationHost {
                     },
                 )
             }
-            None => crate::input::compile_execution_plan(execution, target),
+            _ => crate::input::compile_execution_plan(execution, target),
         }
         .map_err(|error| error.to_string())
         .map(|mut input| {

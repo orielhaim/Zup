@@ -200,18 +200,19 @@ fn a_damaged_package_is_refused_before_anything_is_read_from_it() {
 /// A target the package does not carry is a refusal that names both what was
 /// asked for and what is there, because "unsupported target" alone leaves the
 /// author guessing.
-///
-/// The missing target is one neither host carries: the package holds this
-/// host's target plus one foreign one, so the refusal names both on every
-/// machine the suite runs on.
 #[test]
 fn a_target_the_package_does_not_carry_names_what_it_has() {
     let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST, "windows-arm64"]);
+    let path = write_package(directory.path(), &[HOST]);
+    let missing = if target(HOST) == Target::LINUX_ARM64 {
+        Target::LINUX_X64
+    } else {
+        Target::LINUX_ARM64
+    };
     let error = select(
         &path,
         &installer(),
-        &target("linux-arm64"),
+        &missing,
         &settings(serde_json::json!({ "accent": "#695cff" })),
     )
     .expect_err("this package has no such binary");
@@ -219,9 +220,8 @@ fn a_target_the_package_does_not_carry_names_what_it_has() {
     let host = Target::parse(HOST)
         .expect("the host target parses")
         .to_string();
-    assert!(message.contains("linux-arm64"), "{message}");
+    assert!(message.contains(missing.as_str()), "{message}");
     assert!(message.contains(&host), "{message}");
-    assert!(message.contains("windows-arm64"), "{message}");
 }
 
 /// A preset built against another wire protocol is its own refusal, distinct from

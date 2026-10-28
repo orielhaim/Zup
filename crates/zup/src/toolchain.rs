@@ -1059,10 +1059,10 @@ mod toolchain_cli_tests {
         if let ToolchainComponent::Runtime { target, .. } = component
             && target.operating_system() == zup_core::TargetOperatingSystem::Linux
         {
-            let machine: u16 = if target.as_str().starts_with("aarch64") {
-                183
-            } else {
-                62
+            let machine: u16 = match target.architecture() {
+                zup_core::TargetArchitecture::Aarch64(_) => 183,
+                zup_core::TargetArchitecture::X86_64 => 62,
+                other => panic!("unsupported fixture architecture: {other}"),
             };
             let mut bytes = vec![0u8; 64];
             bytes[..4].copy_from_slice(b"\x7fELF");
@@ -1095,10 +1095,11 @@ mod toolchain_cli_tests {
         }
         let (machine, subsystem): (u16, u16) = match component {
             ToolchainComponent::Runtime { target, frontend } => (
-                if target.as_str().starts_with("aarch64") {
-                    0xaa64
-                } else {
-                    0x8664
+                match target.architecture() {
+                    zup_core::TargetArchitecture::Aarch64(_) => 0xaa64,
+                    zup_core::TargetArchitecture::X86_64 => 0x8664,
+                    zup_core::TargetArchitecture::X86_32(_) => 0x014c,
+                    other => panic!("unsupported fixture architecture: {other}"),
                 },
                 match frontend {
                     zup_core::Frontend::Gui => 2,
@@ -1121,8 +1122,13 @@ mod toolchain_cli_tests {
         bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
         bytes[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
         bytes[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
-        bytes[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
-        bytes[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
+        let (optional_size, magic): (u16, u16) = if machine == 0x014c {
+            (224, 0x10b)
+        } else {
+            (240, 0x20b)
+        };
+        bytes[0x54..0x56].copy_from_slice(&optional_size.to_le_bytes());
+        bytes[0x58..0x5a].copy_from_slice(&magic.to_le_bytes());
         bytes[0x9c..0x9e].copy_from_slice(&subsystem.to_le_bytes());
         bytes
     }

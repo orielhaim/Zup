@@ -29,7 +29,7 @@ use zup_runtime::Operation;
 const HANDSHAKE: Duration = Duration::from_secs(30);
 
 fn linux_target() -> Target {
-    Target::parse("linux-x64").expect("a Linux target")
+    Target::host().expect("a supported Linux host")
 }
 
 fn app_id() -> AppId {
