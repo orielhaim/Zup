@@ -132,9 +132,11 @@ fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
         zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. } => {
             Ok(LinuxOutcome::CommittedPendingReconciliation {
                 transaction: zup_runtime::discover_recovery(state_root)
+                    .map_err(|error| ExecError::Ownership(error.to_string()))?
                     .into_iter()
                     .find_map(|status| match status {
-                        zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id }
+                        zup_runtime::RecoveryStatus::CommittedTransaction { transaction_id }
+                        | zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id }
                         | zup_runtime::RecoveryStatus::PreparedTransaction { transaction_id }
                         | zup_runtime::RecoveryStatus::InterruptedApplyingTransaction {
                             transaction_id,
@@ -146,6 +148,7 @@ fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
         }
         zup_runtime::InstallOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
             transaction: zup_runtime::discover_recovery(state_root)
+                .map_err(|error| ExecError::Ownership(error.to_string()))?
                 .into_iter()
                 .find_map(|status| match status {
                     zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id } => {

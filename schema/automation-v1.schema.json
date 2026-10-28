@@ -1476,6 +1476,10 @@
           "description": "A step began.",
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "phase"
+            },
             "phase": {
               "description": "A short, stable name for the step.",
               "type": "string"
@@ -1483,10 +1487,6 @@
             "message": {
               "description": "The sentence a person would have read.",
               "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "const": "phase"
             }
           },
           "required": [
@@ -1499,6 +1499,10 @@
           "description": "A counter moved.",
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "progress"
+            },
             "completed": {
               "description": "Items finished.",
               "type": "integer",
@@ -1514,10 +1518,6 @@
             "label": {
               "description": "The label a person would have read.",
               "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "const": "progress"
             }
           },
           "required": [
@@ -1531,12 +1531,12 @@
           "description": "Something a reader should know now rather than at the end.",
           "type": "object",
           "properties": {
-            "diagnostic": {
-              "$ref": "#/$defs/Diagnostic"
-            },
             "type": {
               "type": "string",
               "const": "diagnostic"
+            },
+            "diagnostic": {
+              "$ref": "#/$defs/Diagnostic"
             }
           },
           "required": [
@@ -1548,12 +1548,12 @@
           "description": "A file was produced.",
           "type": "object",
           "properties": {
-            "artifact": {
-              "$ref": "#/$defs/Artifact"
-            },
             "type": {
               "type": "string",
               "const": "artifact"
+            },
+            "artifact": {
+              "$ref": "#/$defs/Artifact"
             }
           },
           "required": [
@@ -1565,12 +1565,12 @@
           "description": "A release went somewhere.",
           "type": "object",
           "properties": {
-            "publication": {
-              "$ref": "#/$defs/Publication"
-            },
             "type": {
               "type": "string",
               "const": "publication"
+            },
+            "publication": {
+              "$ref": "#/$defs/Publication"
             }
           },
           "required": [
@@ -1582,15 +1582,15 @@
           "description": "Human output that would have gone to a terminal.\n\nExists so a build's logs can be *shown* without being *suppressed*: in\n`--format jsonl` the child's and zup's own human lines come out here, and a\nconsumer that ignores them still has a complete stream.",
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "log"
+            },
             "level": {
               "$ref": "#/$defs/LogLevel"
             },
             "message": {
               "type": "string"
-            },
-            "type": {
-              "type": "string",
-              "const": "log"
             }
           },
           "required": [
@@ -1603,12 +1603,12 @@
           "description": "The last line. The authoritative result.\n\nBoxed because the result is three orders of magnitude larger than any other\nevent, and a stream that carries thousands of progress lines would otherwise\npay for it on every line. Invisible on the wire.",
           "type": "object",
           "properties": {
-            "result": {
-              "$ref": "#/$defs/AutomationResult"
-            },
             "type": {
               "type": "string",
               "const": "completed"
+            },
+            "result": {
+              "$ref": "#/$defs/AutomationResult"
             }
           },
           "required": [

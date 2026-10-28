@@ -331,8 +331,10 @@ fn derived_output_path(
     candidate
 }
 
-pub fn default_build_target() -> String {
-    Target::host().to_string()
+pub fn default_build_target() -> miette::Result<String> {
+    Target::host()
+        .map(|target| target.to_string())
+        .map_err(|error| miette::miette!("{error}"))
 }
 
 /// The dispatch is on the *target's* operating system, never on the build
@@ -453,13 +455,13 @@ mod tests {
 
     #[test]
     fn the_default_build_target_is_the_host_itself() {
-        let host = Target::host();
+        let host = Target::host().unwrap();
         assert_eq!(
             host.is_windows(),
             !cfg!(target_os = "linux"),
             "a Windows target builds on any host: composition is target-selected, never host-selected"
         );
-        assert!(default_build_target() == host.to_string());
+        assert!(default_build_target().unwrap() == host.to_string());
     }
 
     fn empty_resolver() -> ToolchainResolver {

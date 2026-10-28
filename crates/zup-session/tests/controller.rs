@@ -31,15 +31,6 @@ struct FakeBackend {
 }
 
 impl zup_runtime::RuntimeBackend for FakeBackend {
-    fn payload_source(
-        &self,
-        _request: &zup_runtime::RuntimeRequest,
-    ) -> zup_runtime::RuntimePayloadSource {
-        let root = tempfile::tempdir().expect("payload root");
-        let root = root.keep();
-        Arc::new(zup_bundle::DirectoryPayloadSource::new(root))
-    }
-
     fn execute<'a>(
         &'a self,
         _request: zup_runtime::RuntimeRequest,

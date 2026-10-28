@@ -156,19 +156,10 @@ impl JournalVolume for MachineJournals {
         })?;
         let mut ids = Vec::new();
         for name in names {
-            let Ok(id) = name.parse::<TransactionId>() else {
-                continue;
-            };
-            let Some(directory) = open_optional(&transactions, &name)? else {
-                continue;
-            };
-            if directory
-                .read("transaction.json", PolicyKind::Administrators)
-                .map_err(|error| store_io(&id, error))?
-                .is_some()
-            {
-                ids.push(id);
-            }
+            let id = name
+                .parse::<TransactionId>()
+                .map_err(|_| StoreError::InvalidDirectory { name })?;
+            ids.push(id);
         }
         Ok(ids)
     }
@@ -311,16 +302,15 @@ pub(crate) mod tests {
                 .lock_journal(&orphan)
                 .expect("initial unpublished journal"),
         );
-        assert!(
-            store
-                .list_ids()
-                .expect("unpublished directories are not recovery records")
-                .is_empty()
-        );
+        assert_eq!(store.list_ids().expect("journal directories"), vec![orphan]);
+        assert!(matches!(
+            store.load(&orphan),
+            Err(StoreError::Corrupt(zup_transaction::CorruptReason::Missing))
+        ));
         machine
             .remove_journal(&orphan)
             .expect("validated orphan cleanup");
-        let plan = compile_transaction(&TransactionInput::new(zup_core::Target::host()))
+        let plan = compile_transaction(&TransactionInput::new(zup_core::Target::host().unwrap()))
             .expect("barrier plan");
         let record = TransactionRecord::new(
             TransactionId::new_v7(),

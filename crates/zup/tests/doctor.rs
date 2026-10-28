@@ -254,7 +254,7 @@ fn healthy_single_target_passes_every_required_check() {
     );
     let report = report(&output);
     assert_eq!(report["ready"], true);
-    assert_eq!(report["host"], zup_core::Target::host().to_string());
+    assert_eq!(report["host"], zup_plugin_contract::HOST_TARGET);
     assert_eq!(report["targets"].as_array().unwrap().len(), 1);
 
     let rows = checks(&output, "default");

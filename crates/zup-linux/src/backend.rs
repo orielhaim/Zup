@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use zup_core::SelectedScope;
 use zup_runtime::{
     EventingExecutor, InstallOutcome, Operation, OperationSelection, RuntimeBackend,
-    RuntimeControl, RuntimeEvent, RuntimeFuture, RuntimePayloadSource, RuntimeRequest,
-    SessionError,
+    RuntimeControl, RuntimeEvent, RuntimeFuture, RuntimeRequest, SessionError,
 };
 use zup_transaction::{
     FilesystemTransactionStore, InstallationLock, TransactionCoordinator, TransactionOutcome,
@@ -564,29 +562,7 @@ fn scope_token(scope: SelectedScope) -> &'static str {
     }
 }
 
-struct UnavailablePayload;
-
-impl zup_bundle::PayloadSource for UnavailablePayload {
-    fn open(
-        &self,
-        path: &zup_core::RelativePath,
-        _expected_sha256: &zup_core::Sha256Digest,
-        _expected_size: u64,
-    ) -> Result<zup_bundle::PayloadReader, zup_bundle::PayloadError> {
-        Err(zup_bundle::PayloadError::NotFound {
-            path: path.to_string(),
-        })
-    }
-}
-
 impl RuntimeBackend for LinuxRuntimeBackend {
-    fn payload_source(&self, _request: &RuntimeRequest) -> RuntimePayloadSource {
-        match Carrier::open(&self.installer) {
-            Ok(carrier) => Arc::new(carrier.package().payload_source()),
-            Err(_) => Arc::new(UnavailablePayload),
-        }
-    }
-
     fn execute<'a>(
         &'a self,
         request: RuntimeRequest,

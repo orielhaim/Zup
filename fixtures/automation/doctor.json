@@ -24,7 +24,7 @@
   "details": {
     "kind": "doctor",
     "manifest": "zup.toml",
-    "host": "windows-x64",
+    "host": "x86_64-pc-windows-msvc",
     "ready": false,
     "checks": 3,
     "targets": [

@@ -292,6 +292,8 @@ pub enum CorruptReason {
     InvalidJson(String),
     #[error("unsupported journal schema {found}")]
     UnsupportedSchema { found: u32 },
+    #[error("journal transaction identity does not match its directory")]
+    IdentityMismatch,
     #[error("plan fingerprint mismatch")]
     PlanHashMismatch,
     #[error("plan target does not match journal target")]
@@ -310,6 +312,10 @@ pub enum CorruptReason {
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum StoreError {
+    #[error("invalid transaction directory name `{name}`")]
+    #[diagnostic(code(zup_transaction::invalid_directory))]
+    InvalidDirectory { name: String },
+
     #[error("journal corrupt: {0}")]
     #[diagnostic(code(zup_transaction::corrupt_journal))]
     Corrupt(#[from] CorruptReason),

@@ -22,7 +22,7 @@ pub fn run(args: InitCommand) -> miette::Result<()> {
     };
     let install_name = project::slug(&answers.name);
     let frontend = answers.frontend;
-    let target = crate::build_inputs::default_build_target();
+    let target = crate::build_inputs::default_build_target()?;
     let mut document = format!(
         "#:schema https://zup.dev/schema/zup.toml.json\n\n\
          schema = {}\nfrontend = {}\n\n\

@@ -451,3 +451,22 @@ fn load_of_an_unknown_transaction_is_missing() {
         "{err:?}"
     );
 }
+
+#[test]
+fn a_journal_cannot_be_relocated_under_another_transaction_identity() {
+    let (root, store) = store();
+    let original = record();
+    store.create(&original).unwrap();
+    let other = TransactionId::new_v7();
+    std::fs::rename(
+        root.path()
+            .join("transactions")
+            .join(original.transaction_id.to_string()),
+        root.path().join("transactions").join(other.to_string()),
+    )
+    .unwrap();
+    assert!(matches!(
+        store.load(&other),
+        Err(StoreError::Corrupt(CorruptReason::IdentityMismatch))
+    ));
+}

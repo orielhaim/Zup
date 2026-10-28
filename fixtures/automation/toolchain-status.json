@@ -20,7 +20,7 @@
   "details": {
     "kind": "toolchain.status",
     "zup_version": "0.0.1",
-    "host": "windows-x64",
+    "host": "x86_64-pc-windows-msvc",
     "cache": "%LOCALAPPDATA%\\zup\\toolchain\\0.0.1",
     "complete": false,
     "components": [

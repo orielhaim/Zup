@@ -260,19 +260,10 @@ impl Target {
         })
     }
 
-    /// The target this host builds for by default.
-    pub fn host() -> Self {
-        if cfg!(target_os = "linux") {
-            if cfg!(target_arch = "aarch64") {
-                Self::LINUX_ARM64
-            } else {
-                Self::LINUX_X64
-            }
-        } else if cfg!(target_arch = "aarch64") {
-            Self::WINDOWS_ARM64
-        } else {
-            Self::WINDOWS_X64
-        }
+    /// The supported target matching the host OS, architecture, and C runtime.
+    pub fn host() -> Result<Self, TargetParseError> {
+        let triple = Triple::host();
+        Self::parse(triple.to_string())
     }
 
     fn def(self) -> &'static TargetDef {

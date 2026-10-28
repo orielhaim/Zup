@@ -70,8 +70,9 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
     let mut written = Vec::new();
+    let host = zup_core::Target::host().map_err(|error| error.to_string())?;
 
-    for (feature, binary) in frontends_for(&zup_core::Target::host()) {
+    for (feature, binary) in frontends_for(&host) {
         cargo(
             root,
             &[
@@ -89,7 +90,7 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
         )?;
         let built = target_directory(root, profile)
             .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
-        let component = runtime_component(feature);
+        let component = runtime_component(host, feature);
         let staged_file = stage_component(&built, &staged, &component, &version)?;
         println!("  runtime  {feature:<8} {}", component_name(&staged_file));
         written.push(staged_file);
@@ -378,7 +379,7 @@ fn build_and_stage_preset(
 ) -> Result<PathBuf, String> {
     let scratch = tempfile::tempdir_in(staged)
         .map_err(|error| format!("a scratch directory in {}: {error}", staged.display()))?;
-    let host = zup_core::Target::host();
+    let host = zup_core::Target::host().map_err(|error| error.to_string())?;
     let binary_name = "zup-preset-default";
     cargo(
         root,
@@ -430,13 +431,7 @@ fn build_and_stage_preset(
             ),
         }
     }
-    let mut binaries = vec![(host.as_str().to_owned(), packaged.clone())];
-    binaries.extend(retained_preset_binaries(
-        staged,
-        host,
-        &document.stdout,
-        scratch.path(),
-    )?);
+    let binaries = [(host.as_str().to_owned(), packaged)];
     let package = scratch.path().join(zup_toolchain::PRESET_PACKAGE_NAME);
     let mut pack = vec![
         "run".to_owned(),
@@ -470,75 +465,6 @@ fn build_and_stage_preset(
     )
 }
 
-fn retained_preset_binaries(
-    staged: &Path,
-    host: zup_core::Target,
-    document: &[u8],
-    scratch: &Path,
-) -> Result<Vec<(String, PathBuf)>, String> {
-    let staged_package = staged.join(zup_toolchain::PRESET_PACKAGE_NAME);
-    let bytes = match std::fs::read(&staged_package) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("{}: {error}", staged_package.display())),
-    };
-    let view = match zup_artifact::preset::PresetPackageView::open(bytes) {
-        Ok(view) => match view.verify() {
-            Ok(()) => view,
-            Err(error) => {
-                println!(
-                    "  preset             the staged preset does not verify, so only this host's binary is packed: {error}"
-                );
-                return Ok(Vec::new());
-            }
-        },
-        Err(error) => {
-            println!(
-                "  preset             the staged preset does not open, so only this host's binary is packed: {error}"
-            );
-            return Ok(Vec::new());
-        }
-    };
-    let described: serde_json::Value = serde_json::from_slice(document)
-        .map_err(|error| format!("the describe document is unusable: {error}"))?;
-    if view.name() != described["name"].as_str().unwrap_or_default()
-        || view.version().to_string() != described["version"].as_str().unwrap_or_default()
-        || !view
-            .package()
-            .is_compatible_with(zup_preset_protocol::PRESET_PROTOCOL_VERSION)
-    {
-        println!(
-            "  preset             the staged preset is another version; packing this host's binary only"
-        );
-        return Ok(Vec::new());
-    }
-    let mut retained = Vec::new();
-    for target in view.targets() {
-        if target == host.as_str() {
-            continue;
-        }
-        let parsed = zup_core::Target::parse(target)
-            .map_err(|error| format!("the staged preset names `{target}`: {error}"))?;
-        let bytes = view
-            .binary_for(&parsed)
-            .map_err(|error| format!("the staged preset's `{target}` binary: {error}"))?;
-        let path = scratch.join(format!("retained-{target}"));
-        std::fs::write(&path, &bytes).map_err(|error| format!("{}: {error}", path.display()))?;
-        retained.push((target.to_owned(), path));
-    }
-    if !retained.is_empty() {
-        println!(
-            "  preset             keeping {} from the staged package",
-            retained
-                .iter()
-                .map(|(target, _)| target.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    Ok(retained)
-}
-
 #[cfg(windows)]
 const LAUNCHER_PROFILE: &[(&str, &str)] = &[
     ("CARGO_PROFILE_RELEASE_LTO", "fat"),
@@ -564,9 +490,12 @@ fn output_directory(profile: &str) -> &str {
     }
 }
 
-fn runtime_component(frontend: &str) -> zup_toolchain::ToolchainComponent {
+fn runtime_component(
+    target: zup_core::Target,
+    frontend: &str,
+) -> zup_toolchain::ToolchainComponent {
     zup_toolchain::ToolchainComponent::Runtime {
-        target: zup_core::Target::host(),
+        target,
         frontend: match frontend {
             "gui" => zup_core::Frontend::Gui,
             "console" => zup_core::Frontend::Console,
@@ -614,9 +543,176 @@ fn component_name(path: &Path) -> String {
 
 pub use zup_toolchain::RELEASE_INDEX_NAME;
 
-pub fn package(root: &Path, profile: &str, out: &Path) -> Result<PathBuf, String> {
+pub fn assemble_sources(
+    sources: &[PathBuf],
+    version: &str,
+    destination: &Path,
+) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
+
+    if sources.is_empty() {
+        return Err("toolchain assembly needs at least one source".into());
+    }
+    std::fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+    if std::fs::read_dir(destination)
+        .map_err(|error| error.to_string())?
+        .next()
+        .is_some()
+    {
+        return Err(format!(
+            "assembly destination {} must be empty",
+            destination.display()
+        ));
+    }
+    let mut files = BTreeMap::new();
+    let mut description = None;
+    let mut binaries = BTreeMap::new();
+    for source in sources {
+        let directory = source.join(version);
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if !entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_file()
+            {
+                return Err(format!(
+                    "expected a staged file at {}",
+                    entry.path().display()
+                ));
+            }
+            let name = entry.file_name();
+            let name = name.to_str().ok_or("non-UTF-8 staged file name")?;
+            if name
+                == format!(
+                    "{}{}",
+                    zup_toolchain::PRESET_PACKAGE_NAME,
+                    zup_toolchain::DESCRIPTOR_SUFFIX
+                )
+            {
+                continue;
+            }
+            if ["", ".exe"]
+                .iter()
+                .any(|suffix| name == zup_toolchain::test_preset_file_name(suffix))
+            {
+                continue;
+            }
+            if name == zup_toolchain::PRESET_PACKAGE_NAME {
+                let descriptor_path =
+                    directory.join(format!("{name}{}", zup_toolchain::DESCRIPTOR_SUFFIX));
+                let descriptor = std::fs::read(&descriptor_path)
+                    .map_err(|error| format!("{}: {error}", descriptor_path.display()))?;
+                let descriptor = zup_toolchain::ComponentDescriptor::parse(&descriptor)
+                    .map_err(|error| error.to_string())?;
+                let expected = zup_toolchain::ComponentDescriptor::of(
+                    &zup_toolchain::ToolchainComponent::Preset,
+                    version,
+                    &entry.path(),
+                )
+                .map_err(|error| error.to_string())?;
+                if descriptor != expected {
+                    return Err(format!(
+                        "staged preset descriptor does not match {}",
+                        entry.path().display()
+                    ));
+                }
+                let bytes = std::fs::read(entry.path()).map_err(|error| error.to_string())?;
+                let view = PresetPackageView::open(bytes).map_err(|error| error.to_string())?;
+                view.verify().map_err(|error| error.to_string())?;
+                let package = view.package();
+                let current = zup_preset_protocol::PresetDescription {
+                    name: package.name.clone(),
+                    version: package.version.to_string(),
+                    ui_protocol: package.ui_protocol,
+                    required_capabilities: package.required_capabilities.clone(),
+                    settings_schema: package.settings_schema.clone(),
+                };
+                if description
+                    .as_ref()
+                    .is_some_and(|previous| previous != &current)
+                {
+                    return Err("staged presets have different descriptions".into());
+                }
+                description = Some(current);
+                for binary in &package.binaries {
+                    let bytes = view
+                        .binary_for(&binary.target)
+                        .map_err(|error| error.to_string())?;
+                    match binaries.entry(binary.target) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(bytes);
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry)
+                            if entry.get() != &bytes =>
+                        {
+                            return Err(format!("conflicting preset binary for {}", binary.target));
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                if let Some(previous) = files.get(name) {
+                    let fingerprint = |path: &PathBuf| {
+                        std::fs::File::open(path)
+                            .map_err(|error| error.to_string())
+                            .and_then(|file| {
+                                zup_core::hash_reader(file).map_err(|error| error.to_string())
+                            })
+                    };
+                    if fingerprint(previous)? != fingerprint(&entry.path())? {
+                        return Err(format!("conflicting staged component `{name}`"));
+                    }
+                } else {
+                    files.insert(name.to_owned(), entry.path());
+                }
+            }
+        }
+    }
+    for (name, source) in files {
+        copy(&source, &destination.join(name))?;
+    }
+    if let Some(description) = description {
+        let mut writer =
+            PresetPackageWriter::new(description).map_err(|error| error.to_string())?;
+        for (target, bytes) in binaries {
+            writer
+                .add_binary(target, bytes)
+                .map_err(|error| error.to_string())?;
+        }
+        let scratch = tempfile::NamedTempFile::new().map_err(|error| error.to_string())?;
+        std::fs::write(
+            scratch.path(),
+            writer.finish().map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        stage_component(
+            scratch.path(),
+            destination,
+            &zup_toolchain::ToolchainComponent::Preset,
+            version,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn package(
+    root: &Path,
+    profile: &str,
+    out: &Path,
+    sources: &[PathBuf],
+) -> Result<PathBuf, String> {
     let version = version()?;
-    let staged = staging_directory(root, profile, &version);
+    let assembly = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let staged = if sources.is_empty() {
+        staging_directory(root, profile, &version)
+    } else {
+        assemble_sources(sources, &version, assembly.path())?;
+        assembly.path().to_path_buf()
+    };
     if !staged.is_dir() {
         return Err(format!(
             "there is no {} toolchain in {}; run `cargo xtask toolchain build --profile {profile}` first",
@@ -648,8 +744,10 @@ pub fn package(root: &Path, profile: &str, out: &Path) -> Result<PathBuf, String
     let test_peer = zup_toolchain::test_preset_file_name(EXECUTABLE_SUFFIX);
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&staged)
         .map_err(|error| format!("{}: {error}", staged.display()))?
-        .flatten()
-        .map(|entry| entry.path())
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("{}: {error}", staged.display()))?
+        .into_iter()
         .filter(|path| path.is_file())
         .filter(|path| component_name(path) != test_peer)
         .collect();
@@ -670,7 +768,12 @@ pub fn package(root: &Path, profile: &str, out: &Path) -> Result<PathBuf, String
     }
     components.sort_by(|left, right| left.path.cmp(&right.path));
 
-    let mut index = zup_toolchain::ToolchainRelease::new(version.clone(), machine_target());
+    let mut index = zup_toolchain::ToolchainRelease::new(
+        version.clone(),
+        zup_core::Target::host()
+            .map_err(|error| error.to_string())?
+            .to_string(),
+    );
     index.cli = zup_toolchain::ReleaseFile::of(
         &format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"),
         &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")),
@@ -688,24 +791,6 @@ pub fn package(root: &Path, profile: &str, out: &Path) -> Result<PathBuf, String
         )
     })?;
     Ok(out.to_path_buf())
-}
-
-pub fn machine_target() -> String {
-    let machine = zup_binary::BinaryArchitecture::host().unwrap_or_else(|| {
-        panic!(
-            "this host runs on a machine zup has no Windows target for. A release has \
-             to name a machine its components can run on, and there is no honest name for \
-             one that has none."
-        )
-    });
-    match machine {
-        zup_binary::BinaryArchitecture::X86_64 => zup_core::Target::WINDOWS_X64.to_string(),
-        zup_binary::BinaryArchitecture::Arm64 => zup_core::Target::WINDOWS_ARM64.to_string(),
-        other => panic!(
-            "{} is not a machine a Windows toolchain release targets",
-            other
-        ),
-    }
 }
 
 fn copy(from: &Path, to: &Path) -> Result<(), String> {
@@ -773,7 +858,7 @@ mod tests {
             format!("zup-preset-test{EXECUTABLE_SUFFIX}"),
             "the peer is named by the contract crate, so this test would notice it moving"
         );
-        let listed = zup_toolchain::host_components(&zup_core::Target::host());
+        let listed = zup_toolchain::host_components(&zup_core::Target::host().unwrap());
         for component in &listed {
             assert_ne!(
                 zup_toolchain::file_name(component, EXECUTABLE_SUFFIX),
@@ -862,7 +947,7 @@ mod tests {
 
     #[test]
     fn the_stager_produces_exactly_the_components_the_contract_names() {
-        let target = zup_core::Target::host();
+        let target = zup_core::Target::host().unwrap();
         let wanted: Vec<String> = zup_toolchain::supported_components(&target)
             .iter()
             .map(|component| zup_toolchain::file_name(component, EXECUTABLE_SUFFIX))
@@ -871,7 +956,7 @@ mod tests {
         let mut staged: Vec<String> = frontends_for(&target)
             .iter()
             .map(|(feature, _)| {
-                zup_toolchain::file_name(&runtime_component(feature), EXECUTABLE_SUFFIX)
+                zup_toolchain::file_name(&runtime_component(target, feature), EXECUTABLE_SUFFIX)
             })
             .collect();
         staged.push(zup_toolchain::file_name(
@@ -898,5 +983,113 @@ mod tests {
         let mut wanted = wanted;
         wanted.sort();
         assert_eq!(staged, wanted);
+    }
+}
+
+#[cfg(test)]
+mod assembly_tests {
+    use super::*;
+
+    #[test]
+    fn assembly_merges_native_presets_and_regenerates_the_descriptor() {
+        use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("assembled");
+        std::fs::create_dir(&output).unwrap();
+        let mut sources = Vec::new();
+        for target in [zup_core::Target::WINDOWS_X64, zup_core::Target::LINUX_X64] {
+            let source = root.path().join(target.as_str());
+            std::fs::create_dir_all(source.join("0.0.1")).unwrap();
+            let mut writer = PresetPackageWriter::new(zup_preset_protocol::PresetDescription::new(
+                "default",
+                "0.0.1",
+                serde_json::json!({"type": "object"}),
+            ))
+            .unwrap();
+            writer
+                .add_binary(target, target.as_str().as_bytes().to_vec())
+                .unwrap();
+            std::fs::write(
+                source
+                    .join("0.0.1")
+                    .join(zup_toolchain::PRESET_PACKAGE_NAME),
+                writer.finish().unwrap(),
+            )
+            .unwrap();
+            let path = source
+                .join("0.0.1")
+                .join(zup_toolchain::PRESET_PACKAGE_NAME);
+            let descriptor = zup_toolchain::ComponentDescriptor::of(
+                &zup_toolchain::ToolchainComponent::Preset,
+                "0.0.1",
+                &path,
+            )
+            .unwrap();
+            std::fs::write(
+                source.join("0.0.1").join(format!(
+                    "{}{}",
+                    zup_toolchain::PRESET_PACKAGE_NAME,
+                    zup_toolchain::DESCRIPTOR_SUFFIX
+                )),
+                descriptor.encode(),
+            )
+            .unwrap();
+            sources.push(source);
+        }
+        assemble_sources(&sources, "0.0.1", &output).unwrap();
+        let path = output.join(zup_toolchain::PRESET_PACKAGE_NAME);
+        let view = PresetPackageView::open(std::fs::read(&path).unwrap()).unwrap();
+        view.verify().unwrap();
+        assert_eq!(view.targets().len(), 2);
+        for target in [zup_core::Target::WINDOWS_X64, zup_core::Target::LINUX_X64] {
+            assert_eq!(
+                view.binary_for(&target).unwrap(),
+                target.as_str().as_bytes()
+            );
+        }
+        let expected = zup_toolchain::ComponentDescriptor::of(
+            &zup_toolchain::ToolchainComponent::Preset,
+            "0.0.1",
+            &path,
+        )
+        .unwrap();
+        let descriptor = std::fs::read(output.join(format!(
+            "{}{}",
+            zup_toolchain::PRESET_PACKAGE_NAME,
+            zup_toolchain::DESCRIPTOR_SUFFIX
+        )))
+        .unwrap();
+        assert_eq!(
+            zup_toolchain::ComponentDescriptor::parse(&descriptor).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn downloaded_toolchains_keep_their_version_and_conflicts_are_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let windows = root.path().join("windows");
+        let linux = root.path().join("linux");
+        let output = root.path().join("assembled");
+        for directory in [&windows, &linux] {
+            std::fs::create_dir_all(directory.join("0.0.1")).unwrap();
+        }
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(windows.join("0.0.1/windows-runtime"), b"windows").unwrap();
+        std::fs::write(linux.join("0.0.1/linux-runtime"), b"linux").unwrap();
+        let sources = [windows.clone(), linux.clone()];
+        assemble_sources(&sources, "0.0.1", &output).unwrap();
+        assert_eq!(
+            std::fs::read(output.join("windows-runtime")).unwrap(),
+            b"windows"
+        );
+        assert_eq!(
+            std::fs::read(output.join("linux-runtime")).unwrap(),
+            b"linux"
+        );
+        std::fs::remove_dir_all(&output).unwrap();
+        assert!(assemble_sources(&sources, "0.0.2", &output).is_err());
+        std::fs::write(linux.join("0.0.1/windows-runtime"), b"different").unwrap();
+        assert!(assemble_sources(&sources, "0.0.1", &output).is_err());
     }
 }

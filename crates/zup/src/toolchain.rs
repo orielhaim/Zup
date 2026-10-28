@@ -890,7 +890,7 @@ fn report(
         .collect();
     ToolchainStatus {
         zup_version: crate::ZUP_VERSION.to_owned(),
-        host: zup_core::Target::host().to_string(),
+        host: zup_plugin_contract::HOST_TARGET.to_owned(),
         cache: crate::plain_path(&cache),
         cache_populated: cache.is_dir(),
         other_versions: crate::toolchain::other_cached_versions_for_self(state_root),

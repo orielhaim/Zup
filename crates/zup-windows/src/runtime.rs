@@ -11,14 +11,15 @@ use zup_bundle::{AcquiredPayloadSource, PayloadSource};
 use zup_core::SelectedScope;
 use zup_runtime::{
     BootstrapRequest, CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeBackend,
-    RuntimeControl, RuntimeEvent, RuntimeFuture, RuntimePayloadSource, RuntimeRequest,
-    RuntimeState, SessionError,
+    RuntimeControl, RuntimeEvent, RuntimeFuture, RuntimeRequest, RuntimeState, SessionError,
 };
 use zup_transaction::{
     CancellationProbe, FileDelta, FilePrecondition, FilesystemTransactionStore, InstallationLock,
     OperationExecutor, OperationReceipt, ReconcileResult, TransactionCoordinator, TransactionId,
     TransactionNode, TransactionOutcome, TransactionPlan, TransactionStore,
 };
+
+type SharedPayloadSource = Arc<dyn PayloadSource + Send + Sync>;
 
 use crate::{
     AutoPayloadSource, BundleError, InstallLedgerStore, NullProgress, PAYLOAD_OVERLAY_DIRECTORY,
@@ -43,7 +44,7 @@ const BLOCKED_BY_RUNNING_APPLICATIONS: &str = "blocked by running applications";
 
 #[derive(Clone)]
 pub struct WindowsRuntimeBackend {
-    payload: RuntimePayloadSource,
+    payload: SharedPayloadSource,
     payload_root: PathBuf,
     payload_overlay_root: Option<PathBuf>,
     retain_on_blocked: bool,
@@ -199,10 +200,6 @@ impl WindowsRuntimeBackend {
 }
 
 impl RuntimeBackend for WindowsRuntimeBackend {
-    fn payload_source(&self, _request: &RuntimeRequest) -> RuntimePayloadSource {
-        self.payload.clone()
-    }
-
     fn execute<'a>(
         &'a self,
         request: RuntimeRequest,
@@ -792,7 +789,7 @@ impl WindowsRuntimeBackend {
     }
 }
 
-struct SharedPayload(RuntimePayloadSource);
+struct SharedPayload(SharedPayloadSource);
 
 impl PayloadSource for SharedPayload {
     fn open(
@@ -1303,7 +1300,7 @@ fn validate_request(
 
 fn execute_local_blocking_with_events(
     request: RuntimeRequest,
-    payload: RuntimePayloadSource,
+    payload: SharedPayloadSource,
     cancel: impl CancellationProbe + Send + 'static,
     events: Option<broadcast::Sender<RuntimeEvent>>,
 ) -> InstallOutcome {
