@@ -205,7 +205,7 @@ fn run_handoff(
         zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
         zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
         zup_acquire::HandoffMode::Repair => LifecycleAction::Repair {
-            force_files: args.force_files,
+            force_files: matches!(request, Operation::Repair { force_files: true }),
         },
     };
     if let Some(action) = named_action(request)
