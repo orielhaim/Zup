@@ -82,19 +82,39 @@ impl Fixture {
         command.arg(self.root.path().join("state"));
         command.env("TERM", term);
         command.env("NO_COLOR", "1");
-        let mut child = pair.slave.spawn_command(command).unwrap();
-        drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().unwrap();
-        let mut writer = pair.master.take_writer().unwrap();
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(pair.master.take_writer().unwrap()));
+        let reply = std::sync::Arc::clone(&writer);
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buffer = [0; 2048];
+            let mut pending = Vec::new();
             while let Ok(count) = reader.read(&mut buffer) {
-                if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
+                if count == 0 {
+                    break;
+                }
+                pending.extend_from_slice(&buffer[..count]);
+                // ConPTY asks its terminal emulator for the inherited cursor position.
+                if pending.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                    let mut reply = reply.lock().unwrap();
+                    if reply
+                        .write_all(b"\x1b[1;1R")
+                        .and_then(|_| reply.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                if pending.len() > 3 {
+                    pending.drain(..pending.len() - 3);
+                }
+                if sender.send(buffer[..count].to_vec()).is_err() {
                     break;
                 }
             }
         });
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
         let deadline = Instant::now() + Duration::from_secs(90);
         let mut transcript = String::new();
         let mut next = 0;
@@ -104,6 +124,7 @@ impl Fixture {
                 if let Some((question, answer)) = exchanges.get(next)
                     && transcript.contains(question)
                 {
+                    let mut writer = writer.lock().unwrap();
                     writer.write_all(answer.as_bytes()).unwrap();
                     writer.flush().unwrap();
                     transcript.clear();
@@ -179,7 +200,7 @@ fn automation_is_one_document_or_a_framed_stream_and_never_prompts() {
 fn real_terminal_selects_components_confirms_and_cancels_without_mutation() {
     let fixture = Fixture::new(Frontend::Console);
     assert_eq!(
-        fixture.terminal(&["install"], &[("Install for", "q\n")], 36, "dumb"),
+        fixture.terminal(&["install"], &[("Install for", "q\r")], 36, "dumb"),
         2
     );
     assert!(!fixture.root.path().join("application").exists());
@@ -224,7 +245,7 @@ fn real_terminal_selects_components_confirms_and_cancels_without_mutation() {
     assert_eq!(
         fixture.terminal(
             &["uninstall", "--scope", "user", "--plain"],
-            &[("Proceed with these changes?", "y\n")],
+            &[("Proceed with these changes?", "y\r")],
             36,
             "dumb"
         ),

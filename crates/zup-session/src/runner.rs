@@ -77,7 +77,7 @@ async fn drive_operation<H: SessionHost>(
             Err(error) => return (InstallOutcome::Failed(error.to_string()), Vec::new()),
         }
     };
-    let executed = run_operation(host, &context, discovery, &prepared, &control).await;
+    let executed = run_operation(host, &context, &discovery.build, &prepared, &control).await;
     reconcile_operation(host, &context, &prepared, zup_runtime::outcome_of(executed))
 }
 
@@ -118,19 +118,19 @@ impl zup_plan::CancellationQuery for CancelQuery<'_> {
 pub async fn run_operation<H: SessionHost>(
     host: &H,
     context: &OperationContext,
-    discovery: &SessionDiscovery,
+    build: &zup_core::TargetBuildPlan,
     prepared: &PreparedOperation,
     control: &OperationControl,
 ) -> Result<InstallOutcome, zup_runtime::SessionError> {
     let backend = host.backend(context, prepared).map_err(session_error)?;
     let runtime = runtime_request(
         prepared,
-        discovery.build.installer.app.id.clone(),
+        build.installer.app.id.clone(),
         prepared
             .target_plan()
             .map(|target| target.app.version.clone())
             .or_else(|| context.ledger.as_ref().map(|ledger| ledger.version.clone()))
-            .unwrap_or_else(|| discovery.build.installer.app.version.clone()),
+            .unwrap_or_else(|| build.installer.app.version.clone()),
         context.scope,
         context.state_root.clone(),
         zup_runtime::RequestOptions {

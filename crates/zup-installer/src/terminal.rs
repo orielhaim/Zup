@@ -10,7 +10,7 @@ use zup_runtime::{
     ExecutionPolicy, InstallOutcome, Operation, OperationControl, OperationInput,
     OperationSelection,
 };
-use zup_session::{SessionDiscovery, SessionHost, SessionLaunch};
+use zup_session::SessionHost;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -250,16 +250,10 @@ fn drive<H: SessionHost>(
 ) -> miette::Result<InstallOutcome> {
     let executable =
         std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
-    let launch = SessionLaunch {
-        scope: cli.scope.map(Into::into),
-        state_root: cli.state_root.clone(),
-        interactive,
-        ..Default::default()
-    };
-    let mut discovery = host
-        .discover(&executable, &launch)
+    let mut build = host
+        .describe(&executable)
         .map_err(|error| miette::miette!("{error}"))?;
-    let installer = discovery.installer();
+    let installer = &build.installer;
     report.result.application = installer.app.name.to_string();
     report.result.version = installer.app.version.to_string();
     report.event(&InstallerEvent::started(
@@ -271,15 +265,10 @@ fn drive<H: SessionHost>(
     if interactive {
         crate::console::Console::new(cli.plain).intro(installer)?;
     }
-    let scope = choose_scope(
-        &discovery,
-        cli.scope.map(Into::into),
-        interactive,
-        cli.plain,
-    )?;
+    let scope = choose_scope(installer, cli.scope.map(Into::into), interactive, cli.plain)?;
     report.result.scope = Some(scope);
-    let context = discovery
-        .context(scope)
+    let context = host
+        .observe(installer, scope, cli.state_root.as_deref())
         .map_err(|error| miette::miette!("{error}"))?;
     if cli.operation.is_none() && !interactive {
         return Err(Failure {
@@ -338,33 +327,27 @@ fn drive<H: SessionHost>(
         state: "checking_content".into(),
     })?;
     let mut reporting_error = None;
-    host.acquire_content(
-        &mut discovery,
-        &context,
-        operation,
-        &selection,
-        &mut |event| {
-            if !matches!(
-                event,
-                InstallerEvent::Completed { .. } | InstallerEvent::Failed { .. }
-            ) && let Err(error) = report.event(&event)
-            {
-                reporting_error = Some(error);
-            }
-        },
-    )
+    host.acquire_content(&mut build, &context, operation, &selection, &mut |event| {
+        if !matches!(
+            event,
+            InstallerEvent::Completed { .. } | InstallerEvent::Failed { .. }
+        ) && let Err(error) = report.event(&event)
+        {
+            reporting_error = Some(error);
+        }
+    })
     .map_err(|error| miette::miette!("content acquisition: {error}"))?;
     if let Some(error) = reporting_error {
         return Err(error);
     }
-    report.result.application = discovery.installer().app.name.to_string();
-    report.result.version = discovery.installer().app.version.to_string();
+    report.result.application = build.installer.app.name.to_string();
+    report.result.version = build.installer.app.version.to_string();
     let bound = host
         .bind(&context)
         .map_err(|error| miette::miette!("{error}"))?;
     let prepared = zup_runtime::prepare_operation(
         &OperationInput {
-            build: &discovery.build,
+            build: &build,
             installer: &executable,
             scope,
             operation,
@@ -377,6 +360,8 @@ fn drive<H: SessionHost>(
     )
     .map_err(Failure::from)?;
     let mut plan = PlanPreview::from_transaction_plan(&prepared.transaction_plan, scope);
+    plan.application = build.installer.app.name.to_string();
+    plan.version = build.installer.app.version.to_string();
     if let Some(target) = prepared.target_plan() {
         plan.install_directory = target.install_directory.to_string();
         plan.selected_components = target.selected_components.clone();
@@ -402,7 +387,7 @@ fn drive<H: SessionHost>(
     let mut events = control.subscribe();
     tokio::runtime::Builder::new_current_thread().enable_all().build()
         .map_err(|error| miette::miette!("runtime: {error}"))?.block_on(async {
-            let execute = zup_session::run_operation(host, &context, &discovery, &prepared, &control);
+            let execute = zup_session::run_operation(host, &context, &build, &prepared, &control);
             tokio::pin!(execute);
             let interrupted = tokio::signal::ctrl_c();
             tokio::pin!(interrupted);
@@ -443,12 +428,12 @@ fn drive<H: SessionHost>(
 }
 
 fn choose_scope(
-    discovery: &SessionDiscovery,
+    installer: &zup_core::Installer,
     requested: Option<SelectedScope>,
     interactive: bool,
     _plain: bool,
 ) -> miette::Result<SelectedScope> {
-    let declared = discovery.installer().install.scope;
+    let declared = installer.install.scope;
     if requested.is_some() || !interactive || declared.scopes().len() == 1 {
         return declared.select(requested).map_err(|error| {
             miette::Report::new(Failure {
@@ -458,7 +443,7 @@ fn choose_scope(
         });
     }
     #[cfg(feature = "console")]
-    return crate::console::Console::new(_plain).scope(discovery);
+    return crate::console::Console::new(_plain).scope(installer);
     #[cfg(not(feature = "console"))]
     Err(miette::miette!("this runtime has no interactive frontend"))
 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use zup_core::SelectedScope;
 use zup_runtime::{PreparedOperation, RuntimeBackend};
-use zup_session::{SessionDiscovery, SessionHost, SessionLaunch};
+use zup_session::{SessionDiscovery, SessionHost};
 
 use crate::operation_host::LinuxOperationHost;
 
@@ -42,11 +42,7 @@ impl SessionHost for LinuxSessionHost {
         Ok(self.operation_host(context.scope))
     }
 
-    fn discover(
-        &mut self,
-        executable: &Path,
-        launch: &SessionLaunch,
-    ) -> Result<SessionDiscovery, String> {
+    fn describe(&mut self, executable: &Path) -> Result<Arc<zup_core::TargetBuildPlan>, String> {
         self.installer = executable.to_path_buf();
         let carrier =
             crate::carrier::Carrier::open(executable).map_err(|error| error.to_string())?;
@@ -58,31 +54,26 @@ impl SessionHost for LinuxSessionHost {
             .into_iter()
             .next()
             .ok_or_else(|| "an installer package holds exactly one target".to_owned())?;
-        let mut installations = Vec::new();
-        for scope in [SelectedScope::User, SelectedScope::Machine] {
-            let permitted = match scope {
-                SelectedScope::User => build.installer.install.scope.allows_user(),
-                SelectedScope::Machine => build.installer.install.scope.allows_machine(),
-            };
-            if !permitted {
-                continue;
-            }
-            let state_root = match &launch.state_root {
-                Some(root) => root.clone(),
-                None => crate::paths::state_root(scope).map_err(|error| error.to_string())?,
-            };
-            let ledger = crate::ledger::LinuxLedgerStore::new(&state_root)
-                .load(&build.installer.app.id, scope)
-                .map_err(|error| error.to_string())?;
-            installations.push(zup_session::ScopedInstallation {
-                scope,
-                state_root,
-                ledger,
-            });
-        }
-        Ok(SessionDiscovery {
-            build,
-            installations,
+        Ok(Arc::new(build))
+    }
+
+    fn observe(
+        &self,
+        installer: &zup_core::Installer,
+        scope: SelectedScope,
+        state_root: Option<&Path>,
+    ) -> Result<zup_session::OperationContext, String> {
+        let state_root = match state_root {
+            Some(root) => root.to_path_buf(),
+            None => crate::paths::state_root(scope).map_err(|error| error.to_string())?,
+        };
+        let ledger = crate::ledger::LinuxLedgerStore::new(&state_root)
+            .load(&installer.app.id, scope)
+            .map_err(|error| error.to_string())?;
+        Ok(zup_session::OperationContext {
+            scope,
+            state_root,
+            ledger,
         })
     }
 

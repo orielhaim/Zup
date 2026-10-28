@@ -34,7 +34,7 @@ pub struct OperationContext {
 
 #[derive(Debug, Clone)]
 pub struct SessionDiscovery {
-    pub build: TargetBuildPlan,
+    pub build: Arc<TargetBuildPlan>,
     pub installations: Vec<ScopedInstallation>,
 }
 
@@ -113,15 +113,46 @@ pub trait SessionHost {
     where
         Self: 'a;
 
+    fn describe(&mut self, executable: &Path) -> Result<Arc<TargetBuildPlan>, String>;
+
+    fn observe(
+        &self,
+        installer: &Installer,
+        scope: SelectedScope,
+        state_root: Option<&Path>,
+    ) -> Result<OperationContext, String>;
+
     fn discover(
         &mut self,
         executable: &Path,
         launch: &SessionLaunch,
-    ) -> Result<SessionDiscovery, String>;
+    ) -> Result<SessionDiscovery, String> {
+        let build = self.describe(executable)?;
+        let mut installations = Vec::new();
+        for scope in build.installer.install.scope.scopes() {
+            let context = self.observe(&build.installer, *scope, launch.state_root.as_deref())?;
+            installations.push(ScopedInstallation {
+                scope: context.scope,
+                state_root: context.state_root,
+                ledger: context.ledger,
+            });
+        }
+        if launch.maintenance
+            && installations
+                .iter()
+                .all(|installation| installation.ledger.is_none())
+        {
+            return Err("the installed application was not found".into());
+        }
+        Ok(SessionDiscovery {
+            build,
+            installations,
+        })
+    }
 
     fn acquire_content(
         &mut self,
-        _discovery: &mut SessionDiscovery,
+        _build: &mut Arc<TargetBuildPlan>,
         _context: &OperationContext,
         _operation: zup_runtime::Operation,
         _selection: &zup_runtime::OperationSelection,

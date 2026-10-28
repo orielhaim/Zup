@@ -6,7 +6,7 @@ use zup_core::{ComponentId, Installer, SelectedScope};
 use zup_exec::LifecycleAction;
 use zup_presentation::{InstallerEvent, PlanPreview};
 use zup_runtime::{Operation, OperationSelection};
-use zup_session::{OperationContext, SessionDiscovery};
+use zup_session::OperationContext;
 
 fn prompt<T>(result: io::Result<T>) -> miette::Result<T> {
     result.map_err(|error| {
@@ -100,8 +100,8 @@ impl Console {
         Ok(())
     }
 
-    pub fn scope(&self, discovery: &SessionDiscovery) -> miette::Result<SelectedScope> {
-        let scopes = discovery.installer().install.scope.scopes();
+    pub fn scope(&self, installer: &Installer) -> miette::Result<SelectedScope> {
+        let scopes = installer.install.scope.scopes();
         let items = scopes
             .iter()
             .map(|scope| {
@@ -109,14 +109,9 @@ impl Console {
                     SelectedScope::User => "Current user",
                     SelectedScope::Machine => "All users",
                 };
-                let installed = discovery
-                    .installation(*scope)
-                    .is_some_and(|installation| installation.ledger.is_some());
                 (
                     label.into(),
-                    if installed {
-                        "Existing installation".into()
-                    } else if *scope == SelectedScope::Machine {
+                    if *scope == SelectedScope::Machine {
                         "Requires native administrator authorization".into()
                     } else {
                         String::new()
@@ -293,8 +288,10 @@ impl Console {
 
     pub fn review(&self, plan: &PlanPreview, action: LifecycleAction) -> miette::Result<()> {
         eprintln!(
-            "\n{}\n  Scope: {}\n  Location: {}",
+            "\n{} {} {}\n  Scope: {}\n  Location: {}",
             zup_runtime::Operation::from(action).name(),
+            text(&plan.application),
+            text(&plan.version),
             plan.scope,
             text(&plan.install_directory)
         );

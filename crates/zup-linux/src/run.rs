@@ -104,7 +104,11 @@ fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> 
         .build()
         .map_err(|error| ExecError::Executor(error.to_string()))?
         .block_on(zup_session::run_operation(
-            &host, &context, &discovery, &prepared, &control,
+            &host,
+            &context,
+            &discovery.build,
+            &prepared,
+            &control,
         ))
         .map_err(|error| ExecError::Executor(error.to_string()))?;
     let version = prepared

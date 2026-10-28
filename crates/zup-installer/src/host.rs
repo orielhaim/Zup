@@ -165,7 +165,7 @@ impl SessionHost for WindowsSessionHost {
 
     fn acquire_content(
         &mut self,
-        discovery: &mut SessionDiscovery,
+        build: &mut Arc<zup_core::TargetBuildPlan>,
         context: &zup_session::OperationContext,
         operation: zup_runtime::Operation,
         selection: &zup_runtime::OperationSelection,
@@ -180,7 +180,7 @@ impl SessionHost for WindowsSessionHost {
         {
             return Ok(());
         }
-        let installer = discovery.installer();
+        let installer = &build.installer;
         let config = installer.updates.as_ref().ok_or_else(|| {
             "this thin installer has no authenticated update repository".to_owned()
         })?;
@@ -283,8 +283,9 @@ impl SessionHost for WindowsSessionHost {
         }
         let payload =
             crate::acquire::payload_source(&acquired).map_err(|error| error.to_string())?;
-        discovery.build =
-            crate::acquire::target_plan(&acquired.manifest).map_err(|error| error.to_string())?;
+        *build = Arc::new(
+            crate::acquire::target_plan(&acquired.manifest).map_err(|error| error.to_string())?,
+        );
         self.acquired = Some(AcquiredContent {
             release: Arc::new(acquired),
             payload: Arc::new(payload),
@@ -305,11 +306,7 @@ impl SessionHost for WindowsSessionHost {
         self.operation_host(context)
     }
 
-    fn discover(
-        &mut self,
-        executable: &Path,
-        launch: &SessionLaunch,
-    ) -> Result<SessionDiscovery, String> {
+    fn describe(&mut self, executable: &Path) -> Result<Arc<zup_core::TargetBuildPlan>, String> {
         let bundle = package::open_bundle_if_present(executable)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
@@ -321,37 +318,28 @@ impl SessionHost for WindowsSessionHost {
                 .map_err(|error| error.to_string())?,
             None => package::target_plan(&bundle).map_err(|error| error.to_string())?,
         };
-        let installer = build.installer.clone();
-        let mut installations = Vec::new();
-        for scope in zup_preset_host::surface::scopes(&installer)
-            .into_iter()
-            .map(zup_preset_host::engine_scope)
-        {
-            let state_root = state::resolve_state_root(launch.state_root.clone(), scope)
-                .map_err(|error| error.to_string())?;
-            let ledger = zup_windows::InstallLedgerStore::new(&state_root)
-                .load(&installer.app.id, scope)
-                .map_err(|error| error.to_string())?;
-            installations.push(zup_session::ScopedInstallation {
-                scope,
-                state_root,
-                ledger,
-            });
-        }
-        if launch.maintenance
-            && installations
-                .iter()
-                .all(|installation| installation.ledger.is_none())
-        {
-            return Err("the installed application was not found".into());
-        }
         self.executable = executable.to_path_buf();
         self.bundle = Some(bundle);
-        self.app_id = Some(installer.app.id.clone());
-        self.frontend = installer.frontend;
-        Ok(SessionDiscovery {
-            build,
-            installations,
+        self.app_id = Some(build.installer.app.id.clone());
+        self.frontend = build.installer.frontend;
+        Ok(Arc::new(build))
+    }
+
+    fn observe(
+        &self,
+        installer: &zup_core::Installer,
+        scope: SelectedScope,
+        state_root: Option<&Path>,
+    ) -> Result<zup_session::OperationContext, String> {
+        let state_root = state::resolve_state_root(state_root.map(Path::to_path_buf), scope)
+            .map_err(|error| error.to_string())?;
+        let ledger = zup_windows::InstallLedgerStore::new(&state_root)
+            .load(&installer.app.id, scope)
+            .map_err(|error| error.to_string())?;
+        Ok(zup_session::OperationContext {
+            scope,
+            state_root,
+            ledger,
         })
     }
 
