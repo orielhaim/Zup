@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure composed installers against an already-built native toolchain."""
+"""Measure offline installers against an already-built native toolchain."""
 
 import argparse
 import json
@@ -27,7 +27,7 @@ def measure(cli, toolchain, output):
     preset_metadata = json.loads(raw[32 : 32 + metadata_size])
     rows = []
     for component in components:
-        if component["kind"] != "runtime":
+        if component["kind"] != "runtime" or component.get("online", False):
             continue
         target, frontend = component["target"], component["frontend"]
         directory = output / f"{target}-{frontend}"
