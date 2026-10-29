@@ -107,7 +107,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: sizes-${{ runner.os }}-${{ runner.arch }}
-          cache-on-failure: true
+          cache-on-failure: false
       - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
         with:
@@ -192,8 +192,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: full-${{ runner.os }}
-          cache-on-failure: true
+          shared-key: full-${{ runner.os }}-${{ runner.arch }}-debug0
+          cache-on-failure: false
 
       - uses: ilammy/setup-nasm@v1
         if: matrix.platform == 'windows'
@@ -250,11 +250,34 @@ jobs:
         shell: bash
         run: cargo nextest run --all-features --no-fail-fast $PORTABLE $LINUX
 
+      - name: Build reusable tooling
+        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        run: cargo build -p zup -p zup-xtask --bins
+
+      - name: Archive reusable tooling
+        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        shell: bash
+        run: |
+          suffix=''
+          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+          tar -cf "tooling-${{ matrix.artifact }}.tar" -C target/debug "zup$suffix" "xtask$suffix"
+
+      - name: Upload reusable tooling
+        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        uses: actions/upload-artifact@v7
+        with:
+          path: tooling-${{ matrix.artifact }}.tar
+          archive: false
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Upload staged toolchain
         uses: actions/upload-artifact@v7
         with:
           name: toolchain-${{ matrix.artifact }}
           path: target/debug/toolchain
+          compression-level: 0
+          retention-days: 7
           if-no-files-found: error
 
   cross-build-windows:
@@ -268,14 +291,16 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: "1.99"
+          name: tooling-windows.tar
+          path: tools
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: full-${{ runner.os }}
-          cache-on-failure: true
+      - name: Restore reusable tooling
+        shell: bash
+        run: |
+          mkdir -p tooling
+          tar -xf tools/tooling-windows.tar -C tooling
 
       - uses: actions/download-artifact@v8
         with:
@@ -292,18 +317,15 @@ jobs:
           name: toolchain-linux-arm64
           path: tc-arm64
 
-      - name: Build the developer CLI
-        run: cargo build -p zup --bin zup --profile dev
-
       - name: Merge both toolchains
         shell: pwsh
         run: |
-          cargo xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
+          tooling/xtask.exe toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
 
       - name: Build every fixture target
         shell: pwsh
         run: |
-          $zup = 'target/debug/zup.exe'
+          $zup = 'tooling/zup.exe'
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-arm64 --output dist/arm64.bin --force
@@ -312,7 +334,7 @@ jobs:
       - name: Verify every artifact
         shell: pwsh
         run: |
-          $zup = 'target/debug/zup.exe'
+          $zup = 'tooling/zup.exe'
           foreach ($artifact in @('dist/win.exe', 'dist/lnx.bin', 'dist/arm64.bin', 'dist/uni.exe')) {
             & $zup artifact inspect $artifact | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "inspect of $artifact failed" }
@@ -351,19 +373,16 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: "1.99"
+          name: tooling-linux.tar
+          path: tools
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: full-${{ runner.os }}
-          cache-on-failure: true
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 3.0.0
-          make-default: "true"
+      - name: Restore reusable tooling
+        shell: bash
+        run: |
+          mkdir -p tooling
+          tar -xf tools/tooling-linux.tar -C tooling
 
       - uses: actions/download-artifact@v8
         with:
@@ -380,22 +399,18 @@ jobs:
           name: toolchain-linux-arm64
           path: tc-arm64
 
-      - name: Build the developer CLI
-        shell: bash
-        run: cargo build -p zup --bin zup --profile dev
-
       - name: Merge both toolchains
         shell: bash
         run: |
           set -euo pipefail
-          cargo xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
+          tooling/xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
           mkdir -p dist
 
       - name: Build every fixture target
         shell: bash
         run: |
           set -euo pipefail
-          zup=target/debug/zup
+          zup=tooling/zup
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-arm64 --output dist/arm64.bin --force
@@ -405,7 +420,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zup=target/debug/zup
+          zup=tooling/zup
           for artifact in dist/win.exe dist/lnx.bin dist/arm64.bin dist/uni.exe; do
             $zup artifact inspect "$artifact" > /dev/null
           done
@@ -492,15 +507,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: "1.99"
-          components: rustfmt, clippy
+          name: tooling-windows.tar
+          path: tools
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: full-${{ runner.os }}
-          cache-on-failure: true
+      - name: Restore reusable tooling
+        shell: bash
+        run: |
+          mkdir -p tooling
+          tar -xf tools/tooling-windows.tar -C tooling
 
       - uses: actions/download-artifact@v8
         with:
@@ -520,14 +536,14 @@ jobs:
       - name: Merge and package the multi-platform release
         shell: pwsh
         run: |
-          cargo xtask toolchain package --profile dev --source tc-win --source tc-linux --source tc-arm64
+          tooling/xtask.exe toolchain package --cli tooling/zup.exe --profile dev --source tc-win --source tc-linux --source tc-arm64
 
       - name: Release clean-room
         shell: pwsh
-        run: cargo xtask release clean-room
+        run: tooling/xtask.exe release clean-room
 
       - name: Published schema
         shell: pwsh
         run: |
-          cargo run -p zup --bin zup -- schema --output schema/zup.schema.json
+          tooling/zup.exe schema --output schema/zup.schema.json
           git diff --exit-code -- schema/zup.schema.json

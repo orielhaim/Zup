@@ -29,7 +29,8 @@ Without it, builds fail with `zup.toolchain.component_missing`.
 To package toolchains downloaded from separate Windows and Linux builds:
 
 ```bash
-cargo xtask toolchain package --source tc-win --source tc-linux
+cargo build -p zup --bin zup
+cargo xtask toolchain package --cli target/debug/zup --source tc-win --source tc-linux
 ```
 
 Each source contains the version directory uploaded from `target/debug/toolchain`.

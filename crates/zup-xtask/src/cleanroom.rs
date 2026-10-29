@@ -20,7 +20,7 @@ pub fn run(material: &Path, work: &Path) -> Result<CleanRoom, String> {
     let zup = material.join(executable("zup"));
     if !zup.is_file() {
         return Err(format!(
-            "`{}` has no zup executable; run `cargo xtask toolchain package --out {}` first",
+            "`{}` has no zup executable; run `cargo xtask toolchain package --cli <file> --out {}` first",
             material.display(),
             material.display()
         ));

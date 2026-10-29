@@ -643,8 +643,23 @@ pub fn package(
     profile: &str,
     out: &Path,
     sources: &[PathBuf],
+    cli: &Path,
 ) -> Result<PathBuf, String> {
     let version = version()?;
+    let host = zup_core::Target::host().map_err(|error| error.to_string())?;
+    zup_binary::Executable::read(cli)
+        .map_err(|error| format!("{}: {error}", cli.display()))?
+        .refuse_target(&host)
+        .map_err(|error| format!("{}: {error}", cli.display()))?;
+    let reported = Command::new(cli)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("{} --version: {error}", cli.display()))?;
+    if !reported.status.success()
+        || String::from_utf8_lossy(&reported.stdout).trim() != format!("zup {version}")
+    {
+        return Err(format!("{} must be the zup {version} CLI", cli.display()));
+    }
     let assembly = tempfile::tempdir().map_err(|error| error.to_string())?;
     let staged = if sources.is_empty() {
         staging_directory(root, profile, &version)
@@ -661,29 +676,7 @@ pub fn package(
     }
     std::fs::create_dir_all(out).map_err(|error| format!("{}: {error}", out.display()))?;
 
-    let cli_profile = if profile == "installer" {
-        "release"
-    } else {
-        profile
-    };
-    cargo(
-        root,
-        &[
-            "build",
-            "-p",
-            CLI_PACKAGE,
-            "--bin",
-            CLI_PACKAGE,
-            "--profile",
-            cli_profile,
-        ],
-    )?;
-    let built =
-        target_directory(root, cli_profile).join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"));
-    copy(
-        &built,
-        &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")),
-    )?;
+    copy(cli, &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")))?;
 
     let mut components = Vec::new();
     let test_peer = zup_toolchain::test_preset_file_name(EXECUTABLE_SUFFIX);
@@ -713,12 +706,7 @@ pub fn package(
     }
     components.sort_by(|left, right| left.path.cmp(&right.path));
 
-    let mut index = zup_toolchain::ToolchainRelease::new(
-        version.clone(),
-        zup_core::Target::host()
-            .map_err(|error| error.to_string())?
-            .to_string(),
-    );
+    let mut index = zup_toolchain::ToolchainRelease::new(version.clone(), host.to_string());
     index.cli = zup_toolchain::ReleaseFile::of(
         &format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"),
         &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")),
