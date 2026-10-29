@@ -49,16 +49,40 @@ impl Fixture {
             });
         }
         plan.total_size = plan.files.iter().map(|file| file.size).sum();
+        #[cfg(all(target_os = "linux", feature = "online"))]
+        let preset = linux_updates::preset(frontend);
+        #[cfg(not(all(target_os = "linux", feature = "online")))]
+        let preset: Option<Vec<u8>> = None;
+        if preset.is_some() {
+            plan.installer.preset = Some(zup_core::PresetRuntime {
+                name: zup_core::NonEmptyString::new("test-preset").unwrap(),
+                version: "1.0.0".parse().unwrap(),
+                protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
+                required_capabilities: Vec::new(),
+                settings: json!({}),
+                assets: Vec::new(),
+            });
+        }
         let package = zup_bundle::BundleWriter::encode(&plan, &[]).unwrap();
         let runtime = match frontend {
             Frontend::Console => env!("CARGO_BIN_EXE_zup-setup-console"),
             Frontend::Headless => env!("CARGO_BIN_EXE_zup-setup-headless"),
+            #[cfg(all(target_os = "linux", feature = "online", feature = "gui"))]
+            Frontend::Gui => env!("CARGO_BIN_EXE_zup-setup-gui"),
+            #[cfg(not(all(target_os = "linux", feature = "online", feature = "gui")))]
             _ => unreachable!(),
         };
         let setup = root
             .path()
             .join(format!("setup{}", target.executable_suffix()));
-        zup_compose::compose(&target, Path::new(runtime), &setup, &package, None).unwrap();
+        zup_compose::compose(
+            &target,
+            Path::new(runtime),
+            &setup,
+            &package,
+            preset.as_deref(),
+        )
+        .unwrap();
         Self {
             root,
             setup,
@@ -70,7 +94,7 @@ impl Fixture {
         let mut command = Command::new(&self.setup);
         command
             .arg("--state-root")
-            .arg(self.root.path().join("state"))
+            .arg(self.root.path().join("zup"))
             .stdin(Stdio::null());
         command
     }
@@ -86,7 +110,7 @@ impl Fixture {
         let mut command = CommandBuilder::new(&self.setup);
         command.args(args);
         command.arg("--state-root");
-        command.arg(self.root.path().join("state"));
+        command.arg(self.root.path().join("zup"));
         command.env("TERM", term);
         command.env("NO_COLOR", "1");
         let mut reader = pair.master.try_clone_reader().unwrap();

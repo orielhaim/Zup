@@ -249,6 +249,9 @@ fn apply_completion<H: SessionHost>(
         return;
     }
     control.active = None;
+    if let Some(status) = completion.update {
+        control.state.set_update(None, status);
+    }
     if matches!(completion.outcome, zup_runtime::InstallOutcome::Committed)
         && completion.kind == crate::runner::CompletionKind::UpdateInstall
     {
@@ -416,10 +419,20 @@ where
             let task = tokio::spawn(async move {
                 let status_sender = sender.clone();
                 let mut work = tokio::task::spawn_blocking(move || {
+                    let mut final_status = None;
                     let mut status = |progress| {
-                        let _ = status_sender.send(Report::Update(UpdateReport::Status(progress)));
+                        if matches!(
+                            progress,
+                            UpdateState::Available { .. } | UpdateState::UpToDate { .. }
+                        ) {
+                            final_status = Some(progress);
+                        } else {
+                            let _ =
+                                status_sender.send(Report::Update(UpdateReport::Status(progress)));
+                        }
                     };
-                    host.update(&context, &request, &operation, &mut status)
+                    let result = host.update(&context, &request, &operation, &mut status);
+                    (result, final_status)
                 });
                 let result = loop {
                     tokio::select! {
@@ -427,12 +440,13 @@ where
                         event = events.recv() => if let Ok(event) = event && !is_terminal(&event) { let _ = sender.send(Report::Engine(event)); },
                     }
                 };
-                let outcome = match result {
-                    Ok(Ok(outcome)) => outcome,
-                    Ok(Err(error)) => zup_runtime::InstallOutcome::Failed(error),
-                    Err(error) => zup_runtime::InstallOutcome::Failed(error.to_string()),
+                let (outcome, update) = match result {
+                    Ok((Ok(outcome), status)) => (outcome, status),
+                    Ok((Err(error), _)) => (zup_runtime::InstallOutcome::Failed(error), None),
+                    Err(error) => (zup_runtime::InstallOutcome::Failed(error.to_string()), None),
                 };
                 crate::runner::OperationCompletion {
+                    update,
                     kind,
                     id,
                     outcome,

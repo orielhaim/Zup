@@ -266,9 +266,16 @@ pub fn dispatcher_for(
 pub fn describe(component: &ToolchainComponent) -> String {
     match component {
         ToolchainComponent::Runtime {
-            target, frontend, ..
+            target,
+            frontend,
+            online,
         } => {
-            format!("{} runtime for {}", frontend.as_str(), target.as_str())
+            let capability = if *online { " online" } else { "" };
+            format!(
+                "{}{capability} runtime for {}",
+                frontend.as_str(),
+                target.as_str()
+            )
         }
         ToolchainComponent::Dispatcher { subsystem, .. } => {
             format!("{} dispatcher", subsystem.as_str())

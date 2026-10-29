@@ -13,6 +13,7 @@ pub enum CompletionKind {
 }
 
 pub struct OperationCompletion {
+    pub update: Option<zup_preset_protocol::UpdateState>,
     pub kind: CompletionKind,
     pub id: zup_runtime::Uuid,
     pub outcome: InstallOutcome,
@@ -36,6 +37,7 @@ pub async fn complete_operation<H: SessionHost>(
     let outcome = drive_operation(host, executable, discovery, launch).await;
     let repair_drift = outcome.1;
     OperationCompletion {
+        update: None,
         kind: CompletionKind::Lifecycle,
         id,
         outcome: outcome.0,

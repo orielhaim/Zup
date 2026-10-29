@@ -30,14 +30,17 @@ pub fn run(frontend: Frontend) -> miette::Result<()> {
     if let Some((session, client_pid, socket_path)) = worker_session_args() {
         return run_worker(session, client_pid, socket_path);
     }
-    if frontend == Frontend::Gui
-        && !std::env::args().any(|argument| {
-            matches!(
+    let command = crate::terminal::command();
+    let terminal_request = std::env::args().skip(1).any(|argument| {
+        command
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == argument)
+            || matches!(
                 argument.as_str(),
-                "recover" | "update" | "--help" | "-h" | "--version" | "-V"
+                "--help" | "-h" | "--version" | "-V" | "--output" | "--non-interactive" | "--yes"
             )
-        })
-    {
+    });
+    if frontend == Frontend::Gui && !terminal_request {
         #[cfg(feature = "gui")]
         return run_gui();
         #[cfg(not(feature = "gui"))]

@@ -12,7 +12,7 @@ use zup_linux::{LinuxFileExecutor, LinuxLedgerStore};
 use zup_platform::TargetPath;
 use zup_transaction::{
     FileDelta, FilePrecondition, FileWork, FilesystemTransactionStore, TransactionCoordinator,
-    TransactionInput, TransactionOutcome, TransactionStore, compile_transaction, recover,
+    TransactionInput, TransactionOutcome, TransactionStore, compile_transaction,
 };
 
 const PAYLOAD: &[u8] = b"verified application content";
@@ -34,6 +34,30 @@ fn executor(root: &Path, record: &zup_transaction::TransactionRecord) -> LinuxFi
     executor.register_plan(&record.plan).unwrap();
     executor.set_transaction_id(record.transaction_id);
     executor
+}
+
+fn recovery_carrier(root: &Path) -> std::path::PathBuf {
+    let plan: zup_core::TargetBuildPlan = serde_json::from_value(serde_json::json!({
+        "installer": {
+            "app": {"id": "com.example.interrupted", "name": "Interrupted", "version": "1.0.0"},
+            "target": Target::host().unwrap(), "frontend": "headless", "updates": null,
+            "install": {"scope": "user", "directory": {"user": root.join("installed").to_string_lossy()}},
+            "components": [], "plugins": [], "files": [], "launchers": [], "path": [], "services": [], "protocols": [], "file_associations": []
+        },
+        "files": [{"source": root.join("payload/tool"), "source_relative": "tool", "destination": "${install}/tool", "size": PAYLOAD.len(), "sha256": zup_core::hash_bytes(PAYLOAD), "component": null, "condition": null}],
+        "plugins": [], "prerequisites": [], "total_size": PAYLOAD.len(), "prerequisite_size": 0
+    })).unwrap();
+    let package = zup_bundle::BundleWriter::encode(&plan, &[]).unwrap();
+    let output = root.join("recovery-carrier");
+    zup_compose::compose(
+        &Target::host().unwrap(),
+        &std::env::current_exe().unwrap(),
+        &output,
+        &package,
+        None,
+    )
+    .unwrap();
+    output
 }
 
 #[test]
@@ -111,11 +135,50 @@ fn process_interruption_recovers_real_files() {
         let store = FilesystemTransactionStore::private_at(root.path().join("state"));
         let ids = store.list_ids().unwrap();
         assert_eq!(ids.len(), 1);
+        let carrier = recovery_carrier(root.path());
+        let backend = zup_linux::LinuxRuntimeBackend {
+            installer: carrier,
+            operation: zup_runtime::Operation::Apply,
+            selection: Default::default(),
+            install_dir_override: None,
+            generated: Default::default(),
+        };
         let mut previous = None;
         for _ in 0..2 {
             let record = store.load(&ids[0]).unwrap();
-            let mut executor = executor(root.path(), &record);
-            let (record, outcome) = recover(record, &store, &mut executor).unwrap();
+            let operation =
+                zup_runtime::OperationControl::new(zup_runtime::ExecutionPolicy::NonInteractive);
+            let request = zup_runtime::RuntimeRequest {
+                target: record.target,
+                app_id: record.app_id.clone(),
+                app_version: record.app_version.clone(),
+                scope: record.scope,
+                transaction_plan: record.plan.clone(),
+                state_root: root.path().join("state"),
+                work_root: root.path().join("work"),
+                recovery_id: Some(record.transaction_id),
+                bootstrap: None,
+                release: None,
+            };
+            let report = backend
+                .execute_blocking(
+                    &request,
+                    &zup_runtime::RuntimeControl::new(
+                        operation.cancellation(),
+                        operation.events(),
+                        operation.policy(),
+                    ),
+                )
+                .unwrap();
+            let outcome = match report.outcome {
+                zup_runtime::InstallOutcome::Committed => TransactionOutcome::Committed,
+                zup_runtime::InstallOutcome::RolledBack => TransactionOutcome::RolledBack,
+                zup_runtime::InstallOutcome::RecoveryRequired => {
+                    TransactionOutcome::RecoveryRequired
+                }
+                other => panic!("recovery at {index}: {other:?}"),
+            };
+            let record = store.load(&ids[0]).unwrap();
             record.validate().unwrap();
             if let Some(previous) = previous {
                 assert_eq!(

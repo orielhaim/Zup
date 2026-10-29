@@ -77,10 +77,35 @@ impl Drop for RepositoryServer {
     }
 }
 
+pub(super) fn preset(frontend: Frontend) -> Option<Vec<u8>> {
+    if frontend != Frontend::Gui {
+        return None;
+    }
+    #[cfg(feature = "gui")]
+    {
+        Some(
+            std::fs::read(
+                Path::new(env!("CARGO_BIN_EXE_zup-setup-gui"))
+                    .parent()
+                    .unwrap()
+                    .join("test-gui-install-preset"),
+            )
+            .expect("the native GUI test driver is built with zup-linux test-support"),
+        )
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        unreachable!()
+    }
+}
+
 fn runtime(frontend: Frontend) -> &'static Path {
     Path::new(match frontend {
         Frontend::Console => env!("CARGO_BIN_EXE_zup-setup-console"),
         Frontend::Headless => env!("CARGO_BIN_EXE_zup-setup-headless"),
+        #[cfg(feature = "gui")]
+        Frontend::Gui => env!("CARGO_BIN_EXE_zup-setup-gui"),
+        #[cfg(not(feature = "gui"))]
         _ => unreachable!(),
     })
 }
@@ -92,7 +117,7 @@ fn compose(plan: &TargetBuildPlan, output: &Path) {
         runtime(plan.installer.frontend),
         output,
         &bytes,
-        None,
+        preset(plan.installer.frontend).as_deref(),
     )
     .unwrap();
 }
@@ -115,6 +140,10 @@ async fn publish(
         zup_bundle::Package::parse(zup_bundle::BundleWriter::encode(plan, &[]).unwrap()).unwrap();
     let runtime = std::fs::read(runtime(plan.installer.frontend)).unwrap();
     let runtime_ref = DocumentRef::of(zup_core::hash_bytes(&runtime), runtime.len() as u64);
+    let preset = preset(plan.installer.frontend);
+    let preset_descriptor = preset
+        .as_deref()
+        .map(|bytes| zup_artifact::Descriptor::of(zup_artifact::MediaType::PRESET, bytes));
     let manifest = zup_artifact::VariantManifest {
         schema: zup_artifact::VARIANT_MANIFEST_SCHEMA,
         required_features: zup_artifact::FEATURE_VARIANT_MANIFESTS,
@@ -125,10 +154,12 @@ async fn publish(
             zup_artifact::MediaType::RUNTIME,
             &runtime,
         )),
-        preset: None,
+        preset: preset_descriptor,
         requirements: Default::default(),
         plan: package.plan().clone(),
-        logical_size: plan.total_size + runtime_ref.size,
+        logical_size: plan.total_size
+            + runtime_ref.size
+            + preset_descriptor.map_or(0, |preset| preset.size),
     };
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let mut objects = BTreeMap::new();
@@ -136,6 +167,9 @@ async fn publish(
         objects.insert(file.sha256, std::fs::read(&file.source).unwrap());
     }
     objects.insert(runtime_ref.digest, runtime);
+    if let Some(bytes) = preset {
+        objects.insert(zup_core::hash_bytes(&bytes), bytes);
+    }
     let catalog = ContentCatalog::new(
         objects
             .iter()
@@ -164,7 +198,7 @@ async fn publish(
                 manifest_bytes.len() as u64,
             ),
             runtime: Some(runtime_ref),
-            preset: None,
+            preset: preset_descriptor.map(|preset| DocumentRef::of(preset.digest, preset.size)),
             content: manifest.content_digests(),
             requirements: Default::default(),
             logical_size: manifest.logical_size,
@@ -227,8 +261,23 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
         .enable_all()
         .build()
         .unwrap();
-    for frontend in [Frontend::Headless, Frontend::Console] {
+    for frontend in [
+        Frontend::Headless,
+        Frontend::Console,
+        #[cfg(feature = "gui")]
+        Frontend::Gui,
+    ] {
         let mut fixture = Fixture::new(frontend);
+        if frontend == Frontend::Gui {
+            fixture
+                .plan
+                .installer
+                .components
+                .iter_mut()
+                .find(|component| component.id.as_str() == "docs")
+                .unwrap()
+                .default = true;
+        }
         let repository = fixture.root.path().join("repository");
         let server = RepositoryServer::start(repository.clone());
         fixture.plan.installer.updates = Some(zup_core::UpdateConfig {
@@ -237,19 +286,28 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
             trusted_root: ROOT.to_vec(),
         });
         compose(&fixture.plan, &fixture.setup);
-        let install = fixture
-            .command()
-            .args([
-                "install", "--scope", "user", "--enable", "docs", "--output", "json",
-            ])
-            .output()
-            .unwrap();
+        let install = if frontend == Frontend::Gui {
+            Command::new(&fixture.setup)
+                .env("DISPLAY", "test-display")
+                .env("XDG_STATE_HOME", fixture.root.path())
+                .args(["--scope", "user"])
+                .output()
+                .unwrap()
+        } else {
+            fixture
+                .command()
+                .args([
+                    "install", "--scope", "user", "--enable", "docs", "--output", "json",
+                ])
+                .output()
+                .unwrap()
+        };
         assert!(
             install.status.success(),
             "{}",
             String::from_utf8_lossy(&install.stdout)
         );
-        let first_ledger = zup_linux::LinuxLedgerStore::new(fixture.root.path().join("state"))
+        let first_ledger = zup_linux::LinuxLedgerStore::new(fixture.root.path().join("zup"))
             .load(
                 &fixture.plan.installer.app.id,
                 zup_core::SelectedScope::User,
@@ -257,7 +315,7 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
             .unwrap()
             .unwrap();
         let old_generation = zup_transaction::maintenance_directory(
-            &fixture.root.path().join("state"),
+            &fixture.root.path().join("zup"),
             &first_ledger.app_id,
             first_ledger.scope,
             &first_ledger.version,
@@ -342,7 +400,7 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
             .to_hex();
         let blob = seed.join(format!("blobs/sha256/{}/{}", &digest[..2], &digest[2..]));
         zup_acquire::ContentCache::open(
-            fixture.root.path().join("state/content"),
+            fixture.root.path().join("zup/content"),
             zup_acquire::CachePolicy::Auto,
         )
         .unwrap()
@@ -371,7 +429,7 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
                 .observe(
                     &fixture.plan.installer,
                     zup_core::SelectedScope::User,
-                    Some(&fixture.root.path().join("state")),
+                    Some(&fixture.root.path().join("zup")),
                 )
                 .unwrap();
             let mut states = Vec::new();
@@ -389,6 +447,21 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
                 .unwrap();
             assert!(matches!(outcome, zup_runtime::InstallOutcome::Committed));
             assert!(!states.is_empty());
+        }
+        if frontend == Frontend::Gui {
+            let updated = Command::new(&fixture.setup)
+                .env("DISPLAY", "test-display")
+                .env("XDG_STATE_HOME", fixture.root.path())
+                .env("ZUP_TEST_UPDATE", "1")
+                .args(["--scope", "user"])
+                .output()
+                .unwrap();
+            assert!(
+                updated.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&updated.stdout),
+                String::from_utf8_lossy(&updated.stderr)
+            );
         }
         let update = fixture
             .command()
@@ -421,7 +494,7 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
             b"updated core"
         );
         assert!(fixture.root.path().join("application/docs.txt").exists());
-        let state = fixture.root.path().join("state");
+        let state = fixture.root.path().join("zup");
         let ledger = zup_linux::LinuxLedgerStore::new(&state)
             .load(
                 &fixture.plan.installer.app.id,

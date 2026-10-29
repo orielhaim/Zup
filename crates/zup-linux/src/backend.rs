@@ -136,14 +136,7 @@ impl LinuxRuntimeBackend {
         } else {
             std::collections::BTreeMap::new()
         };
-        let maintenance = zup_transaction::maintenance_runtime_path(
-            &request.state_root,
-            &request.app_id,
-            request.scope,
-            &record.app_version,
-            record.target.executable_suffix(),
-        );
-        let carrier = Carrier::open(&maintenance)
+        let carrier = Carrier::open(&self.installer)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;
         let payload = crate::run::RunnerPayload::open(&carrier, carrier.executable(), generated)
             .map_err(|error| SessionError::Transaction(error.to_string()))?;

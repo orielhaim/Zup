@@ -96,6 +96,7 @@ zup-protocol.workspace = true
 zup-transaction.workspace = true
 
 [dev-dependencies]
+zup-preset-protocol.workspace = true
 jiff.workspace = true
 tough = "0.24"
 zup-acquire.workspace = true

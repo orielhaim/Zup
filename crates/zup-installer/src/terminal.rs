@@ -423,6 +423,7 @@ fn drive<H: SessionHost>(
         }
     }
     let executable = host.content_executable(&executable);
+    #[cfg(feature = "console")]
     let installer = &build.installer;
     if command.is_none() && !interactive {
         return Err(Failure {

@@ -60,6 +60,36 @@ pub fn install() {
     wait_until_succeeded(channel);
 }
 
+pub fn update() {
+    let (mut channel, mut peer) = connect();
+    send(&channel, &mut peer, Action::Update);
+    loop {
+        let (next, incoming) = channel
+            .recv_within(std::time::Duration::from_secs(60))
+            .expect("the update check completes");
+        channel = next;
+        let Message::Snapshot(snapshot) = &incoming.message else {
+            continue;
+        };
+        if matches!(
+            snapshot.state,
+            InstallerState::Failed | InstallerState::RecoveryRequired
+        ) {
+            panic!("update check failed: {:?}", snapshot.diagnostic);
+        }
+        if snapshot.update.as_ref().is_some_and(|update| {
+            matches!(
+                update.state,
+                zup_preset_protocol::UpdateState::Available { .. }
+            )
+        }) {
+            send(&channel, &mut peer, Action::Update);
+            break;
+        }
+    }
+    wait_until_succeeded(channel);
+}
+
 pub fn install_then_fault() {
     let (channel, mut peer) = connect();
     send(&channel, &mut peer, Action::Install);
