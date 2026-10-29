@@ -5,6 +5,8 @@ mod executor;
 mod id;
 mod input;
 mod lock;
+mod ownership;
+pub use ownership::{OwnershipError, validate_ownership};
 mod plan;
 mod private;
 mod reconciliation;

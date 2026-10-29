@@ -47,8 +47,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fast-${{ runner.os }}
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+          cache-on-failure: true
 
       - uses: ilammy/setup-nasm@v1
         if: matrix.platform == 'windows'
@@ -109,8 +108,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fast-${{ runner.os }}
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+          cache-on-failure: true
 
       - uses: ilammy/setup-nasm@v1
         if: matrix.platform == 'windows'

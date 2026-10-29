@@ -13,7 +13,7 @@ pub fn reconcile_committed<T>(
     store: &dyn TransactionStore,
     record: &TransactionRecord,
     state_root: &Path,
-    complete: impl FnOnce() -> Result<T, String>,
+    complete: impl FnOnce(&TransactionRecord) -> Result<T, String>,
 ) -> Result<T, String> {
     if record.phase != TransactionPhase::Committed {
         return Err("only committed changes can be reconciled".into());
@@ -31,7 +31,7 @@ pub fn reconcile_committed<T>(
     {
         return Err("committed reconciliation identity mismatch".into());
     }
-    let result = complete();
+    let result = complete(&durable);
     let error = result.as_ref().err().map(|error| {
         format!(
             "{error}\nTransaction: {}\nApplication: {}\nScope: {}\nTransaction state: {}",

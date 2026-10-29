@@ -593,9 +593,8 @@ fn preview<H: SessionHost>(
     selection: &Selection,
 ) -> Result<zup_presentation::PlanPreview, String> {
     let context = discovery.context(selection.scope)?;
-    let (plan, installer, target) = target_plan(host, discovery, &context, selection)?;
-    let mut preview = zup_presentation::PlanPreview::from_install_plan(&plan)
-        .with_declared_prerequisites(&installer.prerequisites);
+    let (plan, _, target) = target_plan(host, discovery, &context, selection)?;
+    let mut preview = zup_presentation::PlanPreview::from_install_plan(&plan);
     preview.install_directory = target.install_directory.to_string();
     preview.estimated_bytes = target.summary.install_bytes;
     preview.requires_authorization = target.summary.requires_authorization;

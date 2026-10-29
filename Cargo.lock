@@ -12295,8 +12295,8 @@ dependencies = [
  "tokio",
  "zup-acquire",
  "zup-core",
- "zup-exec",
  "zup-plan",
+ "zup-platform",
  "zup-preset-protocol",
  "zup-transaction",
 ]
@@ -12580,6 +12580,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "zup-core",
+ "zup-exec",
  "zup-platform",
 ]
 

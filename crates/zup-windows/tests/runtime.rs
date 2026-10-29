@@ -11,7 +11,8 @@ use zup_exec::LifecycleAction;
 use zup_platform::{TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
 use zup_runtime::{ExecutionPolicy, InstallOutcome, RuntimeRequest, SessionError};
 use zup_transaction::{
-    FileDelta, FilePrecondition, FileWork, TransactionInput, compile_transaction,
+    FileDelta, FilePrecondition, FileWork, FilesystemTransactionStore, ReconciliationState,
+    TransactionInput, TransactionStore, compile_transaction,
 };
 use zup_windows::{InstallLedgerStore, PayloadOverlayIdentity, WindowsRuntimeBackend};
 
@@ -101,6 +102,10 @@ async fn local_backend_commits_files_and_publishes_ledger() {
         .unwrap()
         .unwrap();
     assert_eq!(ledger.version.to_string(), "1.0.0");
+    let journal = FilesystemTransactionStore::private_at(&request.state_root)
+        .load(&ledger.committed_transaction.parse().unwrap())
+        .unwrap();
+    assert_eq!(journal.reconciliation, ReconciliationState::Complete);
 }
 
 #[tokio::test]
@@ -192,11 +197,53 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
         .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
     assert!(!destination.exists());
+    let journals = FilesystemTransactionStore::private_at(&state_root);
+    let remaining = journals.list_ids().unwrap();
+    assert_eq!(remaining.len(), 1);
+    let uninstall = journals.load(&remaining[0]).unwrap();
+    assert!(uninstall.plan.uninstall);
+    assert_eq!(uninstall.reconciliation, ReconciliationState::Complete);
+    for _ in 0..2 {
+        InstallLedgerStore::new(&state_root)
+            .repair_committed(&ledger.app_id, SelectedScope::User)
+            .unwrap();
+    }
     assert!(
         InstallLedgerStore::new(&state_root)
             .load(&ledger.app_id, SelectedScope::User)
             .unwrap()
             .is_none()
+    );
+    let (reinstall, backend) = self::request(&root, SelectedScope::User);
+    assert_eq!(
+        run(&backend, reinstall, ExecutionPolicy::Interactive)
+            .await
+            .unwrap(),
+        InstallOutcome::Committed
+    );
+    let ledgers = InstallLedgerStore::new(&state_root);
+    let newer = ledgers
+        .load(&ledger.app_id, SelectedScope::User)
+        .unwrap()
+        .unwrap();
+    let reconciled = ledgers
+        .publish_committed(
+            &uninstall,
+            SelectedScope::User,
+            zup_windows::ReleaseRecord::Preserve,
+        )
+        .unwrap();
+    assert_eq!(
+        reconciled.committed_transaction,
+        newer.committed_transaction
+    );
+    assert_eq!(std::fs::read(&destination).unwrap(), b"installed");
+    assert_eq!(
+        ledgers
+            .load(&ledger.app_id, SelectedScope::User)
+            .unwrap()
+            .unwrap(),
+        newer
     );
 }
 

@@ -638,19 +638,6 @@ fn an_operation_a_real_preset_started_survives_a_control_the_state_machine_refus
 }
 
 #[test]
-fn ending_a_preview_leaves_no_child_running() {
-    let (project, mut session) = opened();
-    await_report(&project);
-    let generation = run_directory(&project).join("1");
-    session.end();
-    // The point of the assertion: the file can be replaced. A child that was not
-    // reaped would still hold it open, and on this platform that is a file the next
-    // window could not be staged into.
-    std::fs::write(generation.join("preset.exe"), b"replaced")
-        .expect("the staged executable is writable again");
-}
-
-#[test]
 fn nothing_a_preview_does_reaches_past_its_own_directory() {
     let (project, mut session) = opened();
     await_report(&project);

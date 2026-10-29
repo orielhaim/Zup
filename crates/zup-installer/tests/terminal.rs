@@ -209,6 +209,10 @@ fn automation_is_one_document_or_a_framed_stream_and_never_prompts() {
                 .lines()
                 .map(|line| serde_json::from_str::<Value>(line).unwrap())
                 .collect::<Vec<_>>();
+            assert_eq!(
+                documents[0]["protocol_version"],
+                zup_presentation::INSTALLER_PROTOCOL_VERSION
+            );
             if format == "json" {
                 assert_eq!(documents.len(), 1);
             } else {
