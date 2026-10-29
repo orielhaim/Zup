@@ -76,5 +76,7 @@ jobs:
           log = Path(os.environ["RUNNER_TEMP"]) / "diagnostic.log"
           if log.is_file():
               text = log.read_bytes()[-12000:].decode("utf-8", errors="replace")
-              text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-              print(f"::error::{text}")
+              for offset in range(0, len(text), 3000):
+                  chunk = text[offset:offset + 3000]
+                  chunk = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title=Native diagnostic part {offset // 3000 + 1}::{chunk}")
