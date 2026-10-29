@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 cargo_metadata = "0.23"
-jsonschema = { version = "0.58", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 process-wrap.workspace = true
 semver.workspace = true
 serde.workspace = true

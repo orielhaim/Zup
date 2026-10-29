@@ -12,7 +12,7 @@ on:
         description: Run focused native Windows validation instead of Full Verification
         type: choice
         default: none
-        options: [none, windows-2025, windows-11-arm]
+        options: [none, windows-latest, windows-11-arm]
       test_filter:
         description: Nextest expression for focused native Windows validation
         type: string
@@ -32,7 +32,8 @@ on:
         description: Native runner for size measurements
         type: choice
         default: all
-        options: [all, ubuntu-24.04, ubuntu-24.04-arm, windows-2025, windows-11-arm]
+        options:
+          [all, ubuntu-latest, ubuntu-26.04-arm, windows-latest, windows-11-arm]
 
 permissions:
   contents: read
@@ -80,43 +81,51 @@ jobs:
         run: cargo nextest run -p zup -p zup-installer -p zup-windows -p zup-plugin-runtime --all-features --no-fail-fast -E "$env:TEST_FILTER"
       - name: Machine authority tests
         run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
+
   sizes:
-    name: Installer sizes (${{ matrix.runner }})
+    name: Installer sizes (${{ matrix.os }})
     if: inputs.measure_sizes == true && (!inputs.native_windows_runner || inputs.native_windows_runner == 'none')
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ fromJSON(inputs.size_runner == 'all' && '["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025", "windows-11-arm"]' || format('["{0}"]', inputs.size_runner)) }}
+        os: ${{ fromJSON(inputs.size_runner == 'all' && '["ubuntu-latest", "ubuntu-26.04-arm", "windows-latest", "windows-11-arm"]' || format('["{0}"]', inputs.size_runner)) }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
       - name: Preserve the measurement tool
         shell: bash
         run: cp scripts/ci/installer-size.py "$RUNNER_TEMP/installer-size.py"
+
       - uses: actions/checkout@v7
         if: inputs.revision != ''
         with:
           ref: ${{ inputs.revision }}
           persist-credentials: false
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99"
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: sizes-${{ runner.os }}-${{ runner.arch }}
           cache-on-failure: false
+
       - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
         with:
           platform: win64
+
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev mold
+
       - name: Build native toolchain and developer CLI
         shell: bash
         env:
@@ -124,6 +133,7 @@ jobs:
         run: |
           cargo xtask toolchain build --profile "$SIZE_PROFILE"
           cargo build -p zup --bin zup
+
       - name: Measure composed installers
         shell: bash
         env:
@@ -140,6 +150,7 @@ jobs:
           for row in json.loads(Path("target/sizes/sizes.json").read_text())["measurements"]:
               print("::notice title=Installer size::" + json.dumps(row))
           PYREPORT
+
       - name: Windows runtime link map
         if: runner.os == 'Windows' && inputs.profile == 'installer'
         shell: pwsh
@@ -147,39 +158,25 @@ jobs:
           $map = Join-Path $env:GITHUB_WORKSPACE 'target/runtime.map'
           cargo rustc -p zup-installer --no-default-features --features headless --bin zup-setup-headless --profile installer -- -C "link-arg=/MAP:$map"
           if ($LASTEXITCODE -ne 0) { throw 'runtime link map failed' }
+
       - uses: actions/upload-artifact@v7
         with:
-          name: sizes-${{ matrix.runner }}-${{ inputs.profile }}
+          name: sizes-${{ matrix.os }}-${{ inputs.profile }}
           path: |
             target/sizes/sizes.json
             target/sizes/*/inspection.json
             target/runtime.map
           if-no-files-found: error
+
   test:
-    name: full test ${{ matrix.name }}
+    name: full test ${{ matrix.os }}
     if: inputs.measure_sizes != true && (!inputs.native_windows_runner || inputs.native_windows_runner == 'none')
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Windows
-            runner: windows-2025
-            platform: windows
-            artifact: windows
-          - name: Windows ARM64
-            runner: windows-11-arm
-            platform: windows
-            artifact: windows-arm64
-          - name: Linux
-            runner: ubuntu-24.04
-            platform: linux
-            artifact: linux
-          - name: Linux ARM64
-            runner: ubuntu-24.04-arm
-            platform: linux
-            artifact: linux-arm64
+        os: [windows-latest, windows-11-arm, ubuntu-latest, ubuntu-26.04-arm]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -196,12 +193,12 @@ jobs:
           cache-on-failure: false
 
       - uses: ilammy/setup-nasm@v1
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         with:
           platform: win64
 
       - uses: rui314/setup-mold@v1
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         with:
           mold-version: 3.0.0
           make-default: "true"
@@ -211,7 +208,7 @@ jobs:
           tool: cargo-nextest@0.9.146
 
       - name: Linux package selection
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -220,14 +217,14 @@ jobs:
           printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
 
       - name: Linux dependencies
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
 
       - name: Linux native service lifecycle
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           sudo env PATH="$PATH" RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" \
@@ -238,35 +235,36 @@ jobs:
         run: cargo xtask toolchain build
 
       - name: Windows tests
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         run: cargo nextest run --workspace --all-features --no-fail-fast
 
       - name: Windows machine authority tests
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
 
       - name: Linux tests
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: cargo nextest run --all-features --no-fail-fast $PORTABLE $LINUX
 
       - name: Build reusable tooling
-        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        if: runner.arch == 'X64'
         run: cargo build -p zup -p zup-xtask --bins
 
       - name: Archive reusable tooling
-        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        if: runner.arch == 'X64'
         shell: bash
         run: |
           suffix=''
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
-          tar -cf "tooling-${{ matrix.artifact }}.tar" -C target/debug "zup$suffix" "xtask$suffix"
+          tar -cf "tooling-${{ runner.os == 'Windows' && 'windows' || 'linux' }}.tar" -C target/debug "zup$suffix" "xtask$suffix"
 
       - name: Upload reusable tooling
-        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        if: runner.arch == 'X64'
         uses: actions/upload-artifact@v7
         with:
-          path: tooling-${{ matrix.artifact }}.tar
+          name: tooling-${{ runner.os == 'Windows' && 'windows' || 'linux' }}.tar
+          path: tooling-${{ runner.os == 'Windows' && 'windows' || 'linux' }}.tar
           archive: false
           retention-days: 7
           if-no-files-found: error
@@ -274,7 +272,7 @@ jobs:
       - name: Upload staged toolchain
         uses: actions/upload-artifact@v7
         with:
-          name: toolchain-${{ matrix.artifact }}
+          name: toolchain-${{ runner.os == 'Windows' && 'windows' || 'linux' }}${{ runner.arch == 'ARM64' && '-arm64' || '' }}
           path: target/debug/toolchain
           compression-level: 0
           retention-days: 7
@@ -282,7 +280,7 @@ jobs:
 
   cross-build-windows:
     name: Build both targets on Windows
-    runs-on: windows-2025
+    runs-on: windows-latest
     timeout-minutes: 60
     needs: [test]
     steps:
@@ -364,7 +362,7 @@ jobs:
 
   cross-build-linux:
     name: Build both targets on Linux
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: [test]
     steps:
@@ -438,7 +436,7 @@ jobs:
 
   cross-e2e-windows:
     name: Run the Linux-built Universal installer
-    runs-on: windows-2025
+    runs-on: windows-latest
     timeout-minutes: 30
     needs: [cross-build-linux]
     steps:
@@ -458,7 +456,7 @@ jobs:
 
   cross-e2e-linux:
     name: Run the Windows-built Linux installer
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [cross-build-windows]
     steps:
@@ -481,7 +479,7 @@ jobs:
 
   cross-e2e-arm64:
     name: Run the Windows-built ARM64 installer
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 15
     needs: [cross-build-windows]
     steps:
@@ -499,7 +497,7 @@ jobs:
 
   release:
     name: release material
-    runs-on: windows-2025
+    runs-on: windows-latest
     timeout-minutes: 180
     needs: [test]
     steps:

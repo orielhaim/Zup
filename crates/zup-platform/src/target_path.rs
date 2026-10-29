@@ -239,7 +239,7 @@ fn canonical(target: &Target, raw: &str) -> Result<Utf8TypedPathBuf, TargetPathE
         });
     }
 
-    if !is_absolute(&path) {
+    if !path.is_absolute() {
         return Err(TargetPathError::NotAbsolute {
             target: target.to_string(),
             path: raw.to_owned(),
@@ -334,17 +334,6 @@ fn lexical<'a>(target: &Target, raw: &'a str) -> Utf8TypedPath<'a> {
             _ => PathType::Unix,
         },
     )
-}
-
-/// Whether `path` is absolute on its own target.
-///
-/// A Windows path is rooted at a drive or a UNC share; `\Acme` is not absolute
-/// because it names a location on whichever drive happens to be current.
-fn is_absolute(path: &Utf8TypedPath<'_>) -> bool {
-    match path {
-        Utf8TypedPath::Unix(path) => path.has_root(),
-        Utf8TypedPath::Windows(path) => path.has_root() && path.components().has_prefix(),
-    }
 }
 
 /// Windows spells paths case-insensitively; every other target compares bytes.

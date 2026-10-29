@@ -235,6 +235,21 @@ fn a_relative_path_is_refused(#[case] authored: &str, #[case] target: Target) {
     );
 }
 
+/// A UNC prefix without a share names no location the network can reach.
+#[rstest]
+#[case::unc_server(r"\\server")]
+#[case::unc_server_with_separator(r"\\server\")]
+#[case::forward_slash_unc_server(r"//server")]
+fn a_share_less_unc_path_is_refused(#[case] authored: &str) {
+    assert!(
+        matches!(
+            TargetPath::new(windows(), authored),
+            Err(TargetPathError::NotAbsolute { .. })
+        ),
+        "{authored:?}"
+    );
+}
+
 /// Windows device namespaces name kernel objects, so they are not places an
 /// installer can write.
 #[rstest]

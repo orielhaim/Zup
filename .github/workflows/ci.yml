@@ -22,19 +22,13 @@ env:
 
 jobs:
   lint:
-    name: lint ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+    name: lint ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Windows
-            runner: windows-2025
-            platform: windows
-          - name: Linux
-            runner: ubuntu-24.04
-            platform: linux
+        os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -52,12 +46,12 @@ jobs:
           cache-on-failure: false
 
       - uses: ilammy/setup-nasm@v1
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         with:
           platform: win64
 
       - uses: rui314/setup-mold@v1
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         with:
           mold-version: 3.0.0
           make-default: "true"
@@ -66,7 +60,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Linux package selection
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -75,28 +69,22 @@ jobs:
           printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
 
       - name: Windows Clippy
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
       - name: Linux Clippy
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
 
   test:
-    name: test ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
+    name: test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Windows
-            runner: windows-2025
-            platform: windows
-          - name: Linux
-            runner: ubuntu-24.04
-            platform: linux
+        os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -113,12 +101,12 @@ jobs:
           cache-on-failure: false
 
       - uses: ilammy/setup-nasm@v1
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         with:
           platform: win64
 
       - uses: rui314/setup-mold@v1
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         with:
           mold-version: 3.0.0
           make-default: "true"
@@ -128,7 +116,7 @@ jobs:
           tool: cargo-nextest@0.9.146
 
       - name: Linux package selection
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -137,7 +125,7 @@ jobs:
           printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
 
       - name: Linux dependencies
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           sudo apt-get update
@@ -148,45 +136,48 @@ jobs:
           mold --version
 
       - name: Windows tests
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         run: cargo nextest run --workspace --all-features --no-fail-fast --profile fast
 
       - name: Windows machine authority tests
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
 
       - name: Linux tests
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: cargo nextest run --all-features --no-fail-fast --profile fast $PORTABLE $LINUX
 
       - name: Windows doc tests
-        if: matrix.platform == 'windows'
+        if: runner.os == 'Windows'
         run: cargo test --workspace --all-features --doc
 
       - name: Linux doc tests
-        if: matrix.platform == 'linux'
+        if: runner.os == 'Linux'
         shell: bash
         run: cargo test --doc --all-features $PORTABLE $LINUX
 
   terminal-arm64:
-    name: terminal ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
+    name: terminal ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04-arm, windows-11-arm]
+        os: [ubuntu-26.04-arm, windows-11-arm]
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99"
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: terminal-${{ runner.os }}-${{ runner.arch }}-debug0
           cache-on-failure: false
+
       - name: Terminal and automation lifecycle
         run: cargo test -p zup-installer --no-default-features --features console,headless,online --test terminal
