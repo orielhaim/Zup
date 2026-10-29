@@ -105,6 +105,7 @@ pub(crate) fn plan_expected(
     )?;
     let digest = prepared.transaction_plan.fingerprint().to_hex();
     let intent = PrepareOperation {
+        recovery_id: None,
         operation: request.action.name().to_owned(),
         force_files: matches!(
             request.action,
@@ -156,6 +157,7 @@ pub(crate) fn run_machine_elevated_once(
     let systemd = crate::machine::SystemdRoots::production();
     let (intent, expected) = plan_expected(request, &state_root, &roots, &systemd, 0)?;
     drive_elevated(
+        &request.installer,
         &intent,
         &expected.digest,
         &expected.target,
@@ -166,6 +168,7 @@ pub(crate) fn run_machine_elevated_once(
 }
 
 pub(crate) fn drive_elevated(
+    worker_exe: &std::path::Path,
     intent: &PrepareOperation,
     expected_digest: &str,
     target: &zup_core::Target,
@@ -177,11 +180,6 @@ pub(crate) fn drive_elevated(
     let invoking = rustix::process::getuid().as_raw();
     let rendezvous = Rendezvous::create(invoking, session).map_err(into_run_error)?;
 
-    let worker_exe = std::env::current_exe().map_err(|source| PathError::Io {
-        path: "<executable>".into(),
-        source,
-    })?;
-
     let args = vec![
         "__privileged-worker".to_owned(),
         "--session".to_owned(),
@@ -192,7 +190,7 @@ pub(crate) fn drive_elevated(
         rendezvous.socket().display().to_string(),
     ];
     let mut spawned = launcher
-        .spawn(&worker_exe, &args)
+        .spawn(worker_exe, &args)
         .map_err(ExecError::Elevation)?;
 
     let mut stream = {
@@ -306,12 +304,23 @@ pub(crate) fn drive_client(
         }
     };
 
-    if prepared.plan_digest.to_lowercase() != expected_digest.to_lowercase() {
+    if prepared.app_id != intent.app_id
+        || prepared.scope != intent.scope
+        || prepared.target != intent.target
+        || prepared.operation != intent.operation
+    {
+        return Err(ExecError::Worker(
+            "the worker prepared a different operation".into(),
+        ));
+    }
+    if intent.recovery_id.is_none()
+        && prepared.plan_digest.to_lowercase() != expected_digest.to_lowercase()
+    {
         return Err(ExecError::Worker(
             "the worker's plan differs from the confirmed one".into(),
         ));
     }
-    println!(
+    tracing::debug!(
         "machine {} {} {} ({} files, plan {})",
         prepared.operation,
         prepared.app_id,
@@ -371,7 +380,13 @@ pub(crate) fn drive_client(
                     }),
                     "committed_pending_reconciliation" => {
                         Ok(LinuxOutcome::CommittedPendingReconciliation {
-                            transaction: completed.transaction_id.to_string(),
+                            detail: completed.detail.unwrap_or_else(|| {
+                                format!(
+                                    "transaction {} committed; reconciliation remains pending",
+                                    completed.transaction_id
+                                )
+                            }),
+                            transaction: completed.transaction_id,
                         })
                     }
                     _ => Err(ExecError::Worker(format!(
@@ -514,10 +529,18 @@ fn check_capabilities(capabilities: &Capabilities) -> Result<(), ExecError> {
 pub(crate) fn run_machine_loopback(
     request: &LinuxRunRequest,
     roots: &MachineRoots,
+    control: &zup_runtime::RuntimeControl,
 ) -> Result<LinuxOutcome, ExecError> {
     let state_root =
         crate::machine::resolve_machine_state_root(request.state_root.as_deref(), roots)?;
-    run_machine_loopback_on(request, &state_root, roots)
+    run_machine_loopback_with_on(
+        request,
+        &state_root,
+        roots,
+        &crate::machine::SystemdRoots::production(),
+        crate::worker::WorkerFault::None,
+        Some(control),
+    )
 }
 
 #[cfg(feature = "test-support")]
@@ -539,20 +562,6 @@ pub(crate) fn run_machine_loopback_faulted(
     run_machine_loopback_with(request, roots, systemd, fault)
 }
 
-fn run_machine_loopback_on(
-    request: &LinuxRunRequest,
-    state_root: &PathBuf,
-    roots: &MachineRoots,
-) -> Result<LinuxOutcome, ExecError> {
-    run_machine_loopback_with_on(
-        request,
-        state_root,
-        roots,
-        &crate::machine::SystemdRoots::production(),
-        crate::worker::WorkerFault::None,
-    )
-}
-
 #[cfg(feature = "test-support")]
 fn run_machine_loopback_with(
     request: &LinuxRunRequest,
@@ -562,7 +571,7 @@ fn run_machine_loopback_with(
 ) -> Result<LinuxOutcome, ExecError> {
     let state_root =
         crate::machine::resolve_machine_state_root(request.state_root.as_deref(), roots)?;
-    run_machine_loopback_with_on(request, &state_root, roots, systemd, fault)
+    run_machine_loopback_with_on(request, &state_root, roots, systemd, fault, None)
 }
 
 fn run_machine_loopback_with_on(
@@ -571,10 +580,11 @@ fn run_machine_loopback_with_on(
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
     fault: crate::worker::WorkerFault,
+    control: Option<&zup_runtime::RuntimeControl>,
 ) -> Result<LinuxOutcome, ExecError> {
-    match run_machine_loopback_with_once(request, state_root, roots, systemd, fault) {
+    match run_machine_loopback_with_once(request, state_root, roots, systemd, fault, control) {
         Err(ExecError::StalePlan) => {
-            run_machine_loopback_with_once(request, state_root, roots, systemd, fault)
+            run_machine_loopback_with_once(request, state_root, roots, systemd, fault, control)
         }
         outcome => outcome,
     }
@@ -586,6 +596,7 @@ fn run_machine_loopback_with_once(
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
     fault: crate::worker::WorkerFault,
+    control: Option<&zup_runtime::RuntimeControl>,
 ) -> Result<LinuxOutcome, ExecError> {
     let (intent, expected) = plan_expected(
         request,
@@ -594,62 +605,101 @@ fn run_machine_loopback_with_once(
         systemd,
         rustix::process::geteuid().as_raw(),
     )?;
-    let session = SessionId::new_v7();
-    let (mut client, mut worker) = UnixStream::pair().map_err(|source| PathError::Io {
-        path: "<loopback>".into(),
-        source,
-    })?;
     let context = crate::worker::WorkerContext {
         roots: roots.clone(),
         systemd: systemd.clone(),
         invoking_uid: rustix::process::geteuid().as_raw(),
-
         expected_client_pid: std::process::id(),
-        session,
+        session: SessionId::new_v7(),
         worker_exe: request.installer.clone(),
         carrier_pin: None,
         fault,
     };
-    let worker_thread =
-        std::thread::spawn(move || crate::worker::serve_session(&mut worker, context));
-    let outcome = drive_client_loopback(
+    drive_loopback(context, &intent, &expected.digest, control)
+}
+
+fn drive_loopback(
+    context: crate::worker::WorkerContext,
+    intent: &PrepareOperation,
+    expected_digest: &str,
+    control: Option<&zup_runtime::RuntimeControl>,
+) -> Result<LinuxOutcome, ExecError> {
+    let session = context.session;
+    let (mut client, mut worker) = UnixStream::pair()
+        .map_err(|source| PathError::io(std::path::Path::new("<loopback>"), source))?;
+    let peer = peer_identity(&client).map_err(into_run_error)?;
+    if peer.uid != context.invoking_uid {
+        return Err(ExecError::Worker("loopback peer mismatch".into()));
+    }
+    let worker = std::thread::spawn(move || crate::worker::serve_session(&mut worker, context));
+    let outcome = drive_client(
         &mut client,
         session,
-        &intent,
-        &expected.digest,
-        &expected.target,
+        intent,
+        expected_digest,
+        &intent.target,
+        control.map(|control| &control.events),
+        control.map(|control| &control.cancellation),
     );
-    match worker_thread.join() {
+    drop(client);
+    match worker.join() {
         Ok(Ok(_)) => outcome,
         Ok(Err(error)) => Err(ExecError::Worker(error.to_string())),
         Err(_) => Err(ExecError::Worker("the worker thread failed".into())),
     }
 }
 
-fn drive_client_loopback(
-    stream: &mut UnixStream,
-    session: SessionId,
-    intent: &PrepareOperation,
-    expected_digest: &str,
-    expected_target: &zup_core::Target,
-) -> Result<LinuxOutcome, ExecError> {
-    let peer = peer_identity(stream).map_err(into_run_error)?;
-    if peer.uid != rustix::process::geteuid().as_raw() {
-        return Err(ExecError::Worker("loopback peer mismatch".into()));
-    }
-    drive_client(
-        stream,
-        session,
-        intent,
-        expected_digest,
-        expected_target,
-        None,
-        None,
-    )
-}
-
 fn into_run_error(error: crate::error::IpcError) -> ExecError {
     ExecError::Worker(error.to_string())
+}
+
+pub(crate) fn recover_machine(
+    installer: &std::path::Path,
+    state_root: &std::path::Path,
+    id: uuid::Uuid,
+    control: &zup_runtime::RuntimeControl,
+) -> Result<LinuxOutcome, ExecError> {
+    let carrier = crate::carrier::Carrier::open(installer)?;
+    let app = &carrier.package().plan().installer.app;
+    let intent = PrepareOperation {
+        recovery_id: Some(id),
+        operation: zup_protocol::privileged_operation::RECOVER.into(),
+        force_files: false,
+        install_dir_override: None,
+        selected_components: Vec::new(),
+        disabled_components: Vec::new(),
+        expected_plan_digest: None,
+        app_id: app.id.to_string(),
+        app_version: app.version.to_string(),
+        scope: "machine".into(),
+        target: *carrier.target(),
+        state_root: state_root.display().to_string(),
+    };
+    if rustix::process::geteuid().as_raw() != 0 {
+        let _ = control
+            .events
+            .send(zup_runtime::RuntimeEvent::WaitingForAuthorization);
+        return drive_elevated(
+            installer,
+            &intent,
+            "",
+            carrier.target(),
+            &crate::pkexec::SystemPkexec::resolve()?,
+            Some(&control.events),
+            Some(&control.cancellation),
+        );
+    }
+    let context = crate::worker::WorkerContext {
+        roots: MachineRoots::production(),
+        systemd: crate::machine::SystemdRoots::production(),
+        invoking_uid: 0,
+        expected_client_pid: std::process::id(),
+        session: SessionId::new_v7(),
+        worker_exe: installer.to_path_buf(),
+        carrier_pin: None,
+        fault: crate::worker::WorkerFault::None,
+    };
+    drive_loopback(context, &intent, "", Some(control))
 }
 
 #[cfg(test)]

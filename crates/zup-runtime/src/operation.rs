@@ -9,6 +9,12 @@ use zup_transaction::{TransactionInput, TransactionPlan, compile_transaction};
 
 use crate::BootstrapRequest;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateRequest {
+    Check,
+    Install { version: Option<String> },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     Install,
@@ -329,8 +335,7 @@ pub fn prepare_operation<H: OperationHost>(
                 Some(ledger),
                 &OperationSelection::default(),
                 LifecycleAction::Modify,
-                persisted_install_directory(Some(ledger))
-                    .filter(|_| installer.install.allow_directory_override),
+                persisted_install_directory(Some(ledger)),
             )?;
             let planned = host
                 .plan_build(input.build, &plan_request, input.cancellation)
@@ -454,9 +459,6 @@ pub fn choose_install_directory(
     repair: bool,
 ) -> Result<Option<Template>, OperationError> {
     if repair {
-        if !allowed {
-            return Ok(None);
-        }
         return Ok(persisted_install_directory(prior));
     }
     choose_explicit_directory(explicit, prior, allowed)
@@ -476,12 +478,7 @@ fn choose_explicit_directory(
         }
         return install_directory_template(path).map(Some);
     }
-    if !allowed {
-        return Ok(None);
-    }
-    Ok(prior
-        .and_then(|ledger| ledger.install_directory.as_ref())
-        .and_then(|path| Template::parse(&path.to_string()).ok()))
+    Ok(persisted_install_directory(prior))
 }
 
 pub fn persisted_install_directory(prior: Option<&InstallLedger>) -> Option<Template> {
@@ -510,7 +507,13 @@ pub fn plan_request(
     install_directory: Option<Template>,
 ) -> Result<PlanRequest, OperationError> {
     let mut request = PlanRequest::new(installer.target, scope);
-    request.install_directory = install_directory;
+    request.install_directory = install_directory.map(|directory| {
+        if selection.install_directory.is_none() && prior.is_some() {
+            zup_plan::InstallDirectory::Installed(directory)
+        } else {
+            zup_plan::InstallDirectory::Override(directory)
+        }
+    });
     if matches!(
         action,
         LifecycleAction::Upgrade | LifecycleAction::Modify | LifecycleAction::Repair { .. }

@@ -1181,6 +1181,8 @@ impl InstallerEvent {
 /// the wrong message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallerResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction: Option<String>,
     pub protocol_version: u32,
     pub outcome: ProcessOutcome,
     pub code: i32,
@@ -1200,6 +1202,7 @@ impl InstallerResult {
         version: impl Into<String>,
     ) -> Self {
         Self {
+            transaction: None,
             protocol_version: INSTALLER_PROTOCOL_VERSION,
             outcome,
             code: outcome.code(),

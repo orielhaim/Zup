@@ -440,10 +440,13 @@ impl SessionHost for WindowsSessionHost {
     #[cfg(feature = "gui")]
     fn update(
         &self,
-        scope: SelectedScope,
-        status: &mut dyn FnMut(zup_preset_protocol::UpdateState),
-    ) -> Result<(), String> {
-        state::from_maintenance_surface(&self.executable, scope, status)
+        context: &zup_session::OperationContext,
+        request: &zup_runtime::UpdateRequest,
+        _control: &zup_runtime::OperationControl,
+        status: &mut (dyn FnMut(zup_preset_protocol::UpdateState) + Send),
+    ) -> Result<zup_runtime::InstallOutcome, String> {
+        state::from_maintenance_surface(&self.executable, context.scope, request, status)
+            .map(|_| zup_runtime::InstallOutcome::Committed)
     }
 
     fn copy_diagnostics(&self, text: &str) {

@@ -179,4 +179,4 @@ jobs:
           shared-key: terminal-${{ runner.os }}-${{ runner.arch }}
           cache-on-failure: true
       - name: Terminal and automation lifecycle
-        run: cargo test -p zup-installer --no-default-features --features console,headless --test terminal
+        run: cargo test -p zup-installer --no-default-features --features console,headless,online --test terminal

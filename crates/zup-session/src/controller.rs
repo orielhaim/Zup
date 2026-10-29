@@ -19,7 +19,6 @@ enum Report {
 #[derive(Clone)]
 enum UpdateReport {
     Status(UpdateState),
-    Finished(Result<(), String>),
 }
 
 type Reports = tokio::sync::broadcast::Sender<Report>;
@@ -150,10 +149,6 @@ where
                         }
                     }
                     Report::Update(UpdateReport::Status(status)) => control.state.set_update(None, status),
-                    Report::Update(UpdateReport::Finished(Ok(()))) => {}
-                    Report::Update(UpdateReport::Finished(Err(message))) => {
-                        control.state.fail(message, false);
-                    }
                 }
                 if let Err(error) = publish_if(&mut preset, &control.state, &configuration, &mut deliverable) {
                     interaction_error = Some(error);
@@ -254,10 +249,78 @@ fn apply_completion<H: SessionHost>(
         return;
     }
     control.active = None;
+    if matches!(completion.outcome, zup_runtime::InstallOutcome::Committed)
+        && completion.kind == crate::runner::CompletionKind::UpdateInstall
+    {
+        let previous = control
+            .discovery
+            .installation(control.presented)
+            .map(|installation| installation.state_root.clone());
+        let refreshed = control
+            .host
+            .observe(
+                control.discovery.installer(),
+                control.presented,
+                previous.as_deref(),
+            )
+            .and_then(|context| {
+                if let Some(build) = control.host.refresh_installation(&context)? {
+                    control.discovery.build = build;
+                    if let Some(installation) = control
+                        .discovery
+                        .installations
+                        .iter_mut()
+                        .find(|installation| installation.scope == context.scope)
+                    {
+                        installation.ledger = context.ledger.clone();
+                    }
+                    control.executable = control.host.content_executable(&control.executable);
+                    control.state = initial_state(&control.discovery, &context, None);
+                    if let Some(ledger) = &context.ledger {
+                        control.state.set_update(
+                            None,
+                            UpdateState::UpToDate {
+                                current: ledger.version.to_string(),
+                            },
+                        );
+                    }
+                }
+                Ok(())
+            });
+        if let Err(error) = refreshed {
+            control.state.fail(error, false);
+            return;
+        }
+    }
     if !completion.repair_drift.is_empty() {
         control.state.set_repair_drift(completion.repair_drift);
     }
+    if completion.kind == crate::runner::CompletionKind::UpdateCheck
+        && matches!(completion.outcome, zup_runtime::InstallOutcome::Committed)
+    {
+        control
+            .state
+            .finish_with(&zup_runtime::InstallOutcome::Cancelled);
+        return;
+    }
     control.state.finish_with(&completion.outcome);
+    if completion.kind != crate::runner::CompletionKind::Lifecycle
+        && !matches!(completion.outcome, zup_runtime::InstallOutcome::Committed)
+    {
+        let status = if matches!(completion.outcome, zup_runtime::InstallOutcome::Cancelled) {
+            UpdateState::Idle
+        } else {
+            let message = control
+                .state
+                .snapshot()
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.meaning.clone())
+                .unwrap_or_else(|| "The update did not complete".into());
+            UpdateState::Failed { message }
+        };
+        control.state.set_update(None, status);
+    }
 }
 
 fn publish(
@@ -327,17 +390,56 @@ where
                 request_plan(control, selection);
             }
         }
-        HostDecision::Update => {
+        HostDecision::Update(request) => {
+            if control.active.is_some() {
+                return;
+            }
             let scope = zup_preset_host::engine_scope(control.state.snapshot().surface.scope());
+            let context = match control.discovery.context(scope) {
+                Ok(context) => context,
+                Err(error) => {
+                    control.state.fail(error, false);
+                    return;
+                }
+            };
             let sender = control.reports.clone();
             let host = control.host.clone();
-            let _ = spawn("setup-update", move || {
-                let mut status = |progress| {
-                    let _ = sender.send(Report::Update(UpdateReport::Status(progress)));
+            let operation = OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
+            let cancel = operation.cancellation();
+            let id = zup_runtime::Uuid::now_v7();
+            let mut events = operation.subscribe();
+            let kind = if matches!(request, zup_runtime::UpdateRequest::Check) {
+                crate::runner::CompletionKind::UpdateCheck
+            } else {
+                crate::runner::CompletionKind::UpdateInstall
+            };
+            let task = tokio::spawn(async move {
+                let status_sender = sender.clone();
+                let mut work = tokio::task::spawn_blocking(move || {
+                    let mut status = |progress| {
+                        let _ = status_sender.send(Report::Update(UpdateReport::Status(progress)));
+                    };
+                    host.update(&context, &request, &operation, &mut status)
+                });
+                let result = loop {
+                    tokio::select! {
+                        result = &mut work => break result,
+                        event = events.recv() => if let Ok(event) = event && !is_terminal(&event) { let _ = sender.send(Report::Engine(event)); },
+                    }
                 };
-                let result = host.update(scope, &mut status);
-                let _ = sender.send(Report::Update(UpdateReport::Finished(result)));
+                let outcome = match result {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(error)) => zup_runtime::InstallOutcome::Failed(error),
+                    Err(error) => zup_runtime::InstallOutcome::Failed(error.to_string()),
+                };
+                crate::runner::OperationCompletion {
+                    kind,
+                    id,
+                    outcome,
+                    repair_drift: Vec::new(),
+                }
             });
+            control.active = Some(ActiveOperation { id, cancel, task });
         }
         HostDecision::Launch(target) => {
             let selection = Selection::from_surface(&control.state.snapshot().surface);

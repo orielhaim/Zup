@@ -259,6 +259,7 @@ struct BlobIndex {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Metadata {
+    release: Option<zup_core::ReleaseIdentity>,
     schema: u32,
     required_features: u64,
     plan: PortableBuildPlan,
@@ -416,6 +417,10 @@ impl Package {
                 })
                 .collect(),
         })
+    }
+
+    pub fn release_identity(&self) -> Option<&zup_core::ReleaseIdentity> {
+        self.metadata.release.as_ref()
     }
 
     pub fn plan(&self) -> &PortableBuildPlan {
@@ -894,6 +899,15 @@ fn parse_metadata(
         } else {
             PackageError::Invalid
         });
+    }
+    if let Some(release) = &metadata.release
+        && (release.validate().is_err()
+            || release.app_id != metadata.plan.installer.app.id
+            || release.target != metadata.plan.installer.target
+            || release.version != metadata.plan.installer.app.version.to_string()
+            || release.frontend != metadata.plan.installer.frontend.as_str())
+    {
+        return Err(PackageError::Invalid);
     }
     validate_plugin_aot_total(metadata.plan.plugins.iter())?;
 
@@ -1451,6 +1465,7 @@ impl BundleWriter {
             total_size,
         };
         let metadata = Metadata {
+            release: None,
             schema: PACKAGE_SCHEMA,
             required_features: 0,
             plan: portable_plan,
@@ -1545,6 +1560,7 @@ impl BundleWriter {
             total_size,
         };
         let metadata = Metadata {
+            release: None,
             schema: PACKAGE_SCHEMA,
             required_features: PACKAGE_FEATURE_EXTERNAL_PAYLOAD,
             plan: portable_plan,
@@ -1580,6 +1596,7 @@ impl BundleWriter {
         artifacts: &[PluginArtifact],
     ) -> Result<Vec<u8>, PackageError> {
         let mut metadata = Metadata {
+            release: None,
             schema: PACKAGE_SCHEMA,
             required_features: PACKAGE_FEATURE_EXTERNAL_PAYLOAD,
             plan: plan.clone(),
@@ -1620,6 +1637,7 @@ impl BundleWriter {
     pub fn write_plan(
         plan: &PortableBuildPlan,
         compressed: &std::collections::BTreeMap<Sha256Digest, Vec<u8>>,
+        release: Option<&zup_core::ReleaseIdentity>,
         output: &Path,
     ) -> Result<u64, PackageError> {
         let mut required: Vec<(Sha256Digest, u64)> = Vec::new();
@@ -1665,6 +1683,7 @@ impl BundleWriter {
             offset = offset.checked_add(bytes).ok_or(PackageError::Invalid)?;
         }
         let metadata = Metadata {
+            release: release.cloned(),
             schema: PACKAGE_SCHEMA,
             required_features: 0,
             plan: PortableBuildPlan {
@@ -1800,6 +1819,7 @@ impl BundleWriter {
                 .ok_or(PackageError::Invalid)?;
         }
         let metadata = Metadata {
+            release: None,
             schema: PACKAGE_SCHEMA,
             required_features: 0,
             plan: PortableBuildPlan {
@@ -1980,7 +2000,7 @@ mod tests {
         }
         let directory = tempfile::tempdir().unwrap();
         let output = directory.path().join("staged.zup");
-        BundleWriter::write_plan(&plan, &compressed, &output).unwrap();
+        BundleWriter::write_plan(&plan, &compressed, None, &output).unwrap();
         let package = Package::open(&output).unwrap();
         assert_eq!(package.blob_count(), 3);
         for (name, bytes, digest) in [

@@ -214,16 +214,25 @@ impl LinuxLedgerStore {
         record: &TransactionRecord,
         scope: SelectedScope,
     ) -> Result<InstallLedger, ExecError> {
-        let ledger = self.publish_ledger(record, scope)?;
-        if !record.plan.uninstall {
-            crate::run::retire_old_generations_for(
-                &self.root,
-                &record.app_id,
-                scope,
-                &ledger.version,
-            )?;
-        }
-        Ok(ledger)
+        let store = zup_transaction::FilesystemTransactionStore::private_at(&self.root);
+        zup_transaction::reconcile_committed(&store, record, &self.root, || {
+            let ledger = self
+                .publish_ledger(record, scope)
+                .map_err(|error| error.to_string())?;
+            if !record.plan.uninstall && scope == SelectedScope::Machine {
+                crate::machine::normalize_published_modes(&self.root, &ledger)
+                    .map_err(|error| error.to_string())?;
+            }
+            if scope == SelectedScope::Machine {
+                crate::machine::normalize_state_modes(
+                    &self.root,
+                    rustix::process::geteuid().as_raw(),
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            Ok(ledger)
+        })
+        .map_err(ExecError::Executor)
     }
 
     fn publish_ledger(
@@ -288,30 +297,6 @@ impl LinuxLedgerStore {
             cleanup_removed_directories(record)?;
             cleanup_application_state(&self.root, record)?;
 
-            let maintenance = zup_transaction::maintenance_root(&self.root, &record.app_id, scope);
-            if let Ok(entries) = std::fs::read_dir(&maintenance) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if std::fs::symlink_metadata(&path)
-                        .map(|metadata| metadata.is_dir())
-                        .unwrap_or(false)
-                    {
-                        match std::fs::remove_dir(&path) {
-                            Ok(()) => {}
-                            Err(error)
-                                if matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::NotFound
-                                        | std::io::ErrorKind::DirectoryNotEmpty
-                                ) => {}
-                            Err(source) => {
-                                return Err(PathError::io(&(path), source).into());
-                            }
-                        }
-                    }
-                }
-                let _ = std::fs::remove_dir(&maintenance);
-            }
             return Ok(InstallLedger::new(
                 record.app_id.clone(),
                 record.target,
@@ -323,12 +308,14 @@ impl LinuxLedgerStore {
         if ledger.target != record.target {
             return Err(ExecError::Ownership("target identity".into()));
         }
+        if record.release.is_some() || ledger.version != record.app_version {
+            ledger.release = record.release.clone();
+        }
         ledger.version = record.app_version.clone();
         ledger.selected_components = record.plan.selected_components.clone();
         ledger.install_directory = record.plan.install_directory.clone();
         ledger.preset = record.plan.preset.clone();
 
-        ledger.release = None;
         for node in &record.plan.nodes {
             if matches!(
                 &node.kind,
@@ -496,18 +483,18 @@ impl LinuxLedgerStore {
             .map(|ledger| ledger.committed_transaction.parse::<uuid::Uuid>())
             .transpose()
             .map_err(|_| ExecError::LedgerInvalid)?;
-        for record in committed {
+        for record in &committed {
             let id = record.transaction_id.as_uuid();
             if latest.is_none_or(|previous| id > previous) {
-                self.publish_ledger(&record, scope)?;
+                self.publish_ledger(record, scope)?;
                 latest = Some(id);
             } else {
-                cleanup_committed_files(&record)?;
-                cleanup_removed_directories(&record)?;
+                cleanup_committed_files(record)?;
+                cleanup_removed_directories(record)?;
             }
         }
-        if let Some(ledger) = self.load(app_id, scope)? {
-            crate::run::retire_old_generations_for(&self.root, app_id, scope, &ledger.version)?;
+        if let Some(record) = committed.last() {
+            self.publish_committed(record, scope)?;
         }
         Ok(())
     }
@@ -878,7 +865,10 @@ fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Resu
         let record = store
             .load(&id)
             .map_err(|error| ExecError::Executor(error.to_string()))?;
-        if record.app_id != uninstall.app_id || record.scope != uninstall.scope {
+        if record.app_id != uninstall.app_id
+            || record.scope != uninstall.scope
+            || id == uninstall.transaction_id
+        {
             continue;
         }
         if !matches!(

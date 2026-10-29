@@ -19,7 +19,7 @@ pub use plugins::{
     PlannedInstallation, PluginExecutor, PluginFailure, PluginPlanningContext, PluginResource,
     PluginResourceProposal, sanitize_error,
 };
-pub use request::{ComponentOverrides, PlanRequest};
+pub use request::{ComponentOverrides, InstallDirectory, PlanRequest};
 pub use resolve::{resolve_install_directory, resolve_template};
 pub use resources::{
     PlannedFile, PlannedFileAssociation, PlannedLauncher, PlannedPathEntry, PlannedPrerequisite,

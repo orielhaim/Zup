@@ -22,6 +22,13 @@ impl ComponentOverrides {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", content = "path", rename_all = "snake_case")]
+pub enum InstallDirectory {
+    Override(Template),
+    Installed(Template),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanRequest {
     pub target: Target,
@@ -29,7 +36,7 @@ pub struct PlanRequest {
     #[serde(default)]
     pub components: ComponentOverrides,
     #[serde(default)]
-    pub install_directory: Option<Template>,
+    pub install_directory: Option<InstallDirectory>,
 }
 
 impl PlanRequest {

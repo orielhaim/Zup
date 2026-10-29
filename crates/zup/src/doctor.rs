@@ -286,6 +286,7 @@ fn inspect(
     let manifest_name = selected.manifest_name.clone();
     let runtimes = build_inputs::resolve_runtimes(
         build_inputs::InputMode::Preflight,
+        selected.manifest.updates.is_some(),
         resolver,
         &args.runtime,
         &selected.selected_targets,
@@ -670,7 +671,11 @@ impl TargetChecks<'_> {
     }
 
     fn runtime_template(&mut self, runtime: &Path) {
-        let component = crate::toolchain::runtime_for(&self.config.target, self.config.frontend);
+        let component = crate::toolchain::runtime_for(
+            &self.config.target,
+            self.config.frontend,
+            self.manifest.updates.is_some(),
+        );
         match zup_toolchain::read(runtime, &component, crate::ZUP_VERSION) {
             Ok(descriptor) => {
                 let source = self.inputs.runtimes[self.index]

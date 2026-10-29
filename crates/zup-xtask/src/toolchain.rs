@@ -16,19 +16,6 @@ pub const PRESET_DIRECTORY: &str = "crates/zup-preset-default";
 
 pub const TEST_PRESET_PACKAGE: &str = "zup-preset-test";
 
-pub fn frontends_for(target: &zup_core::Target) -> Vec<(&'static str, &'static str)> {
-    zup_platform::capabilities(target)
-        .map(|caps| caps.frontends)
-        .unwrap_or_default()
-        .iter()
-        .map(|frontend| match frontend {
-            zup_core::Frontend::Gui => ("gui", "zup-setup-gui"),
-            zup_core::Frontend::Console => ("console", "zup-setup-console"),
-            zup_core::Frontend::Headless => ("headless", "zup-setup-headless"),
-        })
-        .collect()
-}
-
 pub const DISPATCHERS: &[(&str, &str, &str)] = &[
     ("", "zup-dispatch", "gui"),
     ("", "zup-dispatch-console", "console"),
@@ -77,7 +64,20 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
         return Err(format!("unsupported toolchain host `{host}`"));
     }
 
-    for (feature, binary) in frontends_for(&host) {
+    for component in zup_toolchain::supported_components(&host) {
+        let zup_toolchain::ToolchainComponent::Runtime {
+            frontend, online, ..
+        } = &component
+        else {
+            continue;
+        };
+        let feature = frontend.as_str();
+        let features = if *online {
+            format!("{feature},online")
+        } else {
+            feature.to_owned()
+        };
+        let binary = format!("zup-setup-{feature}");
         cargo(
             root,
             &[
@@ -86,16 +86,15 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
                 INSTALLER_PACKAGE,
                 "--no-default-features",
                 "--features",
-                feature,
+                &features,
                 "--bin",
-                binary,
+                &binary,
                 "--profile",
                 profile,
             ],
         )?;
         let built = target_directory(root, profile)
             .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
-        let component = runtime_component(host, feature);
         let staged_file = stage_component(&built, &staged, &component, &version)?;
         println!("  runtime  {feature:<8} {}", component_name(&staged_file));
         written.push(staged_file);
@@ -200,7 +199,19 @@ fn build_cross_linux(
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
     let mut written = Vec::new();
-    for (frontend, _) in frontends_for(target) {
+    for component in zup_toolchain::supported_components(target) {
+        let zup_toolchain::ToolchainComponent::Runtime {
+            frontend, online, ..
+        } = &component
+        else {
+            continue;
+        };
+        let frontend = frontend.as_str();
+        let features = if *online {
+            format!("{frontend},online")
+        } else {
+            frontend.to_owned()
+        };
         let binary = format!("zup-setup-{frontend}");
         zigbuild(
             root,
@@ -211,7 +222,7 @@ fn build_cross_linux(
                 INSTALLER_PACKAGE,
                 "--no-default-features",
                 "--features",
-                frontend,
+                &features,
                 "--bin",
                 &binary,
                 "--profile",
@@ -221,14 +232,6 @@ fn build_cross_linux(
         let built = target_directory(root, target.rust_triple())
             .join(output_directory(profile))
             .join(&binary);
-        let component = zup_toolchain::ToolchainComponent::Runtime {
-            target: *target,
-            frontend: match frontend {
-                "gui" => zup_core::Frontend::Gui,
-                "console" => zup_core::Frontend::Console,
-                _ => zup_core::Frontend::Headless,
-            },
-        };
         let staged_file = stage_component(&built, &staged, &component, &version)?;
         println!("  runtime  {frontend:<8} {}", component_name(&staged_file));
         written.push(staged_file);
@@ -480,20 +483,6 @@ fn output_directory(profile: &str) -> &str {
     match profile {
         "dev" => "debug",
         other => other,
-    }
-}
-
-fn runtime_component(
-    target: zup_core::Target,
-    frontend: &str,
-) -> zup_toolchain::ToolchainComponent {
-    zup_toolchain::ToolchainComponent::Runtime {
-        target,
-        frontend: match frontend {
-            "gui" => zup_core::Frontend::Gui,
-            "console" => zup_core::Frontend::Console,
-            _ => zup_core::Frontend::Headless,
-        },
     }
 }
 
@@ -898,46 +887,6 @@ mod tests {
             zup_toolchain::file_name(&offline, EXECUTABLE_SUFFIX),
             zup_toolchain::file_name(&online, EXECUTABLE_SUFFIX)
         );
-    }
-
-    #[test]
-    fn the_stager_produces_exactly_the_components_the_contract_names() {
-        let target = zup_core::Target::host().unwrap();
-        let wanted: Vec<String> = zup_toolchain::supported_components(&target)
-            .iter()
-            .map(|component| zup_toolchain::file_name(component, EXECUTABLE_SUFFIX))
-            .collect();
-
-        let mut staged: Vec<String> = frontends_for(&target)
-            .iter()
-            .map(|(feature, _)| {
-                zup_toolchain::file_name(&runtime_component(target, feature), EXECUTABLE_SUFFIX)
-            })
-            .collect();
-        staged.push(zup_toolchain::file_name(
-            &zup_toolchain::ToolchainComponent::Preset,
-            EXECUTABLE_SUFFIX,
-        ));
-        #[cfg(windows)]
-        {
-            staged.extend(DISPATCHERS.iter().map(|(feature, _, subsystem)| {
-                zup_toolchain::file_name(
-                    &zup_toolchain::ToolchainComponent::Dispatcher {
-                        subsystem: if *subsystem == "gui" {
-                            zup_toolchain::Subsystem::Gui
-                        } else {
-                            zup_toolchain::Subsystem::Console
-                        },
-                        online: !feature.is_empty(),
-                    },
-                    EXECUTABLE_SUFFIX,
-                )
-            }));
-        }
-        staged.sort();
-        let mut wanted = wanted;
-        wanted.sort();
-        assert_eq!(staged, wanted);
     }
 }
 

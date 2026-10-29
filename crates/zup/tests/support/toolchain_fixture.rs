@@ -91,6 +91,7 @@ pub fn runtime(target: &str, frontend: zup_core::Frontend) -> Staged {
     Staged {
         path: PathBuf::new(),
         component: ToolchainComponent::Runtime {
+            online: false,
             target: Target::parse(target).expect("a valid target"),
             frontend,
         },
@@ -147,7 +148,9 @@ fn image(component: &ToolchainComponent) -> Vec<u8> {
         return elf_image(target);
     }
     let (machine, subsystem): (u16, u16) = match component {
-        ToolchainComponent::Runtime { target, frontend } => (
+        ToolchainComponent::Runtime {
+            target, frontend, ..
+        } => (
             machine_of(target),
             match frontend {
                 zup_core::Frontend::Gui => 2,

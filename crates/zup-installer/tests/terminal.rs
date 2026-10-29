@@ -10,6 +10,8 @@ use zup_core::{Frontend, Target, TargetBuildPlan};
 struct Fixture {
     root: tempfile::TempDir,
     setup: PathBuf,
+    #[cfg(all(target_os = "linux", feature = "online"))]
+    plan: TargetBuildPlan,
 }
 
 impl Fixture {
@@ -57,7 +59,12 @@ impl Fixture {
             .path()
             .join(format!("setup{}", target.executable_suffix()));
         zup_compose::compose(&target, Path::new(runtime), &setup, &package, None).unwrap();
-        Self { root, setup }
+        Self {
+            root,
+            setup,
+            #[cfg(all(target_os = "linux", feature = "online"))]
+            plan,
+        }
     }
     fn command(&self) -> Command {
         let mut command = Command::new(&self.setup);
@@ -253,3 +260,7 @@ fn real_terminal_selects_components_confirms_and_cancels_without_mutation() {
     );
     assert!(!fixture.root.path().join("application/core.txt").exists());
 }
+
+#[cfg(all(target_os = "linux", feature = "online"))]
+#[path = "support/linux_updates.rs"]
+mod linux_updates;

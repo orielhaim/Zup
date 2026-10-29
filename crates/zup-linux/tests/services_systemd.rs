@@ -199,11 +199,8 @@ impl RealWorld {
     }
 
     fn plan(&self, version: &str, start: ServiceStart) -> TargetPlan {
-        let binary = TargetPath::new(
-            Self::target(),
-            self.program.join("svc").to_string_lossy().as_ref(),
-        )
-        .expect("a path");
+        let binary = TargetPath::new(Self::target(), &*self.program.join("svc").to_string_lossy())
+            .expect("a path");
         let destination = binary.clone();
         let bytes = std::fs::read(self.payload.join("tool")).expect("payload bytes");
         let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).expect("bytes hash");
@@ -229,11 +226,8 @@ impl RealWorld {
             },
             target: Self::target(),
             scope: SelectedScope::Machine,
-            install_directory: TargetPath::new(
-                Self::target(),
-                self.program.to_string_lossy().as_ref(),
-            )
-            .expect("a path"),
+            install_directory: TargetPath::new(Self::target(), &*self.program.to_string_lossy())
+                .expect("a path"),
             selected_components: Vec::new(),
             prerequisites: Vec::new(),
             files: vec![TargetFile {

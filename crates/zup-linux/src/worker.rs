@@ -303,7 +303,12 @@ fn serve_inner(
     let mut session_state = PrivilegedSession::new(context.session);
     let envelope = channel.recv(HANDSHAKE_TIMEOUT)?;
     let prepared = match envelope.message {
-        Message::Prepare(intent) => prepare_operation(context, &pin, intent)?,
+        Message::Prepare(intent) => {
+            if intent.operation == zup_protocol::privileged_operation::RECOVER {
+                return serve_recovery(channel, context, &pin, intent);
+            }
+            prepare_operation(context, &pin, intent)?
+        }
         Message::Cancel => return Err(IpcError::Cancelled),
         _ => return Err(IpcError::WorkerProtocol("expected Prepare".into())),
     };
@@ -345,12 +350,107 @@ fn serve_inner(
 
     let verdict = execute_prepared(channel, &prepared, context.fault)?;
     let _ = channel.send(Message::Completed(zup_protocol::Completed {
+        detail: verdict.detail,
         transaction_id: verdict.transaction_id,
         outcome: verdict.outcome.clone(),
         prerequisite_id: None,
         exit_code: None,
     }));
     Ok(verdict.outcome)
+}
+
+fn serve_recovery(
+    channel: &mut SessionChannel<'_>,
+    context: &WorkerContext,
+    peer: &PeerPin,
+    intent: PrepareOperation,
+) -> Result<String, IpcError> {
+    let prepared = prepare_carrier(context, &intent)?;
+    let id = zup_transaction::TransactionId::from_uuid(
+        intent
+            .recovery_id
+            .ok_or_else(|| IpcError::Policy("recovery transaction is required".into()))?,
+    );
+    let app = &prepared.carrier.package().plan().installer.app;
+    let key = zup_transaction::InstallationLock::lock_key(app.id.as_str(), "machine");
+    let lock = zup_transaction::InstallationLock::try_acquire(&prepared.state_root, &key)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?
+        .ok_or(IpcError::WorkerBusy)?;
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&prepared.state_root);
+    let record = zup_transaction::TransactionStore::load(&store, &id)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    if record.app_id != app.id
+        || record.scope != SelectedScope::Machine
+        || record.target != intent.target
+    {
+        return Err(IpcError::WorkerAuth("recovery identity mismatch".into()));
+    }
+    let digest = record.plan_hash.to_hex();
+    channel.send(Message::Prepared(PreparedOperation {
+        plan_digest: digest.clone(),
+        operation: "recover".into(),
+        app_id: app.id.to_string(),
+        app_version: record.app_version.to_string(),
+        scope: "machine".into(),
+        target: record.target,
+        file_count: 0,
+    }))?;
+    match channel.recv(EXECUTE_TIMEOUT)?.message {
+        Message::Cancel => return Err(IpcError::Cancelled),
+        Message::Execute(execute) if execute.plan_digest == digest => {}
+        _ => {
+            return Err(IpcError::WorkerAuth(
+                "execute does not name the recovery plan".into(),
+            ));
+        }
+    }
+    if !peer_alive(peer) {
+        return Err(IpcError::WorkerAuth("the authorized client is gone".into()));
+    }
+    if let Some(pin) = &prepared.carrier_pin {
+        pin.verify(&prepared.carrier_path)?;
+    }
+    let result = if record.phase == zup_transaction::TransactionPhase::Committed {
+        crate::ledger::LinuxLedgerStore::new(&prepared.state_root)
+            .publish_committed(&record, record.scope)
+            .map(|_| ())
+            .map_err(|error| IpcError::Transaction(error.to_string()))
+    } else {
+        recover_one(
+            &prepared.state_root,
+            &record.app_id,
+            &prepared.carrier,
+            &prepared.carrier_path,
+            &id.to_string(),
+            &RecoveryHost {
+                roots: &context.roots,
+                systemd: &context.systemd,
+                lock: &lock,
+            },
+        )
+    };
+    let fresh = zup_transaction::TransactionStore::load(&store, &id)
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    let (outcome, detail) = match (result, fresh.phase) {
+        (Ok(()), zup_transaction::TransactionPhase::Committed) => ("committed", None),
+        (Ok(()), zup_transaction::TransactionPhase::RolledBack) => ("rolled_back", None),
+        (Err(error), zup_transaction::TransactionPhase::Committed) => {
+            ("committed_pending_reconciliation", Some(error.to_string()))
+        }
+        (Err(error), _) => ("recovery_required", Some(error.to_string())),
+        _ => (
+            "recovery_required",
+            Some("recovery did not settle the transaction".into()),
+        ),
+    };
+    channel.send(Message::Completed(zup_protocol::Completed {
+        transaction_id: id.as_uuid(),
+        outcome: outcome.into(),
+        detail,
+        prerequisite_id: None,
+        exit_code: None,
+    }))?;
+    Ok(outcome.into())
 }
 
 fn worker_capabilities() -> Capabilities {
@@ -369,6 +469,7 @@ fn worker_target(context: &WorkerContext) -> Result<zup_core::Target, IpcError> 
 }
 
 struct PreparedPlan {
+    release: Option<zup_core::ReleaseIdentity>,
     plan_digest: String,
     operation: String,
     app_id: String,
@@ -380,7 +481,6 @@ struct PreparedPlan {
     carrier_pin: Option<FilePin>,
     plan: zup_transaction::TransactionPlan,
     target_plan: zup_platform::TargetPlan,
-    action: zup_exec::LifecycleAction,
     state_root: PathBuf,
     roots: MachineRoots,
     systemd: crate::machine::SystemdRoots,
@@ -397,11 +497,17 @@ struct PreparedPayload {
     package: zup_bundle::PackagePayloadSource,
 }
 
-fn prepare_operation(
+struct PreparedCarrier {
+    state_root: PathBuf,
+    carrier_path: PathBuf,
+    carrier_pin: Option<FilePin>,
+    carrier: crate::carrier::Carrier,
+}
+
+fn prepare_carrier(
     context: &WorkerContext,
-    _pin: &PeerPin,
-    intent: PrepareOperation,
-) -> Result<PreparedPlan, IpcError> {
+    intent: &PrepareOperation,
+) -> Result<PreparedCarrier, IpcError> {
     intent
         .validate_shape()
         .map_err(|error| IpcError::WorkerProtocol(error.to_string()))?;
@@ -451,7 +557,6 @@ fn prepare_operation(
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
-    let roots = context.roots.clone();
 
     let (carrier_path, carrier_pin) = select_trusted_carrier(
         &state_root,
@@ -463,6 +568,29 @@ fn prepare_operation(
     let carrier = crate::carrier::Carrier::open(&carrier_path)
         .map_err(|error| IpcError::WorkerAuth(format!("trusted carrier: {error}")))?;
     verify_carrier_declares(&carrier, &app_id, &app_version, &target)?;
+
+    Ok(PreparedCarrier {
+        state_root,
+        carrier_path,
+        carrier_pin,
+        carrier,
+    })
+}
+
+fn prepare_operation(
+    context: &WorkerContext,
+    _pin: &PeerPin,
+    intent: PrepareOperation,
+) -> Result<PreparedPlan, IpcError> {
+    let PreparedCarrier {
+        state_root,
+        carrier_path,
+        carrier_pin,
+        carrier,
+    } = prepare_carrier(context, &intent)?;
+    let target = intent.target;
+    let app_id = carrier.package().plan().installer.app.id.clone();
+    let roots = context.roots.clone();
 
     let mut targets = carrier
         .package()
@@ -629,6 +757,7 @@ fn prepare_operation(
     crate::machine::verify_machine_install_roots(&roots, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::Policy(error.to_string()))?;
     Ok(PreparedPlan {
+        release: carrier.package().release_identity().cloned(),
         plan_digest,
         operation: intent.operation.clone(),
         app_id: intent.app_id.clone(),
@@ -640,7 +769,6 @@ fn prepare_operation(
         carrier_pin,
         plan,
         target_plan,
-        action: prepared.action,
         state_root,
         roots: roots.clone(),
         systemd: context.systemd.clone(),
@@ -772,14 +900,7 @@ fn recover_one(
         zup_transaction::TransactionOutcome::Committed => {
             crate::integration::reap_generated(state_root, app_id, record.scope, host.lock)
                 .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            let ledger = ledger_store_publish(state_root, &record)?;
-
-            if !record.plan.uninstall {
-                crate::machine::normalize_published_modes(state_root, &ledger)
-                    .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            }
-            crate::machine::normalize_state_modes(state_root, rustix::process::geteuid().as_raw())
-                .map_err(|error| IpcError::Transaction(error.to_string()))?;
+            ledger_store_publish(state_root, &record)?;
             Ok(())
         }
         zup_transaction::TransactionOutcome::RolledBack => {
@@ -964,14 +1085,24 @@ fn verify_carrier_declares(
 }
 
 struct ExecutionVerdict {
+    detail: Option<String>,
     transaction_id: uuid::Uuid,
     outcome: String,
 }
 
 fn verdict(transaction_id: uuid::Uuid, outcome: &str) -> ExecutionVerdict {
     ExecutionVerdict {
+        detail: None,
         transaction_id,
         outcome: outcome.to_owned(),
+    }
+}
+
+fn pending_verdict(transaction_id: uuid::Uuid, detail: String) -> ExecutionVerdict {
+    ExecutionVerdict {
+        transaction_id,
+        outcome: "committed_pending_reconciliation".into(),
+        detail: Some(detail),
     }
 }
 
@@ -1063,6 +1194,9 @@ fn execute_prepared(
             prepared.plan.clone(),
         )
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    let open = open
+        .with_release(prepared.release.clone())
+        .map_err(|error| IpcError::Transaction(error.to_string()))?;
     executor.set_transaction_id(open.record().transaction_id);
     let transaction_id = open.record().transaction_id.as_uuid();
     let gate = match fault {
@@ -1132,10 +1266,18 @@ fn execute_prepared(
             total: Some(total_files),
         }));
     }
-    if fault == WorkerFault::FailLedgerPublish {
-        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
-    }
     let record = settled.record;
+    if fault == WorkerFault::FailLedgerPublish {
+        let store = zup_transaction::FilesystemTransactionStore::private_at(&prepared.state_root);
+        let detail = zup_transaction::reconcile_committed::<()>(
+            &store,
+            &record,
+            &prepared.state_root,
+            || Err("injected ledger publication failure".into()),
+        )
+        .unwrap_err();
+        return Ok(pending_verdict(transaction_id, detail));
+    }
     if let Err(error) = crate::integration::reap_generated(
         &prepared.state_root,
         &app_id,
@@ -1143,18 +1285,14 @@ fn execute_prepared(
         &prepared._lock,
     ) {
         tracing::warn!(%error, "committed install left generated content for a later cleanup");
-        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
     }
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
-    let ledger = match ledger_store.publish_committed(&record, SelectedScope::Machine) {
-        Ok(ledger) => ledger,
-        Err(_) => {
-            return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
+    match ledger_store.publish_committed(&record, SelectedScope::Machine) {
+        Ok(_) => {}
+        Err(error) => {
+            return Ok(pending_verdict(transaction_id, error.to_string()));
         }
     };
-    if finalize_committed(prepared, &ledger).is_err() {
-        return Ok(verdict(transaction_id, "committed_pending_reconciliation"));
-    }
     let _ = channel.send(Message::Progress(ProgressReport {
         kind: ProgressKind::OperationProgress,
         detail: prepared.operation.clone(),
@@ -1162,22 +1300,6 @@ fn execute_prepared(
         total: Some(total_files),
     }));
     Ok(verdict(transaction_id, "committed"))
-}
-
-fn finalize_committed(
-    prepared: &PreparedPlan,
-    ledger: &zup_exec::InstallLedger,
-) -> Result<(), IpcError> {
-    if prepared.action != zup_exec::LifecycleAction::Uninstall {
-        crate::machine::normalize_published_modes(&prepared.state_root, ledger)
-            .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    }
-    crate::machine::normalize_state_modes(
-        &prepared.state_root,
-        rustix::process::geteuid().as_raw(),
-    )
-    .map_err(|error| IpcError::Transaction(error.to_string()))?;
-    Ok(())
 }
 
 struct GatedExecutor<'a, 'b> {

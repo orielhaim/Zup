@@ -216,7 +216,11 @@ fn resolve_runtimes(
 ) -> miette::Result<Vec<PathBuf>> {
     let mut resolved = Vec::with_capacity(loaded.selected_targets.len());
     for config in &loaded.selected_targets {
-        let component = toolchain::runtime_for(&config.target, config.frontend);
+        let component = toolchain::runtime_for(
+            &config.target,
+            config.frontend,
+            loaded.manifest.updates.is_some(),
+        );
         match resolver.resolve(&component, None) {
             Ok(found) => resolved.push(found.path),
             Err(error) => {

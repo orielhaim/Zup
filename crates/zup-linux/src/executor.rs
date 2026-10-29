@@ -2105,7 +2105,7 @@ fn as_target(
     anchor: &zup_platform::TargetPath,
     host_path: &Path,
 ) -> Result<zup_platform::TargetPath, ExecError> {
-    zup_platform::TargetPath::new(*anchor.target(), host_path.to_string_lossy().as_ref()).map_err(
+    zup_platform::TargetPath::new(*anchor.target(), &*host_path.to_string_lossy()).map_err(
         |error| ExecError::PlanDrift {
             path: host_path.display().to_string(),
             reason: error.to_string(),

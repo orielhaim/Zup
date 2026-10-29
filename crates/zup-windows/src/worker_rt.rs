@@ -848,6 +848,7 @@ async fn run_worker_inner(
             bootstrap.session_id,
             outgoing,
             Message::Completed(zup_protocol::Completed {
+                detail: None,
                 transaction_id,
                 outcome: outcome.clone(),
                 prerequisite_id: None,
@@ -1008,6 +1009,7 @@ async fn run_bootstrap_worker(
                 bootstrap.session_id,
                 outgoing,
                 Message::Completed(zup_protocol::Completed {
+                    detail: None,
                     transaction_id: exec.bootstrap_id,
                     outcome: "recovery_required".into(),
                     prerequisite_id: None,
@@ -1131,6 +1133,7 @@ async fn run_bootstrap_worker(
         bootstrap.session_id,
         outgoing,
         Message::Completed(zup_protocol::Completed {
+            detail: None,
             transaction_id: exec.bootstrap_id,
             outcome: outcome.to_owned(),
             prerequisite_id,

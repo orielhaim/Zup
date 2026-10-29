@@ -552,6 +552,7 @@ pub fn template(frontend: Frontend) -> PathBuf {
     let profile = profile_directory();
     let name = zup_toolchain::file_name(
         &zup_toolchain::ToolchainComponent::Runtime {
+            online: false,
             target: host_target(),
             frontend,
         },

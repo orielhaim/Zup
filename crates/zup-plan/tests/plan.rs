@@ -201,7 +201,9 @@ scope = "{allowed_str}"
 fn install_directory_override_is_rejected_when_not_authored() {
     let build = build_plan_from(BASE, &[("dist/a.txt", b"a")]);
     let mut request = PlanRequest::new(target(), SelectedScope::User);
-    request.install_directory = Some(Template::parse(r"C:\Apps\Acme").unwrap());
+    request.install_directory = Some(zup_plan::InstallDirectory::Override(
+        Template::parse(r"C:\Apps\Acme").unwrap(),
+    ));
     assert!(matches!(
         plan(&build, &request),
         Err(PlanError::InstallDirectoryOverrideNotAllowed)

@@ -5,7 +5,15 @@ use zup_runtime::{InstallOutcome, OperationControl, PreparedOperation, runtime_r
 
 use crate::host::{OperationContext, SessionDiscovery, SessionHost, selection_of};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionKind {
+    Lifecycle,
+    UpdateCheck,
+    UpdateInstall,
+}
+
 pub struct OperationCompletion {
+    pub kind: CompletionKind,
     pub id: zup_runtime::Uuid,
     pub outcome: InstallOutcome,
     pub repair_drift: Vec<String>,
@@ -28,6 +36,7 @@ pub async fn complete_operation<H: SessionHost>(
     let outcome = drive_operation(host, executable, discovery, launch).await;
     let repair_drift = outcome.1;
     OperationCompletion {
+        kind: CompletionKind::Lifecycle,
         id,
         outcome: outcome.0,
         repair_drift,
@@ -90,7 +99,10 @@ pub fn reconcile_operation<H: SessionHost>(
     if matches!(outcome, InstallOutcome::Committed)
         && let Err(detail) = host.after_commit(context, prepared)
     {
-        outcome = InstallOutcome::CommittedPendingReconciliation { detail };
+        outcome = InstallOutcome::CommittedPendingReconciliation {
+            transaction: None,
+            detail,
+        };
     }
     let drift = if matches!(prepared.action, LifecycleAction::Repair { .. })
         && matches!(outcome, InstallOutcome::Committed)

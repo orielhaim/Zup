@@ -8,6 +8,7 @@ description = "Linux backend for zup"
 publish = false
 
 [features]
+online = ["dep:zup-update", "dep:zup-acquire", "dep:zstd", "dep:zup-presentation", "dep:tempfile"]
 test-support = ["dep:tempfile", "dep:zup-preset-ipc", "zup-preset-ipc/test-support"]
 
 [[bin]]
@@ -21,6 +22,10 @@ path = "src/bin/test_gui_close_preset.rs"
 required-features = ["test-support"]
 
 [dependencies]
+zup-presentation = { workspace = true, optional = true }
+zup-update = { workspace = true, features = ["bundle"], optional = true }
+zup-acquire = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
 private-fs.workspace = true
 semver.workspace = true
 serde.workspace = true

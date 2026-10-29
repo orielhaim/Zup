@@ -9,6 +9,7 @@ publish = false
 
 [features]
 default = []
+online = ["zup-linux/online"]
 gui = []
 console = ["dep:cliclack", "dep:console", "dep:indicatif"]
 headless = []
@@ -83,7 +84,7 @@ zup-plugin-runtime.workspace = true
 zup-transaction.workspace = true
 zup-preset-host.workspace = true
 zup-preset-protocol.workspace = true
-zup-update.workspace = true
+zup-update = { workspace = true, features = ["bundle"] }
 zup-windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -95,6 +96,10 @@ zup-protocol.workspace = true
 zup-transaction.workspace = true
 
 [dev-dependencies]
+jiff.workspace = true
+tough = "0.24"
+zup-acquire.workspace = true
+zup-artifact.workspace = true
 portable-pty = "0.9"
 zup-compose.workspace = true
 zup-bundle.workspace = true

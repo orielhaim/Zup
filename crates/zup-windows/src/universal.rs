@@ -426,7 +426,7 @@ fn write_variant_package(
     if temporary.exists() {
         let _ = std::fs::remove_file(&temporary);
     }
-    zup_bundle::BundleWriter::write_plan(&manifest.plan, &compressed, &temporary)?;
+    zup_bundle::BundleWriter::write_plan(&manifest.plan, &compressed, None, &temporary)?;
     std::fs::rename(&temporary, destination)?;
     Ok(())
 }

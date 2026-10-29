@@ -159,7 +159,9 @@ fn check(
         reason: error.to_string(),
     };
     match component {
-        ToolchainComponent::Runtime { target, frontend } => {
+        ToolchainComponent::Runtime {
+            target, frontend, ..
+        } => {
             let runtime = executable().map_err(unreadable)?;
             if !runtime.matches_target(target) {
                 return Err(ToolchainError::WrongTarget {
@@ -214,8 +216,13 @@ fn check(
     Ok(descriptor)
 }
 
-pub fn runtime_for(target: &zup_core::Target, frontend: Frontend) -> ToolchainComponent {
+pub fn runtime_for(
+    target: &zup_core::Target,
+    frontend: Frontend,
+    updates: bool,
+) -> ToolchainComponent {
     ToolchainComponent::Runtime {
+        online: updates && target.operating_system() == zup_core::TargetOperatingSystem::Linux,
         target: *target,
         frontend,
     }
@@ -258,7 +265,9 @@ pub fn dispatcher_for(
 
 pub fn describe(component: &ToolchainComponent) -> String {
     match component {
-        ToolchainComponent::Runtime { target, frontend } => {
+        ToolchainComponent::Runtime {
+            target, frontend, ..
+        } => {
             format!("{} runtime for {}", frontend.as_str(), target.as_str())
         }
         ToolchainComponent::Dispatcher { subsystem, .. } => {
@@ -303,6 +312,7 @@ mod tests {
         let linux = runtime_for(
             &zup_core::Target::parse("linux-x64").expect("valid"),
             Frontend::Console,
+            false,
         );
         let name = file_name_for(&linux);
         assert!(
@@ -312,6 +322,7 @@ mod tests {
         let windows = runtime_for(
             &zup_core::Target::parse("windows-x64").expect("valid"),
             Frontend::Console,
+            false,
         );
         assert_eq!(file_name_for(&windows), "zup-setup-console-windows-x64.exe");
     }
@@ -321,6 +332,7 @@ mod tests {
         let component = runtime_for(
             &zup_core::Target::parse("windows-x64").expect("valid"),
             Frontend::Gui,
+            false,
         );
         let error = ResolveError::NotFound {
             kind: "runtime template",
@@ -1094,7 +1106,9 @@ mod toolchain_cli_tests {
             return writer.finish().expect("a verified package");
         }
         let (machine, subsystem): (u16, u16) = match component {
-            ToolchainComponent::Runtime { target, frontend } => (
+            ToolchainComponent::Runtime {
+                target, frontend, ..
+            } => (
                 match target.architecture() {
                     zup_core::TargetArchitecture::Aarch64(_) => 0xaa64,
                     zup_core::TargetArchitecture::X86_64 => 0x8664,

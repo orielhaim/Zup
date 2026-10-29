@@ -98,6 +98,7 @@ pub enum InstallOutcome {
     RecoveryRequired,
     /// The journal is committed. Ledger publication or required post-commit work is not.
     CommittedPendingReconciliation {
+        transaction: Option<uuid::Uuid>,
         detail: String,
     },
     AuthorizationRequired,
@@ -421,7 +422,7 @@ pub(crate) fn emit_terminal(
                 message: "recovery required".into(),
             });
         }
-        Ok(InstallOutcome::CommittedPendingReconciliation { detail }) => {
+        Ok(InstallOutcome::CommittedPendingReconciliation { detail, .. }) => {
             let _ = events.send(RuntimeEvent::Failed {
                 kind: "committed_pending_reconciliation".into(),
                 message: detail.clone(),

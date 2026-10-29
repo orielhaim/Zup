@@ -160,6 +160,28 @@ fn a_scripted_preset_installs_through_the_shared_session() {
         "",
     );
     assert!(maintenance.exists(), "a maintenance copy is persisted");
+    let mut host = LinuxSessionHost::open(maintenance.clone());
+    let discovery = host
+        .discover(
+            &maintenance,
+            &zup_session::SessionLaunch {
+                scope: Some(SelectedScope::User),
+                state_root: Some(state_root.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let launched = host
+        .materialize_preset(&discovery, &discovery.context(SelectedScope::User).unwrap())
+        .unwrap();
+    let generation = zup_transaction::maintenance_directory(
+        &state_root,
+        &ledger.app_id,
+        ledger.scope,
+        &ledger.version,
+    );
+    std::fs::remove_dir_all(generation).unwrap();
+    assert_eq!(std::fs::read(&launched.executable).unwrap(), preset);
 }
 
 #[test]

@@ -248,7 +248,14 @@ fn plan_windows(
             .map(std::path::PathBuf::as_path),
         prior.as_ref(),
         installer.install.allow_directory_override,
-    )?;
+    )?
+    .map(|directory| {
+        if args.project.install_directory.is_empty() && prior.is_some() {
+            zup_plan::InstallDirectory::Installed(directory)
+        } else {
+            zup_plan::InstallDirectory::Override(directory)
+        }
+    });
     for raw in &args.enable {
         let id = zup_core::ComponentId::new(raw).map_err(|error| {
             crate::failure::error("zup.plan.component", format!("component {raw}: {error}"))

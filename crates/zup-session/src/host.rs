@@ -108,12 +108,22 @@ pub struct PresetLaunch {
     pub stage: Option<zup_preset_host::PresetStage>,
 }
 
+pub enum UpdatePreparation {
+    UpToDate { version: String },
+    Available { version: String },
+    Ready { build: Arc<TargetBuildPlan> },
+}
+
 pub trait SessionHost {
     type Bound<'a>: OperationHost
     where
         Self: 'a;
 
     fn describe(&mut self, executable: &Path) -> Result<Arc<TargetBuildPlan>, String>;
+
+    fn content_executable(&self, executable: &Path) -> PathBuf {
+        executable.to_path_buf()
+    }
 
     fn observe(
         &self,
@@ -161,6 +171,22 @@ pub trait SessionHost {
         Ok(())
     }
 
+    fn supports_updates(&self) -> bool {
+        false
+    }
+
+    fn prepare_update(
+        &mut self,
+        _build: &Arc<TargetBuildPlan>,
+        _context: &OperationContext,
+        _source: Option<&Path>,
+        _request: &zup_runtime::UpdateRequest,
+        _cancellation: zup_runtime::CancellationHandle,
+        _events: &mut (dyn FnMut(zup_presentation::InstallerEvent) + Send),
+    ) -> Result<UpdatePreparation, String> {
+        Err("this runtime does not support authenticated updates".into())
+    }
+
     fn release_identity(&self) -> Option<zup_core::ReleaseIdentity> {
         None
     }
@@ -179,6 +205,26 @@ pub trait SessionHost {
         context: &OperationContext,
     ) -> Result<PresetLaunch, String>;
 
+    fn recover<'a>(
+        &'a self,
+        _context: &'a OperationContext,
+        _transaction: &'a str,
+        _control: &'a zup_runtime::OperationControl,
+    ) -> zup_runtime::RuntimeFuture<'a, Result<InstallOutcome, zup_runtime::SessionError>> {
+        Box::pin(async {
+            Err(zup_runtime::SessionError::Transaction(
+                "explicit recovery is not supported here".into(),
+            ))
+        })
+    }
+
+    fn refresh_installation(
+        &mut self,
+        _context: &OperationContext,
+    ) -> Result<Option<Arc<TargetBuildPlan>>, String> {
+        Ok(None)
+    }
+
     fn after_commit(
         &self,
         _context: &OperationContext,
@@ -189,9 +235,11 @@ pub trait SessionHost {
 
     fn update(
         &self,
-        _scope: SelectedScope,
-        _status: &mut dyn FnMut(UpdateState),
-    ) -> Result<(), String> {
+        _context: &OperationContext,
+        _request: &zup_runtime::UpdateRequest,
+        _control: &zup_runtime::OperationControl,
+        _status: &mut (dyn FnMut(UpdateState) + Send),
+    ) -> Result<InstallOutcome, String> {
         Err("updates are not supported here".into())
     }
 
