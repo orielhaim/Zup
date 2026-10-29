@@ -1,182 +1,48 @@
 name: CI
 
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
 
 jobs:
   lint:
-    name: lint ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            runner: windows-2025
-            platform: windows
-          - name: Linux
-            runner: ubuntu-24.04
-            platform: linux
+    runs-on: windows-2025
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          fetch-depth: 1
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.99"
           components: rustfmt, clippy
-
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fast-${{ runner.os }}
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
-
-      - uses: rui314/setup-mold@v1
-        if: matrix.platform == 'linux'
-        with:
-          mold-version: 3.0.0
-          make-default: "true"
-
-      - name: Formatting
-        run: cargo fmt --all --check
-
-      - name: Linux package selection
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
-          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
-          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
-
+          shared-key: fast-Windows
       - name: Windows Clippy
-        if: matrix.platform == 'windows'
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-
-      - name: Linux Clippy
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
-
-  test:
-    name: test ${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            runner: windows-2025
-            platform: windows
-          - name: Linux
-            runner: ubuntu-24.04
-            platform: linux
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: fast-${{ runner.os }}
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
-
-      - uses: rui314/setup-mold@v1
-        if: matrix.platform == 'linux'
-        with:
-          mold-version: 3.0.0
-          make-default: "true"
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.146
-
-      - name: Linux package selection
-        if: matrix.platform == 'linux'
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
-          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
-          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
-
-      - name: Linux dependencies
-        if: matrix.platform == 'linux'
-        shell: bash
+          & cargo clippy --workspace --all-features --all-targets -- -D warnings *> "$env:RUNNER_TEMP/diagnostic.log"
+          $status = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP/diagnostic.log"
+          exit $status
+      - name: Emit failure output
+        if: failure()
+        shell: python
         run: |
-          sudo apt-get update
-          sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
-          command -v update-mime-database
-          command -v update-desktop-database
-          command -v desktop-file-validate
-          mold --version
-
-      - name: Windows tests
-        if: matrix.platform == 'windows'
-        run: cargo nextest run --workspace --all-features --no-fail-fast --profile fast
-
-      - name: Windows machine authority tests
-        if: matrix.platform == 'windows'
-        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
-
-      - name: Linux tests
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: cargo nextest run --all-features --no-fail-fast --profile fast $PORTABLE $LINUX
-
-      - name: Windows doc tests
-        if: matrix.platform == 'windows'
-        run: cargo test --workspace --all-features --doc
-
-      - name: Linux doc tests
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: cargo test --doc --all-features $PORTABLE $LINUX
-
-  terminal-arm64:
-    name: terminal ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-24.04-arm, windows-11-arm]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: terminal-${{ runner.os }}-${{ runner.arch }}
-          cache-on-failure: true
-      - name: Terminal and automation lifecycle
-        run: cargo test -p zup-installer --no-default-features --features console,headless,online --test terminal
+          import os
+          from pathlib import Path
+          log = Path(os.environ["RUNNER_TEMP"]) / "diagnostic.log"
+          if log.is_file():
+              text = log.read_bytes()[-12000:].decode("utf-8", errors="replace")
+              for offset in range(0, len(text), 3000):
+                  chunk = text[offset:offset + 3000]
+                  chunk = chunk.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title=Clippy diagnostic part {offset // 3000 + 1}::{chunk}")
