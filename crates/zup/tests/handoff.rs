@@ -48,7 +48,7 @@ fn payload(seed: u64, size: usize) -> Vec<u8> {
 /// A real PE, because two of the checks are about the image rather than about a
 /// digest: `verify` reads this executable's own machine and subsystem, and a file
 /// of random bytes would fail that for the wrong reason. The test binary is a
-/// real x86_64 console PE, which is exactly what a native runtime is.
+/// real native console PE, which is exactly what a native runtime is.
 ///
 /// `salt` produces a *different* image that is still a valid PE - appending to
 /// the end of an image leaves its headers intact - so a substitution is a genuine
@@ -118,7 +118,8 @@ user = "${location.programs}/Handoff"
 [[files]]
 source = "**/*"
 destination = "${install}"
-"#,
+"#
+        .replace("windows-x64", zup_plugin_contract::HOST_TARGET),
     )
     .expect("a manifest");
     std::fs::write(
@@ -196,7 +197,7 @@ fn fixture(files: usize) -> Fixture {
     let catalog_bytes = catalog.encode().expect("the catalog encodes");
     let catalog_digest = digest_of(&catalog_bytes);
 
-    let target = zup_core::Target::parse("windows-x64").expect("a triple");
+    let target = zup_core::Target::host().expect("a host target");
     let mut release = ReleaseDescriptor {
         schema: RELEASE_SCHEMA,
         app_id: zup_core::AppId::new("com.example.handoff").expect("valid"),
@@ -381,7 +382,11 @@ fn a_bootstrapper_cannot_substitute_anything_the_release_authenticated() {
 
     // 5. A different target. The release's variant descriptor carries it.
     let mut substituted = honest.clone();
-    substituted.target = zup_core::Target::parse("windows-arm64").expect("a triple");
+    substituted.target = if honest.target == zup_core::Target::WINDOWS_ARM64 {
+        zup_core::Target::WINDOWS_X64
+    } else {
+        zup_core::Target::WINDOWS_ARM64
+    };
     let error =
         zup_windows::verify(&fixture.runtime, &fixture.cache, &substituted).expect_err("refused");
     assert!(error.left_machine_unchanged());

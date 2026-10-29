@@ -23,7 +23,7 @@ fn digest(bytes: &[u8]) -> zup_core::Sha256Digest {
 }
 
 fn target() -> Target {
-    Target::parse("windows-x64").unwrap()
+    Target::host().expect("host target")
 }
 
 fn target_path(path: &Path) -> TargetPath {
@@ -71,13 +71,14 @@ name = "Acme App"
 version = "{version}"
 [build]
 [build.targets.default]
-target = "windows-x64"
+target = "{target}"
 source = {{ directory = "dist" }}
 [install]
 scope = "user"
 [install.directory]
 user = "${{location.user_data}}/AcmeApp"
-"#
+"#,
+        target = target(),
     );
     let parsed = zup_manifest::parse(&manifest).unwrap();
     let installer = zup_manifest::parse_and_compile(&manifest, "default").unwrap();

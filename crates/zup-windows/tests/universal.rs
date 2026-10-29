@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use zup_artifact::{ArtifactComposer, ArtifactRequest};
-use zup_core::Sha256Digest;
+use zup_core::{Sha256Digest, Target};
 use zup_windows::{UniversalArtifact, UniversalError, compose_universal_executable, stage_variant};
 
 mod fixture;
@@ -81,11 +81,18 @@ fn a_staged_variant_runs_as_a_self_contained_installer() {
     let root = tempfile::tempdir().unwrap();
     let (output, _graph) = compose(root.path(), &fixture);
     let artifact = UniversalArtifact::open(&output).expect("the artifact opens");
-    let id = "windows-x64";
+    let id = Target::host().expect("host target").as_str();
     let store = root.path().join("store");
     let staged = stage_variant(&artifact, id, &store).expect("staged");
 
-    assert!(staged.runtime.is_file());
+    assert_eq!(
+        zup_binary::Executable::read(&staged.runtime)
+            .expect("staged executable")
+            .architecture(),
+        Some(zup_binary::BinaryArchitecture::of_target(
+            &Target::host().expect("host target")
+        ))
+    );
     let bundle = zup_windows::EmbeddedBundle::open(&staged.runtime)
         .expect("the staged runtime carries its package");
     assert_eq!(bundle.target().as_str(), {
@@ -97,7 +104,7 @@ fn a_staged_variant_runs_as_a_self_contained_installer() {
     );
     assert!(
         bundle.plan().plugins.is_empty(),
-        "the x64 variant declares no plugin"
+        "the selected variant declares no plugin"
     );
     let entries: Vec<_> = bundle.plan().entries.iter().collect();
     assert!(!entries.is_empty(), "the staged package names payload");
@@ -122,36 +129,45 @@ fn a_staged_variant_carries_no_other_architecture_content() {
     let root = tempfile::tempdir().unwrap();
     let (output, _graph) = compose(root.path(), &fixture);
     let artifact = UniversalArtifact::open(&output).expect("the artifact opens");
-    let store = root.path().join("store-x64");
-    let staged = stage_variant(&artifact, "windows-x64", &store).expect("staged");
+    let id = Target::host().expect("host target").as_str();
+    let other_id = if id == "windows-arm64" {
+        "windows-x64"
+    } else {
+        "windows-arm64"
+    };
+    let store = root.path().join("store");
+    let staged = stage_variant(&artifact, id, &store).expect("staged");
     let bundle = zup_windows::EmbeddedBundle::open(&staged.runtime)
         .expect("the staged runtime carries its package");
     let package = bundle.package();
 
-    let arm = artifact
+    let other = artifact
         .view()
-        .variant_manifest("windows-arm64")
-        .expect("the arm64 manifest reads");
-    let x64 = artifact
+        .variant_manifest(other_id)
+        .expect("the other manifest reads");
+    let selected = artifact
         .view()
-        .variant_manifest("windows-x64")
-        .expect("the x64 manifest reads");
-    let arm_only: Vec<Sha256Digest> = arm
+        .variant_manifest(id)
+        .expect("the selected manifest reads");
+    let other_only: Vec<Sha256Digest> = other
         .content_digests()
         .into_iter()
-        .filter(|digest| !x64.content_digests().contains(digest))
+        .filter(|digest| !selected.content_digests().contains(digest))
         .collect();
-    assert!(!arm_only.is_empty(), "the fixture has ARM64-only content");
+    assert!(
+        !other_only.is_empty(),
+        "the fixture has architecture-specific content"
+    );
     for entry in &package.plan().entries {
         assert!(
-            !arm_only.contains(&entry.blob),
-            "{} is ARM64-only content",
+            !other_only.contains(&entry.blob),
+            "{} belongs to another architecture",
             entry.path
         );
     }
     for artifact in &package.plan().plugins {
         assert!(
-            !arm_only.contains(&artifact.blob),
+            !other_only.contains(&artifact.blob),
             "an ahead-of-time plugin is never another architecture's"
         );
     }

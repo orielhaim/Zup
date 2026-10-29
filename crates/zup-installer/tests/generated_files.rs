@@ -24,6 +24,7 @@ use zup_plugin_contract::{
     AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
     wit_package_digest,
 };
+use zup_transaction::{FilesystemTransactionStore, ReconciliationState, TransactionStore};
 use zup_windows::{InstallLedgerStore, PAYLOAD_OVERLAY_DIRECTORY};
 
 #[path = "support/project.rs"]
@@ -288,7 +289,17 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
     wait_for_uninstall(&state, &app_id, &generated);
     assert!(!generated.exists());
     assert!(!state.path().join("maintenance").join(&app_id_text).exists());
-    for residue in ["transactions", "work", "installations"] {
+    let journals = FilesystemTransactionStore::private_at(state.path());
+    let remaining = journals.list_ids().expect("the journals are readable");
+    assert_eq!(remaining.len(), 1);
+    let uninstall = journals
+        .load(&remaining[0])
+        .expect("the uninstall journal is readable");
+    assert_eq!(uninstall.app_id, app_id);
+    assert_eq!(uninstall.scope, SelectedScope::User);
+    assert!(uninstall.plan.uninstall);
+    assert_eq!(uninstall.reconciliation, ReconciliationState::Complete);
+    for residue in ["work", "installations"] {
         assert!(
             !state.path().join(residue).exists(),
             "{residue} survived the uninstall"

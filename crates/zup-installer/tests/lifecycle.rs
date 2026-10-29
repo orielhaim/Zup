@@ -17,6 +17,7 @@
 use std::{collections::BTreeMap, fs};
 
 use zup_core::{AppId, SelectedScope};
+use zup_transaction::{FilesystemTransactionStore, ReconciliationState, TransactionStore};
 use zup_windows::{AppsFeaturesValue, InstallLedgerStore};
 
 #[path = "support/project.rs"]
@@ -160,9 +161,17 @@ fn an_installation_outlives_its_own_source_tree_and_stays_operable() {
     assert!(!state.path().join("maintenance").join(&app.id).exists());
     assert_eq!(ledger_version(&state, &app), None);
 
-    // An uninstall leaves no state root debris behind. A transaction that had to
-    // be cleaned up on the next run would be a transaction a user pays for.
-    for residue in ["transactions", "work", "installations"] {
+    let journals = FilesystemTransactionStore::private_at(state.path());
+    let remaining = journals.list_ids().expect("the journals are readable");
+    assert_eq!(remaining.len(), 1);
+    let uninstall = journals
+        .load(&remaining[0])
+        .expect("the uninstall journal is readable");
+    assert_eq!(uninstall.app_id, AppId::new(&app.id).unwrap());
+    assert_eq!(uninstall.scope, SelectedScope::User);
+    assert!(uninstall.plan.uninstall);
+    assert_eq!(uninstall.reconciliation, ReconciliationState::Complete);
+    for residue in ["work", "installations"] {
         assert!(
             !state.path().join(residue).exists(),
             "{residue} survived the uninstall"

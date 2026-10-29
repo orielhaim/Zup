@@ -348,7 +348,7 @@ fn context_target_mismatch_is_rejected_before_invocation() {
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
     let mut context = context(&installer);
-    context.target = Target::parse("arm64-pc-windows-msvc").unwrap();
+    context.target = other_target();
     let error = executor
         .plan(&installer.plugins[0], &context, &NeverCancelled)
         .unwrap_err();

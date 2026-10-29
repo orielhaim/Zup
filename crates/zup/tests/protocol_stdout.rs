@@ -67,7 +67,8 @@ user = "${location.user_data}/StdoutApp"
 [[files]]
 source = "**/*"
 destination = "${install}"
-"#,
+"#
+        .replace("windows-x64", zup_plugin_contract::HOST_TARGET),
     )
     .unwrap();
     project
@@ -164,7 +165,10 @@ fn a_failure_still_emits_a_usable_document_and_exits_nonzero() {
         fs::read_to_string(project.path().join("zup.toml"))
             .unwrap()
             .replace(
-                "[build.targets.default]\ntarget = \"windows-x64\"",
+                &format!(
+                    "[build.targets.default]\ntarget = \"{}\"",
+                    zup_plugin_contract::HOST_TARGET
+                ),
                 "[build.targets.default]\ntarget = \"not-a-triple\"",
             ),
     )
