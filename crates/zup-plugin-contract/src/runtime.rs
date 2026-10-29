@@ -60,7 +60,7 @@ impl InvocationError {
 
 pub(crate) fn sandbox_store(engine: &Engine) -> wasmtime::Result<wasmtime::Store<SandboxLimits>> {
     let mut store = wasmtime::Store::new(engine, SandboxLimits::new());
-    store.limiter(SandboxLimits::as_limiter);
+    store.limiter(|limits| limits);
     store.set_fuel(MAX_FUEL_PER_CALL)?;
     store.set_hostcall_fuel(MAX_PLAN_OUTPUT_BYTES);
     #[cfg(target_has_atomic = "64")]
@@ -74,8 +74,7 @@ pub(crate) fn sandbox_store(engine: &Engine) -> wasmtime::Result<wasmtime::Store
 #[derive(Debug)]
 pub(crate) struct SandboxLimits {
     limits: StoreLimits,
-    memory_growth_rejected: bool,
-    table_growth_rejected: bool,
+    pub(crate) growth_rejected: bool,
 }
 
 impl SandboxLimits {
@@ -89,21 +88,8 @@ impl SandboxLimits {
                 .instances(MAX_INSTANCES)
                 .trap_on_grow_failure(true)
                 .build(),
-            memory_growth_rejected: false,
-            table_growth_rejected: false,
+            growth_rejected: false,
         }
-    }
-
-    pub(crate) fn as_limiter(limits: &mut Self) -> &mut dyn ResourceLimiter {
-        limits
-    }
-
-    pub(crate) fn memory_growth_rejected(&self) -> bool {
-        self.memory_growth_rejected
-    }
-
-    pub(crate) fn table_growth_rejected(&self) -> bool {
-        self.table_growth_rejected
     }
 }
 
@@ -116,13 +102,13 @@ impl ResourceLimiter for SandboxLimits {
     ) -> wasmtime::Result<bool> {
         let result = self.limits.memory_growing(current, desired, maximum);
         if !matches!(result, Ok(true)) {
-            self.memory_growth_rejected = true;
+            self.growth_rejected = true;
         }
         result
     }
 
     fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
-        self.memory_growth_rejected = true;
+        self.growth_rejected = true;
         self.limits.memory_grow_failed(error)
     }
 
@@ -134,13 +120,13 @@ impl ResourceLimiter for SandboxLimits {
     ) -> wasmtime::Result<bool> {
         let result = self.limits.table_growing(current, desired, maximum);
         if !matches!(result, Ok(true)) {
-            self.table_growth_rejected = true;
+            self.growth_rejected = true;
         }
         result
     }
 
     fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
-        self.table_growth_rejected = true;
+        self.growth_rejected = true;
         self.limits.table_grow_failed(error)
     }
 

@@ -98,7 +98,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
         });
     }
     let scope = context.scope;
-    let resolve = |template: &Template, kind: &str| {
+    let resolve = |template: &Template, kind: &'static str| {
         let path = resolve_template_path(template, &plan.target, &context.locations, scope)?;
         validate_target_path(kind, &path)?;
         Ok::<TargetPath, TargetResolveError>(path)

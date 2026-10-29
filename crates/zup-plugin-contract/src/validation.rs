@@ -99,7 +99,7 @@ impl ValidatedComponent {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                if store.data().memory_growth_rejected() || store.data().table_growth_rejected() {
+                if store.data().growth_rejected {
                     return Err(InvocationError::MemoryLimit);
                 }
                 if matches!(error, InvocationError::Trap { .. }) && call_was_trap == Some(false) {
