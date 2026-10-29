@@ -82,6 +82,8 @@ pub enum PlanError {
     IntegrationUnsupported(String),
     #[error("cannot resolve for target `{target}`: not a Linux target")]
     UnsupportedTarget { target: String },
+    #[error("target plan size overflow")]
+    SizeOverflow,
     #[error("location or template failure for {kind}: {source}")]
     Template {
         kind: &'static str,

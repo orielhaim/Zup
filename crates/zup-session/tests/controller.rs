@@ -462,7 +462,7 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
         fake_exe(),
         &discovery,
         zup_session::OperationLaunch {
-            id: zup_runtime::Uuid::now_v7(),
+            id: uuid::Uuid::now_v7(),
             action: zup_exec::LifecycleAction::Uninstall,
             selection: &selection,
             control,

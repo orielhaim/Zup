@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use zup_core::{ResourceKey, SelectedScope};
 use zup_plan::InstallPlan;
 use zup_platform::{
-    TargetFile, TargetPath, TargetPlan, TargetPlanSummary, TargetPrerequisite,
+    TargetFile, TargetPath, TargetPlan, TargetPlanSummary, lower_target_plan_files,
     resolve_template_path,
 };
 
@@ -76,36 +76,12 @@ pub fn resolve_target(
         OwnedKind::Directory,
     )?;
 
-    let prerequisites = plan
-        .prerequisites
-        .iter()
-        .map(|prerequisite| TargetPrerequisite {
-            id: prerequisite.id.clone(),
-            name: prerequisite.name.clone(),
-            target: prerequisite.target,
-            requirement: prerequisite.requirement.clone(),
-            package: prerequisite.package.clone(),
-            installer: prerequisite.installer.clone(),
-        })
-        .collect();
-
-    let mut files = Vec::with_capacity(plan.files.len());
-    let mut install_bytes = 0u64;
-    for file in &plan.files {
-        install_bytes = install_bytes.saturating_add(file.size);
-        let destination = resolve(&file.destination, "file destination")?;
-        claim(&destination, "file destination", OwnedKind::File)?;
-        files.push(TargetFile {
-            key: ResourceKey::File {
-                destination: destination.to_string(),
-            },
-            source_relative: file.source_relative.clone(),
-            destination,
-            size: file.size,
-            sha256: file.sha256,
-            executable: file.executable,
-            privilege: file.privilege,
-        });
+    let mut lowered = lower_target_plan_files(plan, resolve).map_err(|error| match error {
+        zup_platform::TargetPlanFilesError::Resolve(error) => error,
+        zup_platform::TargetPlanFilesError::SizeOverflow => PlanError::SizeOverflow,
+    })?;
+    for file in lowered.files() {
+        claim(&file.destination, "file destination", OwnedKind::File)?;
     }
 
     let mut services = Vec::with_capacity(plan.services.len());
@@ -189,31 +165,34 @@ pub fn resolve_target(
         },
     )?;
     for generated in &integration.files {
-        install_bytes = install_bytes.saturating_add(generated.size);
         claim(
             &generated.destination,
             "integration destination",
             OwnedKind::File,
         )?;
-        files.push(TargetFile {
-            key: generated.key.clone(),
-            source_relative: zup_core::RelativePath::new(&generated.source_relative).map_err(
-                |_| PathError::Invalid {
-                    kind: "integration source",
-                    path: generated.source_relative.clone(),
-                    reason: "generated source name is not a relative path".into(),
-                },
-            )?,
-            destination: generated.destination.clone(),
-            size: generated.size,
-            sha256: generated.sha256,
-            executable: false,
-            privilege: zup_core::Privilege::User,
-        });
+        lowered
+            .push_file(TargetFile {
+                key: generated.key.clone(),
+                source_relative: zup_core::RelativePath::new(&generated.source_relative).map_err(
+                    |_| PathError::Invalid {
+                        kind: "integration source",
+                        path: generated.source_relative.clone(),
+                        reason: "generated source name is not a relative path".into(),
+                    },
+                )?,
+                destination: generated.destination.clone(),
+                size: generated.size,
+                sha256: generated.sha256,
+                executable: false,
+                privilege: zup_core::Privilege::User,
+            })
+            .map_err(|_| PlanError::SizeOverflow)?;
     }
 
-    let file_count = files.len();
+    let file_count = lowered.files().len();
+    let install_bytes = lowered.install_bytes();
     let resource_count = services.len();
+    let (prerequisites, files) = lowered.into_parts();
     let target = TargetPlan {
         app: plan.app.clone(),
         target: plan.target,

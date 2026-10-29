@@ -120,6 +120,10 @@ jobs:
             runner: windows-2025
             platform: windows
             artifact: windows
+          - name: Windows ARM64
+            runner: windows-11-arm
+            platform: windows
+            artifact: windows-arm64
           - name: Linux
             runner: ubuntu-24.04
             platform: linux

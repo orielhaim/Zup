@@ -474,7 +474,7 @@ impl HostState {
                 action,
             } => {
                 let phase = zup_presentation::OperationPhase::from_action(action);
-                self.progress(convert::phase(phase), *completed, *total, action);
+                self.progress(phase, *completed, *total, action);
             }
             RuntimeEvent::RollingBack => self.advance("Restoring the previous state…"),
             RuntimeEvent::Completed { outcome } => match outcome.as_str() {
@@ -616,7 +616,7 @@ impl HostState {
     fn advance(&mut self, label: &str) {
         let waiting = self.snapshot.state == InstallerState::WaitingForSafeCancellation;
         let previous = self.snapshot.progress.take();
-        let phase = convert::phase(zup_presentation::OperationPhase::from_action(label));
+        let phase = zup_presentation::OperationPhase::from_action(label);
         self.snapshot.progress = Some(ProgressPresentation::new(
             phase,
             previous.as_ref().map_or(0, |progress| progress.completed),

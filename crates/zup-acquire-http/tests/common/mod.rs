@@ -38,6 +38,7 @@ pub enum Behaviour {
     NoContentRange(Vec<u8>),
     /// Never answer at all.
     Hang,
+    Redirect(String),
 }
 
 /// One local origin.
@@ -46,6 +47,7 @@ pub struct TestServer {
     routes: Arc<Mutex<HashMap<String, Behaviour>>>,
     requests: Arc<AtomicUsize>,
     ranges: Arc<Mutex<Vec<Option<String>>>>,
+    authorization: Arc<Mutex<Vec<Option<String>>>>,
     shutdown: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -61,6 +63,8 @@ impl TestServer {
         let routes: Arc<Mutex<HashMap<String, Behaviour>>> = Arc::new(Mutex::new(HashMap::new()));
         let requests = Arc::new(AtomicUsize::new(0));
         let ranges: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let authorization = Arc::new(Mutex::new(Vec::new()));
+        let thread_authorization = Arc::clone(&authorization);
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_routes = Arc::clone(&routes);
         let thread_requests = Arc::clone(&requests);
@@ -74,8 +78,9 @@ impl TestServer {
                         let routes = Arc::clone(&thread_routes);
                         let requests = Arc::clone(&thread_requests);
                         let ranges = Arc::clone(&thread_ranges);
+                        let authorization = Arc::clone(&thread_authorization);
                         std::thread::spawn(move || {
-                            let _ = serve(stream, &routes, &requests, &ranges);
+                            let _ = serve(stream, &routes, &requests, &ranges, &authorization);
                         });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -90,6 +95,7 @@ impl TestServer {
             routes,
             requests,
             ranges,
+            authorization,
             shutdown,
             handle: Some(handle),
         }
@@ -123,6 +129,13 @@ impl TestServer {
         self.shutdown.store(true, Ordering::Relaxed);
     }
 
+    pub fn authorization(&self) -> Vec<Option<String>> {
+        self.authorization
+            .lock()
+            .expect("authorization log")
+            .clone()
+    }
+
     /// Every `Range` header this server has seen, in order.
     pub fn ranges(&self) -> Vec<Option<String>> {
         self.ranges
@@ -146,6 +159,7 @@ fn serve(
     routes: &Arc<Mutex<HashMap<String, Behaviour>>>,
     requests: &Arc<AtomicUsize>,
     ranges: &Arc<Mutex<Vec<Option<String>>>>,
+    authorization: &Arc<Mutex<Vec<Option<String>>>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -153,6 +167,7 @@ fn serve(
         return Ok(());
     }
     let mut range: Option<String> = None;
+    let mut credential = None;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
@@ -163,11 +178,20 @@ fn serve(
             break;
         }
         if let Some((name, value)) = trimmed.split_once(':')
+            && name.eq_ignore_ascii_case("authorization")
+        {
+            credential = Some(value.trim().to_owned());
+        }
+        if let Some((name, value)) = trimmed.split_once(':')
             && name.eq_ignore_ascii_case("range")
         {
             range = Some(value.trim().to_owned());
         }
     }
+    authorization
+        .lock()
+        .expect("authorization log")
+        .push(credential);
     requests.fetch_add(1, Ordering::Relaxed);
     ranges
         .lock()
@@ -190,6 +214,9 @@ fn serve(
         .unwrap_or(Behaviour::Status(404));
     let mut writer = stream;
     match behaviour {
+        Behaviour::Redirect(location) => {
+            write_status(&mut writer, 302, Some(("Location", location)))
+        }
         Behaviour::Hang => {
             // Hold the connection open without answering. The client's header
             // timeout is what has to end this.

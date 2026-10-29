@@ -43,10 +43,8 @@ fn change_tag(kind: ChangeKind) -> Tag {
         ChangeKind::Create => Tag::success().outline().xsmall().child(label),
         ChangeKind::Update => Tag::info().outline().xsmall().child(label),
         ChangeKind::Remove => Tag::danger().outline().xsmall().child(label),
-        ChangeKind::Drifted | ChangeKind::Conflict => {
-            Tag::warning().outline().xsmall().child(label)
-        }
-        ChangeKind::NoChange => Tag::secondary().xsmall().child(label),
+        ChangeKind::Drift | ChangeKind::Conflict => Tag::warning().outline().xsmall().child(label),
+        ChangeKind::NoOp => Tag::secondary().xsmall().child(label),
     }
 }
 
@@ -110,7 +108,7 @@ impl RenderOnce for PlanDetails {
             .groups
             .iter()
             .flat_map(|group| &group.changes)
-            .filter(|change| change.kind == ChangeKind::NoChange)
+            .filter(|change| change.kind == ChangeKind::NoOp)
             .count();
 
         v_flex()
@@ -323,7 +321,7 @@ impl RenderOnce for Group {
             .group
             .changes
             .iter()
-            .filter(|change| change.kind != ChangeKind::NoChange)
+            .filter(|change| change.kind != ChangeKind::NoOp)
             .collect();
         let hidden = changes.len().saturating_sub(size::PLAN_ROWS);
         v_flex().child(header).when(open, |this| {

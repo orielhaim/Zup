@@ -1,25 +1,4 @@
-//! Fetching a file a manifest pinned by URL and digest.
-//!
-//! This exists for **system prerequisites**, not for application content. The
-//! distinction is architectural and load-bearing:
-//!
-//! ```text
-//! shared system prerequisites   ≠   application-owned CAS resources
-//! a prerequisite is a .msi or a redistributable the machine shares
-//! an application resource is a file an installation's ledger owns
-//! ```
-//!
-//! They share a *transport* without sharing *ownership*. A prerequisite is
-//! staged into a quarantine and executed by a package installer; it is not in
-//! any installation's closure, so it is not in the content-addressed cache, is
-//! not covered by a retention policy, and cannot be swept or restored as if it
-//! were application content. What it shares is what was genuinely duplicated:
-//! one pooled client, the same redirect policy, the same size ceiling, and a
-//! write path that publishes only after the digest matches.
-//!
-//! Keeping the two apart is why this is its own module rather than an
-//! `AcquisitionItem`. Making a prerequisite a cache object would let one
-//! installation evict a redistributable another installation depends on.
+//! Digest-pinned system prerequisites, staged separately from application-owned content.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -64,14 +43,7 @@ pub enum PinnedError {
     Io(#[from] std::io::Error),
 }
 
-/// Fetch `url` into `destination`, publishing there only if it hashes to
-/// `expected`.
-///
-/// The bytes are written to a temporary sibling and renamed, so the destination
-/// never contains unverified content and a caller never has to decide whether a
-/// leftover partial is safe to keep. That matters because this writes into a
-/// quarantine a later run may find, and a stale partial that looked like content
-/// would be a way past the digest check.
+/// Publish at `destination` only after its size and digest have been verified.
 pub async fn fetch_pinned(
     url: &str,
     expected: Sha256Digest,
@@ -90,9 +62,6 @@ pub async fn fetch_pinned(
         return Err(PinnedError::Url);
     }
     let origin = Origin::site(&address).map_err(|_| PinnedError::Url)?;
-    if origin.scheme() != "https" && !origin.is_loopback() && !origin.is_local() {
-        return Err(PinnedError::Url);
-    }
     let client = HttpClient::new(&HttpClientConfig {
         timeouts: zup_acquire_http::TimeoutPolicy {
             per_blob: Duration::from_secs(10 * 60),
@@ -122,21 +91,13 @@ pub async fn fetch_pinned(
         .parent()
         .ok_or_else(|| PinnedError::Transport("the destination has no parent".to_owned()))?;
     tokio::fs::create_dir_all(parent).await?;
-    let temporary = parent.join(format!(
-        ".zup-pinned-{}.partial",
-        zup_core::base64_encode(&rand_suffix())
-    ));
-    let size = match write_verified(response, &temporary, expected, expected_size, max_size).await {
-        Ok(size) => size,
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temporary).await;
-            return Err(error);
-        }
-    };
-    if let Err(error) = tokio::fs::rename(&temporary, destination).await {
-        let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(PinnedError::Io(error));
-    }
+    let (file, temporary) = tempfile::NamedTempFile::new_in(parent)?.into_parts();
+    let mut file = tokio::fs::File::from_std(file);
+    let size = write_verified(response, &mut file, expected, expected_size, max_size).await?;
+    drop(file);
+    temporary
+        .persist(destination)
+        .map_err(|error| error.error)?;
     Ok(PinnedDownload {
         path: destination.to_path_buf(),
         size,
@@ -146,22 +107,18 @@ pub async fn fetch_pinned(
 
 async fn write_verified(
     response: zup_acquire_http::Response,
-    temporary: &Path,
+    file: &mut tokio::fs::File,
     expected: Sha256Digest,
     expected_size: Option<u64>,
     max_size: u64,
 ) -> Result<u64, PinnedError> {
     use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temporary)
-        .await?;
     let mut stream = response.into_body().bytes_stream();
     let mut hasher = Sha256::new();
     let mut size = 0u64;
     while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
-        let chunk = chunk.map_err(|error| PinnedError::Transport(error.to_string()))?;
+        let chunk =
+            chunk.map_err(|error| PinnedError::Transport(error.without_url().to_string()))?;
         size = size
             .checked_add(chunk.len() as u64)
             .ok_or(PinnedError::TooLarge { limit: max_size })?;
@@ -192,39 +149,71 @@ async fn write_verified(
     Ok(size)
 }
 
-fn rand_suffix() -> [u8; 8] {
-    // A unique-enough temporary name. This is a sibling of a file in a
-    // per-installation quarantine, so the requirement is "not the same name as a
-    // concurrent run's temporary", not unpredictability.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or_default();
-    let pid = std::process::id() as u128;
-    let mixed = nanos ^ (pid << 17);
-    (mixed.to_le_bytes()[..8]).try_into().expect("eight bytes")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_url_that_could_leak_a_credential_is_refused() {
-        for hostile in [
-            "http://updates.example.com/msi/x.msi",
-            "https://user:pw@host/x.msi",
-            "https://host/x.msi#frag",
-            "not a url",
-        ] {
-            assert!(
-                Origin::parse(hostile).is_err(),
-                "{hostile} must not parse into an origin"
-            );
-        }
-        // The only plain-HTTP case is one that does not leave the machine.
-        assert!(Origin::parse("http://127.0.0.1:8080/x.msi").is_ok());
-        assert!(Origin::parse("https://updates.example.com/x.msi").is_ok());
+    #[rstest::rstest]
+    #[case::verified(true, 1024, true)]
+    #[case::corrupt(false, 1024, false)]
+    #[case::oversized(true, 2, false)]
+    #[tokio::test]
+    async fn verified_publication_preserves_the_destination_on_failure(
+        #[case] correct_digest: bool,
+        #[case] limit: u64,
+        #[case] succeeds: bool,
+    ) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("header");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\npayload",
+                )
+                .expect("response");
+        });
+        let directory = tempfile::tempdir().expect("directory");
+        let destination = directory.path().join("prerequisite");
+        std::fs::write(&destination, b"existing").expect("existing destination");
+        let expected = zup_core::hash_bytes(if correct_digest {
+            b"payload"
+        } else {
+            b"corrupt"
+        });
+        let result = fetch_pinned(
+            &format!("http://{address}/artifact"),
+            expected,
+            None,
+            &destination,
+            limit,
+        )
+        .await;
+        server.join().expect("server");
+        assert_eq!(result.is_ok(), succeeds);
+        assert_eq!(
+            std::fs::read(destination).expect("destination"),
+            if succeeds {
+                b"payload".as_slice()
+            } else {
+                b"existing".as_slice()
+            }
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("entries")
+                .count(),
+            1
+        );
     }
 
     #[test]

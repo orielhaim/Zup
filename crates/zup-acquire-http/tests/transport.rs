@@ -704,12 +704,82 @@ async fn a_request_identifies_itself_and_a_secret_header_is_never_rendered() {
         );
     let source = HttpSource::new(
         "private",
-        client,
+        client.clone(),
         OriginSet::from_urls(&server.url(), Vec::<&str>::new()).expect("valid"),
     );
     acquire_raw(&fixture(), descriptor, Arc::new(source))
         .await
         .expect("an authenticated origin works");
+
+    assert_eq!(
+        server.authorization(),
+        [Some("Bearer super-secret-token".to_owned())]
+    );
+    let foreign = TestServer::start();
+    let foreign_url = url::Url::parse(&foreign.url()).expect("a URL");
+    client
+        .get(&foreign.origin(), &foreign_url, 0)
+        .await
+        .expect("a response");
+    assert_eq!(
+        foreign.authorization(),
+        [None],
+        "another port is another origin"
+    );
+
+    let redirected = server.origin().url().join("redirect").expect("URL");
+    server.route("redirect", Behaviour::Redirect(foreign.url()));
+    assert!(matches!(
+        client
+            .send(
+                &server.origin(),
+                zup_acquire_http::Request::get(&redirected),
+                1
+            )
+            .await,
+        Err(HttpError::Redirect { .. })
+    ));
+    assert_eq!(
+        foreign.authorization(),
+        [None],
+        "an HTTP redirect never receives the credential"
+    );
+    let requests = foreign.requests();
+    assert!(matches!(
+        client.get_range(&server.origin(), &redirected, 7, 1).await,
+        Err(HttpError::RangeUnsupported { .. })
+    ));
+    for request in [
+        zup_acquire_http::Request::post(&redirected, "mutation"),
+        zup_acquire_http::Request::delete(&redirected),
+    ] {
+        assert!(matches!(
+            client.send(&server.origin(), request, 1).await,
+            Err(HttpError::Redirect { .. })
+        ));
+    }
+    assert_eq!(
+        foreign.requests(),
+        requests,
+        "ranges and mutations are never replayed"
+    );
+    let https_grant =
+        Origin::parse(&foreign.url().replacen("http:", "https:", 1)).expect("HTTPS origin");
+    let https_client = HttpClient::new(&HttpClientConfig::default())
+        .expect("client")
+        .with_bearer(
+            &https_grant,
+            zup_acquire_http::SecretHeader::new("HTTPS only"),
+        );
+    https_client
+        .get(&foreign.origin(), &foreign_url, 0)
+        .await
+        .expect("HTTP response");
+    assert_eq!(
+        foreign.authorization().last(),
+        Some(&None),
+        "scheme is part of an authorization grant"
+    );
 
     // The token is a fact in a diagnostic and never a value.
     let header = zup_acquire_http::SecretHeader::new("super-secret-token");

@@ -7,10 +7,7 @@ repository = "https://github.com/orielhaim/zup"
 description = "The canonical WebAssembly component contract for zup plugins"
 publish = true
 
-# Cargo has no mechanism for one crate to hand a file path to another, so this
-# crate publishes its WIT directory to crates that generate bindings from the
-# contract. Without it a guest SDK would have to vendor a copy of the WIT, and
-# two copies of an ABI are one divergence away from being two ABIs.
+# Publish the canonical WIT path to host and guest binding generators.
 links = "zup_plugin_abi"
 build = "build.rs"
 

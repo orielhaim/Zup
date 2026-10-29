@@ -16,8 +16,8 @@ mod web;
 pub mod oci;
 
 pub use compat::{
-    CompatibilityDimension, Incompatibility, Incompatible, LauncherSubsystem, VariantShape,
-    check_compatibility, frontend_subsystem, requires_native, satisfies_minimum_host,
+    CompatibilityDimension, Incompatibility, Incompatible, LauncherSubsystem, check_compatibility,
+    frontend_subsystem, requires_native, satisfies_minimum_host,
 };
 pub use compose::{
     ArtifactComposer, ArtifactGraph, ArtifactRequest, ComposedImage, ComposedManifest,

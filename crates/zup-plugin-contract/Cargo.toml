@@ -22,9 +22,6 @@ zup-plugin-abi.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
-# Components built from the canonical contract rather than from a fixture, so
-# the shape the host refuses a bad component for is exercised against what an
-# author would actually produce.
 wit-component = { version = "0.262", features = ["dummy-module"] }
 wit-parser = "0.262"
 wat = "1"

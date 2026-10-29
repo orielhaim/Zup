@@ -920,7 +920,7 @@ fn report(
 fn host_components() -> Vec<ToolchainComponent> {
     let target = zup_core::Target::parse(zup_plugin_contract::HOST_TARGET)
         .expect("the build host's own target is valid");
-    zup_toolchain::supported_components(&target)
+    zup_toolchain::components_for_target(&target)
 }
 
 pub fn run_clean(args: ToolchainCleanCommand) -> miette::Result<AutomationResult> {
@@ -1164,7 +1164,7 @@ mod toolchain_cli_tests {
         let cli = root.join(&cli_name);
         std::fs::write(&cli, b"a cli").expect("write the cli");
         index.cli = zup_toolchain::ReleaseFile::of(&cli_name, &cli).expect("measure the cli");
-        for component in zup_toolchain::supported_components(&target) {
+        for component in zup_toolchain::components_for_target(&target) {
             let name = zup_toolchain::file_name(&component, component_suffix(&component));
             let path = staged.join(&name);
             std::fs::write(&path, image(&component)).expect("write a component");

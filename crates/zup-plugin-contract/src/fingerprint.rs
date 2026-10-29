@@ -1,11 +1,13 @@
 use std::fmt::{self, Write as _};
 
 use sha2::{Digest, Sha256};
+use zup_plugin_abi::wit_package_digest;
 
-use crate::config::{
-    EPOCH_DEADLINE_TICKS, INVOCATION_DEADLINE_MILLIS, MAX_FUEL_PER_CALL, MAX_HOST_CALLS,
-    MAX_INSTANCES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES, MAX_PLAN_RESOURCES,
-    MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS, MAX_WASM_STACK_BYTES, WASMTIME_VERSION, engine_features,
+use crate::config::engine_features;
+use crate::{
+    EPOCH_DEADLINE_TICKS, INVOCATION_DEADLINE_MILLIS, MAX_FUEL_PER_CALL, MAX_INSTANCES,
+    MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES, MAX_PLAN_RESOURCES, MAX_TABLE_COUNT,
+    MAX_TABLE_ELEMENTS, MAX_WASM_STACK_BYTES, WASMTIME_VERSION,
 };
 
 const FINGERPRINT_DOMAIN: &[u8] = b"zup.plugin.engine-configuration.v1";
@@ -56,7 +58,6 @@ pub fn engine_fingerprint(target: &str) -> EngineFingerprint {
     update_number(&mut hasher, MAX_FUEL_PER_CALL);
     update_number(&mut hasher, EPOCH_DEADLINE_TICKS);
     update_number(&mut hasher, INVOCATION_DEADLINE_MILLIS);
-    update_number(&mut hasher, MAX_HOST_CALLS);
     update_number(&mut hasher, 1);
     update_number(&mut hasher, MAX_MEMORY_PAGES);
     update_number(
@@ -81,10 +82,6 @@ pub fn engine_fingerprint(target: &str) -> EngineFingerprint {
         u64::try_from(MAX_PLAN_OUTPUT_BYTES).expect("the byte output limit fits in u64"),
     );
     EngineFingerprint(hasher.finalize().into())
-}
-
-pub fn wit_package_digest() -> [u8; 32] {
-    zup_plugin_abi::wit_package_digest()
 }
 
 fn update_field(hasher: &mut Sha256, value: &[u8]) {

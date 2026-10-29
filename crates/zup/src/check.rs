@@ -286,7 +286,7 @@ fn plan_windows(
         crate::failure::error("zup.plan.transaction", format!("transaction plan: {error}"))
     })?;
     let mut preview = zup_presentation::PlanPreview::from_transaction_plan(&transaction, scope)
-        .with_prerequisites(&install);
+        .with_declared_prerequisites(&install.prerequisites);
     preview.application = installer.app.name.to_string();
     preview.version = installer.app.version.to_string();
     preview.install_directory = target.install_directory.to_string();

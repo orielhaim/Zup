@@ -519,3 +519,45 @@ async fn a_duplicate_filename_is_a_refusal_not_a_retry() {
     assert!(error.to_string().contains("422"), "{error}");
     assert!(error.to_string().contains("Validation Failed"), "{error}");
 }
+
+#[tokio::test]
+async fn api_and_uploads_authorize_their_origins_and_encode_urls_once() {
+    let api = Github::start(Behaviour::new());
+    let uploads = Github::start(Behaviour::new());
+    let client = zup_publish_github::GithubClient::at(
+        &api.repository(),
+        &supplied("test-token"),
+        &zup_publish_github::ClientEndpoints {
+            api: api.api_origin(),
+            upload: uploads.upload_origin(),
+        },
+    )
+    .expect("a client");
+    client
+        .release_by_tag("release/v1 +%20")
+        .await
+        .expect("a release");
+    client.assets(4242).await.expect("assets");
+    let asset = tempfile::NamedTempFile::new().expect("a file");
+    std::fs::write(asset.path(), b"payload").expect("write");
+    client
+        .upload_asset(4242, "asset +.bin", asset.path(), 7)
+        .await
+        .expect("upload");
+    assert_eq!(
+        api.authorization(),
+        vec![Some("Bearer test-token".to_owned()); 2]
+    );
+    assert_eq!(
+        uploads.authorization(),
+        vec![Some("Bearer test-token".to_owned())]
+    );
+    assert_eq!(
+        api.targets(),
+        [
+            "/repos/acme/acme/releases/tags/release%2Fv1%20+%2520",
+            "/repos/acme/acme/releases/4242/assets?per_page=100&page=1",
+        ]
+    );
+    assert_eq!(uploads.asset_names(), ["asset +.bin"]);
+}

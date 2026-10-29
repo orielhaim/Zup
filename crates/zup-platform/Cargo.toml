@@ -12,8 +12,10 @@ serde.workspace = true
 thiserror.workspace = true
 typed-path.workspace = true
 zup-core.workspace = true
+zup-plan.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
+semver.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true

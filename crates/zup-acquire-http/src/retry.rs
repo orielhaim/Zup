@@ -1,20 +1,4 @@
-//! Retry policy: what is worth sending again, and how long to wait.
-//!
-//! Two ideas do the work here.
-//!
-//! **Only retry what can change.** A connection reset, a temporary DNS failure,
-//! a `408`, a `429`, and a `503` are all statements about now. A `404` is a
-//! statement about the request, and repeating it converts a clear refusal into a
-//! slow one.
-//!
-//! **Let the server set the pace when it can.** A `Retry-After` header is the one
-//! piece of timing information that comes from the party that knows the load.
-//! Everything else is a local curve with jitter, because N clients that all
-//! back off by exactly the same amount are N clients that retry in lockstep.
-//!
-//! `backon` supplies the exponential curve and the jitter. The decisions below -
-//! what counts as retryable, what the ceiling is, and when to give up on an
-//! origin entirely - are zup's, because they are policy rather than arithmetic.
+//! Retry classification and bounded exponential backoff supplied by `backon`.
 
 use std::time::Duration;
 
@@ -153,87 +137,33 @@ fn status_of(error: &HttpError) -> Option<u16> {
     }
 }
 
-/// What one blob's transfer has done so far.
-#[derive(Debug, Clone)]
-pub struct RetryState {
+#[derive(Debug)]
+pub(crate) struct RetryState {
     policy: BackoffPolicy,
     attempt: u32,
     started: std::time::Instant,
-    /// Bytes already on disk from a previous run, so the bytes saved by a resume
-    /// can be reported rather than guessed at.
-    resumed_from: u64,
-    last_delay: Duration,
 }
 
 impl RetryState {
-    /// Start tracking one blob.
-    pub fn new(policy: BackoffPolicy, resumed_from: u64) -> Self {
+    pub(crate) fn new(policy: BackoffPolicy) -> Self {
         Self {
             policy,
             attempt: 0,
             started: std::time::Instant::now(),
-            resumed_from,
-            last_delay: Duration::ZERO,
         }
     }
 
-    /// How many attempts have been made.
-    pub const fn attempt(&self) -> u32 {
-        self.attempt
-    }
-
-    /// Bytes a resume saved, which is zero for a cold transfer.
-    pub const fn resumed_from(&self) -> u64 {
-        self.resumed_from
-    }
-
-    /// The wait before the most recent attempt.
-    pub const fn last_delay(&self) -> Duration {
-        self.last_delay
-    }
-
-    /// Time spent so far.
-    pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
-    }
-
-    /// Time left in this blob's budget.
-    pub fn remaining(&self) -> Duration {
-        self.policy.budget.saturating_sub(self.started.elapsed())
-    }
-
-    /// Record an attempt and decide what happens next.
-    pub fn record(&mut self, error: &HttpError, retry_after_header: Option<&str>) -> RetryDecision {
+    pub(crate) fn record(
+        &mut self,
+        error: &HttpError,
+        retry_after_header: Option<&str>,
+    ) -> RetryDecision {
         self.attempt += 1;
-        let decision = self
-            .policy
-            .decide(error, self.attempt, self.elapsed(), retry_after_header);
-        self.last_delay = match decision {
-            RetryDecision::Again(delay) => delay,
-            _ => Duration::ZERO,
-        };
-        decision
-    }
-}
-
-/// How a transfer ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RetryOutcome {
-    /// The blob was acquired and verified.
-    Acquired {
-        attempts: u32,
-        /// Wire bytes a resume avoided re-fetching.
-        resumed_bytes: u64,
-    },
-    /// The blob could not be acquired here. Another origin may still have it.
-    Unavailable { attempts: u32, reason: String },
-    /// The blob is not available anywhere and never will be on this request.
-    Refused { attempts: u32, reason: String },
-}
-
-impl RetryOutcome {
-    /// Whether another origin is worth trying.
-    pub const fn should_try_elsewhere(&self) -> bool {
-        matches!(self, Self::Unavailable { .. })
+        self.policy.decide(
+            error,
+            self.attempt,
+            self.started.elapsed(),
+            retry_after_header,
+        )
     }
 }

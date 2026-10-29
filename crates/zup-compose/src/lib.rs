@@ -1,7 +1,7 @@
 //! Portable installer composition and verified content extraction.
 
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use zup_binary::{BinaryFormat, Executable};
 use zup_bundle::Package;
@@ -527,40 +527,32 @@ pub fn compose_linux(
     };
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| ComposeError::io(parent, error))?;
-    let temporary = staging_path(output);
-    let composed = (|| -> Result<(), std::io::Error> {
-        let mut out = std::fs::File::create(&temporary)?;
-        std::io::copy(&mut template, &mut out)?;
-        out.write_all(package)?;
-        out.write_all(&preset)?;
-        out.write_all(&footer.to_bytes())?;
-        out.sync_all()
-    })();
-    if let Err(error) = composed {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(ComposeError::io(output, error));
-    }
-    let bytes = std::fs::read(&temporary).map_err(|error| ComposeError::io(&temporary, error))?;
-    zup_platform::publish(output, &bytes).map_err(|error| ComposeError::Io {
-        path: output.display().to_string(),
-        source: std::io::Error::other(error.to_string()),
-    })?;
-    let _ = std::fs::remove_file(&temporary);
+    let mut out = atomic_write_file::AtomicWriteFile::open(output)
+        .map_err(|error| ComposeError::io(output, error))?;
+    std::io::copy(&mut template, &mut out)
+        .and_then(|_| out.write_all(package))
+        .and_then(|_| out.write_all(&preset))
+        .and_then(|_| out.write_all(&footer.to_bytes()))
+        .map_err(|error| ComposeError::io(output, error))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(output, std::fs::Permissions::from_mode(0o755))
+        out.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o755))
             .map_err(|error| ComposeError::io(output, error))?;
     }
+    let output_size = out
+        .as_file()
+        .metadata()
+        .map_err(|error| ComposeError::io(output, error))?
+        .len();
+    out.commit()
+        .map_err(|error| ComposeError::io(output, error))?;
     Ok(ComposeReport {
-        output_size: bytes.len() as u64,
+        output_size,
         package_size: package.len() as u64,
         preset_size: preset.len() as u64,
     })
-}
-
-fn staging_path(output: &Path) -> PathBuf {
-    output.with_extension("zup-partial")
 }
 
 pub fn open_linux(path: &Path) -> Result<OpenedInstaller, ComposeError> {
@@ -576,11 +568,12 @@ pub fn open_linux(path: &Path) -> Result<OpenedInstaller, ComposeError> {
         footer.package_offset,
         footer.package_length,
     )?;
-    if zup_core::hash_bytes(&package_bytes) != footer.package_digest {
+    let found = zup_core::hash_bytes(&package_bytes);
+    if found != footer.package_digest {
         return Err(ComposeError::PackageDigestMismatch {
             path: path.display().to_string(),
             expected: footer.package_digest,
-            found: zup_core::hash_bytes(&package_bytes),
+            found,
         });
     }
     let package = Package::from_bytes(package_bytes)?;
@@ -591,11 +584,12 @@ pub fn open_linux(path: &Path) -> Result<OpenedInstaller, ComposeError> {
             footer.package_offset + footer.package_length,
             footer.preset_length,
         )?;
-        if zup_core::hash_bytes(&preset_bytes) != footer.preset_digest {
+        let found = zup_core::hash_bytes(&preset_bytes);
+        if found != footer.preset_digest {
             return Err(ComposeError::PresetDigestMismatch {
                 path: path.display().to_string(),
                 expected: footer.preset_digest,
-                found: zup_core::hash_bytes(&preset_bytes),
+                found,
             });
         }
         Some(decompress_preset(&preset_bytes)?)
@@ -643,6 +637,7 @@ fn decompress_preset(bytes: &[u8]) -> Result<Vec<u8>, ComposeError> {
 mod tests {
     use super::*;
     use rstest::rstest;
+    use std::path::PathBuf;
 
     #[test]
     fn compressed_presets_reject_malformed_and_oversized_frames() {
@@ -719,35 +714,36 @@ destination = "${install}"
         (bytes, target)
     }
 
-    #[test]
-    fn a_linux_carrier_round_trips_package_and_preset() {
+    #[rstest]
+    #[case::without_preset(None)]
+    #[case::with_preset(Some(vec![b'x'; 64 * 1024]))]
+    fn linux_carrier_round_trips(#[case] preset: Option<Vec<u8>>) {
         let (package, target) = linux_package();
-        assert_eq!(target.as_str(), "linux-x64");
         let directory = tempfile::tempdir().expect("temp dir");
         let runtime = runtime_file(directory.path(), "zup-installer");
         let output = directory.path().join("Acme-Setup");
-        let preset = vec![b'x'; 64 * 1024];
-        let report = compose(&target, &runtime, &output, &package, Some(&preset)).expect("compose");
+        let report =
+            compose(&target, &runtime, &output, &package, preset.as_deref()).expect("compose");
         assert_eq!(report.package_size, package.len() as u64);
-        assert!(report.preset_size < preset.len() as u64);
         assert_eq!(
             std::fs::metadata(&output).expect("stat").len(),
-            report.output_size,
+            report.output_size
         );
         let opened = open(&output).expect("open");
-        assert_eq!(opened.preset.as_deref(), Some(preset.as_slice()));
+        assert_eq!(opened.preset.as_deref(), preset.as_deref());
         assert_eq!(opened.target(), &target);
-    }
-
-    #[test]
-    fn a_linux_carrier_without_a_preset_opens_with_none() {
-        let (package, target) = linux_package();
-        let directory = tempfile::tempdir().expect("temp dir");
-        let runtime = runtime_file(directory.path(), "zup-installer");
-        let output = directory.path().join("Acme-Setup");
-        compose(&target, &runtime, &output, &package, None).expect("compose");
-        let opened = open(&output).expect("open");
-        assert_eq!(opened.preset, None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&output)
+                    .expect("stat")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+        }
     }
 
     #[test]

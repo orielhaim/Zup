@@ -27,7 +27,8 @@ use zup_core::{
     AppId, Component, ComponentId, Install, InstallDirectory, InstallScope, Installer,
     NonEmptyString, PresetAsset, PresetRuntime, SelectedScope, Target, Template,
 };
-use zup_installer::host::{HostDecision, HostState, preset};
+use zup_installer::host::preset;
+use zup_preset_host::{HostDecision, HostState};
 use zup_preset_protocol::{Action, Capabilities, Capability, HostOffers, PRESET_PROTOCOL_VERSION};
 
 /// The child this test launches.
@@ -100,9 +101,9 @@ fn installer() -> Installer {
 /// The host state a fresh install opens on.
 fn install_state(installer: &Installer) -> HostState {
     HostState::install(
-        zup_installer::host::product(installer),
-        zup_installer::host::install_options(installer, SelectedScope::User, None, None, None),
-        zup_installer::host::capabilities(installer, false),
+        zup_preset_host::surface::product(installer),
+        zup_preset_host::surface::install_options(installer, SelectedScope::User, None, None, None),
+        zup_preset_host::surface::capabilities(installer, false),
     )
 }
 
@@ -355,11 +356,17 @@ fn a_composed_installer_launches_the_preset_its_package_carried() {
     // And the real session runs against it, with the host launching what it
     // materialized rather than the build tree's copy.
     let mut state = HostState::install(
-        zup_installer::host::product(&installer),
-        zup_installer::host::install_options(&installer, SelectedScope::User, None, None, None),
+        zup_preset_host::surface::product(&installer),
+        zup_preset_host::surface::install_options(
+            &installer,
+            SelectedScope::User,
+            None,
+            None,
+            None,
+        ),
         offered.clone(),
     );
-    let mut process = preset::launch(
+    let mut process = zup_preset_host::process::launch(
         &composed.executable,
         state.capabilities().clone(),
         state.snapshot().product.clone(),

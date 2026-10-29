@@ -10,13 +10,10 @@ use zup_core::{
 pub struct PlannedPrerequisite {
     pub id: PrerequisiteId,
     pub name: NonEmptyString,
-    pub description: Option<String>,
     pub target: PrerequisiteArchitecture,
     pub requirement: PrerequisiteRequirement,
     pub package: PrerequisitePackage,
     pub installer: PrerequisiteInstaller,
-    pub component: Option<zup_core::ComponentId>,
-    pub condition: Option<zup_core::Condition>,
 }
 
 impl PlannedPrerequisite {
@@ -24,13 +21,10 @@ impl PlannedPrerequisite {
         Self {
             id: prerequisite.id.clone(),
             name: prerequisite.name.clone(),
-            description: prerequisite.description.clone(),
             target: prerequisite.target,
             requirement: prerequisite.requirement.clone(),
             package: prerequisite.package.clone(),
             installer: prerequisite.installer.clone(),
-            component: prerequisite.component.clone(),
-            condition: prerequisite.when.clone(),
         }
     }
 }

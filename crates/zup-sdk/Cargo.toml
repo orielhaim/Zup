@@ -25,7 +25,7 @@ plugin = ["dep:zup-plugin-abi", "dep:wit-bindgen"]
 test-support = ["preset", "gpui-kit/test-support"]
 
 [dependencies]
-gpui-kit = { version = "0.7", optional = true }
+gpui-kit = { version = "0.8", optional = true }
 zup-preset-protocol = { path = "../zup-preset-protocol", version = "0.1.0", optional = true }
 zup-preset-ipc = { path = "../zup-preset-ipc", version = "0.1.0", optional = true }
 zup-sdk-macros = { path = "../zup-sdk-macros", version = "0.1.0", optional = true }
@@ -36,7 +36,7 @@ thiserror = { version = "2", optional = true }
 futures-channel = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true }
 zup-plugin-abi = { path = "../zup-plugin-abi", version = "0.1.0", optional = true }
-wit-bindgen = { version = "=0.62.0", optional = true }
+wit-bindgen = { version = "=0.63.0", optional = true }
 
 [dev-dependencies]
 serde_json = "1"

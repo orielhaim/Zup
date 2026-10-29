@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use zup_core::{App, Frontend, Install, Sha256Digest, Target, Template};
+use zup_core::{App, Frontend, Install, Sha256Digest, UpdateConfig};
 
 use crate::platform::Platform;
 use crate::variant::{
@@ -43,7 +43,6 @@ pub const fn frontend_subsystem(frontend: Frontend) -> LauncherSubsystem {
 #[serde(rename_all = "snake_case")]
 pub enum CompatibilityDimension {
     Platform,
-    ArtifactBackend,
     LauncherSubsystem,
     ApplicationIdentity,
     UpdateTrust,
@@ -54,7 +53,6 @@ impl CompatibilityDimension {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Platform => "platform",
-            Self::ArtifactBackend => "artifact backend",
             Self::LauncherSubsystem => "launcher subsystem",
             Self::ApplicationIdentity => "application identity",
             Self::UpdateTrust => "update trust",
@@ -65,7 +63,6 @@ impl CompatibilityDimension {
     pub const fn requirement(self) -> &'static str {
         match self {
             Self::Platform => "one artifact serves one operating system",
-            Self::ArtifactBackend => "one artifact uses one artifact backend",
             Self::LauncherSubsystem => "one artifact is one launcher experience",
             Self::ApplicationIdentity => "one artifact carries one application version",
             Self::UpdateTrust => "one artifact carries one update trust configuration",
@@ -82,10 +79,6 @@ pub enum Incompatibility {
     Platform {
         left: Platform,
         right: Platform,
-    },
-    ArtifactBackend {
-        left: String,
-        right: String,
     },
     LauncherSubsystem {
         left: LauncherSubsystem,
@@ -109,7 +102,6 @@ impl Incompatibility {
     pub fn dimension(&self) -> CompatibilityDimension {
         match self {
             Self::Platform { .. } => CompatibilityDimension::Platform,
-            Self::ArtifactBackend { .. } => CompatibilityDimension::ArtifactBackend,
             Self::LauncherSubsystem { .. } => CompatibilityDimension::LauncherSubsystem,
             Self::ApplicationIdentity { .. } => CompatibilityDimension::ApplicationIdentity,
             Self::UpdateTrust { .. } => CompatibilityDimension::UpdateTrust,
@@ -121,9 +113,6 @@ impl Incompatibility {
         match self {
             Self::Platform { left, right } => {
                 format!("`{left}` and `{right}` are different operating systems")
-            }
-            Self::ArtifactBackend { left, right } => {
-                format!("`{left}` and `{right}` use different artifact backends")
             }
             Self::LauncherSubsystem { left, right } => {
                 format!("`{left}` and `{right}` are different launcher subsystems")
@@ -146,94 +135,74 @@ pub struct Incompatible {
     pub reason: Box<Incompatibility>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VariantShape {
-    pub id: String,
-    pub platform: Platform,
-    pub target: Target,
-    pub subsystem: LauncherSubsystem,
-    pub application: App,
-    pub install: Install,
-    pub update_trust: Option<String>,
-    pub components: Vec<String>,
-}
-
-impl VariantShape {
-    fn of(variant: &DistributionVariant) -> Self {
-        Self {
-            id: variant.id().to_owned(),
-            platform: variant.platform().clone(),
-            target: *variant.target(),
-            subsystem: variant.subsystem(),
-            application: variant.application().clone(),
-            install: variant.install().clone(),
-            update_trust: variant.plan().installer.updates.as_ref().map(|updates| {
-                format!(
-                    "{}#{}#{}",
-                    updates.repository,
-                    updates.channel,
-                    Sha256Digest::from_bytes(Sha256::digest(&updates.trusted_root).into())
-                )
-            }),
-            components: variant
-                .plan()
-                .installer
-                .components
-                .iter()
-                .map(|component| component.id.to_string())
-                .collect(),
-        }
-    }
-}
-
 pub fn check_compatibility(variants: &[&DistributionVariant]) -> Result<(), Incompatible> {
-    let shapes = variants
-        .iter()
-        .map(|variant| VariantShape::of(variant))
-        .collect::<Vec<_>>();
-    for (index, left) in shapes.iter().enumerate() {
-        for right in shapes.iter().skip(index + 1) {
-            if let Some(reason) = compare(left, right) {
-                return Err(Incompatible {
-                    left: left.id.clone(),
-                    right: right.id.clone(),
-                    reason: Box::new(reason),
-                });
-            }
+    let Some((left, rest)) = variants.split_first() else {
+        return Ok(());
+    };
+    for right in rest {
+        if let Some(reason) = compare(left, right) {
+            return Err(Incompatible {
+                left: left.id().to_owned(),
+                right: right.id().to_owned(),
+                reason: Box::new(reason),
+            });
         }
     }
     Ok(())
 }
 
-fn compare(left: &VariantShape, right: &VariantShape) -> Option<Incompatibility> {
-    if !left.platform.same_os(&right.platform) {
+fn compare(left: &DistributionVariant, right: &DistributionVariant) -> Option<Incompatibility> {
+    if !left.platform().same_os(right.platform()) {
         return Some(Incompatibility::Platform {
-            left: left.platform.clone(),
-            right: right.platform.clone(),
+            left: left.platform().clone(),
+            right: right.platform().clone(),
         });
     }
-    if left.subsystem != right.subsystem {
+    if left.subsystem() != right.subsystem() {
         return Some(Incompatibility::LauncherSubsystem {
-            left: left.subsystem,
-            right: right.subsystem,
+            left: left.subsystem(),
+            right: right.subsystem(),
         });
     }
-    if let Some(reason) = compare_application(&left.application, &right.application) {
+    if let Some(reason) = compare_application(left.application(), right.application()) {
         return Some(reason);
     }
-    if left.update_trust != right.update_trust {
+    let left_installer = &left.plan().installer;
+    let right_installer = &right.plan().installer;
+    if left_installer.updates != right_installer.updates {
+        let describe = |updates: &Option<UpdateConfig>| {
+            updates.as_ref().map_or_else(
+                || "none".into(),
+                |updates| {
+                    format!(
+                        "{}#{}#{}",
+                        updates.repository,
+                        updates.channel,
+                        Sha256Digest::from_bytes(Sha256::digest(&updates.trusted_root).into())
+                    )
+                },
+            )
+        };
         return Some(Incompatibility::UpdateTrust {
-            left: left.update_trust.clone().unwrap_or_else(|| "none".into()),
-            right: right.update_trust.clone().unwrap_or_else(|| "none".into()),
+            left: describe(&left_installer.updates),
+            right: describe(&right_installer.updates),
         });
     }
-    if let Some(detail) = compare_install(
-        &left.install,
-        &right.install,
-        &left.components,
-        &right.components,
-    ) {
+    if let Some(detail) = compare_install(left.install(), right.install()) {
         return Some(Incompatibility::InstallerSemantics { detail });
+    }
+    if !left_installer
+        .components
+        .iter()
+        .map(|component| &component.id)
+        .eq(right_installer
+            .components
+            .iter()
+            .map(|component| &component.id))
+    {
+        return Some(Incompatibility::InstallerSemantics {
+            detail: "component sets differ".into(),
+        });
     }
     None
 }
@@ -252,12 +221,7 @@ fn compare_application(left: &App, right: &App) -> Option<Incompatibility> {
     })
 }
 
-fn compare_install(
-    left: &Install,
-    right: &Install,
-    left_components: &[String],
-    right_components: &[String],
-) -> Option<String> {
+fn compare_install(left: &Install, right: &Install) -> Option<String> {
     if left.scope != right.scope {
         return Some(format!(
             "install scope differs (`{}` and `{}`)",
@@ -272,17 +236,8 @@ fn compare_install(
         left.directory.machine.as_ref(),
         right.directory.machine.as_ref(),
     );
-    if user.0.map(Template::to_string) != user.1.map(Template::to_string)
-        || machine.0.map(Template::to_string) != machine.1.map(Template::to_string)
-    {
+    if user.0 != user.1 || machine.0 != machine.1 {
         return Some("install destination templates differ".into());
-    }
-    if left_components != right_components {
-        return Some(format!(
-            "component sets differ (`{}` and `{}`); a shared installer would present one of them to a machine that cannot use it",
-            left_components.join(", "),
-            right_components.join(", ")
-        ));
     }
     None
 }

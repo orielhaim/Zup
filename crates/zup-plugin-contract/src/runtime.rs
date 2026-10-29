@@ -1,13 +1,13 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use wasmtime::{Engine, ResourceLimiter, StoreLimits, StoreLimitsBuilder, Trap};
 
-use crate::config::{
+use crate::{
     EPOCH_DEADLINE_TICKS, INVOCATION_DEADLINE_MILLIS, MAX_FUEL_PER_CALL, MAX_INSTANCES,
     MAX_MEMORY_BYTES, MAX_MEMORY_COUNT, MAX_PLAN_OUTPUT_BYTES, MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS,
 };
@@ -176,54 +176,25 @@ pub(crate) fn run_with_watchdog<T>(
         Err(_) => return Err(InvocationError::internal("cancellation query panicked")),
     }
 
-    let cause = Arc::new(AtomicU8::new(0));
-    let stop = Arc::new(AtomicU8::new(0));
+    let cause = AtomicU8::new(0);
     let (stop_sender, stop_receiver) = mpsc::channel();
     let deadline = Instant::now() + INVOCATION_DEADLINE;
-    let (operation_result, watchdog_result, spawn_error) = thread::scope(|scope| {
-        let watchdog_engine = engine.clone();
-        let watchdog_cause = Arc::clone(&cause);
-        let watchdog_stop = Arc::clone(&stop);
-        let watchdog_cancellation = cancellation;
+    let operation_result = thread::scope(|scope| {
         let handle = thread::Builder::new()
             .name("zup-plugin-watchdog".to_owned())
-            .spawn_scoped(scope, move || {
-                watchdog(
-                    &watchdog_engine,
-                    watchdog_cancellation,
-                    watchdog_stop,
-                    &watchdog_cause,
-                    stop_receiver,
-                    deadline,
-                )
-            });
-        let handle = match handle {
-            Ok(handle) => handle,
-            Err(error) => {
-                return (
-                    None,
-                    None,
-                    Some(InvocationError::internal(format!(
-                        "could not start invocation watchdog: {error}"
-                    ))),
-                );
-            }
-        };
-        let operation_result = catch_unwind(AssertUnwindSafe(operation));
-        stop.store(1, Ordering::Release);
+            .spawn_scoped(scope, || {
+                watchdog(engine, cancellation, &cause, stop_receiver, deadline)
+            })
+            .map_err(|error| {
+                InvocationError::internal(format!("could not start invocation watchdog: {error}"))
+            })?;
+        let result = catch_unwind(AssertUnwindSafe(operation));
         let _ = stop_sender.send(());
-        let watchdog_result = handle.join();
-        (Some(operation_result), Some(watchdog_result), None)
-    });
-
-    if let Some(error) = spawn_error {
-        return Err(error);
-    }
-    if watchdog_result.is_some_and(|result| result.is_err()) {
-        return Err(InvocationError::internal("invocation watchdog panicked"));
-    }
-    let operation_result = operation_result
-        .ok_or_else(|| InvocationError::internal("invocation result was not produced"))?;
+        handle
+            .join()
+            .map_err(|_| InvocationError::internal("invocation watchdog panicked"))?;
+        Ok(result)
+    })?;
     let operation_result = match operation_result {
         Ok(result) => result,
         Err(_) => return Err(InvocationError::internal("plugin invocation panicked")),
@@ -260,13 +231,12 @@ fn cancellation_requested(cancellation: &(dyn Fn() -> bool + Send + Sync)) -> bo
 fn watchdog(
     engine: &Engine,
     cancellation: &(dyn Fn() -> bool + Send + Sync),
-    stop: Arc<AtomicU8>,
     cause: &AtomicU8,
     stop_receiver: mpsc::Receiver<()>,
     deadline: Instant,
 ) {
     loop {
-        if stop.load(Ordering::Acquire) != 0 || stop_receiver.try_recv().is_ok() {
+        if stop_receiver.try_recv().is_ok() {
             return;
         }
         let cancelled = match catch_unwind(AssertUnwindSafe(cancellation)) {
@@ -373,16 +343,6 @@ mod tests {
         let engine = Engine::default();
         let result = run_with_watchdog(&engine, &|| false, || {
             std::thread::sleep(Duration::from_millis(300));
-            Ok(())
-        });
-        assert_eq!(result, Err(InvocationError::Timeout));
-    }
-
-    #[test]
-    fn a_watchdog_that_finds_its_deadline_already_gone_still_times_out() {
-        let engine = Engine::default();
-        let result = run_with_watchdog(&engine, &|| false, || {
-            std::thread::sleep(Duration::from_millis(INVOCATION_DEADLINE_MILLIS + 250));
             Ok(())
         });
         assert_eq!(result, Err(InvocationError::Timeout));

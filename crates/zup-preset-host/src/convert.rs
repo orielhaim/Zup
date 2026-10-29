@@ -1,9 +1,7 @@
 use zup_core::{ComponentId as EngineComponentId, SelectedScope};
-use zup_presentation::OperationPhase as EnginePhase;
 use zup_preset_protocol::{
-    ChangeGroup, ChangeKind, ComponentId, ComponentProminence, DiagnosticKind,
-    DiagnosticPresentation, InstallScope, OperationPhase, PlanPreview, PlannedChange,
-    RequirementPresentation, RequirementStatus, ResourceCategory, SelectionRequirement,
+    ChangeGroup, ComponentId, ComponentProminence, DiagnosticKind, DiagnosticPresentation,
+    InstallScope, PlanPreview, PlannedChange, SelectionRequirement,
 };
 
 pub fn scope(value: SelectedScope) -> InstallScope {
@@ -43,63 +41,10 @@ pub fn components<'a>(values: impl IntoIterator<Item = &'a EngineComponentId>) -
     values.into_iter().map(component).collect()
 }
 
-pub fn phase(value: EnginePhase) -> OperationPhase {
-    match value {
-        EnginePhase::Prepare => OperationPhase::Prepare,
-        EnginePhase::Download => OperationPhase::Download,
-        EnginePhase::Verify => OperationPhase::Verify,
-        EnginePhase::Files => OperationPhase::Files,
-        EnginePhase::System => OperationPhase::System,
-        EnginePhase::Finish => OperationPhase::Finish,
-    }
-}
-
-pub fn requirement(value: &zup_presentation::RequirementPresentation) -> RequirementPresentation {
-    RequirementPresentation {
-        id: value.id.clone(),
-        name: value.name.clone(),
-        status: match value.status {
-            zup_presentation::RequirementStatus::Satisfied => RequirementStatus::Satisfied,
-            zup_presentation::RequirementStatus::Missing => RequirementStatus::Missing,
-            zup_presentation::RequirementStatus::Unknown => RequirementStatus::Unknown,
-        },
-        estimated_bytes: value.estimated_bytes,
-        shared: value.shared,
-    }
-}
-
-fn category(value: zup_presentation::ResourceCategory) -> ResourceCategory {
-    use zup_presentation::ResourceCategory as Engine;
-    match value {
-        Engine::Files => ResourceCategory::Files,
-        Engine::Launchers => ResourceCategory::Launchers,
-        Engine::Path => ResourceCategory::Path,
-        Engine::Services => ResourceCategory::Services,
-        Engine::Protocols => ResourceCategory::Protocols,
-        Engine::FileAssociations => ResourceCategory::FileAssociations,
-        Engine::AppsFeatures => ResourceCategory::AppsFeatures,
-        Engine::Maintenance => ResourceCategory::Maintenance,
-        Engine::Prerequisites => ResourceCategory::Prerequisites,
-        Engine::Other => ResourceCategory::Other,
-    }
-}
-
-fn change_kind(value: zup_presentation::ChangeKind) -> ChangeKind {
-    use zup_presentation::ChangeKind as Engine;
-    match value {
-        Engine::Create => ChangeKind::Create,
-        Engine::Update => ChangeKind::Update,
-        Engine::Remove => ChangeKind::Remove,
-        Engine::NoOp => ChangeKind::NoChange,
-        Engine::Drift => ChangeKind::Drifted,
-        Engine::Conflict => ChangeKind::Conflict,
-    }
-}
-
 fn change(value: &zup_presentation::PlannedChange) -> PlannedChange {
     PlannedChange {
-        category: category(value.category),
-        kind: change_kind(value.kind),
+        category: value.category,
+        kind: value.kind,
         label: value.label.clone(),
         location: value.location.clone(),
         scope: value.scope.map(scope),
@@ -111,7 +56,7 @@ fn change(value: &zup_presentation::PlannedChange) -> PlannedChange {
 
 fn group(value: &zup_presentation::ChangeGroup) -> ChangeGroup {
     ChangeGroup {
-        category: category(value.category),
+        category: value.category,
         changes: value.changes.iter().map(change).collect(),
     }
 }
@@ -125,7 +70,7 @@ pub fn plan(value: &zup_presentation::PlanPreview) -> PlanPreview {
         download_bytes: value.download_bytes,
         requires_authorization: value.requires_authorization,
         groups: value.groups.iter().map(group).collect(),
-        requirements: value.requirements.iter().map(requirement).collect(),
+        requirements: value.requirements.clone(),
     }
 }
 

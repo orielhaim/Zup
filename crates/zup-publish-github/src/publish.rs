@@ -100,7 +100,7 @@ pub async fn publish(
     request: &PublishRequest,
 ) -> Result<zup_publish::PublishReport, GithubError> {
     let plan = &request.plan;
-    let products = plan.preflight(&crate::api::LIMITS)?;
+    let products = plan.preflight(&crate::limits::LIMITS)?;
     let client = match &request.endpoints {
         Some(endpoints) => GithubClient::at(repository, token, endpoints)?,
         None => GithubClient::new(repository, token)?,
@@ -177,7 +177,7 @@ pub async fn publish(
         report.info("left as a draft", "the caller asked for a draft release");
     } else {
         final_release = client
-            .publish(release.id, &CreateRelease::publish(request.prerelease))
+            .update(release.id, &CreateRelease::publish(request.prerelease))
             .await?;
         receipt.state = PublicationState::Published;
         report.ok(format!("{} published", release.tag_name));

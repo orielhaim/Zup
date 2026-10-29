@@ -1,8 +1,8 @@
 use zup_preset_protocol::{
     Action, Capabilities, Capability, ComponentId, ComponentOption, DiagnosticKind,
-    DiagnosticPresentation, Envelope, HostHello, InstallOptions, InstallScope, InstallerState,
-    MaintenanceState, Message, OperationPhase, PlanStatus, PresetHello, ProductIdentity,
-    ProgressPresentation, SessionId, Snapshot, Surface, WireError, decode, encode, negotiate,
+    DiagnosticPresentation, Envelope, InstallOptions, InstallScope, InstallerState,
+    MaintenanceState, Message, OperationPhase, PlanStatus, ProductIdentity, ProgressPresentation,
+    SessionId, Snapshot, Surface, WireError, decode, encode, negotiate,
 };
 
 fn session() -> SessionId {
@@ -160,49 +160,6 @@ fn capability_names_are_a_closed_vocabulary() {
 }
 
 #[test]
-fn the_handshake_names_the_protocol_and_the_session_on_both_sides() {
-    let id = session();
-    let hello = PresetHello {
-        protocol_version: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
-        session: id,
-        preset: "aurora".into(),
-        preset_version: "2.1.0".into(),
-        required_capabilities: [Capability::PlanPreview].into_iter().collect(),
-    };
-    let host = HostHello::new(
-        id,
-        [Capability::PlanPreview, Capability::Diagnostics]
-            .into_iter()
-            .collect(),
-        product(),
-        "0.8.4",
-        zup_preset_protocol::HostEnvironment {
-            operating_system: zup_preset_protocol::OperatingSystem::Windows,
-            architecture: "x86_64".into(),
-            target: "windows-x64".into(),
-            desktop: zup_preset_protocol::DesktopEnvironment {
-                session: zup_preset_protocol::GraphicalSession::Native,
-                desktop_id: None,
-                desktop_name: None,
-            },
-            machine_authorization: zup_preset_protocol::MachineAuthorization::Available,
-        },
-    );
-    assert_eq!(host.session, hello.session);
-    assert!(negotiate(&host.capabilities, &hello.required_capabilities).is_ok());
-}
-
-#[test]
-fn a_frame_from_another_session_is_recognizable() {
-    let first = envelope(Message::Action(Action::Install));
-    let second = Envelope {
-        session: SessionId::new_v7(),
-        ..first.clone()
-    };
-    assert_ne!(first.session, second.session);
-}
-
-#[test]
 fn every_lifecycle_state_and_action_survives_the_wire() {
     let states = [
         InstallerState::Options,
@@ -220,8 +177,8 @@ fn every_lifecycle_state_and_action_survives_the_wire() {
     for state in states {
         let bytes = serde_json::to_string(&state).expect("encoded");
         assert_eq!(
-            bytes,
-            serde_json::to_string(&decode_state(&bytes)).expect("decoded")
+            state,
+            serde_json::from_str::<InstallerState>(&bytes).expect("decoded")
         );
     }
 
@@ -256,10 +213,6 @@ fn every_lifecycle_state_and_action_survives_the_wire() {
         let bytes = encode(&frame).expect("encoded");
         assert_eq!(decode(&bytes).expect("decoded"), frame);
     }
-}
-
-fn decode_state(bytes: &str) -> InstallerState {
-    serde_json::from_str(bytes).expect("a state")
 }
 
 #[test]

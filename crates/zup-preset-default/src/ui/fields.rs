@@ -89,7 +89,7 @@ impl RenderOnce for PathChooser {
                     .pl(space::MD)
                     .pr(if changeable { space::XS } else { space::MD })
                     .py(space::XS)
-                    .min_h(rems_of(2.5))
+                    .min_h(gpui::rems(2.5))
                     .rounded(theme.radius)
                     .border_1()
                     .border_color(theme.border)
@@ -129,10 +129,6 @@ impl RenderOnce for PathChooser {
                     })),
             )
     }
-}
-
-fn rems_of(value: f32) -> zup_sdk::preset::gpui_kit::Rems {
-    zup_sdk::preset::gpui_kit::Rems(value)
 }
 
 #[derive(IntoElement)]

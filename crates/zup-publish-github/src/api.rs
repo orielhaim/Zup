@@ -12,9 +12,8 @@ use crate::endpoint::{
     ACCEPT_JSON, ACCEPT_UPLOAD, API_VERSION, CONTENT_TYPE_OCTET_STREAM, GithubHost,
 };
 use crate::error::GithubError;
-use crate::limits;
 use crate::publish::CreateRelease;
-use crate::token::{Token, authorization};
+use crate::token::Token;
 
 const MAX_JSON_BYTES: u64 = 1 << 20;
 
@@ -70,7 +69,9 @@ impl GithubClient {
         })?;
         Ok(Self {
             host: repository.host.clone(),
-            client: client.with_bearer(&api_origin, SecretHeader::new(authorization(token))),
+            client: client
+                .with_bearer(&api_origin, SecretHeader::new(token.expose()))
+                .with_bearer(&upload_origin, SecretHeader::new(token.expose())),
             api_origin,
             upload_origin,
             repository: repository.path(),
@@ -114,11 +115,12 @@ impl GithubClient {
     }
 
     pub async fn release_by_tag(&self, tag: &str) -> Result<Option<Release>, GithubError> {
-        let url = self.api_url(&format!(
-            "repos/{}/releases/tags/{}",
-            self.repository,
-            encode(tag)
-        ))?;
+        let mut url = self.api_url(&format!("repos/{}/releases/tags", self.repository))?;
+        url.path_segments_mut()
+            .map_err(|()| GithubError::Host {
+                reason: "the API base is not a valid base URL".to_owned(),
+            })?
+            .push(tag);
         match self.get_json(&url).await {
             Ok(value) => Ok(Some(Release::from_json(value)?)),
             Err(GithubError::NotFound { .. }) => Ok(None),
@@ -152,10 +154,6 @@ impl GithubClient {
         Release::from_json(self.send_json(&url, reqwest::Method::PATCH, body).await?)
     }
 
-    pub async fn publish(&self, id: u64, request: &CreateRelease) -> Result<Release, GithubError> {
-        self.update(id, request).await
-    }
-
     pub async fn generate_notes(
         &self,
         tag: &str,
@@ -184,20 +182,17 @@ impl GithubClient {
         let mut all = Vec::new();
         let mut page = 1u32;
         loop {
-            let url = self.api_url(&format!(
-                "repos/{}/releases/{release_id}/assets?per_page=100&page={page}",
+            let mut url = self.api_url(&format!(
+                "repos/{}/releases/{release_id}/assets",
                 self.repository
             ))?;
-            let response = self.send(&url, reqwest::Method::GET, None).await?;
-            let page_items: Vec<Json> = serde_json::from_slice(
-                &response
-                    .read_to_end(MAX_JSON_BYTES)
-                    .await
-                    .map_err(transport)?,
-            )
-            .map_err(|error| GithubError::Decode {
-                reason: error.to_string(),
-            })?;
+            url.query_pairs_mut()
+                .append_pair("per_page", "100")
+                .append_pair("page", &page.to_string());
+            let page_items: Vec<Json> = serde_json::from_value(self.get_json(&url).await?)
+                .map_err(|error| GithubError::Decode {
+                    reason: error.to_string(),
+                })?;
             let count = page_items.len();
             all.extend(page_items.into_iter().filter_map(Asset::from_json));
             if count < 100 {
@@ -238,15 +233,11 @@ impl GithubClient {
                 found: declared,
             });
         }
-        let body = Body::File {
-            path: path.to_path_buf(),
-            chunk: Body::UPLOAD_CHUNK,
-        };
+        let body = Body::File(path.to_path_buf());
         let request = Request::post(&url, body)
             .header("Accept", ACCEPT_UPLOAD)
-            .header("X-GitHub-Api-Version", API_VERSION)
             .header("Content-Type", CONTENT_TYPE_OCTET_STREAM);
-        let response = self.exchange_once(request).await?;
+        let response = self.exchange(request, 1).await?;
         if !response.status().is_success() {
             return Err(status_error(response, &url).await);
         }
@@ -261,7 +252,9 @@ impl GithubClient {
             "repos/{}/releases/assets/{asset_id}",
             self.repository
         ))?;
-        let response = self.exchange(Request::delete(&url)).await?;
+        let response = self
+            .exchange(Request::delete(&url), self.max_attempts)
+            .await?;
         if response.status() == reqwest::StatusCode::NO_CONTENT || response.status().is_success() {
             return Ok(());
         }
@@ -270,7 +263,7 @@ impl GithubClient {
 
     async fn get_json(&self, url: &Url) -> Result<Json, GithubError> {
         let request = Request::get(url).header("Accept", ACCEPT_JSON);
-        let response = self.exchange(request).await?;
+        let response = self.exchange(request, self.max_attempts).await?;
         if !response.status().is_success() {
             return Err(status_error(response, url).await);
         }
@@ -286,49 +279,20 @@ impl GithubClient {
         let request = Request::new(method, url)
             .header("Accept", ACCEPT_JSON)
             .header("Content-Type", "application/json")
-            .header("X-GitHub-Api-Version", API_VERSION)
             .with_body(body);
-        let response = self.exchange(request).await?;
+        let response = self.exchange(request, self.max_attempts).await?;
         if !response.status().is_success() {
             return Err(status_error(response, url).await);
         }
         read_json(response).await
     }
 
-    async fn send(
-        &self,
-        url: &Url,
-        method: reqwest::Method,
-        body: Option<Vec<u8>>,
-    ) -> Result<Response, GithubError> {
-        let mut request = Request::new(method, url)
-            .header("Accept", ACCEPT_JSON)
-            .header("X-GitHub-Api-Version", API_VERSION);
-        if let Some(body) = body {
-            request = request
-                .with_body(body)
-                .header("Content-Type", "application/json");
-        }
-        let response = self.exchange(request).await?;
-        if !response.status().is_success() {
-            return Err(status_error(response, url).await);
-        }
-        Ok(response)
-    }
-
-    async fn exchange(&self, request: Request<'_>) -> Result<Response, GithubError> {
-        self.try_exchange(request, true).await
-    }
-
-    async fn exchange_once(&self, request: Request<'_>) -> Result<Response, GithubError> {
-        self.try_exchange(request, false).await
-    }
-
-    async fn try_exchange(
+    async fn exchange(
         &self,
         request: Request<'_>,
-        retry: bool,
+        max_attempts: u32,
     ) -> Result<Response, GithubError> {
+        let request = request.header("X-GitHub-Api-Version", API_VERSION);
         let mut attempt = 1u32;
         let mut delay = Duration::from_millis(500);
         loop {
@@ -338,11 +302,7 @@ impl GithubClient {
                 .await
                 .map_err(transport)?;
             let status = response.status();
-            if status.is_success()
-                || !retry
-                || !is_retryable(&response)
-                || attempt >= self.max_attempts
-            {
+            if status.is_success() || !is_retryable(&response) || attempt >= max_attempts {
                 return Ok(response);
             }
             let wait = response
@@ -557,17 +517,3 @@ fn string_field(value: &Json, name: &str) -> Option<String> {
         _ => None,
     }
 }
-
-pub fn encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
-}
-
-pub use limits::LIMITS;

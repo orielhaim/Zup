@@ -37,7 +37,7 @@ pub use repository::{
 pub use runner::{
     Runner, WINDOWS_ARM, WINDOWS_ARM_VS2026, cross_runner, is_windows, native_runner,
 };
-pub use token::{Token, authorization, discover, discover_with, supplied};
+pub use token::{Token, discover, discover_with, supplied};
 pub use workflow::{
     Freshness, MatrixTarget, Signing, WORKFLOW_PATH, WorkflowPolicy, check, generate,
 };

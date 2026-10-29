@@ -75,6 +75,8 @@ struct State {
     release_id: u64,
     next_asset_id: u64,
     log: Vec<String>,
+    authorization: Vec<Option<String>>,
+    targets: Vec<String>,
 }
 
 impl Github {
@@ -175,6 +177,22 @@ impl Github {
         self.assets().into_iter().map(|(name, ..)| name).collect()
     }
 
+    pub fn authorization(&self) -> Vec<Option<String>> {
+        self.state
+            .lock()
+            .expect("the state is not poisoned")
+            .authorization
+            .clone()
+    }
+
+    pub fn targets(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("the state is not poisoned")
+            .targets
+            .clone()
+    }
+
     pub fn log(&self) -> Vec<String> {
         self.state
             .lock()
@@ -227,6 +245,7 @@ fn serve(
     let target = parts.next().unwrap_or("/").to_owned();
     let mut content_length = 0usize;
     let mut chunked = false;
+    let mut authorization = None;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
@@ -239,6 +258,9 @@ fn serve(
         if let Some((name, value)) = trimmed.split_once(':') {
             let name = name.trim();
             let value = value.trim();
+            if name.eq_ignore_ascii_case("authorization") {
+                authorization = Some(value.to_owned());
+            }
             if name.eq_ignore_ascii_case("content-length") {
                 content_length = value.parse().unwrap_or(0);
             } else if name.eq_ignore_ascii_case("transfer-encoding")
@@ -264,6 +286,8 @@ fn serve(
     let behaviour = {
         let mut guard = state.lock().expect("the state is not poisoned");
         guard.log.push(format!("{method} {path}"));
+        guard.authorization.push(authorization);
+        guard.targets.push(target.clone());
         guard.behaviour.clone()
     };
     if let Some(status) = behaviour.status {
