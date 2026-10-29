@@ -17,14 +17,7 @@ fn zup_with_toolchain(root: &Path) -> Command {
     toolchain_fixture::zup(&toolchain_fixture::host_toolchain(root))
 }
 
-/// The target fixtures check on this host, and a frontend its backend ships.
-///
-/// The diagnostics under test are host-independent; the target carrying them
-/// has to lower far enough to reach the compile errors they describe.
-#[cfg(windows)]
-const TARGET: &str = "windows-x64";
-#[cfg(not(windows))]
-const TARGET: &str = "linux-x64";
+const TARGET: &str = zup_plugin_contract::HOST_TARGET;
 
 #[cfg(windows)]
 const FRONTEND: &str = "gui";
@@ -98,7 +91,8 @@ source = { directory = "dist" }
 scope = "user"
 [install.directory]
 user = "${location.user_data}/Plan"
-"#,
+"#
+        .replace("windows-x64", TARGET),
     )
     .unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();

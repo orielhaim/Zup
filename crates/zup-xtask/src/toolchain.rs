@@ -12,8 +12,6 @@ pub const CLI_PACKAGE: &str = "zup";
 
 pub const PRESET_PACKAGE: &str = "zup-preset-default";
 
-pub const PRESET_DIRECTORY: &str = "crates/zup-preset-default";
-
 pub const TEST_PRESET_PACKAGE: &str = "zup-preset-test";
 
 pub const DISPATCHERS: &[(&str, &str, &str)] = &[
@@ -30,25 +28,13 @@ const EXECUTABLE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
 pub fn version() -> Result<String, String> {
     let root = repository_root();
     let manifest = root.join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest).map_err(|error| {
-        format!(
-            "`{}`: {error}; run this from the zup repository",
-            manifest.display()
-        )
-    })?;
-    for line in text.lines() {
-        let Some(rest) = line.trim().strip_prefix("version") else {
-            continue;
-        };
-        let value = rest.trim_start().trim_start_matches('=').trim();
-        if !value.is_empty() {
-            return Ok(value.trim_matches('"').to_owned());
-        }
-    }
-    Err(format!(
-        "`{}` declares no workspace version",
-        manifest.display()
-    ))
+    crate::workspace::read_manifest(&manifest)?
+        .get("workspace")
+        .and_then(|workspace| workspace.get("package"))
+        .and_then(|package| package.get("version"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("`{}` declares no workspace version", manifest.display()))
 }
 
 pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<PathBuf>, String> {
@@ -58,47 +44,19 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
     let version = version()?;
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
-    let mut written = Vec::new();
     let host = zup_core::Target::host().map_err(|error| error.to_string())?;
     if zup_platform::capabilities(&host).is_none() {
         return Err(format!("unsupported toolchain host `{host}`"));
     }
 
-    for component in zup_toolchain::supported_components(&host) {
-        let zup_toolchain::ToolchainComponent::Runtime {
-            frontend, online, ..
-        } = &component
-        else {
-            continue;
-        };
-        let feature = frontend.as_str();
-        let features = if *online {
-            format!("{feature},online")
-        } else {
-            feature.to_owned()
-        };
-        let binary = format!("zup-setup-{feature}");
-        cargo(
-            root,
-            &[
-                "build",
-                "-p",
-                INSTALLER_PACKAGE,
-                "--no-default-features",
-                "--features",
-                &features,
-                "--bin",
-                &binary,
-                "--profile",
-                profile,
-            ],
-        )?;
-        let built = target_directory(root, profile)
-            .join(format!("{binary}{}", std::env::consts::EXE_SUFFIX));
-        let staged_file = stage_component(&built, &staged, &component, &version)?;
-        println!("  runtime  {feature:<8} {}", component_name(&staged_file));
-        written.push(staged_file);
-    }
+    let mut written = build_runtimes(
+        root,
+        profile,
+        &host,
+        &staged,
+        &version,
+        RuntimeBuild::Native,
+    )?;
 
     #[cfg(windows)]
     for (feature, binary, subsystem) in DISPATCHERS {
@@ -198,45 +156,7 @@ fn build_cross_linux(
     let version = version()?;
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
-    let mut written = Vec::new();
-    for component in zup_toolchain::supported_components(target) {
-        let zup_toolchain::ToolchainComponent::Runtime {
-            frontend, online, ..
-        } = &component
-        else {
-            continue;
-        };
-        let frontend = frontend.as_str();
-        let features = if *online {
-            format!("{frontend},online")
-        } else {
-            frontend.to_owned()
-        };
-        let binary = format!("zup-setup-{frontend}");
-        zigbuild(
-            root,
-            &[
-                "--target",
-                target.rust_triple(),
-                "-p",
-                INSTALLER_PACKAGE,
-                "--no-default-features",
-                "--features",
-                &features,
-                "--bin",
-                &binary,
-                "--profile",
-                profile,
-            ],
-        )?;
-        let built = target_directory(root, target.rust_triple())
-            .join(output_directory(profile))
-            .join(&binary);
-        let staged_file = stage_component(&built, &staged, &component, &version)?;
-        println!("  runtime  {frontend:<8} {}", component_name(&staged_file));
-        written.push(staged_file);
-    }
-    Ok(written)
+    build_runtimes(root, profile, target, &staged, &version, RuntimeBuild::Zig)
 }
 
 fn build_cross_windows(
@@ -250,66 +170,110 @@ fn build_cross_windows(
     let version = version()?;
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
-    let mut written = Vec::new();
-    for component in zup_toolchain::supported_components(target) {
-        match component {
-            zup_toolchain::ToolchainComponent::Runtime { frontend, .. } => {
-                let feature = frontend.as_str();
-                let binary = format!("zup-setup-{feature}");
-                cargo(
-                    root,
-                    &[
-                        "build",
-                        "-p",
-                        INSTALLER_PACKAGE,
-                        "--no-default-features",
-                        "--features",
-                        feature,
-                        "--bin",
-                        &binary,
-                        "--target",
-                        target.rust_triple(),
-                        "--profile",
-                        profile,
-                    ],
-                )
-                .map_err(|error| {
-                    format!(
-                        "{error}; building Windows runtimes off Windows needs a Windows target \
-                         toolchain (for example `cargo-xwin`), or install a release's toolchain \
-                         with `zup toolchain install <dir>` instead"
-                    )
-                })?;
-                let built = target_directory(root, target.rust_triple())
-                    .join(output_directory(profile))
-                    .join(format!("{binary}.exe"));
-                let staged_file = stage_component(&built, &staged, &component, &version)?;
-                println!("  runtime  {feature:<8} {}", component_name(&staged_file));
-                written.push(staged_file);
-            }
-            zup_toolchain::ToolchainComponent::Dispatcher { .. } => {}
-            zup_toolchain::ToolchainComponent::Preset => {
-                println!(
-                    "  preset             skipped: a preset package executes a native binary to \
-                     describe itself. Pack it on the target host (`zup preset pack --build \
-                     <target>`), or pack binaries built elsewhere with `--describe-file \
-                     <document>` from a native `--zup-describe` run"
-                );
-            }
-        }
-    }
+    let written = build_runtimes(
+        root,
+        profile,
+        target,
+        &staged,
+        &version,
+        RuntimeBuild::Cross,
+    )?;
+    println!(
+        "  preset             skipped: a preset package executes a native binary to \
+         describe itself. Pack it on the target host (`zup preset pack --build \
+         <target>`), or pack binaries built elsewhere with `--describe-file \
+         <document>` from a native `--zup-describe` run"
+    );
     #[cfg(windows)]
-    for (feature, binary, subsystem) in DISPATCHERS {
-        written.push(stage_dispatcher(
-            root, profile, &staged, &version, feature, binary, subsystem,
-        )?);
-    }
+    let written = {
+        let mut written = written;
+        for (feature, binary, subsystem) in DISPATCHERS {
+            written.push(stage_dispatcher(
+                root, profile, &staged, &version, feature, binary, subsystem,
+            )?);
+        }
+        written
+    };
     #[cfg(not(windows))]
     {
         println!(
             "  dispatch           skipped: launchers link against Windows libraries; build them \
              on Windows or install a release's toolchain with `zup toolchain install <dir>`"
         );
+    }
+    Ok(written)
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeBuild {
+    Native,
+    Cross,
+    Zig,
+}
+
+fn build_runtimes(
+    root: &Path,
+    profile: &str,
+    target: &zup_core::Target,
+    staged: &Path,
+    version: &str,
+    mode: RuntimeBuild,
+) -> Result<Vec<PathBuf>, String> {
+    let mut written = Vec::new();
+    for component in zup_toolchain::components_for_target(target) {
+        let zup_toolchain::ToolchainComponent::Runtime {
+            frontend, online, ..
+        } = &component
+        else {
+            continue;
+        };
+        let frontend = frontend.as_str();
+        let features = if *online {
+            format!("{frontend},online")
+        } else {
+            frontend.to_owned()
+        };
+        let binary = format!("zup-setup-{frontend}");
+        let mut args = vec![
+            "-p",
+            INSTALLER_PACKAGE,
+            "--no-default-features",
+            "--features",
+            &features,
+            "--bin",
+            &binary,
+            "--profile",
+            profile,
+        ];
+        let directory = match mode {
+            RuntimeBuild::Native => target_directory(root, profile),
+            RuntimeBuild::Cross | RuntimeBuild::Zig => {
+                args.extend(["--target", target.rust_triple()]);
+                target_directory(root, target.rust_triple()).join(output_directory(profile))
+            }
+        };
+        match mode {
+            RuntimeBuild::Zig => zigbuild(root, &args),
+            RuntimeBuild::Native | RuntimeBuild::Cross => {
+                args.insert(0, "build");
+                cargo(root, &args)
+            }
+        }
+        .map_err(|error| {
+            if matches!(mode, RuntimeBuild::Cross) {
+                format!(
+                    "{error}; building Windows runtimes off Windows needs a Windows target \
+                     toolchain (for example `cargo-xwin`), or install a release's toolchain \
+                     with `zup toolchain install <dir>` instead"
+                )
+            } else {
+                error
+            }
+        })?;
+        let built = directory.join(format!("{binary}{}", target.executable_suffix()));
+        let staged_file = stage_component(&built, staged, &component, version)?;
+        println!("  runtime  {frontend:<8} {}", component_name(&staged_file));
+        written.push(staged_file);
     }
     Ok(written)
 }
@@ -407,7 +371,6 @@ fn build_and_stage_preset(
     if !built.is_file() {
         return Err(format!("the preset build wrote no `{}`", built.display()));
     }
-    let describe = scratch.path().join("describe.json");
     let document = Command::new(&built)
         .arg("--zup-describe")
         .output()
@@ -418,8 +381,14 @@ fn build_and_stage_preset(
             String::from_utf8_lossy(&document.stderr).trim()
         ));
     }
-    std::fs::write(&describe, &document.stdout)
-        .map_err(|error| format!("{}: {error}", describe.display()))?;
+    let description: zup_preset_protocol::PresetDescription =
+        serde_json::from_slice(&document.stdout)
+            .map_err(|error| format!("the preset's describe document is unusable: {error}"))?;
+    if description.name != PRESET_PACKAGE || description.version != version {
+        return Err(format!(
+            "the bundled preset must describe itself as {PRESET_PACKAGE} {version}"
+        ));
+    }
     let mut packaged = built.clone();
     if !cfg!(windows) {
         let stripped = scratch.path().join(format!(
@@ -435,32 +404,20 @@ fn build_and_stage_preset(
             ),
         }
     }
-    let binaries = [(host.as_str().to_owned(), packaged)];
+    let mut writer = zup_artifact::preset::PresetPackageWriter::new(description)
+        .map_err(|error| error.to_string())?;
+    writer
+        .add_binary(
+            host,
+            std::fs::read(&packaged).map_err(|error| format!("{}: {error}", packaged.display()))?,
+        )
+        .map_err(|error| error.to_string())?;
     let package = scratch.path().join(zup_toolchain::PRESET_PACKAGE_NAME);
-    let mut pack = vec![
-        "run".to_owned(),
-        "-p".to_owned(),
-        CLI_PACKAGE.to_owned(),
-        "--profile".to_owned(),
-        "dev".to_owned(),
-        "--".to_owned(),
-        "preset".to_owned(),
-        "pack".to_owned(),
-        "--manifest".to_owned(),
-        root.join(PRESET_DIRECTORY).to_string_lossy().into_owned(),
-    ];
-    for (target, path) in &binaries {
-        pack.push("--binary".to_owned());
-        pack.push(format!("{target}={}", path.to_string_lossy()));
-    }
-    pack.extend([
-        "--describe-file".to_owned(),
-        describe.to_string_lossy().into_owned(),
-        "--output".to_owned(),
-        package.to_string_lossy().into_owned(),
-        "--force".to_owned(),
-    ]);
-    cargo(root, &pack.iter().map(String::as_str).collect::<Vec<_>>())?;
+    std::fs::write(
+        &package,
+        writer.finish().map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("{}: {error}", package.display()))?;
     stage_component(
         &package,
         staged,
@@ -686,8 +643,23 @@ pub fn package(
     profile: &str,
     out: &Path,
     sources: &[PathBuf],
+    cli: &Path,
 ) -> Result<PathBuf, String> {
     let version = version()?;
+    let host = zup_core::Target::host().map_err(|error| error.to_string())?;
+    zup_binary::Executable::read(cli)
+        .map_err(|error| format!("{}: {error}", cli.display()))?
+        .refuse_target(&host)
+        .map_err(|error| format!("{}: {error}", cli.display()))?;
+    let reported = Command::new(cli)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("{} --version: {error}", cli.display()))?;
+    if !reported.status.success()
+        || String::from_utf8_lossy(&reported.stdout).trim() != format!("zup {version}")
+    {
+        return Err(format!("{} must be the zup {version} CLI", cli.display()));
+    }
     let assembly = tempfile::tempdir().map_err(|error| error.to_string())?;
     let staged = if sources.is_empty() {
         staging_directory(root, profile, &version)
@@ -704,29 +676,7 @@ pub fn package(
     }
     std::fs::create_dir_all(out).map_err(|error| format!("{}: {error}", out.display()))?;
 
-    let cli_profile = if profile == "installer" {
-        "release"
-    } else {
-        profile
-    };
-    cargo(
-        root,
-        &[
-            "build",
-            "-p",
-            CLI_PACKAGE,
-            "--bin",
-            CLI_PACKAGE,
-            "--profile",
-            cli_profile,
-        ],
-    )?;
-    let built =
-        target_directory(root, cli_profile).join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"));
-    copy(
-        &built,
-        &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")),
-    )?;
+    copy(cli, &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")))?;
 
     let mut components = Vec::new();
     let test_peer = zup_toolchain::test_preset_file_name(EXECUTABLE_SUFFIX);
@@ -756,12 +706,7 @@ pub fn package(
     }
     components.sort_by(|left, right| left.path.cmp(&right.path));
 
-    let mut index = zup_toolchain::ToolchainRelease::new(
-        version.clone(),
-        zup_core::Target::host()
-            .map_err(|error| error.to_string())?
-            .to_string(),
-    );
+    let mut index = zup_toolchain::ToolchainRelease::new(version.clone(), host.to_string());
     index.cli = zup_toolchain::ReleaseFile::of(
         &format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}"),
         &out.join(format!("{CLI_PACKAGE}{EXECUTABLE_SUFFIX}")),
@@ -839,7 +784,7 @@ mod tests {
             format!("zup-preset-test{EXECUTABLE_SUFFIX}"),
             "the peer is named by the contract crate, so this test would notice it moving"
         );
-        let listed = zup_toolchain::host_components(&zup_core::Target::host().unwrap());
+        let listed = zup_toolchain::components_for_target(&zup_core::Target::host().unwrap());
         for component in &listed {
             assert_ne!(
                 zup_toolchain::file_name(component, EXECUTABLE_SUFFIX),

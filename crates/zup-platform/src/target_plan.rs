@@ -3,13 +3,14 @@
 use serde::{Deserialize, Serialize};
 use zup_core::{
     App, ComponentId, FileAssociationId, FileExtension, InstalledPreset, LauncherLocation,
-    NonEmptyString, PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller,
-    PrerequisitePackage, PrerequisiteRequirement, Privilege, ProtocolScheme, RelativePath,
-    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, Target,
+    NonEmptyString, PrerequisitePackage, Privilege, ProtocolScheme, RelativePath, ResourceKey,
+    SelectedScope, ServiceId, ServiceStart, Sha256Digest, Target,
 };
+use zup_plan::PlannedPrerequisite;
 
 use crate::command::CommandSpec;
 use crate::target_path::TargetPath;
+use thiserror::Error;
 
 /// Target-resolved plan. Contains no `Template` values and no build-machine paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,7 +22,7 @@ pub struct TargetPlan {
     pub selected_components: Vec<ComponentId>,
 
     #[serde(default)]
-    pub prerequisites: Vec<TargetPrerequisite>,
+    pub prerequisites: Vec<PlannedPrerequisite>,
     pub files: Vec<TargetFile>,
     pub launchers: Vec<TargetLauncher>,
     pub path_entries: Vec<TargetPathEntry>,
@@ -37,16 +38,6 @@ pub struct TargetPlan {
     /// are content and this is the record of what they are for. An installation
     /// whose window cannot be reconstructed from its own state is not installed.
     pub preset: Option<InstalledPreset>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TargetPrerequisite {
-    pub id: PrerequisiteId,
-    pub name: NonEmptyString,
-    pub target: PrerequisiteArchitecture,
-    pub requirement: PrerequisiteRequirement,
-    pub package: PrerequisitePackage,
-    pub installer: PrerequisiteInstaller,
 }
 
 /// One desired payload file on the target machine.
@@ -135,4 +126,211 @@ pub struct TargetPlanSummary {
     pub selected_component_count: usize,
     pub prerequisite_count: usize,
     pub download_bytes: u64,
+}
+
+/// The common file and prerequisite portion lowered from a resolved install plan.
+/// Platform backends remain responsible for validating each target path and checking
+/// collisions before accepting these files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetPlanFiles {
+    prerequisites: Vec<PlannedPrerequisite>,
+    files: Vec<TargetFile>,
+    install_bytes: u64,
+    download_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("target plan size overflow")]
+pub struct TargetPlanSizeOverflow;
+
+impl TargetPlanFiles {
+    pub fn files(&self) -> &[TargetFile] {
+        &self.files
+    }
+
+    pub const fn install_bytes(&self) -> u64 {
+        self.install_bytes
+    }
+
+    pub const fn download_bytes(&self) -> u64 {
+        self.download_bytes
+    }
+
+    pub fn into_parts(self) -> (Vec<PlannedPrerequisite>, Vec<TargetFile>) {
+        (self.prerequisites, self.files)
+    }
+
+    /// Add a backend-generated file while keeping the shared byte total checked.
+    pub fn push_file(&mut self, file: TargetFile) -> Result<(), TargetPlanSizeOverflow> {
+        self.install_bytes = self
+            .install_bytes
+            .checked_add(file.size)
+            .ok_or(TargetPlanSizeOverflow)?;
+        self.files.push(file);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum TargetPlanFilesError<E> {
+    Resolve(E),
+    SizeOverflow,
+}
+
+/// Lower the common payload files and prerequisites shared by platform backends.
+/// The resolver callback performs platform-specific template and path validation.
+pub fn lower_target_plan_files<E>(
+    plan: &zup_plan::InstallPlan,
+    mut resolve: impl FnMut(&zup_core::Template, &'static str) -> Result<TargetPath, E>,
+) -> Result<TargetPlanFiles, TargetPlanFilesError<E>> {
+    let prerequisites = plan.prerequisites.clone();
+
+    let mut files = TargetPlanFiles {
+        prerequisites,
+        files: Vec::with_capacity(plan.files.len()),
+        install_bytes: 0,
+        download_bytes: 0,
+    };
+    files.download_bytes = files
+        .prerequisites
+        .iter()
+        .filter_map(|prerequisite| match &prerequisite.package {
+            PrerequisitePackage::Remote { size, .. } => *size,
+            PrerequisitePackage::Embedded { .. } => None,
+        })
+        .try_fold(0u64, |total, size| total.checked_add(size))
+        .ok_or(TargetPlanFilesError::SizeOverflow)?;
+    for file in &plan.files {
+        let destination = resolve(&file.destination, "file destination")
+            .map_err(TargetPlanFilesError::Resolve)?;
+        files
+            .push_file(TargetFile {
+                key: ResourceKey::File {
+                    destination: destination.to_string(),
+                },
+                source_relative: file.source_relative.clone(),
+                destination,
+                size: file.size,
+                sha256: file.sha256,
+                executable: file.executable,
+                privilege: file.privilege,
+            })
+            .map_err(|_| TargetPlanFilesError::SizeOverflow)?;
+    }
+    Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use semver::Version;
+    use zup_core::{
+        App, AppId, NonEmptyString, PrerequisiteArchitecture, PrerequisiteId,
+        PrerequisiteRequirement, Runtime, RuntimeRequirementId, SelectedScope, Target, Template,
+        hash_bytes,
+    };
+    use zup_plan::{InstallPlan, PlanSummary, PlannedFile, PlannedPrerequisite};
+
+    fn plan() -> InstallPlan {
+        InstallPlan {
+            app: App {
+                id: AppId::new("com.example.app").unwrap(),
+                name: NonEmptyString::new("App").unwrap(),
+                version: Version::new(1, 0, 0),
+                publisher: None,
+                main: None,
+                description: None,
+            },
+            target: Target::parse("linux-x64").unwrap(),
+            scope: SelectedScope::User,
+            install_directory: Template::parse("/opt/app").unwrap(),
+            selected_components: Vec::new(),
+            prerequisites: Vec::new(),
+            files: Vec::new(),
+            launchers: Vec::new(),
+            path_entries: Vec::new(),
+            services: Vec::new(),
+            protocols: Vec::new(),
+            file_associations: Vec::new(),
+            summary: PlanSummary {
+                file_count: 0,
+                install_bytes: 0,
+                selected_component_count: 0,
+                resource_count: 0,
+                requires_authorization: false,
+                prerequisite_count: 0,
+                download_bytes: 0,
+            },
+        }
+    }
+
+    fn remote_prerequisite(name: &str, size: Option<u64>) -> PlannedPrerequisite {
+        PlannedPrerequisite {
+            id: PrerequisiteId::new(name).unwrap(),
+            name: NonEmptyString::new(name).unwrap(),
+            target: PrerequisiteArchitecture::Any,
+            requirement: PrerequisiteRequirement::Runtime(Runtime {
+                id: RuntimeRequirementId::new("test.runtime").unwrap(),
+                version: None,
+            }),
+            package: PrerequisitePackage::Remote {
+                url: "https://example.invalid/package".into(),
+                sha256: hash_bytes(b"package"),
+                size,
+                filename: "package.bin".into(),
+            },
+            installer: Default::default(),
+        }
+    }
+
+    #[test]
+    fn payload_and_generated_files_share_checked_install_total() {
+        let mut plan = plan();
+        plan.files.push(PlannedFile {
+            key: ResourceKey::File {
+                destination: "/opt/app/payload".into(),
+            },
+            source_relative: zup_core::RelativePath::new("payload").unwrap(),
+            destination: Template::parse("/opt/app/payload").unwrap(),
+            size: u64::MAX,
+            sha256: hash_bytes(b"payload"),
+            privilege: zup_core::Privilege::User,
+            executable: false,
+        });
+        let mut lowered = lower_target_plan_files(&plan, |_, _| {
+            TargetPath::new(plan.target, "/opt/app/payload").map_err(|error| error.to_string())
+        })
+        .unwrap();
+
+        let generated = TargetFile {
+            key: ResourceKey::File {
+                destination: "/opt/app/generated.desktop".into(),
+            },
+            source_relative: zup_core::RelativePath::new("generated.desktop").unwrap(),
+            destination: TargetPath::new(plan.target, "/opt/app/generated.desktop").unwrap(),
+            size: 1,
+            sha256: hash_bytes(b"generated"),
+            privilege: zup_core::Privilege::User,
+            executable: false,
+        };
+        assert_eq!(lowered.install_bytes(), u64::MAX);
+        assert_eq!(lowered.push_file(generated), Err(TargetPlanSizeOverflow));
+        assert_eq!(lowered.install_bytes(), u64::MAX);
+        assert_eq!(lowered.files().len(), 1);
+    }
+
+    #[test]
+    fn remote_download_sizes_use_checked_total() {
+        let mut plan = plan();
+        plan.prerequisites
+            .push(remote_prerequisite("first", Some(u64::MAX)));
+        plan.prerequisites
+            .push(remote_prerequisite("second", Some(1)));
+        assert!(matches!(
+            lower_target_plan_files(&plan, |_, _| -> Result<TargetPath, String> {
+                unreachable!()
+            }),
+            Err(TargetPlanFilesError::SizeOverflow)
+        ));
+    }
 }

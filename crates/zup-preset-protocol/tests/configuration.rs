@@ -1,23 +1,6 @@
 use zup_preset_protocol::{Configuration, ConfigurationError, MAX_ASSET_PATH_BYTES, MAX_ASSETS};
 
 #[test]
-fn assets_are_resolved_by_name() {
-    let mut configuration = Configuration::empty();
-    configuration
-        .assets
-        .insert("logo".into(), "C:/Temp/zup/ui/logo.svg".into());
-    configuration
-        .assets
-        .insert("hero".into(), "C:/Temp/zup/ui/hero.png".into());
-    configuration.validate().expect("valid");
-    assert_eq!(
-        configuration.assets.get("logo").map(String::as_str),
-        Some("C:/Temp/zup/ui/logo.svg")
-    );
-    assert!(!configuration.assets.contains_key("missing"));
-}
-
-#[test]
 fn more_assets_than_the_limit_are_refused() {
     let mut configuration = Configuration::empty();
     for index in 0..=MAX_ASSETS {
@@ -62,8 +45,12 @@ fn an_over_long_asset_path_is_refused() {
 }
 
 #[test]
-fn settings_travel_as_json_the_preset_deserializes_itself() {
+fn configuration_round_trips_settings_and_assets() {
     let mut configuration = Configuration::empty();
+    configuration
+        .assets
+        .insert("logo".into(), "C:/Temp/zup/ui/logo.svg".into());
+    configuration.validate().unwrap();
     configuration.settings = serde_json::json!({ "accent": "#695cff", "logo": "logo" });
     let bytes = serde_json::to_vec(&configuration).expect("serializes");
     let read: Configuration = serde_json::from_slice(&bytes).expect("deserializes");

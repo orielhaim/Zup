@@ -94,17 +94,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_different_wire_version_is_its_own_refusal() {
+    #[rstest::rstest]
+    #[case::previous(1)]
+    #[case::future(PRESET_PROTOCOL_VERSION + 1)]
+    fn a_different_wire_version_is_its_own_refusal(#[case] protocol: u32) {
         let host = offers(&[]);
         let error = host
-            .check(PRESET_PROTOCOL_VERSION + 1, &Capabilities::default())
+            .check(protocol, &Capabilities::default())
             .expect_err("a preset from another protocol generation");
         assert_eq!(
             error,
             Incompatible::Protocol {
                 expected: PRESET_PROTOCOL_VERSION,
-                found: PRESET_PROTOCOL_VERSION + 1,
+                found: protocol,
             }
         );
         assert!(

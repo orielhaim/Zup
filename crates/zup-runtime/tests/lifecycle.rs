@@ -4,8 +4,7 @@ struct TestDir(std::path::PathBuf);
 
 impl TestDir {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("zup-recovery-{}", zup_runtime::Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!("zup-recovery-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -36,7 +35,7 @@ fn recovery_discovery_never_hides_a_missing_or_corrupt_journal() {
     let journal = root
         .0
         .join("transactions")
-        .join(zup_runtime::Uuid::now_v7().to_string());
+        .join(uuid::Uuid::now_v7().to_string());
     std::fs::create_dir_all(&journal).unwrap();
     assert!(discover_recovery(&root.0).is_err());
     std::fs::write(journal.join("transaction.json"), b"{truncated").unwrap();

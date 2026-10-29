@@ -15,13 +15,13 @@ pub enum CompletionKind {
 pub struct OperationCompletion {
     pub update: Option<zup_preset_protocol::UpdateState>,
     pub kind: CompletionKind,
-    pub id: zup_runtime::Uuid,
+    pub id: uuid::Uuid,
     pub outcome: InstallOutcome,
     pub repair_drift: Vec<String>,
 }
 
 pub struct OperationLaunch<'a> {
-    pub id: zup_runtime::Uuid,
+    pub id: uuid::Uuid,
     pub action: LifecycleAction,
     pub selection: &'a zup_preset_host::Selection,
     pub control: OperationControl,

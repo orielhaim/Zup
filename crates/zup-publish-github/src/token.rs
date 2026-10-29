@@ -124,7 +124,3 @@ fn gh_auth_token() -> Option<String> {
     let value = value.trim().to_owned();
     (!value.is_empty()).then_some(value)
 }
-
-pub fn authorization(token: &Token) -> String {
-    format!("Bearer {}", token.expose())
-}

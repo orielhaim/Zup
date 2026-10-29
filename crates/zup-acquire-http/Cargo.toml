@@ -8,7 +8,6 @@ description = "HTTP transport for the zup content acquisition engine"
 
 [dependencies]
 backon.workspace = true
-bytes.workspace = true
 futures-util = "0.3"
 reqwest.workspace = true
 thiserror.workspace = true

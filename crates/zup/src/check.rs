@@ -285,11 +285,8 @@ fn plan_windows(
     .map_err(|error| {
         crate::failure::error("zup.plan.transaction", format!("transaction plan: {error}"))
     })?;
-    let mut preview = zup_presentation::PlanPreview::from_transaction_plan(&transaction, scope)
-        .with_prerequisites(&install);
-    preview.application = installer.app.name.to_string();
-    preview.version = installer.app.version.to_string();
-    preview.install_directory = target.install_directory.to_string();
+    let preview =
+        zup_presentation::PlanPreview::from_transaction_plan(&transaction, scope, Some(&target));
     reporter.log(LogLevel::Info, preview.human());
     let changes = preview
         .groups

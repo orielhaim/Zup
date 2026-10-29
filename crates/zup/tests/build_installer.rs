@@ -33,8 +33,11 @@ mod toolchain_fixture;
 
 const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
-const X64: &str = "windows-x64";
-const ARM64: &str = "windows-arm64";
+const OTHER_TARGET: &str = if cfg!(target_arch = "aarch64") {
+    "windows-x64"
+} else {
+    "windows-arm64"
+};
 
 /// A project with one payload file and no plugins, which is the smallest thing a
 /// build can be asked to compose.
@@ -63,7 +66,9 @@ user = "${location.user_data}/Build"
 [[files]]
 source = "**/*"
 destination = "${install}"
-"#,
+"#
+            .replace("windows-x64", HOST_TARGET)
+            .as_str(),
         )
     }
 
@@ -130,7 +135,7 @@ fn a_build_composes_an_installer_from_the_staged_toolchain() {
     let output = project.path().join("Setup.exe");
     assert!(output.is_file());
     let bundle = zup_windows::EmbeddedBundle::open(&output).expect("the installer opens");
-    assert_eq!(bundle.target().as_str(), X64);
+    assert_eq!(bundle.target(), &zup_core::Target::host().unwrap());
     assert_eq!(bundle.frontend(), Frontend::Gui);
     assert_eq!(
         zup_windows::read_frontend(&output).expect("the subsystem reads"),
@@ -172,7 +177,7 @@ fn a_frontend_flag_selects_the_matching_template() {
 #[test]
 fn a_template_for_the_wrong_machine_or_frontend_is_refused() {
     for (label, target, frontend, extra) in [
-        ("machine", ARM64, Frontend::Gui, vec![]),
+        ("machine", OTHER_TARGET, Frontend::Gui, vec![]),
         (
             "frontend",
             HOST_TARGET,

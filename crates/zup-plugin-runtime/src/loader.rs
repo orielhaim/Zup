@@ -26,8 +26,6 @@ pub enum LoadError {
     MissingArtifact { plugin_id: PluginId },
     #[error("plugin artifact set has an unexpected number of entries")]
     ArtifactCount,
-    #[error("plugin artifact `{plugin_id}` is not declared by the installer")]
-    ExtraArtifact { plugin_id: PluginId },
     #[error("plugin artifact `{plugin_id}` is duplicated")]
     DuplicateArtifact { plugin_id: PluginId },
     #[error("installer plugin `{plugin_id}` is duplicated")]
@@ -74,26 +72,13 @@ pub(crate) fn load_bundle(
         });
     }
     let engine = PluginEngine::new(expected_target.rust_triple())?;
-    if engine.target() != expected_target.rust_triple() {
-        return Err(LoadError::TargetMismatch {
-            expected: *expected_target,
-            found: Target::parse(engine.target()).expect("engine target is a valid triple"),
-        });
-    }
     let expected_fingerprint = Sha256Digest::from_bytes(*engine.fingerprint().as_bytes());
     let artifacts = exact_artifacts(&package)?;
     let mut plugins = BTreeMap::new();
     for (plugin_id, artifact) in artifacts {
         verify_metadata(&plugin_id, artifact, expected_target, expected_fingerprint)?;
         let bytes = package.plugin_aot(&plugin_id)?;
-        if bytes.len() as u64 != artifact.aot_size
-            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.aot_sha256
-        {
-            return Err(LoadError::UnverifiedAot { plugin_id });
-        }
-        if Engine::detect_precompiled(&bytes) != Some(Precompiled::Component) {
-            return Err(LoadError::NotAComponent { plugin_id });
-        }
+        verify_aot(&plugin_id, artifact, &bytes)?;
         plugins.insert(
             plugin_id,
             LoadedPlugin {
@@ -115,44 +100,40 @@ impl LoadedBundle {
         &mut self,
         plugin_id: &PluginId,
     ) -> Result<&ValidatedComponent, LoadError> {
-        if !self.plugins.contains_key(plugin_id) {
-            return Err(LoadError::MissingArtifact {
+        let plugin = self
+            .plugins
+            .get_mut(plugin_id)
+            .ok_or_else(|| LoadError::MissingArtifact {
                 plugin_id: plugin_id.clone(),
-            });
-        }
-        if self.plugins[plugin_id].component.is_none() {
-            let artifact = self.plugins[plugin_id].artifact.clone();
-            verify_metadata(
-                plugin_id,
-                &artifact,
-                &self.target,
-                Sha256Digest::from_bytes(*self.engine.fingerprint().as_bytes()),
-            )?;
+            })?;
+        if plugin.component.is_none() {
             let bytes = self.package.plugin_aot(plugin_id)?;
-            if bytes.len() as u64 != artifact.aot_size
-                || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.aot_sha256
-            {
-                return Err(LoadError::UnverifiedAot {
-                    plugin_id: plugin_id.clone(),
-                });
-            }
-            if Engine::detect_precompiled(&bytes) != Some(Precompiled::Component) {
-                return Err(LoadError::NotAComponent {
-                    plugin_id: plugin_id.clone(),
-                });
-            }
-            // SAFETY: the package accessor re-read and authenticated these exact bytes, and the engine metadata was validated at load.
-            let component = unsafe { self.engine.validate_trusted_aot(&bytes)? };
-            self.plugins
-                .get_mut(plugin_id)
-                .expect("plugin presence checked")
-                .component = Some(component);
+            verify_aot(plugin_id, &plugin.artifact, &bytes)?;
+            // SAFETY: the package authenticated these exact bytes; engine metadata was validated at load.
+            plugin.component = Some(unsafe { self.engine.validate_trusted_aot(&bytes)? });
         }
-        Ok(self.plugins[plugin_id]
-            .component
-            .as_ref()
-            .expect("component loaded above"))
+        Ok(plugin.component.as_ref().expect("component loaded above"))
     }
+}
+
+fn verify_aot(
+    plugin_id: &PluginId,
+    artifact: &PluginArtifact,
+    bytes: &[u8],
+) -> Result<(), LoadError> {
+    if bytes.len() as u64 != artifact.aot_size
+        || Sha256Digest::from_bytes(Sha256::digest(bytes).into()) != artifact.aot_sha256
+    {
+        return Err(LoadError::UnverifiedAot {
+            plugin_id: plugin_id.clone(),
+        });
+    }
+    if Engine::detect_precompiled(bytes) != Some(Precompiled::Component) {
+        return Err(LoadError::NotAComponent {
+            plugin_id: plugin_id.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn host_target() -> Target {
@@ -261,13 +242,6 @@ fn verify_metadata(
             plugin_id: plugin_id.clone(),
             field: "AOT size",
             found: artifact.aot_size.to_string(),
-        });
-    }
-    let host = host_target();
-    if artifact.target != host {
-        return Err(LoadError::HostTargetMismatch {
-            expected: artifact.target,
-            host,
         });
     }
     artifact.validate().map_err(LoadError::Package)?;

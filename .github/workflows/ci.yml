@@ -16,6 +16,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
   RUST_BACKTRACE: 1
 
 jobs:
@@ -46,9 +48,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fast-${{ runner.os }}
+          shared-key: fast-${{ runner.os }}-${{ runner.arch }}-debug0
           cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+
+      - uses: ilammy/setup-nasm@v1
+        if: matrix.platform == 'windows'
+        with:
+          platform: win64
 
       - uses: rui314/setup-mold@v1
         if: matrix.platform == 'linux'
@@ -103,9 +109,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: fast-${{ runner.os }}
+          shared-key: fast-${{ runner.os }}-${{ runner.arch }}-debug0
           cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+
+      - uses: ilammy/setup-nasm@v1
+        if: matrix.platform == 'windows'
+        with:
+          platform: win64
 
       - uses: rui314/setup-mold@v1
         if: matrix.platform == 'linux'
@@ -176,7 +186,7 @@ jobs:
           toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: terminal-${{ runner.os }}-${{ runner.arch }}
-          cache-on-failure: true
+          shared-key: terminal-${{ runner.os }}-${{ runner.arch }}-debug0
+          cache-on-failure: false
       - name: Terminal and automation lifecycle
         run: cargo test -p zup-installer --no-default-features --features console,headless,online --test terminal

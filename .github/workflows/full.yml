@@ -1,5 +1,5 @@
 name: Full Verification
-run-name: ${{ inputs.measure_sizes && 'Installer size measurements' || 'Full Verification' }}
+run-name: ${{ inputs.native_windows_runner && inputs.native_windows_runner != 'none' && format('Native Windows verification ({0})', inputs.native_windows_runner) || inputs.measure_sizes && 'Installer size measurements' || 'Full Verification' }}
 
 on:
   push:
@@ -8,6 +8,15 @@ on:
     - cron: "0 4 * * 1"
   workflow_dispatch:
     inputs:
+      native_windows_runner:
+        description: Run focused native Windows validation instead of Full Verification
+        type: choice
+        default: none
+        options: [none, windows-2025, windows-11-arm]
+      test_filter:
+        description: Nextest expression for focused native Windows validation
+        type: string
+        default: all()
       measure_sizes:
         description: Measure native installers instead of running full verification
         type: boolean
@@ -29,18 +38,51 @@ permissions:
   contents: read
 
 concurrency:
-  group: full-${{ github.ref }}-${{ inputs.measure_sizes && format('sizes-{0}-{1}-{2}', inputs.profile, inputs.revision, inputs.size_runner) || 'verification' }}
+  group: full-${{ github.ref }}-${{ inputs.measure_sizes && format('sizes-{0}-{1}-{2}', inputs.profile, inputs.revision, inputs.size_runner) || inputs.native_windows_runner && inputs.native_windows_runner != 'none' && format('native-{0}', inputs.native_windows_runner) || 'verification' }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
   RUST_BACKTRACE: 1
 
 jobs:
+  native-windows:
+    name: Native Windows verification
+    if: inputs.native_windows_runner && inputs.native_windows_runner != 'none'
+    runs-on: ${{ inputs.native_windows_runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: full-${{ runner.os }}-${{ runner.arch }}-debug0
+          cache-on-failure: false
+      - uses: ilammy/setup-nasm@v1
+        with:
+          platform: win64
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Toolchain
+        run: cargo xtask toolchain build
+      - name: Selected native tests
+        shell: pwsh
+        env:
+          TEST_FILTER: ${{ inputs.test_filter }}
+        run: cargo nextest run -p zup -p zup-installer -p zup-windows -p zup-plugin-runtime --all-features --no-fail-fast -E "$env:TEST_FILTER"
+      - name: Machine authority tests
+        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
   sizes:
     name: Installer sizes (${{ matrix.runner }})
-    if: inputs.measure_sizes == true
+    if: inputs.measure_sizes == true && (!inputs.native_windows_runner || inputs.native_windows_runner == 'none')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -65,7 +107,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: sizes-${{ runner.os }}-${{ runner.arch }}
-          cache-on-failure: true
+          cache-on-failure: false
       - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
         with:
@@ -92,6 +134,12 @@ jobs:
           suffix=''
           if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
           python "$RUNNER_TEMP/installer-size.py" --cli "target/debug/zup$suffix" --toolchain "target/$directory/toolchain/0.0.1" --output target/sizes
+          python - <<'PYREPORT'
+          import json
+          from pathlib import Path
+          for row in json.loads(Path("target/sizes/sizes.json").read_text())["measurements"]:
+              print("::notice title=Installer size::" + json.dumps(row))
+          PYREPORT
       - name: Windows runtime link map
         if: runner.os == 'Windows' && inputs.profile == 'installer'
         shell: pwsh
@@ -109,7 +157,7 @@ jobs:
           if-no-files-found: error
   test:
     name: full test ${{ matrix.name }}
-    if: inputs.measure_sizes != true
+    if: inputs.measure_sizes != true && (!inputs.native_windows_runner || inputs.native_windows_runner == 'none')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -120,6 +168,10 @@ jobs:
             runner: windows-2025
             platform: windows
             artifact: windows
+          - name: Windows ARM64
+            runner: windows-11-arm
+            platform: windows
+            artifact: windows-arm64
           - name: Linux
             runner: ubuntu-24.04
             platform: linux
@@ -140,9 +192,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: full-${{ runner.os }}
+          shared-key: full-${{ runner.os }}-${{ runner.arch }}-debug0
           cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+
+      - uses: ilammy/setup-nasm@v1
+        if: matrix.platform == 'windows'
+        with:
+          platform: win64
 
       - uses: rui314/setup-mold@v1
         if: matrix.platform == 'linux'
@@ -194,11 +250,34 @@ jobs:
         shell: bash
         run: cargo nextest run --all-features --no-fail-fast $PORTABLE $LINUX
 
+      - name: Build reusable tooling
+        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        run: cargo build -p zup -p zup-xtask --bins
+
+      - name: Archive reusable tooling
+        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        shell: bash
+        run: |
+          suffix=''
+          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+          tar -cf "tooling-${{ matrix.artifact }}.tar" -C target/debug "zup$suffix" "xtask$suffix"
+
+      - name: Upload reusable tooling
+        if: matrix.artifact == 'windows' || matrix.artifact == 'linux'
+        uses: actions/upload-artifact@v7
+        with:
+          path: tooling-${{ matrix.artifact }}.tar
+          archive: false
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Upload staged toolchain
         uses: actions/upload-artifact@v7
         with:
           name: toolchain-${{ matrix.artifact }}
           path: target/debug/toolchain
+          compression-level: 0
+          retention-days: 7
           if-no-files-found: error
 
   cross-build-windows:
@@ -212,15 +291,16 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: "1.99"
+          name: tooling-windows.tar
+          path: tools
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: full-${{ runner.os }}
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+      - name: Restore reusable tooling
+        shell: bash
+        run: |
+          mkdir -p tooling
+          tar -xf tools/tooling-windows.tar -C tooling
 
       - uses: actions/download-artifact@v8
         with:
@@ -237,18 +317,15 @@ jobs:
           name: toolchain-linux-arm64
           path: tc-arm64
 
-      - name: Build the developer CLI
-        run: cargo build -p zup --bin zup --profile dev
-
       - name: Merge both toolchains
         shell: pwsh
         run: |
-          cargo xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
+          tooling/xtask.exe toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
 
       - name: Build every fixture target
         shell: pwsh
         run: |
-          $zup = 'target/debug/zup.exe'
+          $zup = 'tooling/zup.exe'
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
           & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-arm64 --output dist/arm64.bin --force
@@ -257,7 +334,7 @@ jobs:
       - name: Verify every artifact
         shell: pwsh
         run: |
-          $zup = 'target/debug/zup.exe'
+          $zup = 'tooling/zup.exe'
           foreach ($artifact in @('dist/win.exe', 'dist/lnx.bin', 'dist/arm64.bin', 'dist/uni.exe')) {
             & $zup artifact inspect $artifact | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "inspect of $artifact failed" }
@@ -296,20 +373,16 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: "1.99"
+          name: tooling-linux.tar
+          path: tools
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: full-${{ runner.os }}
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
-
-      - uses: rui314/setup-mold@v1
-        with:
-          mold-version: 3.0.0
-          make-default: "true"
+      - name: Restore reusable tooling
+        shell: bash
+        run: |
+          mkdir -p tooling
+          tar -xf tools/tooling-linux.tar -C tooling
 
       - uses: actions/download-artifact@v8
         with:
@@ -326,22 +399,18 @@ jobs:
           name: toolchain-linux-arm64
           path: tc-arm64
 
-      - name: Build the developer CLI
-        shell: bash
-        run: cargo build -p zup --bin zup --profile dev
-
       - name: Merge both toolchains
         shell: bash
         run: |
           set -euo pipefail
-          cargo xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
+          tooling/xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
           mkdir -p dist
 
       - name: Build every fixture target
         shell: bash
         run: |
           set -euo pipefail
-          zup=target/debug/zup
+          zup=tooling/zup
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
           $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-arm64 --output dist/arm64.bin --force
@@ -351,7 +420,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zup=target/debug/zup
+          zup=tooling/zup
           for artifact in dist/win.exe dist/lnx.bin dist/arm64.bin dist/uni.exe; do
             $zup artifact inspect "$artifact" > /dev/null
           done
@@ -438,16 +507,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
         with:
-          toolchain: "1.99"
-          components: rustfmt, clippy
+          name: tooling-windows.tar
+          path: tools
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: full-${{ runner.os }}
-          cache-on-failure: false
-          save-if: ${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
+      - name: Restore reusable tooling
+        shell: bash
+        run: |
+          mkdir -p tooling
+          tar -xf tools/tooling-windows.tar -C tooling
 
       - uses: actions/download-artifact@v8
         with:
@@ -467,14 +536,14 @@ jobs:
       - name: Merge and package the multi-platform release
         shell: pwsh
         run: |
-          cargo xtask toolchain package --profile dev --source tc-win --source tc-linux --source tc-arm64
+          tooling/xtask.exe toolchain package --cli tooling/zup.exe --profile dev --source tc-win --source tc-linux --source tc-arm64
 
       - name: Release clean-room
         shell: pwsh
-        run: cargo xtask release clean-room
+        run: tooling/xtask.exe release clean-room
 
       - name: Published schema
         shell: pwsh
         run: |
-          cargo run -p zup --bin zup -- schema --output schema/zup.schema.json
+          tooling/zup.exe schema --output schema/zup.schema.json
           git diff --exit-code -- schema/zup.schema.json

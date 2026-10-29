@@ -1,38 +1,12 @@
-//! The compatibility contract for a zup toolchain component.
-//!
-//! `zup build` composes an installer out of binaries zup itself produced: a
-//! native runtime template, and a dispatcher for a universal artifact. Those bytes
-//! have a version, a machine, and a presentation, and an installer composed from
-//! the wrong combination is an installer that does not work on the machine it was
-//! built for - sometimes on any machine.
-//!
-//! A file name is not a compatibility check. `zup-setup-gui.exe` is a name, and
-//! the same name is written by every zup release that ever had a GUI template. So
-//! every component ships a machine-readable descriptor beside it, and the
-//! descriptor is what the builder reads.
-//!
-//! The contract has one more property, and it is the reason the descriptor exists
-//! as a file rather than as a field inside the binary: **a build host must be able
-//! to inspect a component it cannot run.** A Linux build host composes a Windows
-//! installer for two architectures; neither binary can be started there. Reading
-//! the descriptor, and the target and subsystem out of the file's own header,
-//! answers "will this work" without executing anything.
-//!
-//! This crate is deliberately portable and dependency-light. It is read by the
-//! developer CLI on any host, and written by the repository's contributor
-//! tooling. Component identity never depends on the build host.
+//! Portable descriptors and integrity verification for staged toolchain components.
+//! Components can be inspected without executing target binaries.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use zup_core::Frontend;
 
-/// The version of this contract.
-///
-/// Bumped when the descriptor's shape or its meaning changes. A builder refuses a
-/// component whose descriptor it does not understand, rather than reading the
-/// fields it recognises and ignoring the rest.
+/// Descriptor schema version. Unknown versions are refused.
 pub const FORMAT_VERSION: u32 = 1;
 
 /// The extension of the descriptor written beside every component.
@@ -59,20 +33,9 @@ pub enum ToolchainComponent {
         target: zup_core::Target,
         frontend: Frontend,
     },
-    /// The launcher for one presentation experience.
-    ///
-    /// `online` is a capability rather than a variant: a thin artifact's launcher
-    /// resolves a release over the network before it can start a runtime, and the
-    /// same source built without that path refuses a thin artifact with a clear
-    /// reason instead of pretending. An offline artifact needs neither.
+    /// A universal launcher, with optional authenticated network acquisition.
     Dispatcher { subsystem: Subsystem, online: bool },
-    /// The preset package Zup ships.
-    ///
-    /// One package rather than one binary per target, because that is what a
-    /// `.zupui` is: a build reads it, picks the target it needs, and composes
-    /// that. Staging the package therefore stages exactly what a user who named
-    /// a package stages, so the preset Zup ships and a third-party preset reach
-    /// the runtime by one path rather than two.
+    /// The bundled multi-target preset package.
     Preset,
 }
 
@@ -110,17 +73,7 @@ impl Subsystem {
     }
 }
 
-/// The file name a component is stored under, with `executable_suffix` appended.
-///
-/// The suffix is a parameter rather than a `cfg!` because this crate is portable
-/// and a portable crate may not branch on the build host. It is also more honest:
-/// the suffix is a property of the machine the file will be written on, which is
-/// the caller's machine and not this contract's.
-///
-/// The machine is in the name because a host build writes the unsuffixed name for
-/// its own machine: a build that found a host image here would compose a
-/// universal artifact whose launcher is too wide to run on the machines the
-/// artifact exists to serve.
+/// Component file name, using the destination platform's executable suffix.
 pub fn file_name(component: &ToolchainComponent, executable_suffix: &str) -> String {
     match component {
         ToolchainComponent::Runtime {
@@ -150,46 +103,18 @@ pub fn file_name(component: &ToolchainComponent, executable_suffix: &str) -> Str
     }
 }
 
-/// The name the preset package Zup ships is staged under.
-///
-/// One name in the crate that owns the naming, because a build resolves this
-/// component and a readiness report names it, and two spellings of the same
-/// staged file is one file neither of them finds.
+/// The bundled preset package name.
 pub const PRESET_PACKAGE_NAME: &str = "zup-preset.zupui";
 
-/// The peer preset the runtime's end-to-end tests launch.
-///
-/// Staged beside the components a build host needs rather than inside
-/// `host_components`: it is not something a build composes into an installer, it
-/// is a real preset a test installs, and it reaches the tests the way every other
-/// real binary does - through the staged toolchain, built by the same run. A test
-/// that shelled out to cargo for it would be a second build inside a build, and
-/// two tests doing that at once would race.
-///
-/// Returned rather than named, because a caller has to say where it is looking.
+/// The test peer is staged with the toolchain but excluded from release components.
 pub fn test_preset_file_name(executable_suffix: &str) -> String {
     format!("zup-preset-test{executable_suffix}")
 }
 
-/// The machine a dispatcher is built for.
-///
-/// It has to be the narrowest machine any variant can serve, which on Windows is
-/// always 32-bit x86: it runs natively on x86, under WOW64 on x64, and under the
-/// x86 compatibility layer on arm64. It is also the smallest of the three, which
-/// matters for a file that is downloaded before any of it has been needed.
+/// x86 launchers also run under Windows compatibility layers on x64 and ARM64.
 pub const DISPATCHER_TARGET: zup_core::Target = zup_core::Target::WINDOWS_X86;
 
-/// Every component a target's build needs, in one order.
-///
-/// One function rather than a list spelled at each use. The staging step that
-/// produces them, the readiness report that names them, and the cache that has
-/// to hold all of them all read this, so adding a component in one place
-/// covers all three. The order is presentation: runtimes first, then
-/// launchers, because that is the order a reader cares about them in.
-///
-/// Which components a target needs follows from the target's own
-/// capabilities: a target without a GUI presenter needs no GUI runtime, no
-/// launcher to dispatch through, and no preset package to present with.
+/// Components required to build installers for a supported target.
 pub fn components_for_target(target: &zup_core::Target) -> Vec<ToolchainComponent> {
     let Some(capabilities) = zup_platform::capabilities(target) else {
         return Vec::new();
@@ -220,16 +145,6 @@ pub fn components_for_target(target: &zup_core::Target) -> Vec<ToolchainComponen
     out
 }
 
-/// Every component a build host needs, in one order.
-pub fn host_components(target: &zup_core::Target) -> Vec<ToolchainComponent> {
-    components_for_target(target)
-}
-
-/// The components a target's toolchain actually stages.
-pub fn supported_components(target: &zup_core::Target) -> Vec<ToolchainComponent> {
-    components_for_target(target)
-}
-
 /// The descriptor written beside a component.
 pub fn descriptor_file_name(component: &ToolchainComponent, executable_suffix: &str) -> String {
     format!(
@@ -241,37 +156,17 @@ pub fn descriptor_file_name(component: &ToolchainComponent, executable_suffix: &
 /// Schema of the release index.
 pub const RELEASE_INDEX_SCHEMA: u32 = 1;
 
-/// The name a release gives its index.
-///
-/// One constant, in the crate that owns the contract, because three callers read
-/// it: the packaging step that writes it, the clean room that verifies a
-/// downloaded release, and `zup toolchain install` that populates a cache. Three
-/// spellings of one file name is a release that verifies against nothing.
+/// Release index file name.
 pub const RELEASE_INDEX_NAME: &str = "zup-toolchain.json";
 
-/// The index a zup release carries, naming every file that release ships.
-///
-/// One document and one directory. A developer installing zup gets a tree they can
-/// point a build at, and the index is what says which tree is the right one for
-/// this exact version - so "did I get the toolchain that goes with this CLI" is
-/// answered by reading one file rather than by installing six things and hoping.
-///
-/// The index deliberately holds **no component identity**. Each component's
-/// identity lives in the descriptor beside it, which is the same descriptor the
-/// resolver already checks and which a build host can read without running the
-/// component. Two documents each holding half of one fact is how they drift.
+/// Release file inventory. Component identity is verified against adjacent descriptors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolchainRelease {
     pub schema: u32,
     /// The zup release this material belongs to.
     pub zup_version: String,
-    /// The canonical Zup target every component here is built for.
-    ///
-    /// One machine, because a release is one build. A developer on Windows x64
-    /// downloads the x64 material; an arm64 machine downloads the arm64 material.
-    /// Mixed machines in one tree is how a resolver finds a template it cannot
-    /// run.
+    /// Canonical target for this native release.
     pub target: String,
     /// The developer CLI, relative to the release root.
     pub cli: ReleaseFile,
@@ -325,19 +220,7 @@ impl ToolchainRelease {
         out
     }
 
-    /// Check that `root` holds exactly the files this index names, unmodified.
-    ///
-    /// This is the check a developer runs once, after extracting a release, and
-    /// the one an installer runs before populating a cache. It is worth having as
-    /// a single function because "is this release material intact" is asked in
-    /// three places and answering it three ways is how one of them ends up
-    /// trusting a file the other two would refuse.
-    ///
-    /// The descriptors are in the index too, and that is not redundancy. The index
-    /// proves the bytes; the descriptor states what those bytes are, and a
-    /// descriptor that disagrees with the index is either a different component or
-    /// a different zup release wearing the same name. Neither is installable, and
-    /// only reading both files finds it.
+    /// Verify file integrity, release identity, and component descriptors.
     pub fn verify(&self, root: &Path) -> Result<(), ToolchainError> {
         if self.schema != RELEASE_INDEX_SCHEMA {
             return Err(ToolchainError::Incompatible(format!(
@@ -518,19 +401,11 @@ impl ComponentDescriptor {
     }
 
     /// Read a descriptor.
-    ///
-    /// The error carries no path: the caller knows which file it read, and a
-    /// second copy of the path in the error is a second place for it to be wrong.
     pub fn parse(bytes: &[u8]) -> Result<Self, ToolchainError> {
         serde_json::from_slice(bytes).map_err(|error| ToolchainError::Malformed(error.to_string()))
     }
 
-    /// Whether this descriptor is the component `wanted`, for `zup_version`.
-    ///
-    /// The version check is the point of the whole exercise: a stale runtime from
-    /// another zup release would produce an installer with a plan format the
-    /// template cannot read, and the failure would surface on a user's machine
-    /// rather than on the build host.
+    /// Check component identity and release version.
     pub fn check(
         &self,
         wanted: &ToolchainComponent,
@@ -668,20 +543,16 @@ fn descriptor_path_for(path: &Path) -> PathBuf {
 
 /// The size and SHA-256 of a file.
 pub fn measure(path: &Path) -> Result<(u64, String), ToolchainError> {
-    let bytes = std::fs::read(path).map_err(|error| ToolchainError::Unreadable {
-        path: path.to_path_buf(),
-        reason: error.to_string(),
-    })?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok((bytes.len() as u64, hex(&hasher.finalize())))
+    std::fs::File::open(path)
+        .and_then(zup_core::hash_reader)
+        .map(|(size, digest)| (size, digest.to_hex()))
+        .map_err(|error| ToolchainError::Unreadable {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })
 }
 
-/// Confirm that a component's bytes are the ones its descriptor names.
-///
-/// The descriptor is a claim; this is the check. A component that was replaced,
-/// truncated, or partially copied fails here rather than producing an installer
-/// nobody can diagnose.
+/// Verify a component's size and digest against its descriptor.
 pub fn verify_bytes(path: &Path, descriptor: &ComponentDescriptor) -> Result<(), ToolchainError> {
     let (size, digest) = measure(path)?;
     if size != descriptor.size {
@@ -732,15 +603,10 @@ fn annotate(error: ToolchainError, path: &Path) -> ToolchainError {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The suffix the machine running these tests writes executables with.
     const EXECUTABLE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
 
     fn runtime(target: &str, frontend: Frontend) -> ToolchainComponent {
@@ -875,7 +741,7 @@ mod tests {
             preset_encoding: Some(PresetEncoding::Zstd),
             subsystem: None,
             online: None,
-            digest: hex(&[0; 32]),
+            digest: zup_core::Sha256Digest::from_bytes([0; 32]).to_hex(),
             size: 1,
         };
         let error = descriptor
@@ -885,9 +751,6 @@ mod tests {
         assert!(error.contains("format"), "{error}");
     }
 
-    /// The descriptor is found beside the file, so the two names have to be the
-    /// same name. This is the mismatch that once produced "no descriptor" for a
-    /// component that had one.
     #[test]
     fn a_descriptor_is_named_after_the_component_beside_it() {
         let component = runtime("windows-x64", Frontend::Gui);
@@ -910,9 +773,6 @@ mod tests {
         assert!(read(&path, &component, "0.1.0").is_ok());
     }
 
-    /// The release index is the one document that answers "is this material the
-    /// toolchain for *this* zup", so it has to survive being moved, renamed, and
-    /// half-extracted without becoming a smaller claim than it was.
     #[test]
     fn a_release_index_proves_every_file_it_names() {
         let root = tempfile::TempDir::new().expect("temp dir");
@@ -970,9 +830,6 @@ mod tests {
         assert!(error.to_string().contains("descriptor"), "{error}");
     }
 
-    /// An index that proves the bytes but not the claim is asserting half of what
-    /// the release ships, and half is how a component from one zup release gets
-    /// composed into an installer for another.
     #[test]
     fn a_descriptor_that_disagrees_with_the_index_is_refused() {
         let root = tempfile::TempDir::new().expect("temp dir");
@@ -995,23 +852,16 @@ mod tests {
 
         // Same bytes, a descriptor that claims a different digest.
         let mut lying = descriptor.clone();
-        lying.digest = hex(&[0; 32]);
+        lying.digest = zup_core::Sha256Digest::from_bytes([0; 32]).to_hex();
         std::fs::write(&descriptor_path, lying.encode()).expect("rewrite");
         let error = index.verify(root.path()).expect_err("a lying descriptor");
         assert!(error.to_string().contains("describes itself"), "{error}");
     }
 
-    /// The set a Windows build needs, checked against what actually exists.
-    ///
-    /// Eight: three presentations of the runtime, and each launcher's
-    /// presentation crossed with whether it can reach a release over the network,
-    /// plus the one preset package every graphical build resolves.
-    /// A host missing any of them cannot build something, and a host that
-    /// accumulates a ninth has a component nothing asked for.
     #[test]
     fn a_host_needs_exactly_eight_components_and_they_are_the_ones_listed() {
         let target = zup_core::Target::parse("windows-x64").expect("valid");
-        let components = host_components(&target);
+        let components = components_for_target(&target);
         assert_eq!(components.len(), 8, "{components:?}");
         let names: Vec<String> = components
             .iter()

@@ -9,10 +9,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-# Turning a plugin's core module into a component is Zup's step, not the
-# author's, because the componentiser's version has to agree with the runtime
-# that will load the result. It is pinned to the version the host was built
-# against rather than discovered from whatever happens to be installed.
+# Componentization belongs to the build host, independent of author tooling.
 wit-component = { version = "0.262", features = ["dummy-module"] }
 wit-parser = "0.262"
 zup-plugin-abi.workspace = true

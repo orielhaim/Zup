@@ -3,14 +3,13 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use tracing::{info, info_span};
 use zup_core::{
-    InstallLocation, LauncherLocation, PrerequisitePackage, ResourceKey, SelectedScope,
-    TargetOperatingSystem, Template,
+    InstallLocation, LauncherLocation, ResourceKey, SelectedScope, TargetOperatingSystem, Template,
 };
 use zup_plan::InstallPlan;
 use zup_platform::{
-    CommandSpec, InstallLocationResolver, TargetFile, TargetFileAssociation, TargetLauncher,
-    TargetPath, TargetPathEntry, TargetPlan, TargetPlanSummary, TargetPrerequisite, TargetProtocol,
-    TargetService, TemplateResolveError, resolve_template_path,
+    CommandSpec, InstallLocationResolver, TargetFileAssociation, TargetLauncher, TargetPath,
+    TargetPathEntry, TargetPlan, TargetPlanSummary, TargetProtocol, TargetService,
+    TemplateResolveError, lower_target_plan_files, resolve_template_path,
 };
 
 #[cfg(windows)]
@@ -99,7 +98,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
         });
     }
     let scope = context.scope;
-    let resolve = |template: &Template, kind: &str| {
+    let resolve = |template: &Template, kind: &'static str| {
         let path = resolve_template_path(template, &plan.target, &context.locations, scope)?;
         validate_target_path(kind, &path)?;
         Ok::<TargetPath, TargetResolveError>(path)
@@ -113,38 +112,12 @@ pub fn resolve_target<R: InstallLocationResolver>(
         OwnedPathKind::Directory,
     )?;
 
-    let prerequisites = plan
-        .prerequisites
-        .iter()
-        .map(|prerequisite| TargetPrerequisite {
-            id: prerequisite.id.clone(),
-            name: prerequisite.name.clone(),
-            target: prerequisite.target,
-            requirement: prerequisite.requirement.clone(),
-            package: prerequisite.package.clone(),
-            installer: prerequisite.installer.clone(),
-        })
-        .collect();
-
-    let mut files = Vec::with_capacity(plan.files.len());
-    let mut install_bytes = 0u64;
-    for file in &plan.files {
-        install_bytes = install_bytes
-            .checked_add(file.size)
-            .ok_or(TargetResolveError::SizeOverflow)?;
-        let destination = resolve(&file.destination, "file destination")?;
-        collisions.register_owned(&destination, "file destination", OwnedPathKind::File)?;
-        files.push(TargetFile {
-            key: ResourceKey::File {
-                destination: destination.to_string(),
-            },
-            source_relative: file.source_relative.clone(),
-            destination,
-            size: file.size,
-            sha256: file.sha256,
-            executable: file.executable,
-            privilege: file.privilege,
-        });
+    let lowered = lower_target_plan_files(plan, resolve).map_err(|error| match error {
+        zup_platform::TargetPlanFilesError::Resolve(error) => error,
+        zup_platform::TargetPlanFilesError::SizeOverflow => TargetResolveError::SizeOverflow,
+    })?;
+    for file in lowered.files() {
+        collisions.register_owned(&file.destination, "file destination", OwnedPathKind::File)?;
     }
 
     let mut launchers = Vec::with_capacity(plan.launchers.len());
@@ -268,28 +241,22 @@ pub fn resolve_target<R: InstallLocationResolver>(
         + protocols.len()
         + file_associations.len();
     let summary = TargetPlanSummary {
-        file_count: files.len(),
-        install_bytes,
+        file_count: lowered.files().len(),
+        install_bytes: lowered.install_bytes(),
         resource_count,
         requires_authorization: plan.summary.requires_authorization,
         selected_component_count: plan.selected_components.len(),
         prerequisite_count: plan.prerequisites.len(),
-        download_bytes: plan
-            .prerequisites
-            .iter()
-            .filter_map(|item| match &item.package {
-                PrerequisitePackage::Remote { size, .. } => *size,
-                PrerequisitePackage::Embedded { .. } => None,
-            })
-            .sum(),
+        download_bytes: lowered.download_bytes(),
     };
 
     info!(
-        target_files = files.len(),
+        target_files = lowered.files().len(),
         launchers = launchers.len(),
         "target resolution complete"
     );
 
+    let (prerequisites, files) = lowered.into_parts();
     Ok(TargetPlan {
         app: plan.app.clone(),
         target: plan.target,

@@ -604,14 +604,19 @@ fn changed_asset_bytes_change_the_digest() {
 #[test]
 fn a_build_and_an_inspector_read_one_package() {
     let directory = tempfile::tempdir().expect("a directory");
-    let path = write_package(directory.path(), &[HOST, "windows-arm64"]);
+    let other = if target(HOST) == Target::WINDOWS_ARM64 {
+        "windows-x64"
+    } else {
+        "windows-arm64"
+    };
+    let path = write_package(directory.path(), &[HOST, other]);
     let view = PresetPackageView::open(std::fs::read(&path).expect("read")).expect("opens");
     view.verify().expect("verifies");
 
     let selected = select(
         &path,
         &installer(),
-        &target("windows-arm64"),
+        &target(other),
         &settings(serde_json::json!({ "accent": "#695cff" })),
     )
     .expect("selected");

@@ -1,8 +1,6 @@
 pub const PLUGIN_API_VERSION: &str = "1.0.0";
 
-pub const WIT_PACKAGE_VERSION: &str = "1.0.0";
-
-pub const WASMTIME_VERSION: &str = "49.0.0";
+pub const WASMTIME_VERSION: &str = "50.0.0";
 
 pub const AOT_FORMAT_VERSION: u32 = 1;
 
@@ -11,8 +9,6 @@ pub const MAX_FUEL_PER_CALL: u64 = 100_000_000;
 pub const EPOCH_DEADLINE_TICKS: u64 = 1;
 
 pub const INVOCATION_DEADLINE_MILLIS: u64 = 250;
-
-pub const MAX_HOST_CALLS: u64 = 0;
 
 pub const WASM_PAGE_BYTES: u64 = 64 * 1024;
 

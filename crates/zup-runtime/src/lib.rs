@@ -21,6 +21,3 @@ pub use session::{
 };
 pub use simulate::{SimulatedJob, SimulatedLifecycle, run_simulated};
 pub use telemetry::{EventingExecutor, operation_action, operation_work};
-
-pub use uuid::Uuid;
-pub use zup_protocol::SessionId;

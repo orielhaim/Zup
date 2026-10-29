@@ -115,7 +115,6 @@ fn compile_with_engine(
                 limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
             })?;
         add_aot_size(&mut aot_total, aot_size)?;
-        engine.verify_precompiled(&aot)?;
         let aot_sha256 = Sha256Digest::from_bytes(Sha256::digest(&aot).into());
         let metadata = PluginArtifact {
             plugin_id: resolved.id.clone(),

@@ -82,7 +82,7 @@ fn update_source(plan: &mut TargetBuildPlan, path: &Path, bytes: &[u8]) {
 
 #[test]
 fn compiles_and_verifies_a_valid_component() {
-    let (root, plan) = project();
+    let (_root, plan) = project();
     let artifacts = compile_plugins(&plan).unwrap();
     assert_eq!(artifacts.len(), 1);
     let metadata = artifacts[0].metadata();
@@ -91,9 +91,8 @@ fn compiles_and_verifies_a_valid_component() {
     assert_eq!(metadata.blob, metadata.aot_sha256);
     assert!(!artifacts[0].bytes().is_empty());
     let runtime = PluginEngine::new(HOST_TARGET).unwrap();
-    let component = runtime
-        .compile_component(&fs::read(root.path().join("plugins/helper.wasm")).unwrap())
-        .unwrap();
+    // SAFETY: these bytes were compiled from WebAssembly by this process.
+    let component = unsafe { runtime.validate_trusted_aot(artifacts[0].bytes()) }.unwrap();
     assert_eq!(component.fingerprint(), runtime.fingerprint());
 }
 

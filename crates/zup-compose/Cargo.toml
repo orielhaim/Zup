@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Portable target-driven installer composition for zup"
 
 [dependencies]
+atomic-write-file.workspace = true
 thiserror.workspace = true
 zstd.workspace = true
 zup-binary.workspace = true

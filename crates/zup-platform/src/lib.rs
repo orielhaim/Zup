@@ -22,7 +22,8 @@ pub use source_policy::{PortableSourceFilePolicy, SourceFilePolicy};
 pub use target_path::{TargetPath, TargetPathError};
 pub use target_plan::{
     TargetFile, TargetFileAssociation, TargetLauncher, TargetPathEntry, TargetPlan,
-    TargetPlanSummary, TargetPrerequisite, TargetProtocol, TargetService,
+    TargetPlanFiles, TargetPlanFilesError, TargetPlanSizeOverflow, TargetPlanSummary,
+    TargetProtocol, TargetService, lower_target_plan_files,
 };
 pub use target_support::{
     ArtifactSupport, Elevation, ScopeSupport, TargetCapabilities, capabilities,

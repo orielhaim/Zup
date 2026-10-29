@@ -138,8 +138,8 @@ private-fs = "0.2.1"
 walkdir = "2"
 directories = "6"
 globset = "0.4"
-sha2 = "0.11"
-wasmtime = { version = "49.0", default-features = false, features = [
+sha2 = { version = "0.11", default-features = false }
+wasmtime = { version = "=50.0.0", default-features = false, features = [
   "component-model",
   "runtime",
   "std",
@@ -167,7 +167,7 @@ serde_spanned = "1.1"
 # Test
 criterion = "0.8"
 proptest = "1"
-rstest = "0.27"
+rstest = "0.28"
 tempfile = "3"
 
 # Verified remote artifacts
@@ -194,7 +194,7 @@ windows-service = "0.8"
 # Bindings for Windows APIs without an appropriate focused crate.
 windows-bindgen = "0.100"
 
-zbus_systemd = { version = "0.26200.0", default-features = false, features = [
+zbus_systemd = { version = "0.26201.0", default-features = false, features = [
   "systemd1",
   "zbus-async-tokio",
 ] }

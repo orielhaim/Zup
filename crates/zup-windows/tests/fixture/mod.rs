@@ -92,7 +92,7 @@ impl Fixture {
 fn real_runtime() -> PathBuf {
     zup_xtask::dispatcher::beside_test_executable(
         &std::env::current_exe().expect("test executable path"),
-        "zup-setup-console-windows-x64",
+        &format!("zup-setup-console-{}", Target::host().expect("host target")),
     )
     .unwrap_or_else(|error| panic!("{error}"))
 }

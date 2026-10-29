@@ -1,10 +1,3 @@
-pub use preset::{Composed, PresetError, Source, materialize};
-
-pub use zup_preset_host::{
-    ActionRefusal, HostDecision, HostState, Selection, capabilities, component, components,
-    diagnostic, engine_scope, install_options, maintenance_state, plan, product, scope, scopes,
-};
-
 pub mod preset {
     use std::io;
     use std::path::{Path, PathBuf};
@@ -101,8 +94,6 @@ pub mod preset {
             stage,
         })
     }
-
-    pub use zup_preset_host::process::{PresetProcess, PresetReader, SessionError, launch};
 }
 
 use std::path::{Path, PathBuf};
@@ -408,7 +399,7 @@ impl SessionHost for WindowsSessionHost {
             })
             .transpose()?;
         let source = match &installed {
-            Some((runtime, directory)) => Source::Installed {
+            Some((runtime, directory)) => preset::Source::Installed {
                 directory,
                 runtime,
                 target: &installer.target,
@@ -418,7 +409,7 @@ impl SessionHost for WindowsSessionHost {
                     .preset
                     .as_ref()
                     .ok_or_else(|| "this installer was composed without a preset".to_owned())?;
-                Source::Composed {
+                preset::Source::Composed {
                     executable: &self.executable,
                     preset,
                     bundle,

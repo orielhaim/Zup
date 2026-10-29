@@ -171,8 +171,11 @@ impl SystemdManager for RealSystemd {
         self.call("unit-file-state", async {
             match proxy.get_unit_file_state(unit.clone()).await {
                 Ok(state) => Ok(state),
-                Err(zbus_systemd::zbus::Error::MethodError(name, _, _))
-                    if name.as_str() == "org.freedesktop.DBus.Error.FileNotFound" =>
+                Err(zbus_systemd::zbus::Error::FDO(error))
+                    if matches!(
+                        error.as_ref(),
+                        zbus_systemd::zbus::fdo::Error::FileNotFound(_)
+                    ) =>
                 {
                     Ok("not-found".into())
                 }

@@ -25,7 +25,7 @@ type Reports = tokio::sync::broadcast::Sender<Report>;
 type Inbox = tokio::sync::broadcast::Receiver<Report>;
 
 struct ActiveOperation {
-    id: zup_runtime::Uuid,
+    id: uuid::Uuid,
     cancel: CancellationHandle,
     task: tokio::task::JoinHandle<crate::runner::OperationCompletion>,
 }
@@ -366,7 +366,7 @@ where
             let operation_control =
                 OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
             let cancel = operation_control.cancellation();
-            let id = zup_runtime::Uuid::now_v7();
+            let id = uuid::Uuid::now_v7();
             let operation = OperationRequest {
                 id,
                 action,
@@ -397,7 +397,8 @@ where
             if control.active.is_some() {
                 return;
             }
-            let scope = zup_preset_host::engine_scope(control.state.snapshot().surface.scope());
+            let scope =
+                zup_preset_host::convert::engine_scope(control.state.snapshot().surface.scope());
             let context = match control.discovery.context(scope) {
                 Ok(context) => context,
                 Err(error) => {
@@ -409,7 +410,7 @@ where
             let host = control.host.clone();
             let operation = OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
             let cancel = operation.cancellation();
-            let id = zup_runtime::Uuid::now_v7();
+            let id = uuid::Uuid::now_v7();
             let mut events = operation.subscribe();
             let kind = if matches!(request, zup_runtime::UpdateRequest::Check) {
                 crate::runner::CompletionKind::UpdateCheck
@@ -490,7 +491,7 @@ where
 }
 
 struct OperationRequest {
-    id: zup_runtime::Uuid,
+    id: uuid::Uuid,
     action: LifecycleAction,
     selection: Selection,
 }
@@ -592,9 +593,8 @@ fn preview<H: SessionHost>(
     selection: &Selection,
 ) -> Result<zup_presentation::PlanPreview, String> {
     let context = discovery.context(selection.scope)?;
-    let (plan, installer, target) = target_plan(host, discovery, &context, selection)?;
-    let mut preview = zup_presentation::PlanPreview::from_install_plan(&plan)
-        .with_declared_prerequisites(&installer.prerequisites);
+    let (plan, _, target) = target_plan(host, discovery, &context, selection)?;
+    let mut preview = zup_presentation::PlanPreview::from_install_plan(&plan);
     preview.install_directory = target.install_directory.to_string();
     preview.estimated_bytes = target.summary.install_bytes;
     preview.requires_authorization = target.summary.requires_authorization;

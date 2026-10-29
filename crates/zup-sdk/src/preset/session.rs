@@ -65,18 +65,10 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct Session {
     state: Entity<SessionState>,
     sender: Arc<dyn ActionSender>,
-}
-
-impl Clone for Session {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            sender: Arc::clone(&self.sender),
-        }
-    }
 }
 
 impl Session {
@@ -100,26 +92,18 @@ impl Session {
     }
 
     pub(crate) fn publish(&self, cx: &mut App, snapshot: Snapshot) {
-        self.apply(cx, |state| {
-            state.snapshot = Some(snapshot);
-            state.connected = true;
-            state.closed = None;
-        });
+        self.apply(cx, |state| state.replace(snapshot));
     }
 
     pub(crate) fn publish_environment(&self, cx: &mut App, environment: HostEnvironment) {
-        self.apply(cx, |state| {
-            state.environment = Some(environment);
-        });
+        self.apply(cx, |state| state.set_environment(environment));
     }
 
     pub(crate) fn publish_from_task(&self, cx: &mut AsyncApp, snapshot: Snapshot) {
         let state = self.state.clone();
         cx.update(|cx| {
             state.update(cx, |state, cx| {
-                state.snapshot = Some(snapshot);
-                state.connected = true;
-                state.closed = None;
+                state.replace(snapshot);
                 cx.notify();
             });
         });

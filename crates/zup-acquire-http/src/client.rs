@@ -1,16 +1,8 @@
 //! One HTTP client, one connection pool, sensible timeouts.
-//!
-//! A single client is built once and shared. That is not a micro-optimisation:
-//! it is what makes HTTP/2 work. Many immutable objects over one pooled
-//! connection is the multiplexed behaviour this design wants, and a client per
-//! request would throw that away along with the connection warm-up.
 
-use std::path::Path;
 use std::time::Duration;
 
-use bytes::Bytes;
 use futures_util::StreamExt;
-use tokio::io::AsyncReadExt;
 use url::Url;
 use zup_acquire::RelativeContentPath;
 
@@ -18,18 +10,9 @@ use crate::error::HttpError;
 use crate::origin::Origin;
 
 /// The product token every request carries.
-///
-/// A server operator needs to be able to tell an installer's traffic from a
-/// scraper's, and a client that identifies itself as nothing is harder to
-/// operate than one that does not.
 pub const USER_AGENT: &str = concat!("zup-acquire/", env!("CARGO_PKG_VERSION"));
 
 /// How long each phase of a request may take.
-///
-/// These are separate because they answer different questions. A connect that
-/// takes thirty seconds is a network that is not there; a body that stalls for
-/// thirty seconds is a server that stopped talking; and a whole blob may
-/// legitimately take minutes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeoutPolicy {
     pub connect: Duration,
@@ -56,21 +39,8 @@ impl Default for TimeoutPolicy {
 #[derive(Debug, Clone)]
 pub struct HttpClientConfig {
     pub timeouts: TimeoutPolicy,
-    /// How many redirects one request may follow.
-    pub max_redirects: usize,
     /// Whether the platform's proxy configuration is used.
-    ///
-    /// This is on by default and there is deliberately no way to turn it off
-    /// from configuration: an installer that ignored the machine's proxy would
-    /// be an installer that fails behind a corporate proxy, and adding a knob
-    /// for that failure is how credentials end up in the wrong place.
     pub use_platform_proxy: bool,
-    /// An `Authorization` header value, for a repository that requires one.
-    ///
-    /// Narrow on purpose: one header, one value, never logged, never included
-    /// in a redirect target, and never applied to a host other than the one the
-    /// value was configured for.
-    pub bearer: Option<SecretHeader>,
 }
 
 /// A header value that must not reach a log.
@@ -91,7 +61,6 @@ impl SecretHeader {
 
 impl std::fmt::Debug for SecretHeader {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Present in diagnostics as a fact, absent as a value.
         formatter.write_str("SecretHeader(<redacted>)")
     }
 }
@@ -100,9 +69,7 @@ impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
             timeouts: TimeoutPolicy::default(),
-            max_redirects: 5,
             use_platform_proxy: true,
-            bearer: None,
         }
     }
 }
@@ -112,10 +79,7 @@ impl Default for HttpClientConfig {
 pub struct HttpClient {
     inner: reqwest::Client,
     timeouts: TimeoutPolicy,
-    /// The host a configured bearer token may be sent to. A redirect to any
-    /// other host does not receive it.
-    authorized_host: Option<String>,
-    bearer: Option<SecretHeader>,
+    credentials: Vec<(url::Origin, SecretHeader)>,
 }
 
 impl HttpClient {
@@ -139,25 +103,16 @@ impl HttpClient {
         Ok(Self {
             inner,
             timeouts: config.timeouts,
-            authorized_host: None,
-            bearer: None,
+            credentials: Vec::new(),
         })
     }
 
-    /// Attach a bearer token, bound to the host of `origin`.
-    ///
-    /// Binding it to one host is what makes following a redirect safe: a CDN
-    /// that redirects to a third party must not hand that third party the
-    /// credential.
+    /// Authorize an exact scheme, host, and port. Redirects do not expand this grant.
     pub fn with_bearer(mut self, origin: &Origin, value: SecretHeader) -> Self {
-        self.authorized_host = Some(origin.host().to_owned());
-        self.bearer = Some(value);
+        let origin = origin.url().origin();
+        self.credentials.retain(|(existing, _)| existing != &origin);
+        self.credentials.push((origin, value));
         self
-    }
-
-    /// The underlying client, for a caller that needs a raw request.
-    pub fn inner(&self) -> &reqwest::Client {
-        &self.inner
     }
 
     /// Address one checked relative path on one origin.
@@ -170,10 +125,6 @@ impl HttpClient {
     }
 
     /// Send a GET for one document, applying the redirect policy by hand.
-    ///
-    /// The redirect policy is applied here rather than in the client because it
-    /// is a trust decision, not a convenience: a hop must stay on HTTPS, must
-    /// not carry a credential to a new host, and is bounded.
     pub async fn get(
         &self,
         origin: &Origin,
@@ -184,10 +135,6 @@ impl HttpClient {
     }
 
     /// Send a GET that may ask for a byte range.
-    ///
-    /// A range header is only ever set from a resume offset that the cache
-    /// already verified, so a `Range` this client sends is a statement about
-    /// bytes that are provably on disk.
     pub async fn get_range(
         &self,
         origin: &Origin,
@@ -210,22 +157,14 @@ impl HttpClient {
             Some(offset) => Request::get(url).range(Range::from(offset)),
             None => Request::get(url),
         };
-        // A resumed transfer that has been redirected cannot continue: the
-        // partial was measured against the origin that is no longer answering.
-        // Continuing against a different host's idea of `offset` would produce a
-        // corrupt object, so this is refused rather than guessed.
-        self.exchange(
-            origin,
-            request,
-            max_redirects,
-            self.timeouts.per_blob,
-            /* resend_body */ true,
-        )
-        .await
-        .map_err(|error| match (error, offset) {
-            (HttpError::Redirect { origin, .. }, Some(_)) => HttpError::RangeUnsupported { origin },
-            (error, _) => error,
-        })
+        self.exchange(origin, request, max_redirects)
+            .await
+            .map_err(|error| match (error, offset) {
+                (HttpError::Redirect { origin, .. }, Some(_)) => {
+                    HttpError::RangeUnsupported { origin }
+                }
+                (error, _) => error,
+            })
     }
 
     /// The timeout policy this client applies.
@@ -234,29 +173,13 @@ impl HttpClient {
     }
 
     /// Send one request, applying the redirect and credential policy by hand.
-    ///
-    /// The acquisition path only ever issues `GET`s of immutable objects, which
-    /// is why [`HttpClient::get`] and [`HttpClient::get_range`] are all it
-    /// needed. A caller that has to speak a request API - a versioned API
-    /// header, a `POST`, a `DELETE`, a multi-gigabyte body - supplies the parts
-    /// through [`Request`] rather than reaching for [`HttpClient::inner`], and so
-    /// keeps everything the policy is for: a bounded redirect chain, HTTPS on
-    /// every hop, and a configured credential that never leaves the host it was
-    /// configured for.
     pub async fn send(
         &self,
         origin: &Origin,
         request: Request<'_>,
         max_redirects: usize,
     ) -> Result<Response, HttpError> {
-        self.exchange(
-            origin,
-            request,
-            max_redirects,
-            self.timeouts.per_blob,
-            /* headers re-sent on a redirect */ false,
-        )
-        .await
+        self.exchange(origin, request, max_redirects).await
     }
 }
 
@@ -267,56 +190,40 @@ impl HttpClient {
         origin: &Origin,
         request: Request<'_>,
         max_redirects: usize,
-        timeout: Duration,
-        resend_body: bool,
     ) -> Result<Response, HttpError> {
         let mut current = request.url.clone();
         let mut hops = 0usize;
         loop {
-            let last = hops > 0;
-            let range = match request.range {
-                // A range is only re-sent to the origin it was measured against.
-                // After a redirect the offset is dropped, because a different
-                // host is not obliged to agree about what byte `offset` means.
-                Some(range) if !last => Some(range.header()),
-                _ => None,
-            };
             let mut builder = self
                 .inner
                 .request(request.method.clone(), current.clone())
-                .timeout(timeout);
+                .timeout(self.timeouts.per_blob);
             for (name, value) in &request.headers {
                 builder = builder.header(*name, value.clone());
             }
-            if let Some(range) = range {
-                builder = builder.header(reqwest::header::RANGE, range);
+            if let Some(range) = request.range {
+                builder = builder.header(reqwest::header::RANGE, range.header());
             }
-            if let (Some(host), Some(token)) = (&self.authorized_host, &self.bearer)
-                && current.host_str() == Some(host.as_str())
+            if let Some((_, token)) = self
+                .credentials
+                .iter()
+                .find(|(origin, _)| *origin == current.origin())
             {
                 builder = builder.bearer_auth(token.expose());
             }
-            // A body is a file handle, and a file handle cannot be replayed
-            // after a redirect has consumed it. Dropping the body is not an
-            // option either, because a half-sent `POST` is worse than a refusal,
-            // so a request that carries one is not allowed to move.
-            if let Some(body) = &request.body
-                && !(last && !resend_body)
-            {
-                match body.clone() {
-                    Body::Bytes(bytes) => {
-                        builder = builder.body(bytes);
-                    }
-                    Body::File { path, chunk } => {
-                        let stream = file_stream(&path, chunk).await?;
-                        builder = builder.body(reqwest::Body::wrap_stream(stream));
+            if let Some(body) = &request.body {
+                match body {
+                    Body::Bytes(bytes) => builder = builder.body(bytes.clone()),
+                    Body::File(path) => {
+                        let file = tokio::fs::File::open(path).await.map_err(|error| {
+                            HttpError::Transport {
+                                origin: "file".to_owned(),
+                                reason: error.to_string(),
+                            }
+                        })?;
+                        builder = builder.body(file);
                     }
                 }
-            } else if last && !resend_body {
-                return Err(HttpError::Redirect {
-                    origin: origin.to_string(),
-                    reason: "a request with a body was redirected".to_owned(),
-                });
             }
             let response = builder.send().await.map_err(|error| HttpError::Transport {
                 origin: origin.to_string(),
@@ -324,6 +231,17 @@ impl HttpClient {
             })?;
             let status = response.status();
             if status.is_redirection() {
+                // Replaying a mutation or resuming another origin's representation is unsafe.
+                if request.body.is_some()
+                    || request.range.is_some()
+                    || (request.method != reqwest::Method::GET
+                        && request.method != reqwest::Method::HEAD)
+                {
+                    return Err(HttpError::Redirect {
+                        origin: origin.to_string(),
+                        reason: "only complete, bodyless reads may be redirected".to_owned(),
+                    });
+                }
                 hops += 1;
                 if hops > max_redirects {
                     return Err(HttpError::Redirect {
@@ -351,45 +269,10 @@ impl HttpClient {
             }
             return Ok(Response {
                 origin: origin.clone(),
-                url: current,
-                status,
-                headers: response.headers().clone(),
                 inner: response,
             });
         }
     }
-}
-
-/// Read a file as a stream of chunks.
-///
-/// The alternative - reading a release asset into memory to send it - turns a
-/// two gigabyte upload into a two gigabyte allocation, so the body is a stream
-/// and the file handle is opened per attempt, which is also what makes an
-/// upload retryable.
-/// The stream owns the file handle, so it captures nothing from `path`.
-async fn file_stream(
-    path: &Path,
-    chunk: usize,
-) -> Result<impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + use<>, HttpError> {
-    let file = tokio::fs::File::open(path)
-        .await
-        .map_err(|error| HttpError::Transport {
-            origin: "file".to_owned(),
-            reason: error.to_string(),
-        })?;
-    Ok(futures_util::stream::try_unfold(
-        (file, vec![0u8; chunk.max(1)]),
-        |(mut file, mut buffer)| async move {
-            let read = file.read(&mut buffer).await?;
-            if read == 0 {
-                return Ok(None);
-            }
-            Ok(Some((
-                Bytes::copy_from_slice(&buffer[..read]),
-                (file, buffer),
-            )))
-        },
-    ))
 }
 
 /// A byte range to ask for.
@@ -424,24 +307,12 @@ impl Range {
 }
 
 /// A request body.
-///
-/// Only two shapes exist because only two are needed: a document a caller
-/// already holds, and a file on disk. Anything else would be a second
-/// representation of content zup measures by digest.
 #[derive(Debug, Clone)]
 pub enum Body {
     /// Bytes the caller already has.
     Bytes(Vec<u8>),
-    /// A file, streamed in `chunk`-sized pieces.
-    File {
-        path: std::path::PathBuf,
-        chunk: usize,
-    },
-}
-
-impl Body {
-    /// How many bytes at a time a file body is read.
-    pub const UPLOAD_CHUNK: usize = 1 << 20;
+    /// A file streamed from disk.
+    File(std::path::PathBuf),
 }
 
 impl From<&str> for Body {
@@ -491,31 +362,12 @@ impl<'a> Request<'a> {
 
     /// A `POST` carrying `body`.
     pub fn post(url: &'a Url, body: impl Into<Body>) -> Self {
-        Self {
-            body: Some(body.into()),
-            ..Self::get(url)
-        }
-        .with_method(reqwest::Method::POST)
-    }
-
-    /// A `PATCH` carrying `body`.
-    pub fn patch(url: &'a Url, body: impl Into<Body>) -> Self {
-        Self {
-            body: Some(body.into()),
-            ..Self::get(url)
-        }
-        .with_method(reqwest::Method::PATCH)
+        Self::new(reqwest::Method::POST, url).with_body(body)
     }
 
     /// A `DELETE`.
     pub fn delete(url: &'a Url) -> Self {
         Self::new(reqwest::Method::DELETE, url)
-    }
-
-    /// Replace the method.
-    pub fn with_method(mut self, method: reqwest::Method) -> Self {
-        self.method = method;
-        self
     }
 
     /// Attach a body.
@@ -534,11 +386,6 @@ impl<'a> Request<'a> {
     pub fn range(mut self, range: Range) -> Self {
         self.range = Some(range);
         self
-    }
-
-    /// The URL this request addresses.
-    pub fn url(&self) -> &Url {
-        self.url
     }
 }
 
@@ -567,9 +414,6 @@ fn check_redirect(origin: &Origin, from: &Url, to: &Url) -> Result<(), HttpError
 /// A response whose status has already been examined.
 pub struct Response {
     origin: Origin,
-    url: Url,
-    status: reqwest::StatusCode,
-    headers: reqwest::header::HeaderMap,
     inner: reqwest::Response,
 }
 
@@ -581,22 +425,23 @@ impl Response {
 
     /// The final URL, after any redirect.
     pub fn url(&self) -> &Url {
-        &self.url
+        self.inner.url()
     }
 
     /// The status code.
     pub fn status(&self) -> reqwest::StatusCode {
-        self.status
+        self.inner.status()
     }
 
     /// One response header.
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(name).and_then(|value| value.to_str().ok())
+        self.inner
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
     }
 
     /// The `Content-Length` the server declared, if it declared one.
-    ///
-    /// This is a hint, never a bound. The bound is the descriptor.
     pub fn declared_length(&self) -> Option<u64> {
         self.inner.content_length()
     }
@@ -612,53 +457,18 @@ impl Response {
         self.inner
     }
 
-    /// Take the underlying response, for its body stream.
-    pub fn into_inner(self) -> reqwest::Response {
-        self.inner
-    }
-
     /// Read the whole body, bounded by `limit`.
-    ///
-    /// For a response that is small by construction - a JSON document, an error
-    /// body - and never for a release asset. The bound is a ceiling rather than a
-    /// hint: a server that sends more than the caller will accept is refused
-    /// rather than truncated, because a truncated JSON document parses into
-    /// something that looks true.
     pub async fn read_to_end(self, limit: u64) -> Result<Vec<u8>, HttpError> {
-        if self.declared_length().is_some_and(|length| length > limit) {
-            return Err(HttpError::TooLarge {
-                origin: self.origin.to_string(),
-                limit,
-            });
-        }
-        let origin = self.origin.clone();
         let mut body = Vec::new();
-        let mut stream = self.inner.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| HttpError::Transport {
-                origin: origin.to_string(),
-                reason: classify(&error),
-            })?;
-            if body.len() as u64 + chunk.len() as u64 > limit {
-                return Err(HttpError::TooLarge {
-                    origin: origin.to_string(),
-                    limit,
-                });
-            }
-            body.extend_from_slice(&chunk);
-        }
+        self.stream_into(limit, |chunk| {
+            body.extend_from_slice(chunk);
+            Ok(())
+        })
+        .await?;
         Ok(body)
     }
 
     /// Stream the body into `sink`, one chunk at a time.
-    ///
-    /// For a body that is large and whose progress is worth keeping. A whole-body
-    /// read buffers first and hands over nothing until the last byte, so a
-    /// connection that drops at ninety percent costs the whole transfer; this
-    /// hands over every chunk as it lands, so a caller with a resumable sink keeps
-    /// what arrived.
-    ///
-    /// `limit` bounds the total, the same way [`Self::read_to_end`] does.
     pub async fn stream_into<S>(self, limit: u64, mut sink: S) -> Result<u64, HttpError>
     where
         S: FnMut(&[u8]) -> std::io::Result<()>,
@@ -694,8 +504,6 @@ impl Response {
 }
 
 /// Classify a transport error into a short reason that is safe to log.
-///
-/// A `reqwest` error's `Display` can include the URL. It is never used.
 pub(crate) fn classify(error: &reqwest::Error) -> String {
     if error.is_timeout() {
         return "timed out".to_owned();

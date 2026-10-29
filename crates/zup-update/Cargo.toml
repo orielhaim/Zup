@@ -17,6 +17,7 @@ futures-util = "0.3"
 sha2.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }
 tough = { version = "0.24", features = ["http"] }
 url = "2"
@@ -29,5 +30,4 @@ rstest.workspace = true
 zup-preset-protocol.workspace = true
 aws-lc-rs = "1"
 jiff.workspace = true
-tempfile.workspace = true
 zstd.workspace = true

@@ -7,7 +7,7 @@ xtask emit-portable-matrix [--matrix <name>]... [--format <text|cargo-args>]
 xtask emit-host-packages --host <windows|linux> [--format <text|cargo-args>]
 xtask toolchain build [--profile <name>] [--target <target>]
 xtask toolchain assemble --source <dir>... --out <dir>
-xtask toolchain package [--profile <name>] [--out <dir>] [--source <dir>]...
+xtask toolchain package --cli <file> [--profile <name>] [--out <dir>] [--source <dir>]...
 xtask release clean-room [--material <dir>] [--work <dir>]
 xtask automation generate [--root <dir>]
 xtask automation check [--root <dir>]
@@ -17,6 +17,7 @@ options:
     --matrix <name>      matrix to emit (repeatable)
     --host <name>        build host whose packages to emit
     --format <format>    text or cargo-args
+    --cli <file>         prebuilt developer CLI to package
     --profile <name>     cargo profile to build and stage beside (default: dev)
     --target <target>      cross-build target for `toolchain build` (a Windows or Linux target)
     --source <dir>       downloaded versioned toolchain root to package (repeatable)
@@ -39,6 +40,7 @@ const OPTIONS: &[&str] = &[
     "--target",
     "--source",
     "--out",
+    "--cli",
     "--material",
     "--work",
 ];
@@ -60,6 +62,7 @@ struct Options {
     target: Option<String>,
     out: Option<PathBuf>,
     sources: Vec<PathBuf>,
+    cli: Option<PathBuf>,
     material: Option<PathBuf>,
     work: Option<PathBuf>,
 }
@@ -151,7 +154,7 @@ fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitC
     };
     let allowed: &[&str] = match subcommand.as_str() {
         "build" => &["--root", "--profile", "--target"],
-        "package" => &["--root", "--profile", "--out", "--source"],
+        "package" => &["--root", "--profile", "--out", "--source", "--cli"],
         "assemble" => &["--root", "--out", "--source"],
         unknown => {
             return Err(format!(
@@ -177,7 +180,8 @@ fn stage_toolchain(arguments: &mut impl Iterator<Item = String>) -> Result<ExitC
         let out = options
             .out
             .unwrap_or_else(|| root.join("target").join("release-material").join(&version));
-        let written = zup_xtask::toolchain::package(&root, &profile, &out, &options.sources)?;
+        let cli = options.cli.ok_or("toolchain package needs --cli <file>")?;
+        let written = zup_xtask::toolchain::package(&root, &profile, &out, &options.sources, &cli)?;
         println!("Release material in {}", written.display());
         return Ok(ExitCode::SUCCESS);
     }
@@ -301,6 +305,7 @@ fn parse(
             "--target" => options.target = Some(value),
             "--source" => options.sources.push(PathBuf::from(value)),
             "--out" => options.out = Some(PathBuf::from(value)),
+            "--cli" => options.cli = Some(PathBuf::from(value)),
             "--material" => options.material = Some(PathBuf::from(value)),
             "--work" => options.work = Some(PathBuf::from(value)),
             "--format" => {

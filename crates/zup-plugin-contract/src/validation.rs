@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 use wasmtime::Precompiled;
@@ -8,14 +7,14 @@ use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, Linker};
 
 use crate::bindings::PluginPre;
-use crate::config::{
-    MAX_AOT_BYTES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES, MAX_PLAN_RESOURCES,
-    MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS, PluginEngine,
-};
 use crate::runtime::{
     InvocationError, SandboxLimits, run_with_watchdog, sandbox_store, sanitize_error,
 };
 use crate::{Context, InstallationPlan, PluginError, ResourceItem};
+use crate::{
+    MAX_AOT_BYTES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES, MAX_PLAN_RESOURCES,
+    MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS, PluginEngine,
+};
 use zup_plugin_abi::{PLAN_FUNCTION_NAME, PLANNER_EXPORT_NAME};
 
 #[derive(Clone)]
@@ -86,33 +85,24 @@ impl ValidatedComponent {
     ) -> Result<Result<InstallationPlan, PluginError>, InvocationError> {
         let mut store = sandbox_store(self.pre.engine()).map_err(InvocationError::setup)?;
         let pre = &self.pre;
-        let call_error: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
-        let captured_error = Arc::clone(&call_error);
+        let mut call_was_trap = None;
         let result = run_with_watchdog(self.pre.engine(), cancellation, || {
             let plugin = pre.instantiate(&mut store)?;
-            store.set_hostcall_fuel(crate::config::MAX_PLAN_OUTPUT_BYTES);
+            store.set_hostcall_fuel(MAX_PLAN_OUTPUT_BYTES);
             plugin
                 .zup_plugin_planner()
                 .call_plan(&mut store, context)
                 .inspect_err(|error| {
-                    if let Ok(mut slot) = captured_error.lock() {
-                        *slot = Some(error.root_cause().is::<Trap>());
-                    }
+                    call_was_trap = Some(error.root_cause().is::<Trap>());
                 })
         });
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                if store.data().memory_growth_rejected() || store.data().table_growth_rejected() {
+                if store.data().growth_rejected {
                     return Err(InvocationError::MemoryLimit);
                 }
-                if matches!(error, InvocationError::Trap { .. })
-                    && call_error
-                        .lock()
-                        .ok()
-                        .and_then(|slot| *slot)
-                        .is_some_and(|is_trap| !is_trap)
-                {
+                if matches!(error, InvocationError::Trap { .. }) && call_was_trap == Some(false) {
                     return Err(InvocationError::OutputLimit {
                         actual: MAX_PLAN_OUTPUT_BYTES as u64,
                         limit: MAX_PLAN_OUTPUT_BYTES as u64,
@@ -146,7 +136,7 @@ impl PluginEngine {
                 .map_err(|error| ContractError::Compilation {
                     message: sanitize_error(error.to_string()),
                 })?
-                .precompile_component(component_wasm)?;
+                .compile_component(component_wasm)?;
         }
         let component_aot = self
             .engine
@@ -182,16 +172,22 @@ impl PluginEngine {
         &self,
         component_wasm: &[u8],
     ) -> Result<ValidatedComponent, ContractError> {
-        let component_aot = self.precompile_component(component_wasm)?;
-        if self.target == crate::HOST_TARGET {
-            self.validate_trusted_aot_inner(&component_aot)
-        } else {
-            PluginEngine::host()
+        if is_core_module(component_wasm) {
+            return Err(ContractError::CoreModule);
+        }
+        if self.target != crate::HOST_TARGET {
+            return PluginEngine::host()
                 .map_err(|error| ContractError::Compilation {
                     message: sanitize_error(error.to_string()),
                 })?
-                .compile_component(component_wasm)
+                .compile_component(component_wasm);
         }
+        let component = Component::new(&self.engine, component_wasm).map_err(|error| {
+            ContractError::Compilation {
+                message: sanitize_error(error.to_string()),
+            }
+        })?;
+        self.validate(component)
     }
 
     /// # Safety

@@ -707,8 +707,8 @@ pub fn change_label(kind: ChangeKind) -> &'static str {
         ChangeKind::Create => "Added",
         ChangeKind::Update => "Updated",
         ChangeKind::Remove => "Removed",
-        ChangeKind::NoChange => "Unchanged",
-        ChangeKind::Drifted => "Changed outside setup",
+        ChangeKind::NoOp => "Unchanged",
+        ChangeKind::Drift => "Changed outside setup",
         ChangeKind::Conflict => "Conflict",
     }
 }
@@ -719,8 +719,8 @@ pub fn change_counts(group: &ChangeGroup) -> Vec<(ChangeKind, usize)> {
         ChangeKind::Update,
         ChangeKind::Remove,
         ChangeKind::Conflict,
-        ChangeKind::Drifted,
-        ChangeKind::NoChange,
+        ChangeKind::Drift,
+        ChangeKind::NoOp,
     ]
     .into_iter()
     .map(|kind| {
@@ -745,8 +745,8 @@ pub fn counts_line(group: &ChangeGroup) -> String {
             ChangeKind::Update => format!("{count} updated"),
             ChangeKind::Remove => format!("{count} removed"),
             ChangeKind::Conflict => format!("{count} in conflict"),
-            ChangeKind::Drifted => format!("{count} changed outside setup"),
-            ChangeKind::NoChange => format!("{count} unchanged"),
+            ChangeKind::Drift => format!("{count} changed outside setup"),
+            ChangeKind::NoOp => format!("{count} unchanged"),
         })
         .collect::<Vec<_>>()
         .join(" · ")
@@ -771,7 +771,7 @@ pub fn group_changes_anything(group: &ChangeGroup) -> bool {
     group
         .changes
         .iter()
-        .any(|change| change.kind != ChangeKind::NoChange)
+        .any(|change| change.kind != ChangeKind::NoOp)
 }
 
 pub fn requirement_status(status: RequirementStatus) -> &'static str {

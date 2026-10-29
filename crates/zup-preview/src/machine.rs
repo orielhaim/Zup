@@ -164,10 +164,12 @@ impl Scenario {
             .as_ref());
         let name = installer.app.name.to_string();
         Self {
-            product: zup_preset_host::product(installer),
-            scopes: zup_preset_host::scopes(installer),
-            scope: zup_preset_host::scope(zup_preset_host::default_scope(installer)),
-            components: zup_preset_host::surface_components(installer, None, None),
+            product: zup_preset_host::surface::product(installer),
+            scopes: zup_preset_host::surface::scopes(installer),
+            scope: zup_preset_host::convert::scope(zup_preset_host::surface::default_scope(
+                installer,
+            )),
+            components: zup_preset_host::surface::components(installer, None, None),
             user_directory: user.map_or_else(
                 || format!(r"C:\Users\you\AppData\Local\Programs\{name}"),
                 |template| display_location(template, &name, SelectedScope::User),
@@ -202,7 +204,7 @@ impl Scenario {
                     .collect(),
                 ..defaults.footprint.clone()
             },
-            launcher: zup_preset_host::launchers(installer)
+            launcher: zup_preset_host::surface::launchers(installer)
                 .into_iter()
                 .next()
                 .map(|launcher| launcher.target.name),
@@ -317,7 +319,7 @@ impl Scenario {
                     updates_enabled: self.updates_enabled,
                     scope: self.scope,
                     install_directory: Some(self.install_directory.clone().unwrap_or_else(|| {
-                        self.default_directory(zup_preset_host::engine_scope(self.scope))
+                        self.default_directory(zup_preset_host::convert::engine_scope(self.scope))
                             .to_owned()
                     })),
                     health: self.health.clone(),

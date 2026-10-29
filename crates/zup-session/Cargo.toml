@@ -47,6 +47,7 @@ opener.workspace = true
 semver.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
 zup-core.workspace = true
 zup-exec.workspace = true

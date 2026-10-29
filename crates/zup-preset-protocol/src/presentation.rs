@@ -13,6 +13,42 @@ pub enum OperationPhase {
     Finish,
 }
 
+impl OperationPhase {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Prepare => "Prepare",
+            Self::Download => "Download",
+            Self::Verify => "Verify",
+            Self::Files => "Files",
+            Self::System => "System",
+            Self::Finish => "Finish",
+        }
+    }
+
+    pub fn from_action(action: &str) -> Self {
+        let action = action.to_ascii_lowercase();
+        if action.contains("download") {
+            Self::Download
+        } else if action.contains("verif") || action.contains("signature") {
+            Self::Verify
+        } else if action.contains("service")
+            || action.contains("launcher")
+            || action.contains("path")
+            || action.contains("protocol")
+            || action.contains("system")
+            || action.contains("settings")
+        {
+            Self::System
+        } else if action.contains("finish") || action.contains("commit") {
+            Self::Finish
+        } else if action.contains("file") || action.contains("install") {
+            Self::Files
+        } else {
+            Self::Prepare
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressPresentation {
     pub phase: OperationPhase,
@@ -57,15 +93,45 @@ pub enum ResourceCategory {
     Other,
 }
 
+impl ResourceCategory {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Files => "Files",
+            Self::Launchers => "Launchers",
+            Self::Path => "Search path",
+            Self::Services => "Services",
+            Self::Protocols => "Protocols",
+            Self::FileAssociations => "File associations",
+            Self::AppsFeatures => "Apps & Features",
+            Self::Maintenance => "Maintenance",
+            Self::Prerequisites => "Requirements",
+            Self::Other => "Other",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     Create,
     Update,
     Remove,
-    NoChange,
-    Drifted,
+    NoOp,
+    Drift,
     Conflict,
+}
+
+impl ChangeKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Create => "Create",
+            Self::Update => "Update",
+            Self::Remove => "Remove",
+            Self::NoOp => "No change",
+            Self::Drift => "Changed outside zup",
+            Self::Conflict => "Needs attention",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

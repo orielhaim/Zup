@@ -377,12 +377,17 @@ fn a_release_description_names_files_rather_than_build_paths() {
 fn a_project_with_no_declared_artifacts_still_builds_one_installer_per_target() {
     let project = Project::new();
     let output = project.path().join("Setup.exe");
+    let profile = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
     let result = zup(&[
         "build".as_ref(),
         "--manifest".as_ref(),
         project.manifest().as_os_str(),
         "--target".as_ref(),
-        "x64".as_ref(),
+        profile.as_ref(),
         "--output".as_ref(),
         output.as_os_str(),
         "--force".as_ref(),
@@ -393,7 +398,7 @@ fn a_project_with_no_declared_artifacts_still_builds_one_installer_per_target() 
     assert!(output.is_file());
     // A single-target build is an ordinary package, not a composed artifact.
     let bundle = zup_windows::EmbeddedBundle::open(&output).unwrap();
-    assert_eq!(bundle.target().as_str(), X64);
+    assert_eq!(bundle.target(), &zup_core::Target::host().unwrap());
     assert_eq!(bundle.frontend(), zup_core::Frontend::Console);
     assert_eq!(
         zup_windows::read_frontend(&output).unwrap(),
@@ -449,7 +454,7 @@ fn a_dispatcher_for_the_wrong_launcher_experience_is_refused() {
 #[test]
 fn a_universal_build_refuses_a_runtime_template_for_the_wrong_frontend() {
     let project = Project::new();
-    let template = toolchain_fixture::runtime(X64, zup_core::Frontend::Headless)
+    let template = toolchain_fixture::runtime(ARM64, zup_core::Frontend::Headless)
         .write(&project.path().join("templates/headless"));
 
     let universal = project.path().join("Universal-Windows-Setup.exe");
@@ -464,7 +469,7 @@ fn a_universal_build_refuses_a_runtime_template_for_the_wrong_frontend() {
             std::ffi::OsString::from("--runtime"),
             template.as_os_str().to_owned(),
             std::ffi::OsString::from("--runtime"),
-            project.runtimes[0].as_os_str().to_owned(),
+            project.runtimes[1].as_os_str().to_owned(),
         ],
         vec![
             std::ffi::OsString::from("--dispatcher"),

@@ -139,8 +139,6 @@ impl HttpSource {
     ) -> Result<VerifiedBlob, HttpError> {
         let path = zup_acquire::WebLayout::blob(&descriptor.digest);
         let mut last: Option<HttpError> = None;
-        let mut attempts = 0u32;
-        let mut resumed_bytes = 0u64;
 
         for (index, origin) in self.origins.indices() {
             if cancellation.is_cancelled() {
@@ -153,12 +151,11 @@ impl HttpSource {
                     continue;
                 }
             };
-            let mut state = RetryState::new(self.policy, 0);
+            let mut state = RetryState::new(self.policy);
             loop {
                 if cancellation.is_cancelled() {
                     return Err(HttpError::Cancelled);
                 }
-                attempts += 1;
                 let writer = match cache.writer(descriptor) {
                     Ok(writer) => writer,
                     Err(error) => {
@@ -169,10 +166,6 @@ impl HttpSource {
                             .ok_or(HttpError::Cache(error));
                     }
                 };
-                if state.attempt() == 0 {
-                    resumed_bytes = writer.wire_offset();
-                    state = RetryState::new(self.policy, resumed_bytes);
-                }
                 let offset = writer.wire_offset();
                 let mut attempt = BlobRequest {
                     origin,
@@ -186,7 +179,6 @@ impl HttpSource {
                 match self.transfer(&mut attempt).await {
                     Ok(blob) => {
                         self.origins.prefer(index);
-                        let _ = (attempts, resumed_bytes);
                         return Ok(blob);
                     }
                     Err((error, retry_after)) => {
@@ -422,7 +414,7 @@ async fn stream_body(
     origin: &Origin,
     request: &mut BlobRequest<'_>,
 ) -> Result<(), HttpError> {
-    let mut stream = response.into_inner().bytes_stream();
+    let mut stream = response.into_body().bytes_stream();
     while let Some(chunk) = stream.next().await {
         if request.cancellation.is_cancelled() {
             return Err(HttpError::Cancelled);

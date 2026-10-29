@@ -276,12 +276,16 @@ enum Expected {
     Trapped,
     Bound,
     OutOfMemory,
+    OutputLimit,
     Rejected,
 }
 
 impl Expected {
     fn matches(self, failure: &zup_plan::PluginFailure) -> bool {
         use zup_plan::PluginFailure;
+        if let (Expected::Rejected, PluginFailure::Rejected { code, message }) = (self, failure) {
+            return code == "bad" && message == "failure";
+        }
         matches!(
             (self, failure),
             (Expected::Cancelled, PluginFailure::Cancelled)
@@ -289,7 +293,7 @@ impl Expected {
                 | (Expected::Bound, PluginFailure::FuelExhausted)
                 | (Expected::Bound, PluginFailure::Timeout)
                 | (Expected::OutOfMemory, PluginFailure::MemoryLimit)
-                | (Expected::Rejected, PluginFailure::Rejected { .. })
+                | (Expected::OutputLimit, PluginFailure::OutputLimit { .. })
         )
     }
 }
@@ -300,6 +304,7 @@ impl Expected {
 #[case::never_finishes("fuel", Expected::Bound, Cancellation::Never)]
 #[case::out_of_memory("memory", Expected::OutOfMemory, Cancellation::Never)]
 #[case::rejected("rejected", Expected::Rejected, Cancellation::Never)]
+#[case::oversized_output("output", Expected::OutputLimit, Cancellation::Never)]
 fn a_misbehaving_plugin_is_contained_and_named(
     #[case] behaviour: &str,
     #[case] expected: Expected,
@@ -343,7 +348,7 @@ fn context_target_mismatch_is_rejected_before_invocation() {
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
     let mut context = context(&installer);
-    context.target = Target::parse("arm64-pc-windows-msvc").unwrap();
+    context.target = other_target();
     let error = executor
         .plan(&installer.plugins[0], &context, &NeverCancelled)
         .unwrap_err();
@@ -372,8 +377,16 @@ fn target_mismatch_is_rejected_before_deserialize() {
     assert!(matches!(error, LoadError::TargetMismatch { .. }));
 }
 
-#[test]
-fn loader_reports_package_errors_for_tampered_aot() {
+#[derive(Debug)]
+enum TamperStage {
+    BeforeLoad,
+    BeforeInvocation,
+}
+
+#[rstest]
+#[case::before_load(TamperStage::BeforeLoad)]
+#[case::before_invocation(TamperStage::BeforeInvocation)]
+fn tampered_aot_is_rejected_before_deserialization(#[case] stage: TamperStage) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("runtime.zupbundle");
     let mut bytes = BundleWriter::encode(
@@ -381,12 +394,30 @@ fn loader_reports_package_errors_for_tampered_aot() {
         &[artifact(&empty_aot(), &host_target())],
     )
     .unwrap();
+    fs::write(&path, &bytes).unwrap();
+    let package = Package::open_unverified(&path).unwrap();
+    let mut executor = match stage {
+        TamperStage::BeforeLoad => None,
+        TamperStage::BeforeInvocation => {
+            Some(WasmtimePluginExecutor::load(package.clone(), &host_target()).unwrap())
+        }
+    };
     let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
     bytes[60 + metadata_len] ^= 1;
     fs::write(&path, bytes).unwrap();
-    let package = Package::open_unverified(path).unwrap();
-    let error = WasmtimePluginExecutor::load(package, &host_target()).unwrap_err();
-    assert!(matches!(error, LoadError::Package(_)));
+    match executor.as_mut() {
+        None => {
+            let error = WasmtimePluginExecutor::load(package, &host_target()).unwrap_err();
+            assert!(matches!(error, LoadError::Package(_)));
+        }
+        Some(executor) => {
+            let installer = installer();
+            let error = executor
+                .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
+                .unwrap_err();
+            assert!(matches!(error, zup_plan::PluginFailure::Internal { .. }));
+        }
+    }
 }
 
 fn assert_metadata_mutation_rejected(field: &str, value: serde_json::Value) {

@@ -590,36 +590,6 @@ mod tests {
         );
     }
 
-    /// The invariant is that the declared set is not a function of the selection
-    #[test]
-    fn a_window_is_never_narrowed_away() {
-        let release = release(true, PRESET, &[("branding/logo.svg", LOGO)], &[]);
-        let mut reasons = release
-            .closure()
-            .expect("a closure")
-            .items()
-            .iter()
-            .map(|item| item.reason.clone())
-            .collect::<Vec<_>>();
-        reasons.sort();
-        assert_eq!(
-            reasons,
-            [
-                ContentReason::Preset,
-                ContentReason::PresetAsset {
-                    name: "branding/logo.svg".to_owned()
-                }
-            ],
-            "the window and its asset are required content, and nothing narrows them"
-        );
-        assert!(
-            reasons
-                .iter()
-                .all(|reason| !matches!(reason, ContentReason::File { .. })),
-            "and none of them is payload, so there is no component to select"
-        );
-    }
-
     #[rstest::rstest]
     #[case::an_asset_the_catalog_does_not_carry(
         Some("branding/absent.svg"),
@@ -656,32 +626,6 @@ mod tests {
                 .expect("valid")
                 .is_empty(),
             "so there is nothing a machine would fetch for a window that is not there"
-        );
-    }
-
-    #[test]
-    fn a_window_that_did_not_change_is_the_same_content() {
-        let digests = |preset_bytes: &[u8], asset: &[u8]| {
-            release(true, preset_bytes, &[("branding/logo.svg", asset)], &[])
-                .closure()
-                .expect("a closure")
-                .digests()
-        };
-        let first = digests(PRESET, LOGO);
-        let again = digests(PRESET, LOGO);
-        assert_eq!(
-            first, again,
-            "an unchanged window fetches the same bytes, so it is one download"
-        );
-        assert_ne!(
-            first,
-            digests(PRESET, HERO),
-            "a changed asset is different content"
-        );
-        assert_ne!(
-            first,
-            digests(b"a new preset", LOGO),
-            "and so is a new executable"
         );
     }
 

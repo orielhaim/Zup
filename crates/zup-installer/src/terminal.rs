@@ -503,19 +503,22 @@ fn drive<H: SessionHost>(
         &bound,
     )
     .map_err(Failure::from)?;
-    let mut plan = PlanPreview::from_transaction_plan(&prepared.transaction_plan, scope);
-    plan.application = build.installer.app.name.to_string();
-    plan.version = build.installer.app.version.to_string();
-    if let Some(target) = prepared.target_plan() {
-        plan.install_directory = target.install_directory.to_string();
-        plan.selected_components = target.selected_components.clone();
-    } else if let Some(ledger) = &context.ledger {
-        plan.install_directory = ledger
-            .install_directory
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        plan.selected_components = ledger.selected_components.clone();
+    let mut plan = PlanPreview::from_transaction_plan(
+        &prepared.transaction_plan,
+        scope,
+        prepared.target_plan(),
+    );
+    if prepared.target_plan().is_none() {
+        plan.application = build.installer.app.name.to_string();
+        plan.version = build.installer.app.version.to_string();
+        if let Some(ledger) = &context.ledger {
+            plan.install_directory = ledger
+                .install_directory
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            plan.selected_components = ledger.selected_components.clone();
+        }
     }
     report.result.install_directory =
         (!plan.install_directory.is_empty()).then(|| plan.install_directory.clone());

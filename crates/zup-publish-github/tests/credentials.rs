@@ -1,10 +1,7 @@
 use std::collections::BTreeMap;
 
-use zup_acquire_http::SecretHeader;
 use zup_publish_github::Environment;
-use zup_publish_github::{
-    GithubError, GithubReceipt, GithubRepository, Token, authorization, discover_with,
-};
+use zup_publish_github::{GithubError, GithubReceipt, GithubRepository, Token, discover_with};
 
 struct Env(BTreeMap<String, String>);
 
@@ -122,17 +119,6 @@ fn no_credential_reaches_a_report_a_receipt_or_a_diagnostic() {
         release_is_immutable: None,
     };
     assert!(!format!("{diagnosis:?}").contains(SECRET));
-}
-
-#[test]
-fn the_only_read_of_a_token_is_the_authorization_header() {
-    const SECRET: &str = "ghp_never_print_me";
-    let token = Token::new(SECRET);
-
-    assert_eq!(authorization(&token), format!("Bearer {SECRET}"));
-
-    let header = SecretHeader::new(authorization(&token));
-    assert!(!format!("{header:?}").contains(SECRET));
 }
 
 #[test]

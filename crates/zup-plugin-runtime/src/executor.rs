@@ -166,31 +166,3 @@ fn map_invocation_error(error: InvocationError) -> PluginFailure {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_typed_contract_failures() {
-        assert_eq!(
-            map_invocation_error(InvocationError::Timeout),
-            PluginFailure::Timeout
-        );
-        assert_eq!(
-            map_invocation_error(InvocationError::FuelExhausted),
-            PluginFailure::FuelExhausted
-        );
-        assert_eq!(
-            map_invocation_error(InvocationError::MemoryLimit),
-            PluginFailure::MemoryLimit
-        );
-        assert_eq!(
-            map_invocation_error(InvocationError::OutputLimit {
-                actual: 9,
-                limit: 8,
-            }),
-            PluginFailure::output_limit("returned 9 bytes; limit is 8")
-        );
-    }
-}

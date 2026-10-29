@@ -1273,7 +1273,7 @@ fn execute_prepared(
             &store,
             &record,
             &prepared.state_root,
-            || Err("injected ledger publication failure".into()),
+            |_| Err("injected ledger publication failure".into()),
         )
         .unwrap_err();
         return Ok(pending_verdict(transaction_id, detail));

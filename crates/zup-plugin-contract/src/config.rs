@@ -1,13 +1,7 @@
 use thiserror::Error;
 use wasmtime::{Config, Engine, ProfilingStrategy, WasmBacktraceDetails, WasmFeatures};
 
-pub use zup_plugin_abi::{
-    AOT_FORMAT_VERSION, EPOCH_DEADLINE_TICKS, INVOCATION_DEADLINE_MILLIS, MAX_AOT_BYTES,
-    MAX_FUEL_PER_CALL, MAX_HOST_CALLS, MAX_INSTANCES, MAX_MEMORY_BYTES, MAX_MEMORY_COUNT,
-    MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES, MAX_PLAN_RESOURCES, MAX_TABLE_COUNT,
-    MAX_TABLE_ELEMENTS, MAX_WASM_STACK_BYTES, PLUGIN_API_VERSION, WASM_PAGE_BYTES,
-    WASMTIME_VERSION,
-};
+use zup_plugin_abi::MAX_WASM_STACK_BYTES;
 
 #[derive(Debug, Error)]
 pub enum EngineError {

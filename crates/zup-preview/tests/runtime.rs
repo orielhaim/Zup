@@ -791,25 +791,6 @@ fn a_preset_that_needs_something_this_machine_cannot_do_is_never_launched() {
     );
 }
 
-#[test]
-fn shutdown_ends_the_child_rather_than_leaving_it_holding_its_executable() {
-    let (directory, state) = scratch();
-    let mut runtime = runtime(state);
-    present(&mut runtime);
-    let executable = directory
-        .path()
-        .join(".zup")
-        .join("preview")
-        .join("runs")
-        .join("1");
-    runtime.shutdown();
-    assert!(executable.is_dir(), "the generation is still on disk");
-    // The point of the assertion: the file can be replaced. A child that was not
-    // reaped would still hold it open, and on this platform that is a file the
-    // next generation could not be written to.
-    std::fs::write(executable.join("probe.exe"), b"replaced").expect("the file is writable again");
-}
-
 /// The tree a preset started ends with it, on every platform.
 ///
 /// The witness is a helper the preset spawned, not the preset's own claim about
@@ -827,6 +808,7 @@ fn ending_a_preset_ends_the_tree_it_started() {
 
     runtime.shutdown();
     await_still(&helper);
+    std::fs::write(state.run_executable(1), b"replaced").expect("the executable is closed");
 }
 
 /// The same guarantee by the other route: an owner that is dropped rather than
