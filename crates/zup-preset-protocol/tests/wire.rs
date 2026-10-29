@@ -85,7 +85,7 @@ fn bytes_that_are_not_a_frame_are_refused() {
         Err(WireError::Malformed(_))
     ));
     assert!(matches!(
-        decode(br#"{"version":1,"session":"nope"}"#),
+        decode(br#"{"version":2,"session":"nope"}"#),
         Err(WireError::Malformed(_))
     ));
 }
@@ -109,7 +109,7 @@ fn an_oversized_frame_is_refused() {
 
 #[test]
 fn an_action_that_is_not_in_the_vocabulary_is_refused() {
-    let bytes = br#"{"version":1,"session":"0192f0f0-0000-7000-8000-000000000000","sequence":1,"message":{"type":"action","action":"run_method","method":"install","arguments":{}}}"#;
+    let bytes = br#"{"version":2,"session":"0192f0f0-0000-7000-8000-000000000000","sequence":1,"message":{"type":"action","action":"run_method","method":"install","arguments":{}}}"#;
     assert!(matches!(decode(bytes), Err(WireError::Malformed(_))));
 }
 

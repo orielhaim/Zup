@@ -7,8 +7,8 @@ use zup_core::{
 };
 use zup_plan::InstallPlan;
 use zup_platform::{
-    CommandSpec, InstallLocationResolver, TargetFile, TargetFileAssociation, TargetLauncher,
-    TargetPath, TargetPathEntry, TargetPlan, TargetPlanSummary, TargetProtocol, TargetService,
+    CommandSpec, InstallLocationResolver, TargetFileAssociation, TargetLauncher, TargetPath,
+    TargetPathEntry, TargetPlan, TargetPlanSummary, TargetProtocol, TargetService,
     TemplateResolveError, lower_target_plan_files, resolve_template_path,
 };
 

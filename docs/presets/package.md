@@ -96,7 +96,7 @@ zup preset inspect dist/aurora.zupui
 ```text
 preset        aurora 1.0.0
 package       schema 1
-preset protocol   1
+preset protocol   2
 capabilities  none required
 settings      accent, hero, logo (others permitted)
 

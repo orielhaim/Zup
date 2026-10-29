@@ -44,4 +44,4 @@ pub use wire::{
     negotiate, sender_is_allowed,
 };
 
-pub const PRESET_PROTOCOL_VERSION: u32 = 1;
+pub const PRESET_PROTOCOL_VERSION: u32 = 2;
