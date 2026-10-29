@@ -1,5 +1,5 @@
 name: Full Verification
-run-name: ${{ inputs.measure_sizes && 'Installer size measurements' || 'Full Verification' }}
+run-name: ${{ inputs.native_windows_runner && inputs.native_windows_runner != 'none' && format('Native Windows verification ({0})', inputs.native_windows_runner) || inputs.measure_sizes && 'Installer size measurements' || 'Full Verification' }}
 
 on:
   push:
@@ -8,6 +8,15 @@ on:
     - cron: "0 4 * * 1"
   workflow_dispatch:
     inputs:
+      native_windows_runner:
+        description: Run focused native Windows validation instead of Full Verification
+        type: choice
+        default: none
+        options: [none, windows-2025, windows-11-arm]
+      test_filter:
+        description: Nextest expression for focused native Windows validation
+        type: string
+        default: all()
       measure_sizes:
         description: Measure native installers instead of running full verification
         type: boolean
@@ -29,18 +38,51 @@ permissions:
   contents: read
 
 concurrency:
-  group: full-${{ github.ref }}-${{ inputs.measure_sizes && format('sizes-{0}-{1}-{2}', inputs.profile, inputs.revision, inputs.size_runner) || 'verification' }}
+  group: full-${{ github.ref }}-${{ inputs.measure_sizes && format('sizes-{0}-{1}-{2}', inputs.profile, inputs.revision, inputs.size_runner) || inputs.native_windows_runner && inputs.native_windows_runner != 'none' && format('native-{0}', inputs.native_windows_runner) || 'verification' }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
   RUST_BACKTRACE: 1
 
 jobs:
+  native-windows:
+    name: Native Windows verification
+    if: inputs.native_windows_runner && inputs.native_windows_runner != 'none'
+    runs-on: ${{ inputs.native_windows_runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: full-${{ runner.os }}-${{ runner.arch }}-debug0
+          cache-on-failure: false
+      - uses: ilammy/setup-nasm@v1
+        with:
+          platform: win64
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Toolchain
+        run: cargo xtask toolchain build
+      - name: Selected native tests
+        shell: pwsh
+        env:
+          TEST_FILTER: ${{ inputs.test_filter }}
+        run: cargo nextest run -p zup -p zup-installer -p zup-windows -p zup-plugin-runtime --all-features --no-fail-fast -E "$env:TEST_FILTER"
+      - name: Machine authority tests
+        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
   sizes:
     name: Installer sizes (${{ matrix.runner }})
-    if: inputs.measure_sizes == true
+    if: inputs.measure_sizes == true && (!inputs.native_windows_runner || inputs.native_windows_runner == 'none')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -115,7 +157,7 @@ jobs:
           if-no-files-found: error
   test:
     name: full test ${{ matrix.name }}
-    if: inputs.measure_sizes != true
+    if: inputs.measure_sizes != true && (!inputs.native_windows_runner || inputs.native_windows_runner == 'none')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
