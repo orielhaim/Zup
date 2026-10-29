@@ -1,18 +1,16 @@
-//! path policy, and executes. Zup never handles an administrator password.
-
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+#[cfg(feature = "gui")]
+use clap::Parser;
 use zup_core::Frontend;
 
+#[cfg(feature = "gui")]
 use crate::terminal::Scope;
 
+#[cfg(feature = "gui")]
 #[derive(Debug, Parser)]
 #[command(name = "setup", version)]
 struct Cli {
-    #[command(subcommand)]
-    verb: Option<Verb>,
-
     #[arg(long, global = true)]
     scope: Option<Scope>,
 
@@ -24,71 +22,31 @@ struct Cli {
     state_root: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Subcommand)]
-enum Verb {
-    Install(SelectionArgs),
-    Upgrade(SelectionArgs),
-    Modify(SelectionArgs),
-    Repair(RepairArgs),
-    Uninstall,
-    #[command(name = "__recover", hide = true)]
-    Recover(RecoverArgs),
-    #[command(name = "__privileged-worker", hide = true)]
-    __PrivilegedWorker(WorkerArgs),
-}
-
-#[derive(Debug, Clone, Default, Args)]
-struct SelectionArgs {
-    #[arg(long)]
-    enable: Vec<String>,
-    #[arg(long)]
-    disable: Vec<String>,
-}
-
-#[derive(Debug, Clone, Args)]
-struct RepairArgs {
-    #[arg(long)]
-    force: bool,
-}
-
-#[derive(Debug, Clone, Args)]
-struct RecoverArgs {
-    #[arg(long)]
-    transaction: String,
-}
-
-#[derive(Debug, Clone, Args)]
-struct WorkerArgs {
-    #[arg(long)]
-    session: String,
-    #[arg(long)]
-    client_pid: u32,
-    #[arg(long)]
-    socket_path: PathBuf,
-}
-
 pub fn command() -> clap::Command {
     crate::terminal::command()
 }
 
 pub fn run(frontend: Frontend) -> miette::Result<()> {
-    if frontend == Frontend::Gui {
+    if let Some((session, client_pid, socket_path)) = worker_session_args() {
+        return run_worker(session, client_pid, socket_path);
+    }
+    let command = crate::terminal::command();
+    let terminal_request = std::env::args().skip(1).any(|argument| {
+        command
+            .get_subcommands()
+            .any(|subcommand| subcommand.get_name() == argument)
+            || matches!(
+                argument.as_str(),
+                "--help" | "-h" | "--version" | "-V" | "--output" | "--non-interactive" | "--yes"
+            )
+    });
+    if frontend == Frontend::Gui && !terminal_request {
         #[cfg(feature = "gui")]
         return run_gui();
         #[cfg(not(feature = "gui"))]
         return Err(miette::miette!(
             "this setup runtime has no graphical frontend"
         ));
-    }
-    // package: it authenticates and serves one session, never a lifecycle.
-    if let Some((session, client_pid, socket_path)) = worker_session_args() {
-        return run_worker(session, client_pid, socket_path);
-    }
-    if std::env::args().any(|argument| argument == "__recover") {
-        let cli = Cli::parse();
-        if let Some(Verb::Recover(args)) = &cli.verb {
-            return run_recovery(&cli, args.clone());
-        }
     }
     crate::terminal::run_cli(
         zup_linux::LinuxSessionHost::open(PathBuf::new()),
@@ -115,22 +73,7 @@ fn run_gui() -> miette::Result<()> {
         ));
     }
     let cli = Cli::parse();
-    match &cli.verb {
-        Some(Verb::__PrivilegedWorker(args)) => {
-            return run_worker(
-                args.session.clone(),
-                args.client_pid,
-                args.socket_path.clone(),
-            );
-        }
-        Some(Verb::Recover(_)) => {
-            return Err(miette::miette!(
-                "recovery runs without a window; use the console installer"
-            ));
-        }
-        _ => {}
-    }
-    if cli.verb.is_some() || cli.install_dir.is_some() || cli.state_root.is_some() {
+    if cli.install_dir.is_some() || cli.state_root.is_some() {
         return Err(miette::miette!(
             "the graphical installer takes no operation arguments; choose the operation in the window"
         ));
@@ -152,60 +95,6 @@ fn run_gui() -> miette::Result<()> {
                 ..Default::default()
             },
         ))
-}
-
-fn run_recovery(cli: &Cli, args: RecoverArgs) -> miette::Result<()> {
-    let id = args
-        .transaction
-        .parse::<uuid::Uuid>()
-        .map_err(|_| miette::miette!("the recovery transaction is named by uuid"))?;
-    let id = zup_transaction::TransactionId::from_uuid(id);
-    let scope = cli
-        .scope
-        .map(Into::into)
-        .ok_or_else(|| miette::miette!("recovery requires --scope user or --scope machine"))?;
-    let state_root = match &cli.state_root {
-        Some(root) => root.clone(),
-        None => zup_linux::state_root(scope).map_err(|error| miette::miette!("{error}"))?,
-    };
-    let store = zup_transaction::FilesystemTransactionStore::private_at(&state_root);
-    let record = zup_transaction::TransactionStore::load(&store, &id)
-        .map_err(|error| miette::miette!("transaction: {error}"))?;
-    let executable = std::env::current_exe().map_err(|error| miette::miette!("{error}"))?;
-    let backend = zup_linux::LinuxRuntimeBackend {
-        installer: executable,
-        operation: zup_runtime::Operation::Apply,
-        selection: Default::default(),
-        install_dir_override: None,
-        generated: Default::default(),
-    };
-    let request = zup_runtime::RuntimeRequest {
-        target: record.target,
-        app_id: record.app_id.clone(),
-        app_version: record.app_version.clone(),
-        scope: record.scope,
-        transaction_plan: record.plan.clone(),
-        state_root: state_root.clone(),
-        work_root: state_root.join("work"),
-        recovery_id: Some(id),
-        bootstrap: None,
-        release: None,
-    };
-    let control = zup_runtime::OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
-    let outcome = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| miette::miette!("session runtime: {error}"))?
-        .block_on(zup_runtime::execute(&backend, request, &control));
-    let _ = state_root;
-    match outcome {
-        Ok(zup_runtime::InstallOutcome::Committed) => {
-            println!("committed");
-            Ok(())
-        }
-        Ok(other) => Err(miette::miette!("recovery ended as {other:?}")),
-        Err(error) => Err(miette::miette!("{error}")),
-    }
 }
 
 fn worker_session_args() -> Option<(String, u32, PathBuf)> {

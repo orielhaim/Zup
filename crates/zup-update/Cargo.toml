@@ -6,7 +6,13 @@ license.workspace = true
 repository.workspace = true
 description = "TUF-authenticated release graph resolution for zup"
 
+[features]
+bundle = ["dep:zup-artifact", "dep:zup-bundle", "dep:semver"]
+
 [dependencies]
+zup-artifact = { workspace = true, optional = true }
+zup-bundle = { workspace = true, optional = true }
+semver = { workspace = true, optional = true }
 futures-util = "0.3"
 sha2.workspace = true
 serde_json.workspace = true
@@ -19,6 +25,8 @@ zup-acquire-http.workspace = true
 zup-core.workspace = true
 
 [dev-dependencies]
+rstest.workspace = true
+zup-preset-protocol.workspace = true
 aws-lc-rs = "1"
 jiff.workspace = true
 tempfile.workspace = true

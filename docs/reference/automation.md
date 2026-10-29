@@ -70,3 +70,5 @@ Windows preserves the native reboot exit code `3010`; on Unix, where process exi
 ## Paths
 
 Protocol paths are release/project-relative and use `/` separators unless a command explicitly reports a local machine path.
+
+Linux maintenance also accepts `update check`, `update`, and `recover --transaction UUID` with the same `--scope`, `--output json`, and `--output jsonl` options. An update check reports availability in the result message without changing application files. Recovery returns success only after required completion work finishes; pending reconciliation returns code 7 and retains its original diagnostic and transaction identity. JSON results include the pending transaction UUID in `transaction`.

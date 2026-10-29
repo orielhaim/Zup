@@ -84,11 +84,12 @@ impl BuildInputs {
 
 pub fn resolve_runtimes(
     mode: InputMode,
+    updates: bool,
     resolver: &ToolchainResolver,
     supplied: &[PathBuf],
     targets: &[ResolvedTargetConfig],
 ) -> miette::Result<Vec<RuntimeSlot>> {
-    let slots = resolve_runtime_slots(resolver, supplied, targets);
+    let slots = resolve_runtime_slots(resolver, supplied, targets, updates);
     if let (InputMode::Enforce, Some(problem)) = (mode, first_problem(&slots, &[])) {
         return Err(miette::miette!("{}", problem.message));
     }
@@ -202,6 +203,7 @@ fn resolve_runtime_slots(
     resolver: &ToolchainResolver,
     supplied: &[PathBuf],
     targets: &[ResolvedTargetConfig],
+    updates: bool,
 ) -> Vec<RuntimeSlot> {
     let mismatched = !supplied.is_empty() && supplied.len() != targets.len();
     let mut seen = BTreeMap::<PathBuf, usize>::new();
@@ -216,7 +218,7 @@ fn resolve_runtime_slots(
             ));
         }
         let component =
-            crate::toolchain::runtime_for(&targets[index].target, targets[index].frontend);
+            crate::toolchain::runtime_for(&targets[index].target, targets[index].frontend, updates);
         match resolver.resolve(&component, supplied.get(index).map(|path| path.as_path())) {
             Ok(resolved) => {
                 if let Some(previous) = seen.insert(resolved.path.clone(), index)
@@ -480,7 +482,7 @@ mod tests {
     fn a_target_with_no_resolvable_component_reports_the_refusal_and_enforces_it() {
         let targets = vec![target_config("alpha"), target_config("beta")];
         let resolver = empty_resolver();
-        let slots = resolve_runtimes(InputMode::Preflight, &resolver, &[], &targets)
+        let slots = resolve_runtimes(InputMode::Preflight, false, &resolver, &[], &targets)
             .expect("preflight reports rather than raises");
         assert_eq!(slots.len(), 2);
         for slot in &slots {
@@ -494,7 +496,7 @@ mod tests {
                 slot.problems[0].message
             );
         }
-        let error = resolve_runtimes(InputMode::Enforce, &resolver, &[], &targets)
+        let error = resolve_runtimes(InputMode::Enforce, false, &resolver, &[], &targets)
             .expect_err("a build refuses to start without a component")
             .to_string();
         assert!(error.contains("cargo xtask toolchain build"), "{error}");

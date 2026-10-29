@@ -43,6 +43,9 @@ The common operation interface is:
 ./Acme-Setup upgrade --scope user
 ./Acme-Setup repair --scope user
 ./Acme-Setup uninstall --scope user
+# Linux applications configured for updates:
+./Acme-Setup update check --scope user
+./Acme-Setup update --scope user --yes
 ```
 
 Use the `.exe` executable on Windows. An installer declaring `scope = "either"` requires `--scope` outside interactive mode. Fixed-scope installers do not ask. `--install-directory PATH` is accepted only when the manifest permits it. Repair uses the committed location and component selection. `repair --force-files` explicitly permits restoring edited managed files; ordinary repair preserves them or reports a conflict.

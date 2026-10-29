@@ -494,7 +494,7 @@ pub fn reap_generated(
         .map_err(|error| io_path(&objects.join(&key), error))?
     {
         let label = name.to_string_lossy();
-        if retained.contains(label.as_ref()) {
+        if retained.contains::<str>(label.as_ref()) {
             continue;
         }
         match directory.remove_file(&name, private_fs::Durability::Full) {

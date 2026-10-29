@@ -255,7 +255,7 @@ fn a_public_build_installs_runs_and_uninstalls() {
     let installer = project.root.path().join("Tool-Setup");
 
     let user = IsolatedUser::isolate();
-    let installed = user.installer(&installer, &[]);
+    let installed = user.installer(&installer, &["install"]);
     assert!(
         installed.status.success(),
         "install: {}",

@@ -35,6 +35,9 @@
 //! is never deleted because a fetch failed. A publisher who cannot be reached
 //! must not be able to reset a client's rollback memory.
 
+#[cfg(feature = "bundle")]
+pub mod content;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

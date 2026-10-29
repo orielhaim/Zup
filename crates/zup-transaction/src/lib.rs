@@ -7,7 +7,9 @@ mod input;
 mod lock;
 mod plan;
 mod private;
+mod reconciliation;
 mod record;
+pub use reconciliation::{ReconciliationState, reconcile_committed};
 mod storage;
 
 pub use coordinator::{

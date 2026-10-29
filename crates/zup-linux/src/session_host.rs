@@ -9,12 +9,18 @@ use crate::operation_host::LinuxOperationHost;
 
 #[derive(Clone)]
 pub struct LinuxSessionHost {
-    installer: PathBuf,
+    pub(crate) installer: PathBuf,
+    #[cfg(feature = "online")]
+    pub(crate) update_stage: Option<Arc<tempfile::TempDir>>,
 }
 
 impl LinuxSessionHost {
     pub fn open(installer: PathBuf) -> Self {
-        Self { installer }
+        Self {
+            installer,
+            #[cfg(feature = "online")]
+            update_stage: None,
+        }
     }
 
     fn operation_host(&self, scope: SelectedScope) -> LinuxOperationHost {
@@ -46,9 +52,11 @@ impl SessionHost for LinuxSessionHost {
     }
 
     fn describe(&mut self, executable: &Path) -> Result<Arc<zup_core::TargetBuildPlan>, String> {
-        self.installer = executable.to_path_buf();
+        if self.installer.as_os_str().is_empty() {
+            self.installer = executable.to_path_buf();
+        }
         let carrier =
-            crate::carrier::Carrier::open(executable).map_err(|error| error.to_string())?;
+            crate::carrier::Carrier::open(&self.installer).map_err(|error| error.to_string())?;
         let build = carrier
             .package()
             .build_plan()
@@ -58,6 +66,10 @@ impl SessionHost for LinuxSessionHost {
             .next()
             .ok_or_else(|| "an installer package holds exactly one target".to_owned())?;
         Ok(Arc::new(build))
+    }
+
+    fn content_executable(&self, _executable: &Path) -> PathBuf {
+        self.installer.clone()
     }
 
     fn observe(
@@ -125,7 +137,8 @@ impl SessionHost for LinuxSessionHost {
         };
         zup_preset_host::process::check_presentable(&runtime, &capabilities)
             .map_err(|error| error.to_string())?;
-        let (executable, assets, stage) = match context.ledger.as_ref() {
+        let executable_name = format!("preset{}", installer.target.executable_suffix());
+        let files = match context.ledger.as_ref() {
             Some(ledger) => {
                 let recorded = ledger.preset().ok_or_else(|| {
                     format!(
@@ -146,12 +159,29 @@ impl SessionHost for LinuxSessionHost {
                     |path| path.to_string_lossy().into_owned(),
                 )
                 .map_err(|error| error.to_string())?;
-                (resolved.executable, resolved.assets, None)
+                let mut files = vec![(
+                    executable_name.clone(),
+                    recorded_file(
+                        &resolved.executable,
+                        recorded.executable,
+                        zup_core::MAX_PRESET_BINARY_BYTES,
+                    )?,
+                )];
+                for asset in &runtime.assets {
+                    let path = resolved
+                        .assets
+                        .get(asset.name.as_str())
+                        .ok_or_else(|| format!("the recorded asset {} is missing", asset.name))?;
+                    files.push((
+                        asset.name.to_string(),
+                        recorded_file(Path::new(path), asset.sha256, asset.size)?,
+                    ));
+                }
+                files
             }
             None => {
                 let carrier = crate::carrier::Carrier::open(&self.installer)
                     .map_err(|error| error.to_string())?;
-                let executable_name = format!("preset{}", installer.target.executable_suffix());
                 let mut files = vec![(
                     executable_name.clone(),
                     carrier
@@ -166,16 +196,13 @@ impl SessionHost for LinuxSessionHost {
                         .map_err(|error| format!("the asset `{}`: {error}", asset.name))?;
                     files.push((asset.name.to_string(), bytes));
                 }
-                let staged = stage_session(&files).map_err(|error| error.to_string())?;
-                let executable = staged.executable.clone();
-                let assets = staged.assets.clone();
-                (
-                    executable,
-                    assets,
-                    Some(zup_preset_host::PresetStage::acquire(staged.root)),
-                )
+                files
             }
         };
+        let staged = stage_session(&files).map_err(|error| error.to_string())?;
+        let executable = staged.executable.clone();
+        let assets = staged.assets.clone();
+        let stage = Some(zup_preset_host::PresetStage::acquire(staged.root));
         Ok(zup_session::PresetLaunch {
             executable,
             configuration: zup_preset_protocol::Configuration {
@@ -187,6 +214,72 @@ impl SessionHost for LinuxSessionHost {
             environment: zup_preset_protocol::environment::current(installer.target.as_str()),
             stage,
         })
+    }
+
+    fn supports_updates(&self) -> bool {
+        cfg!(feature = "online")
+    }
+
+    #[cfg(feature = "online")]
+    fn prepare_update(
+        &mut self,
+        build: &Arc<zup_core::TargetBuildPlan>,
+        context: &zup_session::OperationContext,
+        source: Option<&Path>,
+        request: &zup_runtime::UpdateRequest,
+        cancellation: zup_runtime::CancellationHandle,
+        events: &mut (dyn FnMut(zup_presentation::InstallerEvent) + Send),
+    ) -> Result<zup_session::UpdatePreparation, String> {
+        crate::update::prepare(self, build, context, source, request, cancellation, events)
+    }
+
+    #[cfg(feature = "online")]
+    fn update(
+        &self,
+        context: &zup_session::OperationContext,
+        request: &zup_runtime::UpdateRequest,
+        control: &zup_runtime::OperationControl,
+        status: &mut (dyn FnMut(zup_preset_protocol::UpdateState) + Send),
+    ) -> Result<zup_runtime::InstallOutcome, String> {
+        crate::update::run(self.clone(), context, request, control, status)
+    }
+
+    fn refresh_installation(
+        &mut self,
+        context: &zup_session::OperationContext,
+    ) -> Result<Option<Arc<zup_core::TargetBuildPlan>>, String> {
+        let Some(ledger) = &context.ledger else {
+            return Ok(None);
+        };
+        self.installer = zup_transaction::maintenance_runtime_path(
+            &context.state_root,
+            &ledger.app_id,
+            context.scope,
+            &ledger.version,
+            ledger.target.executable_suffix(),
+        );
+        #[cfg(feature = "online")]
+        {
+            self.update_stage = None;
+        }
+        self.describe(&self.installer.clone()).map(Some)
+    }
+
+    fn recover<'a>(
+        &'a self,
+        context: &'a zup_session::OperationContext,
+        transaction: &'a str,
+        control: &'a zup_runtime::OperationControl,
+    ) -> zup_runtime::RuntimeFuture<
+        'a,
+        Result<zup_runtime::InstallOutcome, zup_runtime::SessionError>,
+    > {
+        Box::pin(crate::backend::recover_installation(
+            &self.installer,
+            context,
+            transaction,
+            control,
+        ))
     }
 
     fn copy_diagnostics(&self, text: &str) {
@@ -216,6 +309,25 @@ impl SessionHost for LinuxSessionHost {
             }
         }
     }
+}
+
+fn recorded_file(
+    path: &Path,
+    expected: zup_core::Sha256Digest,
+    limit: u64,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(limit.saturating_add(1)).read_to_end(&mut bytes))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if bytes.len() as u64 > limit || zup_core::hash_bytes(&bytes) != expected {
+        return Err(format!(
+            "installed preset content differs from its recorded identity: {}",
+            path.display()
+        ));
+    }
+    Ok(bytes)
 }
 
 struct StagedSession {

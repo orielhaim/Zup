@@ -82,6 +82,17 @@ impl<S: TransactionStore> std::ops::Deref for OpenTransaction<S> {
 }
 
 impl<S: TransactionStore> OpenTransaction<S> {
+    pub fn with_release(
+        mut self,
+        release: Option<zup_core::ReleaseIdentity>,
+    ) -> Result<Self, TransactionError> {
+        self.record.release = release;
+        let revision = self.record.revision;
+        self.record.touch();
+        self.store.compare_and_swap(revision, &self.record)?;
+        Ok(self)
+    }
+
     pub fn record(&self) -> &TransactionRecord {
         &self.record
     }

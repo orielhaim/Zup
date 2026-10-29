@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zup_bundle::{PackagePayloadSource, PayloadError, PayloadReader, PayloadSource};
-use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest};
+use zup_core::{ResourceKey, SelectedScope, Sha256Digest};
 use zup_exec::{InstallLedger, OwnedResource};
 
 use crate::carrier::Carrier;
@@ -133,23 +133,17 @@ fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
             version: version.clone(),
         }),
         zup_runtime::InstallOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
-        zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. } => {
-            Ok(LinuxOutcome::CommittedPendingReconciliation {
-                transaction: zup_runtime::discover_recovery(state_root)
-                    .map_err(|error| ExecError::Ownership(error.to_string()))?
-                    .into_iter()
-                    .find_map(|status| match status {
-                        zup_runtime::RecoveryStatus::CommittedTransaction { transaction_id }
-                        | zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id }
-                        | zup_runtime::RecoveryStatus::PreparedTransaction { transaction_id }
-                        | zup_runtime::RecoveryStatus::InterruptedApplyingTransaction {
-                            transaction_id,
-                        } => Some(transaction_id),
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| "committed".into()),
-            })
-        }
+        zup_runtime::InstallOutcome::CommittedPendingReconciliation {
+            transaction,
+            detail,
+        } => Ok(LinuxOutcome::CommittedPendingReconciliation {
+            detail: detail.clone(),
+            transaction: transaction.ok_or_else(|| {
+                ExecError::Ownership(format!(
+                    "{detail}; committed reconciliation omitted its transaction identity"
+                ))
+            })?,
+        }),
         zup_runtime::InstallOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
             transaction: zup_runtime::discover_recovery(state_root)
                 .map_err(|error| ExecError::Ownership(error.to_string()))?
@@ -297,66 +291,6 @@ pub(crate) fn inspect_owned_matches_for(
         matches.insert(key.clone(), found);
     }
     matches
-}
-
-pub(crate) fn retire_old_generations_for(
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-    current: &semver::Version,
-) -> Result<(), ExecError> {
-    let root = zup_transaction::maintenance_root(state_root, app_id, scope);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(PathError::Io {
-                path: root.display().to_string(),
-                source,
-            }
-            .into());
-        }
-    };
-    for entry in entries {
-        let entry = entry.map_err(|source| PathError::Io {
-            path: root.display().to_string(),
-            source,
-        })?;
-        let keep = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name == current.to_string());
-        if keep {
-            continue;
-        }
-        let path = entry.path();
-        let is_dir = std::fs::symlink_metadata(&path)
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false);
-        if !is_dir {
-            continue;
-        }
-
-        let owned = std::fs::read_dir(&path)
-            .map(|entries| {
-                entries.filter_map(|entry| entry.ok()).all(|entry| {
-                    entry.file_name().to_str().is_some_and(|name| {
-                        name == zup_transaction::MAINTENANCE_RUNTIME_DIRECTORY
-                            || name == zup_transaction::MAINTENANCE_PACKAGE_NAME
-                            || name == zup_transaction::MAINTENANCE_INDEX_NAME
-                    })
-                })
-            })
-            .unwrap_or(false);
-        if !owned {
-            continue;
-        }
-        std::fs::remove_dir_all(&path).map_err(|source| PathError::Io {
-            path: path.display().to_string(),
-            source,
-        })?;
-    }
-    Ok(())
 }
 
 pub(crate) struct RunnerPayload {

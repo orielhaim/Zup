@@ -68,6 +68,7 @@ pub fn host_runtime(executable: &Path, frontend: zup_core::Frontend) -> PathBuf 
     component(
         executable,
         &ToolchainComponent::Runtime {
+            online: false,
             target: zup_core::Target::parse(zup_plugin_contract::HOST_TARGET)
                 .expect("the host target is valid"),
             frontend,

@@ -715,7 +715,13 @@ source = "plugins/helper.wasm"
     )
     .unwrap();
 
-    let runtime = setup_runtime(project.path(), HOST_TARGET);
+    let mut runtime = toolchain_fixture::runtime(HOST_TARGET, fixture_frontend());
+    if let zup_toolchain::ToolchainComponent::Runtime { target, online, .. } =
+        &mut runtime.component
+    {
+        *online = target.operating_system() == zup_core::TargetOperatingSystem::Linux;
+    }
+    let runtime = runtime.write(&project.path().join("toolchain"));
     let manifest = project.path().join("zup.toml");
     let output = run_doctor(&manifest, &[("--runtime", runtime.as_path())]);
     assert!(

@@ -87,6 +87,7 @@ fn resolve_runtimes(
 ) -> miette::Result<Vec<PathBuf>> {
     let slots = build_inputs::resolve_runtimes(
         build_inputs::InputMode::Enforce,
+        loaded.manifest.updates.is_some(),
         resolver,
         &args.runtime,
         &loaded.selected_targets,
@@ -140,6 +141,7 @@ fn build_variants(
     let targets = &loaded.selected_targets;
     let runtimes = build_inputs::resolve_runtimes(
         build_inputs::InputMode::Enforce,
+        loaded.manifest.updates.is_some(),
         resolver,
         &args.runtime,
         targets,

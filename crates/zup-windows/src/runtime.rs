@@ -1122,6 +1122,7 @@ async fn run_elevated_worker(
                         "recovery_required" => InstallOutcome::RecoveryRequired,
                         "committed_pending_reconciliation" => {
                             InstallOutcome::CommittedPendingReconciliation {
+                                transaction: Some(completed.transaction_id),
                                 detail: "the transaction committed and ledger reconciliation is still required"
                                     .into(),
                             }
@@ -1512,6 +1513,7 @@ fn execute_local_blocking_with_events_inner(
                     InstallOutcome::Committed
                 }
                 Err(e) => InstallOutcome::CommittedPendingReconciliation {
+                    transaction: Some(record.transaction_id.as_uuid()),
                     detail: format!("transaction committed but ledger publication failed: {e}"),
                 },
             }

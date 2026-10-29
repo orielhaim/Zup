@@ -161,10 +161,14 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
     );
 
     let raw_directory = if let Some(directory) = &request.install_directory {
-        if !installer.install.allow_directory_override {
-            return Err(PlanError::InstallDirectoryOverrideNotAllowed);
+        match directory {
+            crate::InstallDirectory::Override(_) if !installer.install.allow_directory_override => {
+                return Err(PlanError::InstallDirectoryOverrideNotAllowed);
+            }
+            crate::InstallDirectory::Override(path) | crate::InstallDirectory::Installed(path) => {
+                path.clone()
+            }
         }
-        directory.clone()
     } else {
         match (scope, installer.install.scope) {
             (SelectedScope::User, _) => installer

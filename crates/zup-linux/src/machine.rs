@@ -682,9 +682,7 @@ pub fn normalize_published_modes(
         let zup_exec::OwnedResource::File { destination, .. } = owned else {
             continue;
         };
-        let Ok(host) = crate::lowering::to_host_path(destination) else {
-            continue;
-        };
+        let host = crate::lowering::to_host_path(destination)?;
 
         if host.starts_with(state_root) {
             set_mode(&host, 0o755)?;

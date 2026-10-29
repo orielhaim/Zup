@@ -567,6 +567,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
 pub fn from_maintenance_surface(
     executable: &Path,
     scope: SelectedScope,
+    request: &zup_runtime::UpdateRequest,
     status: &mut dyn FnMut(UpdateState),
 ) -> Result<(), String> {
     let bundle = package::open_bundle(executable).map_err(|error| error.to_string())?;
@@ -599,24 +600,41 @@ pub fn from_maintenance_surface(
     status(UpdateState::Checking {
         detail: "Resolving the update channel…".into(),
     });
-    let acquired = tokio
-        .block_on(acquire::acquire(
-            context,
-            ComponentSelection::All,
-            None,
-            &[],
-            sink,
-        ))
+    let resolver = zup_update::ReleaseResolver::new(
+        context,
+        zup_acquire::HostProfile::native(),
+        CachePolicy::Auto,
+        sink,
+    )
+    .map_err(|error| error.to_string())?;
+    let resolved = tokio
+        .block_on(resolver.resolve())
         .map_err(|error| error.to_string())?;
-    let available = acquired.resolved.descriptor.version.clone();
-    let same_release = ledger
-        .release_identity()
-        .is_some_and(|installed| installed.release == acquired.resolved.descriptor.release_digest);
-    if same_release {
-        drop(emitter);
+    let available = resolved.descriptor.version.clone();
+    if semver::Version::parse(&available).map_err(|error| error.to_string())? <= ledger.version {
         status(UpdateState::UpToDate { current });
         return Ok(());
     }
+    if matches!(request, zup_runtime::UpdateRequest::Check) {
+        status(UpdateState::Available { current, available });
+        return Ok(());
+    }
+    if let zup_runtime::UpdateRequest::Install {
+        version: Some(expected),
+    } = request
+        && expected != &available
+    {
+        return Err(
+            "The available update changed. Check for updates again before installing.".into(),
+        );
+    }
+    let acquired = tokio
+        .block_on(acquire::acquire_closure(
+            &resolver,
+            resolved,
+            ComponentSelection::All,
+        ))
+        .map_err(|error| error.to_string())?;
     status(UpdateState::Installing {
         detail: acquired.estimate().to_string(),
     });
@@ -631,7 +649,7 @@ pub fn from_maintenance_surface(
     )
     .map_err(|error| error.to_string())?;
     let _ = emitter;
-    status(UpdateState::Available { current, available });
+    status(UpdateState::UpToDate { current: available });
     Ok(())
 }
 

@@ -112,6 +112,8 @@ pub struct NodeStateError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionRecord {
+    pub reconciliation: crate::ReconciliationState,
+    pub release: Option<zup_core::ReleaseIdentity>,
     pub schema: u32,
     pub transaction_id: TransactionId,
     pub app_id: AppId,
@@ -143,6 +145,8 @@ impl TransactionRecord {
             nodes.insert(node.id.clone(), NodeState::Pending);
         }
         Self {
+            reconciliation: crate::ReconciliationState::Pending { failure: None },
+            release: None,
             schema: JOURNAL_SCHEMA,
             transaction_id,
             app_id,
@@ -160,11 +164,23 @@ impl TransactionRecord {
     }
 
     pub fn validate(&self) -> Result<(), CorruptReason> {
+        if self.reconciliation == crate::ReconciliationState::Complete
+            && self.phase != TransactionPhase::Committed
+        {
+            return Err(CorruptReason::InvalidPhase);
+        }
         if self.schema != JOURNAL_SCHEMA {
             return Err(CorruptReason::UnsupportedSchema { found: self.schema });
         }
         if self.plan_hash != self.plan.fingerprint() {
             return Err(CorruptReason::PlanHashMismatch);
+        }
+        if let Some(release) = &self.release
+            && (release.app_id != self.app_id
+                || release.target != self.target
+                || release.version != self.app_version.to_string())
+        {
+            return Err(CorruptReason::InvalidPlan);
         }
         if self.target != self.plan.target {
             return Err(CorruptReason::TargetMismatch);

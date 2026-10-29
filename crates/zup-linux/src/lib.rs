@@ -126,3 +126,6 @@ pub use socket::{
 pub use systemd::{DBUS_TIMEOUT, RealSystemd, SystemdManager, probe_systemd};
 #[cfg(target_os = "linux")]
 pub use worker::{EXECUTE_TIMEOUT, FilePin, WorkerContext, run_worker_mode};
+
+#[cfg(all(target_os = "linux", feature = "online"))]
+mod update;

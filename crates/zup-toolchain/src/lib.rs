@@ -55,6 +55,7 @@ pub enum ComponentKind {
 pub enum ToolchainComponent {
     /// The runtime template for one target and one frontend.
     Runtime {
+        online: bool,
         target: zup_core::Target,
         frontend: Frontend,
     },
@@ -122,9 +123,14 @@ impl Subsystem {
 /// artifact exists to serve.
 pub fn file_name(component: &ToolchainComponent, executable_suffix: &str) -> String {
     match component {
-        ToolchainComponent::Runtime { target, frontend } => {
+        ToolchainComponent::Runtime {
+            target,
+            frontend,
+            online,
+        } => {
+            let network = if *online { "-online" } else { "" };
             format!(
-                "zup-setup-{}-{}{}",
+                "zup-setup-{}{network}-{}{}",
                 frontend.as_str(),
                 target.as_str(),
                 executable_suffix
@@ -190,10 +196,16 @@ pub fn components_for_target(target: &zup_core::Target) -> Vec<ToolchainComponen
     };
     let mut out = Vec::new();
     for &frontend in capabilities.frontends {
-        out.push(ToolchainComponent::Runtime {
-            target: *target,
-            frontend,
-        });
+        for online in [false, true] {
+            if online && target.operating_system() != zup_core::TargetOperatingSystem::Linux {
+                continue;
+            }
+            out.push(ToolchainComponent::Runtime {
+                online,
+                target: *target,
+                frontend,
+            });
+        }
     }
     if capabilities.artifacts == zup_platform::ArtifactSupport::Universal {
         for subsystem in [Subsystem::Gui, Subsystem::Console] {
@@ -438,7 +450,7 @@ pub struct ComponentDescriptor {
     /// The launcher experience, when the component is a dispatcher.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subsystem: Option<String>,
-    /// Whether a dispatcher can resolve a release over the network.
+    /// Whether optional online support was requested for this component.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub online: Option<bool>,
     /// The SHA-256 of the component's bytes, hex.
@@ -456,7 +468,11 @@ impl ComponentDescriptor {
     ) -> Result<Self, ToolchainError> {
         let (size, digest) = measure(path)?;
         Ok(match component {
-            ToolchainComponent::Runtime { target, frontend } => Self {
+            ToolchainComponent::Runtime {
+                target,
+                frontend,
+                online,
+            } => Self {
                 format_version: FORMAT_VERSION,
                 kind: ComponentKind::Runtime,
                 zup_version: zup_version.to_owned(),
@@ -464,7 +480,7 @@ impl ComponentDescriptor {
                 frontend: Some(frontend.as_str().to_owned()),
                 preset_encoding: Some(PresetEncoding::Zstd),
                 subsystem: None,
-                online: None,
+                online: Some(*online),
                 digest,
                 size,
             },
@@ -533,7 +549,17 @@ impl ComponentDescriptor {
             )));
         }
         match wanted {
-            ToolchainComponent::Runtime { target, frontend } => {
+            ToolchainComponent::Runtime {
+                target,
+                frontend,
+                online,
+            } => {
+                if self.online != Some(*online) {
+                    return Err(ToolchainError::Incompatible(
+                        "runtime networking capability does not match; rebuild the toolchain"
+                            .into(),
+                    ));
+                }
                 if self.kind != ComponentKind::Runtime {
                     return Err(ToolchainError::WrongKind);
                 }
@@ -719,6 +745,7 @@ mod tests {
 
     fn runtime(target: &str, frontend: Frontend) -> ToolchainComponent {
         ToolchainComponent::Runtime {
+            online: false,
             target: zup_core::Target::parse(target).expect("valid target"),
             frontend,
         }
@@ -1019,25 +1046,26 @@ mod tests {
     }
 
     #[test]
-    fn a_linux_target_needs_its_three_runtimes_and_a_preset() {
-        let target = zup_core::Target::parse("linux-x64").expect("valid");
+    fn linux_runtime_templates_separate_network_capabilities() {
+        let target = zup_core::Target::LINUX_X64;
         let components = components_for_target(&target);
-        assert_eq!(components.len(), 4, "{components:?}");
-        let mut runtimes = 0;
-        let mut presets = 0;
-        for component in &components {
-            match component {
-                ToolchainComponent::Runtime { target: found, .. } => {
-                    assert_eq!(found, &target, "{component:?}");
-                    runtimes += 1;
-                }
-                ToolchainComponent::Preset => presets += 1,
-                other => panic!("a Linux target stages no {other:?}"),
-            }
+        let root = tempfile::tempdir().unwrap();
+        for frontend in [Frontend::Gui, Frontend::Console, Frontend::Headless] {
+            let offline = ToolchainComponent::Runtime {
+                target,
+                frontend,
+                online: false,
+            };
+            let online = ToolchainComponent::Runtime {
+                target,
+                frontend,
+                online: true,
+            };
+            assert!(components.contains(&offline) && components.contains(&online));
+            assert_ne!(file_name(&offline, ""), file_name(&online, ""));
+            let file = write_component(root.path(), &offline, "0.0.1");
+            let descriptor = ComponentDescriptor::of(&offline, "0.0.1", &file).unwrap();
+            assert!(descriptor.check(&online, "0.0.1").is_err());
         }
-        assert_eq!(runtimes, 3, "{components:?}");
-        assert_eq!(presets, 1, "{components:?}");
-        assert_eq!(components, supported_components(&target));
-        assert_eq!(components, host_components(&target));
     }
 }

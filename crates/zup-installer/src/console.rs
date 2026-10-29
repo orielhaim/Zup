@@ -122,8 +122,12 @@ impl Console {
         Ok(scopes[self.choose("Install for", &items)?])
     }
 
-    pub fn maintenance(&self, operations: &[Operation]) -> miette::Result<Operation> {
-        let items = operations
+    pub fn maintenance(
+        &self,
+        operations: &[Operation],
+        updates: bool,
+    ) -> miette::Result<crate::terminal::Command> {
+        let mut items = operations
             .iter()
             .map(|operation| match operation {
                 Operation::Upgrade => ("Upgrade", "Install the newer version in this package"),
@@ -143,10 +147,33 @@ impl Console {
             })
             .map(|(label, hint)| (label.into(), hint.into()))
             .collect::<Vec<_>>();
-        if operations.len() == 1 {
-            return Ok(operations[0]);
+        if updates {
+            items.push((
+                "Check for updates".into(),
+                "Check the authenticated update channel".into(),
+            ));
         }
-        Ok(operations[self.choose("Maintenance", &items)?])
+        let selected = if items.len() == 1 {
+            0
+        } else {
+            self.choose("Maintenance", &items)?
+        };
+        #[cfg(target_os = "linux")]
+        if selected == operations.len() {
+            return Ok(crate::terminal::Command::Update {
+                command: None,
+                source: None,
+            });
+        }
+        Ok(match operations[selected] {
+            Operation::Upgrade => crate::terminal::Command::Upgrade(Default::default()),
+            Operation::Modify => crate::terminal::Command::Modify(Default::default()),
+            Operation::Repair { force_files } => crate::terminal::Command::Repair { force_files },
+            Operation::Uninstall => crate::terminal::Command::Uninstall,
+            Operation::Install | Operation::Apply => {
+                crate::terminal::Command::Install(Default::default())
+            }
+        })
     }
 
     pub fn selection(

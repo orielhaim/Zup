@@ -528,6 +528,7 @@ fn machine_cross_session_execute_is_refused() {
         session_b,
         1,
         PrepareOperation {
+            recovery_id: None,
             operation: privileged_operation::UPGRADE.to_owned(),
             app_version: "2.0.0".to_owned(),
             ..install_intent(&roots_b.state, None)
@@ -1182,6 +1183,7 @@ fn machine_forbidden_destination_is_refused_by_policy() {
 
 fn install_intent(state: &Path, expected: Option<String>) -> PrepareOperation {
     PrepareOperation {
+        recovery_id: None,
         operation: privileged_operation::INSTALL.to_owned(),
         force_files: false,
         install_dir_override: None,

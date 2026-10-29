@@ -46,7 +46,7 @@ pub enum HostDecision {
         selection: Selection,
     },
     Plan(Selection),
-    Update,
+    Update(zup_runtime::UpdateRequest),
     Cancel,
     OpenLog,
     CopyDiagnostics,
@@ -300,7 +300,14 @@ impl HostState {
         if self.running {
             return HostDecision::Refused(ActionRefusal::Busy);
         }
-        HostDecision::Update
+        let request = match self.snapshot.update.as_ref().map(|update| &update.state) {
+            Some(UpdateState::Available { available, .. }) => zup_runtime::UpdateRequest::Install {
+                version: Some(available.clone()),
+            },
+            _ => zup_runtime::UpdateRequest::Check,
+        };
+        self.begin();
+        HostDecision::Update(request)
     }
 
     fn request_uninstall(&mut self) -> HostDecision {
@@ -540,7 +547,7 @@ impl HostState {
                 self.finish();
             }
             InstallOutcome::RecoveryRequired => self.fail("recovery required".into(), true),
-            InstallOutcome::CommittedPendingReconciliation { detail } => {
+            InstallOutcome::CommittedPendingReconciliation { detail, .. } => {
                 self.fail(detail.clone(), true);
             }
             InstallOutcome::AuthorizationRequired => {

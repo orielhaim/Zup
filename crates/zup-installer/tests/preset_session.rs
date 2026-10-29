@@ -111,7 +111,7 @@ fn describe(decision: HostDecision) -> String {
     match decision {
         HostDecision::Run { .. } => "run".into(),
         HostDecision::Plan(_) => "plan".into(),
-        HostDecision::Update => "update".into(),
+        HostDecision::Update(_) => "update".into(),
         HostDecision::Cancel => "cancel".into(),
         HostDecision::OpenLog => "open-log".into(),
         HostDecision::CopyDiagnostics => "diagnostics".into(),

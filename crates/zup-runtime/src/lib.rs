@@ -7,9 +7,10 @@ mod telemetry;
 
 pub use operation::{
     ContentAccess, Operation, OperationError, OperationHost, OperationInput, OperationSelection,
-    PreparedOperation, RequestOptions, attach_maintenance_copy, choose_install_directory,
-    install_directory_template, maintenance_operations, persisted_install_directory, plan_request,
-    prepare_operation, resolve_operation, runtime_request,
+    PreparedOperation, RequestOptions, UpdateRequest, attach_maintenance_copy,
+    choose_install_directory, install_directory_template, maintenance_operations,
+    persisted_install_directory, plan_request, prepare_operation, resolve_operation,
+    runtime_request,
 };
 
 pub use session::{

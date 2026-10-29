@@ -73,6 +73,7 @@ A Windows build embeds the package into the runtime template as PE resources —
 | User services | not supported |
 | Desktop integration, PATH, protocols, file associations | user scope only; `desktop` launchers and PATH entries are refused on Linux |
 | Machine prerequisites | refused |
+| Authenticated updates | installed GUI, Console, and Headless applications |
 
 A Linux build writes one extensionless installer per target (for example `Acme-Setup`).
 Both architectures use the same backend and support GUI, console, headless, user,

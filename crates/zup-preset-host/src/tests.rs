@@ -593,7 +593,29 @@ fn an_update_check_is_refused_where_there_is_no_channel() {
         HostDecision::Refused(ActionRefusal::UnsupportedSurface)
     );
     let mut host = maintenance_host();
-    assert_eq!(host.accept(Action::Update), HostDecision::Update);
+    assert_eq!(
+        host.accept(Action::Update),
+        HostDecision::Update(zup_runtime::UpdateRequest::Check)
+    );
+    assert_eq!(
+        host.accept(Action::Update),
+        HostDecision::Refused(ActionRefusal::Busy)
+    );
+    assert_eq!(host.accept(Action::Cancel), HostDecision::Cancel);
+    host.finish_with(&zup_runtime::InstallOutcome::Cancelled);
+    host.set_update(
+        None,
+        zup_preset_protocol::UpdateState::Available {
+            current: "1.0.0".into(),
+            available: "2.0.0".into(),
+        },
+    );
+    assert_eq!(
+        host.accept(Action::Update),
+        HostDecision::Update(zup_runtime::UpdateRequest::Install {
+            version: Some("2.0.0".into())
+        })
+    );
 }
 
 #[test]

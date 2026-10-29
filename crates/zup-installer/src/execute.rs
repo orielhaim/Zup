@@ -552,6 +552,7 @@ mod tests {
                     }
                     Sample::Failed => Err(zup_runtime::SessionError::Transaction("disk".into())),
                     Sample::Reconciliation => Ok(InstallOutcome::CommittedPendingReconciliation {
+                        transaction: Some(uuid::Uuid::now_v7()),
                         detail: "ledger publish failed".into(),
                     }),
                     Sample::Committed => {

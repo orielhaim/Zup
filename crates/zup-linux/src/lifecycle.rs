@@ -2,10 +2,17 @@ use zup_runtime::InstallOutcome;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxOutcome {
-    Committed { version: semver::Version },
+    Committed {
+        version: semver::Version,
+    },
     RolledBack,
-    RecoveryRequired { transaction: String },
-    CommittedPendingReconciliation { transaction: String },
+    RecoveryRequired {
+        transaction: String,
+    },
+    CommittedPendingReconciliation {
+        transaction: uuid::Uuid,
+        detail: String,
+    },
     Busy,
 }
 
@@ -15,12 +22,13 @@ impl LinuxOutcome {
             Self::Committed { .. } => InstallOutcome::Committed,
             Self::RolledBack => InstallOutcome::RolledBack,
             Self::RecoveryRequired { .. } => InstallOutcome::RecoveryRequired,
-            Self::CommittedPendingReconciliation { .. } => {
-                InstallOutcome::CommittedPendingReconciliation {
-                    detail: "the transaction committed and ledger reconciliation is still required"
-                        .into(),
-                }
-            }
+            Self::CommittedPendingReconciliation {
+                transaction,
+                detail,
+            } => InstallOutcome::CommittedPendingReconciliation {
+                transaction: Some(*transaction),
+                detail: detail.clone(),
+            },
             Self::Busy => InstallOutcome::Busy {
                 operation: "linux install",
             },

@@ -175,6 +175,7 @@ pub mod privileged_operation {
     pub const REPAIR: &str = "repair";
     pub const UNINSTALL: &str = "uninstall";
     pub const APPLY: &str = "apply";
+    pub const RECOVER: &str = "recover";
 }
 
 pub const PRIVILEGED_OPERATIONS: &[&str] = &[
@@ -184,10 +185,12 @@ pub const PRIVILEGED_OPERATIONS: &[&str] = &[
     privileged_operation::REPAIR,
     privileged_operation::UNINSTALL,
     privileged_operation::APPLY,
+    privileged_operation::RECOVER,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareOperation {
+    pub recovery_id: Option<uuid::Uuid>,
     pub operation: String,
     pub force_files: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,6 +210,11 @@ pub struct PrepareOperation {
 
 impl PrepareOperation {
     pub fn validate_shape(&self) -> Result<(), crate::WireError> {
+        if (self.operation == privileged_operation::RECOVER) != self.recovery_id.is_some() {
+            return Err(crate::WireError::Malformed(
+                "recovery requires a transaction identity".into(),
+            ));
+        }
         if !PRIVILEGED_OPERATIONS.contains(&self.operation.as_str()) {
             return Err(crate::WireError::Malformed(
                 "unknown privileged operation".into(),
@@ -308,6 +316,7 @@ pub struct TransactionStateChanged {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completed {
+    pub detail: Option<String>,
     pub transaction_id: Uuid,
     pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

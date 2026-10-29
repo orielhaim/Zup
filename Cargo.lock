@@ -12100,6 +12100,7 @@ dependencies = [
  "cliclack",
  "console",
  "indicatif",
+ "jiff",
  "miette",
  "opener",
  "portable-pty",
@@ -12111,6 +12112,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "tough",
  "uuid",
  "wat",
  "windows 0.62.2",
@@ -12161,6 +12163,8 @@ dependencies = [
  "uuid",
  "xdg",
  "zbus_systemd",
+ "zstd",
+ "zup-acquire",
  "zup-artifact",
  "zup-binary",
  "zup-build",
@@ -12172,6 +12176,7 @@ dependencies = [
  "zup-plan",
  "zup-platform",
  "zup-plugin-runtime",
+ "zup-presentation",
  "zup-preset-host",
  "zup-preset-ipc",
  "zup-preset-protocol",
@@ -12180,6 +12185,7 @@ dependencies = [
  "zup-session",
  "zup-toolchain",
  "zup-transaction",
+ "zup-update",
 ]
 
 [[package]]
@@ -12610,6 +12616,8 @@ dependencies = [
  "aws-lc-rs",
  "futures-util",
  "jiff",
+ "rstest",
+ "semver",
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
@@ -12620,7 +12628,10 @@ dependencies = [
  "zstd",
  "zup-acquire",
  "zup-acquire-http",
+ "zup-artifact",
+ "zup-bundle",
  "zup-core",
+ "zup-preset-protocol",
 ]
 
 [[package]]

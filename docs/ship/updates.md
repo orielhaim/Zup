@@ -19,7 +19,22 @@ A channel-following artifact is different from a version-pinned artifact: one fo
 
 ## Downgrades
 
-Zup rejects a lower application version as an update. An equal version is handled as maintenance/modify behavior rather than a downgrade.
+Zup rejects a lower application version as an update. An equal version is not an available update. Use modify or repair for the installed release.
+
+## Installed Linux applications
+
+GUI maintenance offers Check for updates. Console also offers it in the maintenance menu. Console and Headless accept:
+
+```sh
+./Acme-Setup update check --scope user --output json
+./Acme-Setup update --scope user --yes --output jsonl
+```
+
+Checking never installs anything. An update preserves the installed scope, directory, and component choices. It authenticates the channel with TUF and verifies the complete selected release before installation. Machine-wide updates acquire content in the invoking user's cache, then require native PolicyKit authorization for execution.
+
+`--source DIRECTORY` adds a local content source; it does not replace repository authentication. Ctrl+C cancels acquisition without changing the installation. After installation starts, cancellation follows the normal transaction and rollback rules.
+
+The maintenance copy retains verified content for every component, plugins, and the GUI preset. Modify, repair, uninstall, and recovery remain available without a connection. Builds automatically select an online Linux runtime when `[updates]` is configured. Applications without updates use an offline runtime with no HTTP or TUF dependencies.
 
 ## Thin installers
 
