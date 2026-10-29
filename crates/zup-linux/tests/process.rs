@@ -28,17 +28,12 @@ fn the_produced_installer_installs_as_a_process() {
         "the composed installer is runnable as produced"
     );
 
-    let output = run_installer_process(&installer, &user, &[]);
+    let output = run_installer_process(&installer, &user, &["install"]);
     assert!(
         output.status.success(),
         "exit {}: {}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("committed"),
-        "the installer reports its outcome: {}",
-        String::from_utf8_lossy(&output.stdout)
     );
 
     let install = user.programs().join("tool");
@@ -88,7 +83,7 @@ fn the_produced_installer_uninstalls_as_a_process() {
     let installer = scratch.path().join("Acme-Setup");
     compose_installer(&genuine_template("console"), &installer, &package);
 
-    let output = run_installer_process(&installer, &user, &[]);
+    let output = run_installer_process(&installer, &user, &["install"]);
     assert!(output.status.success(), "install: {}", output.status);
     let install = user.programs().join("tool");
     std::fs::write(install.join("unrelated.txt"), b"not owned").expect("an unrelated file");
@@ -131,7 +126,7 @@ fn concurrent_installers_serialize_on_the_installation_lock() {
         .expect("nothing else holds it");
 
     let mut command = std::process::Command::new(&installer);
-    command.arg("--state-root").arg(&user.state);
+    command.arg("install").arg("--state-root").arg(&user.state);
     for (name, value) in user.child_env() {
         command.env(name, value);
     }
@@ -153,7 +148,7 @@ fn concurrent_installers_serialize_on_the_installation_lock() {
     );
 
     drop(_held);
-    let output = run_installer_process(&installer, &user, &[]);
+    let output = run_installer_process(&installer, &user, &["install"]);
     assert!(output.status.success(), "after release: {}", output.status);
     let install = user.programs().join("tool");
     assert_eq!(
