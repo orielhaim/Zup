@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -316,12 +315,12 @@ fn run_graph_transition(
     })?;
 
     if let Operation::Repair { force } = request {
-        let drifted = drifted_digests(&state_root, &build.installer, scope, force)?;
-        if drifted.is_empty() {
-            return Ok(());
-        }
+        let owned = ledger
+            .as_ref()
+            .map(zup_plan::owned_content_digests)
+            .ok_or_else(|| miette::miette!("installation not found in the {scope} scope"))?;
         let manifest = &acquired.manifest;
-        let plan = acquire::repair_closure(&acquired.resolved, manifest, &drifted)
+        let plan = acquire::repair_closure(&acquired.resolved, manifest, &owned)
             .map_err(|error| miette::miette!("repair closure: {error}"))?;
         let narrowed = acquire::Acquired { plan, ..acquired };
         return run_acquired_transition(
@@ -354,19 +353,6 @@ fn run_graph_transition(
         args.output(),
         policy,
     )
-}
-
-fn drifted_digests(
-    state_root: &Path,
-    installer: &zup_core::Installer,
-    scope: SelectedScope,
-    _force: bool,
-) -> miette::Result<BTreeSet<zup_core::Sha256Digest>> {
-    let ledger = zup_windows::InstallLedgerStore::new(state_root)
-        .load(&installer.app.id, scope)
-        .map_err(|error| miette::miette!("installation ledger: {error}"))?
-        .ok_or_else(|| miette::miette!("installation not found in the {scope} scope"))?;
-    Ok(zup_plan::owned_content_digests(&ledger))
 }
 
 pub fn run_acquired_transition(

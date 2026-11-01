@@ -106,7 +106,7 @@ fn real_systemd_service_lifecycle() {
     world.foreign.push(mask.clone());
     assert!(
         world
-            .drive(&plan, zup_plan::LifecycleAction::Install, false)
+            .drive(&plan, zup_plan::LifecycleAction::Install)
             .is_err()
     );
     assert_eq!(
@@ -343,7 +343,6 @@ impl RealWorld {
         &mut self,
         plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         action: zup_plan::LifecycleAction,
-        _force: bool,
     ) -> Result<TransactionOutcome, String> {
         let ledgers = self.ledgers();
         let ledger = self.load_ledger();
@@ -418,7 +417,7 @@ impl RealWorld {
         let plan = self.plan(version, start);
         self.resolve_unit(&plan);
         let outcome = self
-            .drive(&plan, zup_plan::LifecycleAction::Install, false)
+            .drive(&plan, zup_plan::LifecycleAction::Install)
             .expect("install plans and executes");
         assert_eq!(outcome, TransactionOutcome::Committed);
     }
@@ -427,7 +426,7 @@ impl RealWorld {
         let plan = self.plan(version, start);
         self.resolve_unit(&plan);
         let outcome = self
-            .drive(&plan, zup_plan::LifecycleAction::Upgrade, false)
+            .drive(&plan, zup_plan::LifecycleAction::Upgrade)
             .unwrap_or_else(|error| panic!("upgrade {version} ({start:?}): {error}"));
         assert_eq!(outcome, TransactionOutcome::Committed);
     }
@@ -439,13 +438,13 @@ impl RealWorld {
     ) -> Result<TransactionOutcome, String> {
         let plan = self.plan(version, start);
         self.resolve_unit(&plan);
-        self.drive(&plan, zup_plan::LifecycleAction::Upgrade, false)
+        self.drive(&plan, zup_plan::LifecycleAction::Upgrade)
     }
 
     fn uninstall(&mut self) {
         let plan = self.plan("4.0.0", ServiceStart::Automatic);
         let outcome = self
-            .drive(&plan, zup_plan::LifecycleAction::Uninstall, false)
+            .drive(&plan, zup_plan::LifecycleAction::Uninstall)
             .expect("uninstall plans and executes");
         assert_eq!(outcome, TransactionOutcome::Committed);
     }
