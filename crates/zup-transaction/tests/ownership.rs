@@ -270,3 +270,48 @@ fn reconciliation_uses_generation_edges_instead_of_clock_order() {
         Err(zup_transaction::ReconciliationError::Generations)
     ));
 }
+
+#[test]
+fn malformed_ownership_cannot_change_resource_family_or_alias_an_identity() {
+    let mut installed = ledger();
+    let work = file("owned", b"old");
+    installed
+        .resources
+        .insert(work.key.clone(), owned_file(&work));
+    assert!(zup_transaction::validate_ledger_identity(
+        &installed,
+        &sample_app_id(),
+        SelectedScope::User
+    ));
+    installed.resources.insert(
+        work.key.clone(),
+        OwnedResource::Service {
+            name: "foreign".into(),
+            privilege: Privilege::System,
+            previous: zup_plan::ServiceState::Absent,
+            installed: zup_plan::ServiceState::Absent,
+        },
+    );
+    assert!(!zup_transaction::validate_ledger_identity(
+        &installed,
+        &sample_app_id(),
+        SelectedScope::User
+    ));
+    installed
+        .resources
+        .insert(work.key.clone(), owned_file(&work));
+    let zup_core::ResourceKey::File { destination } = &work.key else {
+        panic!("file key")
+    };
+    installed.resources.insert(
+        zup_core::ResourceKey::File {
+            destination: destination.to_uppercase(),
+        },
+        owned_file(&work),
+    );
+    assert!(!zup_transaction::validate_ledger_identity(
+        &installed,
+        &sample_app_id(),
+        SelectedScope::User
+    ));
+}

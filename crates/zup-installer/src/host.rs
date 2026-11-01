@@ -343,25 +343,20 @@ impl SessionHost for WindowsSessionHost {
             zup_windows::WindowsRuntimeBackend::from_acquired(
                 Arc::clone(&content.payload),
                 content.release.cache.root().to_path_buf(),
+                content
+                    .release
+                    .handoff(
+                        context.scope,
+                        crate::lifecycle::handoff_mode(prepared.action),
+                    )
+                    .map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?
-        } else if prepared.action == zup_plan::LifecycleAction::Uninstall {
+        } else {
             zup_windows::WindowsRuntimeBackend::from_path(self.executable.clone(), None)
                 .map_err(|error| error.to_string())?
-        } else {
-            let install = prepared
-                .install_plan()
-                .ok_or_else(|| "the operation planned no installation to execute".to_owned())?;
-            zup_windows::WindowsRuntimeBackend::from_path_with_generated_files(
-                self.executable.clone(),
-                &context.state_root,
-                context.scope,
-                install,
-                prepared.generated_files(),
-                &prepared.transaction_plan,
-            )
-            .map_err(|error| error.to_string())?
-        };
+        }
+        .with_generated_files(prepared, &context.state_root)?;
         Ok(Arc::new(backend))
     }
 

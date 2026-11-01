@@ -86,6 +86,7 @@ pub struct Capabilities {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteTransaction {
+    pub content: Option<zup_acquire::RuntimeHandoff>,
     pub intent: Option<zup_plan::DeploymentIntent>,
     pub target: Target,
     pub plan_json: String,

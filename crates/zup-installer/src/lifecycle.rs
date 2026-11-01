@@ -182,6 +182,7 @@ fn run_handoff(
         zup_acquire::HandoffMode::Install => LifecycleAction::Install,
         zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
         zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
+        zup_acquire::HandoffMode::Uninstall => LifecycleAction::Uninstall,
         zup_acquire::HandoffMode::Repair => LifecycleAction::Repair {
             force: matches!(request, Operation::Repair { force: true }),
         },
@@ -470,8 +471,13 @@ pub fn run_acquired_transition(
     let backend = zup_windows::WindowsRuntimeBackend::from_acquired(
         Arc::new(payload),
         acquired.cache.root().to_path_buf(),
+        acquired
+            .handoff(scope, handoff_mode(action))
+            .map_err(|error| miette::miette!("{error}"))?,
     )
-    .map_err(|error| miette::miette!("content source: {error}"))?;
+    .map_err(|error| miette::miette!("content source: {error}"))?
+    .with_generated_files(&prepared, &request.state_root)
+    .map_err(|error| miette::miette!("plugin content: {error}"))?;
     let prepared = PreparedRuntime {
         request,
         backend: Arc::new(backend),
@@ -580,26 +586,23 @@ pub fn prepare_embedded_transition_with_cancellation(
             recovery_id: None,
         },
     );
-    let backend = if prepared.action == LifecycleAction::Uninstall {
-        WindowsRuntimeBackend::from_path(executable, None)
-            .map_err(|error| miette::miette!("payload source: {error}"))?
-    } else {
-        let install = prepared
-            .install_plan()
-            .ok_or_else(|| miette::miette!("the operation planned no installation to execute"))?;
-        WindowsRuntimeBackend::from_path_with_generated_files(
-            executable,
-            &state_root,
-            scope,
-            install,
-            prepared.generated_files(),
-            &prepared.transaction_plan,
-        )
-        .map_err(|error| miette::miette!("plugin payload overlay: {error}"))?
-    };
+    let backend = WindowsRuntimeBackend::from_path(executable, None)
+        .map_err(|error| miette::miette!("payload source: {error}"))?
+        .with_generated_files(&prepared, &state_root)
+        .map_err(|error| miette::miette!("plugin payload overlay: {error}"))?;
     Ok(PreparedRuntime {
         request,
         backend: Arc::new(backend),
         action: prepared.action,
     })
+}
+
+pub(crate) fn handoff_mode(action: LifecycleAction) -> zup_acquire::HandoffMode {
+    match action {
+        LifecycleAction::Install => zup_acquire::HandoffMode::Install,
+        LifecycleAction::Upgrade => zup_acquire::HandoffMode::Upgrade,
+        LifecycleAction::Modify => zup_acquire::HandoffMode::Modify,
+        LifecycleAction::Repair { .. } => zup_acquire::HandoffMode::Repair,
+        LifecycleAction::Uninstall => zup_acquire::HandoffMode::Uninstall,
+    }
 }

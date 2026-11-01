@@ -4,7 +4,7 @@ use std::{
 };
 
 use zup_core::{AppId, ResourceKey, SelectedScope};
-use zup_plan::{INSTALL_LEDGER_SCHEMA, InstallLedger};
+use zup_plan::{INSTALL_LEDGER_SCHEMA, InstallLedger, OwnedResource};
 
 use crate::{NodeKind, OwnershipError, TransactionNode, TransactionPlan};
 
@@ -21,10 +21,14 @@ pub fn validate_ledger_identity(
     app_id: &AppId,
     scope: SelectedScope,
 ) -> bool {
+    let mut identities = BTreeSet::new();
     ledger.schema == INSTALL_LEDGER_SCHEMA
         && ledger.app_id == *app_id
         && ledger.scope == scope
-        && ledger.resources.iter().all(|(key, owned)| match owned {
+        && ledger.install_directory.as_ref().is_none_or(|path| path.target() == &ledger.target)
+        && ledger.resources.iter().all(|(key, owned)| {
+            if !identities.insert(key.canonical_for(&ledger.target)) { return false; }
+            match owned {
             zup_plan::OwnedResource::File {
                 destination,
                 created_directories,
@@ -45,8 +49,35 @@ pub fn validate_ledger_identity(
                             && destination.starts_with(directory)
                     })
             }
-            _ => true,
-        })
+            OwnedResource::Launcher { launcher_path, previous, installed, .. } =>
+                matches!(key, ResourceKey::Launcher { .. }) && launcher_path.target() == &ledger.target
+                && [previous, installed].iter().all(|state| match state {
+                    zup_plan::LauncherState::Absent => true,
+                    zup_plan::LauncherState::Launcher { target, working_directory, .. } =>
+                        target.target() == &ledger.target && working_directory.as_ref().is_none_or(|path| path.target() == &ledger.target),
+                }),
+            OwnedResource::PathEntry { value, .. } => matches!(key, ResourceKey::PathEntry { value: identity }
+                if value.target() == &ledger.target && zup_plan::TargetPath::new(ledger.target, identity).is_ok_and(|identity| value == &identity)),
+            OwnedResource::Service { name, previous, installed, .. } =>
+                matches!(key, ResourceKey::Service { .. }) && !name.is_empty()
+                && [previous, installed].iter().all(|state| match state {
+                    zup_plan::ServiceState::Absent => true,
+                    zup_plan::ServiceState::Registration { command, .. } => command.executable.target() == &ledger.target,
+                }),
+            OwnedResource::Protocol { previous, installed, .. } =>
+                matches!(key, ResourceKey::Protocol { .. }) && [previous, installed].iter().all(|state| match state {
+                    zup_plan::ProtocolState::Absent => true,
+                    zup_plan::ProtocolState::Registration { command } => command.executable.target() == &ledger.target,
+                }),
+            OwnedResource::FileAssociation { previous, installed, .. } =>
+                matches!(key, ResourceKey::FileAssociation { .. }) && [previous, installed].iter().all(|state| match state {
+                    zup_plan::FileAssociationState::Absent => true,
+                    zup_plan::FileAssociationState::Registration { command, .. } => command.executable.target() == &ledger.target,
+                }),
+            OwnedResource::Extension { .. } => matches!(key, ResourceKey::FileAssociationExtension { .. }),
+            OwnedResource::Backend { id, payload, .. } => matches!(key, ResourceKey::Backend { id: identity } if identity == id)
+                && payload.len() <= crate::MAX_BACKEND_PAYLOAD_BYTES,
+        }})
 }
 
 /// Native backends translate their operation keys into the resource identity stored in the ledger.

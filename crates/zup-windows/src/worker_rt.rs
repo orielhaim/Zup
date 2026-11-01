@@ -60,6 +60,9 @@ pub enum WorkerError {
     #[error("target mismatch")]
     TargetMismatch,
 
+    #[error("deployment changed or requested effects differ from authenticated content")]
+    PlanChanged,
+
     #[error("capability missing: {0}")]
     MissingCapability(String),
 
@@ -74,6 +77,24 @@ pub enum WorkerError {
 
     #[error("parent disconnect")]
     ParentDisconnect,
+}
+
+impl WorkerError {
+    fn failure_kind(&self) -> zup_protocol::WorkerFailure {
+        use zup_protocol::WorkerFailure;
+        match self {
+            Self::AuthFailed(_) => WorkerFailure::Authentication,
+            Self::PlanChanged => WorkerFailure::StalePlan,
+            Self::Busy => WorkerFailure::InstallationBusy,
+            Self::Transaction(_) => WorkerFailure::Transaction,
+            Self::InvalidBootstrap(_)
+            | Self::PlanHashMismatch
+            | Self::TargetMismatch
+            | Self::MissingCapability(_)
+            | Self::Protocol(_)
+            | Self::ParentDisconnect => WorkerFailure::Protocol,
+        }
+    }
 }
 
 pub fn worker_capabilities() -> Capabilities {
@@ -495,182 +516,358 @@ async fn run_worker_inner(
         }
     };
 
-    if exec.target != bootstrap.target {
-        return Err(WorkerError::TargetMismatch);
-    }
-    if exec.plan_json.len() > zup_protocol::MAX_PLAN_BYTES {
-        return Err(WorkerError::Protocol("plan too large".into()));
-    }
-    let hash = plan_hash_hex(&exec.plan_json);
-    if hash != bootstrap.expected_plan_hash || hash != exec.plan_hash {
-        return Err(WorkerError::PlanHashMismatch);
-    }
-    let machine_recovery = exec.recovery_intent.is_some();
-    if let Some(intent) = &exec.recovery_intent {
-        intent
-            .validate_shape()
-            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
-        if exec.recovery_id != Some(intent.transaction_id)
-            || exec.app_id != intent.app_id
-            || exec.app_version != intent.app_version
-            || exec.scope != intent.scope
-            || exec.target != intent.target
-            || exec.plan_json != intent.canonical_json().unwrap_or_default()
-        {
-            return Err(WorkerError::AuthFailed(
-                "machine recovery intent does not match the authenticated request".into(),
-            ));
-        }
-    } else if exec.scope == "machine" && exec.recovery_id.is_some() {
-        return Err(WorkerError::Protocol(
-            "machine recovery requires a typed recovery intent".into(),
-        ));
-    }
-    let mut plan = if machine_recovery {
-        None
-    } else {
-        let plan: TransactionPlan = serde_json::from_str(&exec.plan_json)
-            .map_err(|e| WorkerError::Protocol(format!("bad plan: {e}")))?;
-        if exec.target != plan.target {
+    let recovering = exec.recovery_id.is_some();
+    let prepared = (|| {
+        if exec.target != bootstrap.target {
             return Err(WorkerError::TargetMismatch);
         }
-        plan.validate()
-            .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
-        Some(plan)
-    };
-
-    let app_id = zup_core::AppId::new(&exec.app_id)
-        .map_err(|e| WorkerError::Protocol(format!("bad app id: {e}")))?;
-    let app_version: semver::Version = exec
-        .app_version
-        .parse()
-        .map_err(|e| WorkerError::Protocol(format!("bad app version: {e}")))?;
-    let scope = match exec.scope.as_str() {
-        "user" => zup_core::SelectedScope::User,
-        "machine" => zup_core::SelectedScope::Machine,
-        _ => return Err(WorkerError::Protocol("invalid install scope".into())),
-    };
-    {
-        let executable =
-            current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let bundle = EmbeddedBundle::open(&executable)
-            .map_err(|error| WorkerError::AuthFailed(format!("worker bundle: {error}")))?;
-        validate_transaction_bundle_identity(
-            &app_id,
-            &app_version,
-            scope,
-            &bootstrap.target,
-            &bundle,
-        )?;
-    }
-    let machine = if scope == zup_core::SelectedScope::Machine {
-        Some(
-            crate::machine_authority::MachineRoot::acquire()
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
-        )
-    } else {
-        None
-    };
-    let state_root = match &machine {
-        Some(machine) => machine.path().to_path_buf(),
-        None => PathBuf::from(exec.state_root),
-    };
-    let _machine_work = machine
-        .as_ref()
-        .map(|machine| machine.work_dir())
-        .transpose()
-        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    let work_root = state_root.join("work");
-    let store = match &machine {
-        Some(machine) => machine.transaction_store(),
-        None => FilesystemTransactionStore::private_at(&state_root),
-    };
-    let lock_key = InstallationLock::lock_key(app_id.as_str(), &exec.scope);
-    let _lock = match &machine {
-        Some(machine) => machine
-            .try_lock(&lock_key)
-            .map_err(|error| WorkerError::Transaction(error.to_string()))?,
-        None => InstallationLock::try_acquire(&state_root, &lock_key)
-            .map_err(|error| WorkerError::Transaction(error.to_string()))?,
-    }
-    .ok_or_else(|| WorkerError::Transaction("installation busy".into()))?;
-    let payload_overlay_root = decode_overlay_path(exec.payload_overlay_root.as_deref())?;
-    let payload_overlay_base_root = decode_overlay_path(exec.payload_overlay_base_root.as_deref())?;
-    let existing_record = if let Some(id) = exec.recovery_id {
-        let record = zup_transaction::TransactionStore::load(
-            &store,
-            &zup_transaction::TransactionId::from_uuid(id),
-        )
-        .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-        if record.app_id != app_id
-            || record.scope != scope
-            || record.app_version != app_version
-            || record.target != exec.target
-        {
-            return Err(WorkerError::AuthFailed("recovery record mismatch".into()));
+        if exec.plan_json.len() > zup_protocol::MAX_PLAN_BYTES {
+            return Err(WorkerError::Protocol("plan too large".into()));
         }
-        if let Some(plan) = &plan {
-            if record.plan != *plan || record.target != plan.target {
+        let hash = plan_hash_hex(&exec.plan_json);
+        if hash != bootstrap.expected_plan_hash || hash != exec.plan_hash {
+            return Err(WorkerError::PlanHashMismatch);
+        }
+        let machine_recovery = exec.recovery_intent.is_some();
+        if let Some(intent) = &exec.recovery_intent {
+            intent
+                .validate_shape()
+                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+            if exec.recovery_id != Some(intent.transaction_id)
+                || exec.app_id != intent.app_id
+                || exec.app_version != intent.app_version
+                || exec.scope != intent.scope
+                || exec.target != intent.target
+                || exec.plan_json != intent.canonical_json().unwrap_or_default()
+            {
+                return Err(WorkerError::AuthFailed(
+                    "machine recovery intent does not match the authenticated request".into(),
+                ));
+            }
+        } else if exec.scope == "machine" && exec.recovery_id.is_some() {
+            return Err(WorkerError::Protocol(
+                "machine recovery requires a typed recovery intent".into(),
+            ));
+        }
+        let mut plan = if machine_recovery {
+            None
+        } else {
+            let plan: TransactionPlan = serde_json::from_str(&exec.plan_json)
+                .map_err(|e| WorkerError::Protocol(format!("bad plan: {e}")))?;
+            if exec.target != plan.target {
+                return Err(WorkerError::TargetMismatch);
+            }
+            plan.validate()
+                .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
+            Some(plan)
+        };
+
+        let app_id = zup_core::AppId::new(&exec.app_id)
+            .map_err(|e| WorkerError::Protocol(format!("bad app id: {e}")))?;
+        let app_version: semver::Version = exec
+            .app_version
+            .parse()
+            .map_err(|e| WorkerError::Protocol(format!("bad app version: {e}")))?;
+        let scope = match exec.scope.as_str() {
+            "user" => zup_core::SelectedScope::User,
+            "machine" => zup_core::SelectedScope::Machine,
+            _ => return Err(WorkerError::Protocol("invalid install scope".into())),
+        };
+        {
+            let executable =
+                current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            let bundle = EmbeddedBundle::open(&executable)
+                .map_err(|error| WorkerError::AuthFailed(format!("worker bundle: {error}")))?;
+            validate_transaction_bundle_identity(
+                &app_id,
+                &app_version,
+                scope,
+                &bootstrap.target,
+                &bundle,
+            )?;
+        }
+        let machine = if scope == zup_core::SelectedScope::Machine {
+            Some(
+                crate::machine_authority::MachineRoot::acquire()
+                    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let state_root = match &machine {
+            Some(machine) => machine.path().to_path_buf(),
+            None => PathBuf::from(exec.state_root),
+        };
+        let _machine_work = machine
+            .as_ref()
+            .map(|machine| machine.work_dir())
+            .transpose()
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let work_root = state_root.join("work");
+        let store = match &machine {
+            Some(machine) => machine.transaction_store(),
+            None => FilesystemTransactionStore::private_at(&state_root),
+        };
+        let lock_key = InstallationLock::lock_key(app_id.as_str(), &exec.scope);
+        let _lock = match &machine {
+            Some(machine) => machine
+                .try_lock(&lock_key)
+                .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+            None => InstallationLock::try_acquire(&state_root, &lock_key)
+                .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+        }
+        .ok_or_else(|| WorkerError::Transaction("installation busy".into()))?;
+        let payload_overlay_root = decode_overlay_path(exec.payload_overlay_root.as_deref())?;
+        let payload_overlay_base_root =
+            decode_overlay_path(exec.payload_overlay_base_root.as_deref())?;
+        let existing_record = if let Some(id) = exec.recovery_id {
+            let record = zup_transaction::TransactionStore::load(
+                &store,
+                &zup_transaction::TransactionId::from_uuid(id),
+            )
+            .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+            if record.app_id != app_id
+                || record.scope != scope
+                || record.app_version != app_version
+                || record.target != exec.target
+            {
                 return Err(WorkerError::AuthFailed("recovery record mismatch".into()));
             }
-        } else {
-            plan = Some(record.plan.clone());
-        }
-        let identity = PayloadOverlayIdentity::from_transaction(
-            app_id.clone(),
-            app_version.clone(),
-            scope,
-            plan.as_ref().expect("recovery plan"),
-        )
-        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        validate_worker_overlay(
-            &state_root,
-            scope,
-            &identity,
-            payload_overlay_root.as_deref(),
-            payload_overlay_base_root.as_deref(),
-            true,
-            &bootstrap.expected_parent_sid,
-        )?;
-        if identity.has_files() {
-            verify_payload_overlay(
-                payload_overlay_base_root.as_deref().ok_or_else(|| {
-                    WorkerError::AuthFailed("missing recovery overlay base".into())
-                })?,
-                &identity,
-                payload_overlay_root
-                    .as_deref()
-                    .ok_or_else(|| WorkerError::AuthFailed("missing recovery overlay".into()))?,
+            if let Some(plan) = &plan {
+                if record.plan != *plan || record.target != plan.target {
+                    return Err(WorkerError::AuthFailed("recovery record mismatch".into()));
+                }
+            } else {
+                plan = Some(record.plan.clone());
+            }
+            let identity = PayloadOverlayIdentity::from_transaction(
+                app_id.clone(),
+                app_version.clone(),
+                scope,
+                plan.as_ref().expect("recovery plan"),
             )
             .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        }
-        Some(record)
-    } else {
-        let plan = plan
-            .as_ref()
-            .ok_or_else(|| WorkerError::Protocol("missing transaction plan".into()))?;
-        let identity = PayloadOverlayIdentity::from_transaction(
-            app_id.clone(),
-            app_version.clone(),
-            scope,
-            plan,
-        )
-        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        validate_worker_overlay(
-            &state_root,
-            scope,
-            &identity,
-            payload_overlay_root.as_deref(),
-            payload_overlay_base_root.as_deref(),
-            false,
-            &bootstrap.expected_parent_sid,
-        )?;
-        None
-    };
-    let payload_root = PathBuf::from(exec.payload_root);
-    let payload = AutoPayloadSource::from_paths(payload_root.clone(), payload_overlay_root.clone())
-        .map_err(|e| WorkerError::Transaction(format!("payload package: {e}")))?;
+            validate_worker_overlay(
+                &state_root,
+                scope,
+                &identity,
+                payload_overlay_root.as_deref(),
+                payload_overlay_base_root.as_deref(),
+                true,
+                &bootstrap.expected_parent_sid,
+            )?;
+            if identity.has_files() {
+                verify_payload_overlay(
+                    payload_overlay_base_root.as_deref().ok_or_else(|| {
+                        WorkerError::AuthFailed("missing recovery overlay base".into())
+                    })?,
+                    &identity,
+                    payload_overlay_root.as_deref().ok_or_else(|| {
+                        WorkerError::AuthFailed("missing recovery overlay".into())
+                    })?,
+                )
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            }
+            Some(record)
+        } else {
+            let plan = plan
+                .as_ref()
+                .ok_or_else(|| WorkerError::Protocol("missing transaction plan".into()))?;
+            let identity = PayloadOverlayIdentity::from_transaction(
+                app_id.clone(),
+                app_version.clone(),
+                scope,
+                plan,
+            )
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            validate_worker_overlay(
+                &state_root,
+                scope,
+                &identity,
+                payload_overlay_root.as_deref(),
+                payload_overlay_base_root.as_deref(),
+                false,
+                &bootstrap.expected_parent_sid,
+            )?;
+            None
+        };
+        let payload_root = PathBuf::from(exec.payload_root);
+        let executable =
+            current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let acquired = if let Some(content) = &exec.content {
+            content
+                .validate()
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            if content.scope != exec.scope
+                || content.app_id != app_id
+                || content.target != exec.target
+            {
+                return Err(WorkerError::AuthFailed(
+                    "acquired content context mismatch".into(),
+                ));
+            }
+            let cache = crate::open_cache(&payload_root, zup_acquire::CachePolicy::Auto)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            let verified = crate::verify(&executable, &cache, content)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            let bundle = crate::AcquiredBundle::open(&executable, &cache, &verified)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            let manifest = zup_artifact::VariantManifest::parse(&verified.manifest)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            if exec.release.as_ref().is_none_or(|release| {
+                release.release != content.release
+                    || release.catalog != content.catalog
+                    || release.manifest != content.manifest
+                    || release.runtime != Some(content.runtime)
+                    || release.variant != content.variant
+            }) {
+                return Err(WorkerError::AuthFailed(
+                    "acquired release identity mismatch".into(),
+                ));
+            }
+            let source = bundle
+                .payload_source(cache)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            Some((manifest, std::sync::Arc::new(source)))
+        } else {
+            None
+        };
+        let base_payload = match &acquired {
+            Some((_, source)) => AutoPayloadSource::Portable(
+                zup_bundle::AutoPayloadSource::Acquired(std::sync::Arc::clone(source)),
+            ),
+            None => AutoPayloadSource::from_path(payload_root.clone())
+                .map_err(|error| WorkerError::Transaction(format!("payload package: {error}")))?,
+        };
+        let payload = AutoPayloadSource::Overlay(zup_bundle::OverlayPayloadSource::new(
+            base_payload,
+            payload_overlay_root.clone(),
+        ));
 
+        let authorized = plan
+            .clone()
+            .ok_or_else(|| WorkerError::Protocol("missing transaction plan".into()))?;
+        if exec.recovery_id.is_none() {
+            crate::ledger::InstallLedgerStore::new(&state_root)
+                .repair_committed(&app_id, scope)
+                .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+            let intent = exec.intent.as_ref().ok_or_else(|| {
+                WorkerError::AuthFailed("fresh execution requires deployment intent".into())
+            })?;
+            let executable =
+                current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            let bundle = EmbeddedBundle::open(&executable)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            let build = bundle
+                .package()
+                .build_plan()
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            let build = build
+                .targets
+                .first()
+                .ok_or_else(|| WorkerError::AuthFailed("worker bundle has no target".into()))?;
+            let ledger = crate::ledger::InstallLedgerStore::new(&state_root)
+                .load(&app_id, scope)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            let host = crate::operation_host::WindowsOperationHost {
+                app_id: app_id.clone(),
+                scope,
+                frontend: bundle.frontend(),
+                state_root: state_root.clone(),
+                content: match &acquired {
+                    Some((manifest, source)) => {
+                        crate::operation_host::WindowsContent::Acquired(manifest, source)
+                    }
+                    None => crate::operation_host::WindowsContent::Embedded(&bundle),
+                },
+                acquire_prerequisites: false,
+            };
+            let prepared = zup_runtime::prepare_operation(
+                &zup_runtime::OperationInput {
+                    build,
+                    installer: &executable,
+                    scope,
+                    operation: intent.action.into(),
+                    selection: zup_runtime::OperationSelection {
+                        enable: intent.enable.clone(),
+                        disable: intent.disable.clone(),
+                        install_directory: intent.install_directory.clone(),
+                    },
+                    prior: ledger.as_ref(),
+                    state_root: &state_root,
+                    cancellation: &zup_plan::NeverCancelled,
+                },
+                &host,
+            )
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            if prepared.transaction_plan != authorized {
+                return Err(WorkerError::PlanChanged);
+            }
+            crate::ledger::InstallLedgerStore::new(&state_root)
+                .validate_plan(&app_id, scope, &app_version, &authorized)
+                .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+        }
+
+        let coordinator = TransactionCoordinator::new(store.clone());
+        let fresh = if existing_record.is_none() {
+            Some(
+                coordinator
+                    .begin(app_id, scope, app_version, authorized)
+                    .and_then(|open| open.with_release(exec.release.clone()))
+                    .map_err(|e| WorkerError::Transaction(e.to_string()))?,
+            )
+        } else {
+            drop(coordinator);
+            None
+        };
+        let record = match &fresh {
+            Some(open) => open.record().clone(),
+            None => existing_record.expect("recovery loads its journal"),
+        };
+
+        Ok::<_, WorkerError>((
+            record,
+            fresh,
+            store,
+            payload,
+            _lock,
+            _machine_work,
+            state_root,
+            work_root,
+            scope,
+            payload_overlay_base_root,
+            payload_overlay_root,
+        ))
+    })();
+    let (
+        record,
+        fresh,
+        store,
+        payload,
+        _lock,
+        _machine_work,
+        state_root,
+        work_root,
+        scope,
+        payload_overlay_base_root,
+        payload_overlay_root,
+    ) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let _ = writer
+                .send(&WireEnvelope {
+                    version: PROTOCOL_VERSION,
+                    session_id: bootstrap.session_id,
+                    sequence: outgoing,
+                    message: Message::Failed(zup_protocol::Failed {
+                        kind: error.failure_kind(),
+                        message: error.to_string(),
+                    }),
+                })
+                .await;
+            return Err(error);
+        }
+    };
     writer
         .send(&WireEnvelope {
             version: PROTOCOL_VERSION,
@@ -687,84 +884,6 @@ async fn run_worker_inner(
         .await
         .map_err(|e| WorkerError::Protocol(e.to_string()))?;
     outgoing = outgoing.saturating_add(1);
-
-    let authorized = plan
-        .clone()
-        .ok_or_else(|| WorkerError::Protocol("missing transaction plan".into()))?;
-    if exec.recovery_id.is_none() {
-        crate::ledger::InstallLedgerStore::new(&state_root)
-            .repair_committed(&app_id, scope)
-            .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-        let intent = exec.intent.as_ref().ok_or_else(|| {
-            WorkerError::AuthFailed("fresh execution requires deployment intent".into())
-        })?;
-        let executable =
-            current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let bundle = EmbeddedBundle::open(&executable)
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let build = bundle
-            .package()
-            .build_plan()
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let build = build
-            .targets
-            .first()
-            .ok_or_else(|| WorkerError::AuthFailed("worker bundle has no target".into()))?;
-        let ledger = crate::ledger::InstallLedgerStore::new(&state_root)
-            .load(&app_id, scope)
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let host = crate::operation_host::WindowsOperationHost {
-            app_id: app_id.clone(),
-            scope,
-            frontend: bundle.frontend(),
-            state_root: state_root.clone(),
-            content: crate::operation_host::WindowsContent::Embedded(&bundle),
-            acquire_prerequisites: false,
-        };
-        let prepared = zup_runtime::prepare_operation(
-            &zup_runtime::OperationInput {
-                build,
-                installer: &executable,
-                scope,
-                operation: intent.action.into(),
-                selection: zup_runtime::OperationSelection {
-                    enable: intent.enable.clone(),
-                    disable: intent.disable.clone(),
-                    install_directory: intent.install_directory.clone(),
-                },
-                prior: ledger.as_ref(),
-                state_root: &state_root,
-                cancellation: &zup_plan::NeverCancelled,
-            },
-            &host,
-        )
-        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        if prepared.transaction_plan != authorized {
-            return Err(WorkerError::AuthFailed(
-                "deployment changed or requested effects differ from authenticated content".into(),
-            ));
-        }
-        crate::ledger::InstallLedgerStore::new(&state_root)
-            .validate_plan(&app_id, scope, &app_version, &authorized)
-            .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-    }
-
-    let coordinator = TransactionCoordinator::new(store.clone());
-    let fresh = if existing_record.is_none() {
-        Some(
-            coordinator
-                .begin(app_id, scope, app_version, authorized)
-                .and_then(|open| open.with_release(exec.release.clone()))
-                .map_err(|e| WorkerError::Transaction(e.to_string()))?,
-        )
-    } else {
-        drop(coordinator);
-        None
-    };
-    let record = match &fresh {
-        Some(open) => open.record().clone(),
-        None => existing_record.expect("recovery loads its journal"),
-    };
 
     let total_work = record.plan.total_work();
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressReport>();
@@ -822,7 +941,6 @@ async fn run_worker_inner(
     let reader_task = split_reader(reader, cancel_token, incoming);
     let journal_id = record.transaction_id;
 
-    let recovering = exec.recovery_id.is_some();
     let result = tokio::task::spawn_blocking(move || {
         if recovering {
             zup_transaction::recover(record, &store, &mut executor)

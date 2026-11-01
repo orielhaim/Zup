@@ -19,7 +19,7 @@ pub use format::{
 };
 pub use payload::{
     AutoPayloadSource, DirectoryPayloadSource, OverlayPayloadSource, PayloadError, PayloadReader,
-    PayloadSource,
+    PayloadSource, is_plugin_payload_path,
 };
 pub use preset::{
     ASSET_SOURCE_PREFIX, PRESET_SOURCE, PresetContentError, Resolved, asset_path,

@@ -42,6 +42,33 @@ pub struct Acquired {
 }
 
 impl Acquired {
+    pub fn handoff(
+        &self,
+        scope: zup_core::SelectedScope,
+        mode: zup_acquire::HandoffMode,
+    ) -> Result<zup_acquire::RuntimeHandoff, GraphError> {
+        let runtime = self
+            .resolved
+            .variant
+            .runtime
+            .ok_or_else(|| GraphError::Manifest("the variant has no native runtime".into()))?;
+        Ok(zup_acquire::RuntimeHandoff {
+            schema: zup_acquire::HANDOFF_SCHEMA,
+            app_id: self.resolved.descriptor.app_id.clone(),
+            release: self.resolved.descriptor.release_digest,
+            document: self.resolved.descriptor_digest,
+            catalog: self.resolved.descriptor.catalog.digest,
+            variant: self.resolved.variant.id.clone(),
+            manifest: self.resolved.variant.manifest.digest,
+            runtime: runtime.digest,
+            target: self.resolved.variant.target,
+            frontend: self.resolved.variant.frontend.clone(),
+            mode,
+            scope: scope.to_string(),
+            session: self.summary(),
+            components: vec![],
+        })
+    }
     pub fn summary(&self) -> SessionSummary {
         let estimate = self.estimate();
         SessionSummary {

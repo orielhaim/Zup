@@ -42,6 +42,7 @@ pub struct WindowsRuntimeBackend {
     payload_root: PathBuf,
     payload_overlay_root: Option<PathBuf>,
     retain_on_blocked: bool,
+    content: Option<zup_acquire::RuntimeHandoff>,
 }
 
 impl WindowsRuntimeBackend {
@@ -57,18 +58,21 @@ impl WindowsRuntimeBackend {
             payload_root,
             payload_overlay_root,
             retain_on_blocked: false,
+            content: None,
         })
     }
 
-    pub fn from_path_with_generated_files(
-        payload_root: impl Into<PathBuf>,
+    pub fn with_generated_files(
+        mut self,
+        prepared: &zup_runtime::PreparedOperation,
         state_root: &Path,
-        scope: SelectedScope,
-        install: &zup_plan::DesiredState,
-        generated_files: &[zup_plan::GeneratedFile],
-        transaction_plan: &zup_transaction::TransactionPlan,
     ) -> Result<Self, String> {
-        let payload_root = payload_root.into();
+        let Some(install) = prepared.install_plan() else {
+            return Ok(self);
+        };
+        let scope = install.scope;
+        let generated_files = prepared.generated_files();
+        let transaction_plan = &prepared.transaction_plan;
         let transaction_identity = PayloadOverlayIdentity::from_transaction(
             install.app.id.clone(),
             install.app.version.clone(),
@@ -107,7 +111,14 @@ impl WindowsRuntimeBackend {
                 }
             }
         };
-        Self::from_path(payload_root, overlay).map_err(|error| error.to_string())
+        if let Some(overlay) = overlay {
+            self.payload = Arc::new(zup_bundle::OverlayPayloadSource::new(
+                SharedPayload(self.payload),
+                Some(overlay.clone()),
+            ));
+            self.payload_overlay_root = Some(overlay);
+        }
+        Ok(self)
     }
 
     pub fn for_recovery(
@@ -147,6 +158,7 @@ impl WindowsRuntimeBackend {
     pub fn from_acquired(
         payload: std::sync::Arc<AcquiredPayloadSource>,
         payload_root: impl Into<PathBuf>,
+        content: zup_acquire::RuntimeHandoff,
     ) -> Result<Self, BundleError> {
         let payload_root = payload_root.into();
         Ok(Self {
@@ -154,6 +166,7 @@ impl WindowsRuntimeBackend {
             payload_root,
             payload_overlay_root: None,
             retain_on_blocked: false,
+            content: Some(content),
         })
     }
 
@@ -168,6 +181,7 @@ impl WindowsRuntimeBackend {
             payload_root,
             payload_overlay_root: None,
             retain_on_blocked: false,
+            content: None,
         })
     }
 
@@ -773,6 +787,7 @@ impl WindowsRuntimeBackend {
                 request,
                 &self.payload_root,
                 self.payload_overlay_root.clone(),
+                self.content.clone(),
                 cancel,
                 events,
             )
@@ -858,6 +873,7 @@ async fn run_elevated_worker(
     request: RuntimeRequest,
     payload_root: &Path,
     payload_overlay_root: Option<PathBuf>,
+    content: Option<zup_acquire::RuntimeHandoff>,
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
 ) -> Result<InstallOutcome, SessionError> {
@@ -1053,6 +1069,7 @@ async fn run_elevated_worker(
             sequence: 2,
             message: zup_protocol::Message::ExecuteTransaction(Box::new(
                 zup_protocol::ExecuteTransaction {
+                    content,
                     intent: request.intent.clone(),
                     target: request.target,
                     plan_json,

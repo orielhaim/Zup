@@ -647,10 +647,12 @@ fn native_service_names_are_unique_across_logical_ids() {
 [[services]]
 id = "first"
 name = "SharedService"
+start = "automatic"
 binary = "${{install}}/app.txt"
 [[services]]
 id = "second"
 name = "sharedservice"
+start = "automatic"
 binary = "${{install}}/app.txt"
 "#
     );

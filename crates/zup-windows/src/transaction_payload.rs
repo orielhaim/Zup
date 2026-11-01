@@ -322,6 +322,17 @@ pub(crate) fn validate_backend_node(
         BackendOperationIntent::Apply => {
             let payload: ApplyPayload =
                 decode(&operation.payload).map_err(|error| error.to_string())?;
+            let payload_privilege = match &payload {
+                ApplyPayload::Launcher(op) => op.privilege,
+                ApplyPayload::Path(op) => op.privilege,
+                ApplyPayload::Service(op) => op.privilege,
+                ApplyPayload::Protocol(op) => op.privilege,
+                ApplyPayload::FileAssociation(op) | ApplyPayload::Extension(op) => op.privilege,
+                ApplyPayload::AppsFeatures { operation } => operation.privilege,
+            };
+            if payload_privilege != operation.privilege {
+                return Err("backend payload privilege mismatch".into());
+            }
             match payload {
                 ApplyPayload::Launcher(op) => {
                     let installed = match owned {
@@ -514,6 +525,7 @@ pub(crate) fn ledger_key_for_backend_node(
             RemovePayload::AppsFeatures { .. } => operation.key.clone(),
         },
     };
+    let key = key.canonical_for(&zup_core::Target::WINDOWS_X64);
     let expected_key = if matches!(key, ResourceKey::Backend { .. }) {
         key.clone()
     } else {
@@ -736,7 +748,8 @@ pub(crate) fn compile_execution_plan(
         if association.extension_kind != IntegrationChangeKind::NoOp {
             let extension = zup_core::FileExtension::new(&association.extension)
                 .map_err(|error| TransactionPayloadError::Unsupported(error.to_string()))?;
-            let extension_key = ResourceKey::FileAssociationExtension { extension };
+            let extension_key = ResourceKey::FileAssociationExtension { extension }
+                .canonical_for(&zup_core::Target::WINDOWS_X64);
             let dependencies = if association.association_kind == IntegrationChangeKind::NoOp {
                 Vec::new()
             } else {

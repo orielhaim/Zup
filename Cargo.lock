@@ -12399,6 +12399,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "uuid 1.29.0",
+ "zup-acquire",
  "zup-core",
  "zup-plan",
 ]

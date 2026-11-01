@@ -247,6 +247,10 @@ jobs:
         shell: bash
         run: cargo nextest run --all-features --no-fail-fast $PORTABLE $LINUX
 
+      - name: Test failure diagnostics
+        if: always()
+        run: python scripts/ci/report-tests.py
+
       - name: Build reusable tooling
         if: runner.arch == 'X64'
         run: cargo build -p zup -p zup-xtask --bins
