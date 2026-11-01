@@ -20,7 +20,7 @@ impl Screen {
             InstallerState::Options => Self::Install,
             InstallerState::Maintenance | InstallerState::ConfirmUninstall => Self::Maintenance,
             InstallerState::Running | InstallerState::WaitingForSafeCancellation => Self::Operation,
-            InstallerState::Succeeded => Self::Outcome,
+            InstallerState::Succeeded | InstallerState::RebootRequired => Self::Outcome,
             InstallerState::Blocked { .. } => Self::Blocked,
             InstallerState::Failed | InstallerState::RecoveryRequired => Self::Problem,
         }
@@ -359,6 +359,16 @@ pub struct Outcome {
 }
 
 pub fn outcome(snapshot: &Snapshot) -> Outcome {
+    if snapshot.state == InstallerState::RebootRequired {
+        return Outcome {
+            title: "Restart required".into(),
+            detail: "Restart this computer, then run setup again to continue.".into(),
+            note: None,
+            left_alone: Vec::new(),
+            launch: None,
+            removed: false,
+        };
+    }
     let name = &snapshot.product.name;
     let version = &snapshot.product.version;
     let audience = match snapshot.surface.scope() {

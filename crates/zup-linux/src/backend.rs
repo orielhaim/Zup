@@ -681,7 +681,7 @@ pub(crate) async fn recover_installation(
             scope: record.scope,
             transaction_plan: record.plan,
             state_root: context.state_root.clone(),
-            work_root: context.state_root.join("work"),
+
             recovery_id: Some(id),
             bootstrap: None,
             release: record.release,

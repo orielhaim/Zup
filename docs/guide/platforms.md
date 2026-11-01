@@ -72,7 +72,8 @@ A Windows build embeds the package into the runtime template as PE resources —
 | Machine services | systemd system units, machine scope only |
 | User services | not supported |
 | Desktop integration, PATH, protocols, file associations | user scope only; `desktop` launchers and PATH entries are refused on Linux |
-| Machine prerequisites | refused |
+| Prerequisites | unsupported in both scopes |
+| Plugins | user and machine scope; generated resources follow the same capability and ownership rules as static resources |
 | Authenticated updates | installed GUI, Console, and Headless applications |
 
 A Linux build writes one extensionless installer per target (for example `Acme-Setup`).
@@ -87,6 +88,6 @@ Preset packages need a native binary for each GUI target.
 
 Machine installs run through a short-lived privileged worker: the installer plans without authority, requests administrator authorization through `pkexec` at execution time, and the worker re-verifies the package and executes inside `/opt`, `/var/opt`, `/var/lib/zup`, and the owned unit sources. User installs never elevate. `zup build` never needs authority. Zup never handles an administrator password.
 
-A machine project may declare static `[[services]]`. Each becomes a systemd system unit owned at `/usr/local/lib/systemd/system/<unit>.service`. Installing, upgrading, repairing, or uninstalling never starts, stops, or restarts a service: Zup registers boot policy (`automatic` enables for boot, `manual` installs without enabling, `disabled` masks) and systemd decides when the process runs. The service binary must be a Zup-owned payload executable; anything else is refused. Failed service changes restore prior unit contents and boot policy; incomplete restoration reports recovery required.
+A machine project may declare `[[services]]` or plugin-generated services. Each becomes a systemd system unit owned at `/usr/local/lib/systemd/system/<unit>.service`. Installing, upgrading, repairing, or uninstalling never starts, stops, or restarts a service: Zup registers boot policy (`automatic` enables for boot, `manual` installs without enabling, `disabled` masks) and systemd decides when the process runs. The service binary must be a Zup-owned payload executable; anything else is refused. Failed service changes restore prior unit contents and boot policy; incomplete restoration reports recovery required.
 
 `zup check` and `zup build` accept services on any host without systemd. The installing machine needs systemd 240+ only when services are present; `zup doctor` reports that readiness.

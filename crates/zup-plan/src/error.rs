@@ -8,6 +8,9 @@ pub use zup_core::SelectedScope;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum PlanError {
+    #[error("planning cancelled")]
+    #[diagnostic(code(zup_plan::cancelled))]
+    Cancelled,
     #[error("build plan has no target `{target}`")]
     #[diagnostic(code(zup_plan::unknown_build_target))]
     UnknownBuildTarget { target: zup_core::Target },

@@ -131,7 +131,7 @@ fn run_worker(session: String, client_pid: u32, socket_path: PathBuf) -> miette:
         .map_err(|_| miette::miette!("the worker serves one session, named by uuid"))?;
     match zup_linux::run_worker_mode(session, client_pid, &socket_path) {
         Ok(outcome) => {
-            println!("worker: {outcome}");
+            println!("worker: {outcome:?}");
             Ok(())
         }
         Err(error) => Err(miette::miette!("{error}")),

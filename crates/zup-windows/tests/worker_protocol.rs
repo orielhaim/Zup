@@ -249,7 +249,7 @@ fn execute_before_auth_rejected() {
             payload_overlay_root: None,
             payload_overlay_base_root: None,
             state_root: r"C:\state".into(),
-            work_root: r"C:\work".into(),
+
             recovery_id: None,
             recovery_intent: None,
             release: None,
@@ -295,7 +295,7 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
                 payload_overlay_root: None,
                 payload_overlay_base_root: None,
                 state_root: r"C:\state".into(),
-                work_root: r"C:\work".into(),
+
                 recovery_id: None,
                 recovery_intent: None,
                 release: None,

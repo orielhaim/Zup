@@ -262,6 +262,8 @@ dimension: Identifier | null,
  */
 detail: string, };
 
+export type PlanResource = { "kind": "file", destination: string, size: ByteCount, digest: Digest, generated: boolean, } | { "kind": "launcher", name: string, location: string, executable: string, arguments: Array<string>, working_directory: string | null, } | { "kind": "path_entry", value: string, } | { "kind": "service", id: string, executable: string, arguments: Array<string>, start: string, } | { "kind": "protocol", scheme: string, executable: string, arguments: Array<string>, } | { "kind": "file_association", id: string, extension: string, executable: string, arguments: Array<string>, } | { "kind": "prerequisite", id: string, name: string, };
+
 export type PlanDetails = { 
 /**
  * `user` or `machine`.
@@ -278,7 +280,7 @@ estimated_bytes: ByteCount,
 /**
  * How many individual changes it holds.
  */
-change_count: number, };
+change_count: number, resources: Array<PlanResource>, };
 
 export type DoctorCheck = { 
 /**

@@ -81,6 +81,7 @@ impl Default for Footprint {
 /// a state its author will believe in and its users will never see.
 #[derive(Debug, Clone)]
 pub struct Scenario {
+    pub build: Option<zup_core::BuildPlan>,
     pub product: ProductIdentity,
     pub surface: Surface,
     pub scopes: Vec<InstallScope>,
@@ -113,6 +114,7 @@ pub struct Scenario {
 impl Default for Scenario {
     fn default() -> Self {
         Self {
+            build: None,
             product: ProductIdentity {
                 name: "Acme".into(),
                 publisher: Some("Acme Inc".into()),
@@ -211,6 +213,34 @@ impl Scenario {
             target: installer.target.as_str().to_owned(),
             ..defaults
         }
+    }
+
+    pub fn from_build(build: zup_core::BuildPlan) -> Result<Self, String> {
+        if build.targets.len() != 1 {
+            return Err("preview requires exactly one target".into());
+        }
+        let installer = &build.targets[0].installer;
+        let mut scenario = Self::from_installer(installer);
+        for (scope, template, directory) in [
+            (
+                SelectedScope::User,
+                &installer.install.directory.user,
+                &mut scenario.user_directory,
+            ),
+            (
+                SelectedScope::Machine,
+                &installer.install.directory.machine,
+                &mut scenario.machine_directory,
+            ),
+        ] {
+            if let Some(template) = template {
+                let template = zup_plan::resolve_install_directory(template, &installer.app)
+                    .map_err(|error| error.to_string())?;
+                *directory = preview_path(&template, installer.target, scope)?;
+            }
+        }
+        scenario.build = Some(build);
+        Ok(scenario)
     }
 
     pub fn environment(&self) -> zup_preset_protocol::HostEnvironment {
@@ -340,6 +370,60 @@ impl Scenario {
 
     /// What the choices in `selection` would put on this machine.
     pub fn plan(&self, selection: &Selection) -> Result<zup_presentation::PlanPreview, String> {
+        if let Some(build) = &self.build {
+            let target = build.targets[0].installer.target;
+            let mut request = zup_plan::PlanRequest::new(target, selection.scope);
+            if let Some(directory) = &selection.install_directory
+                && self.allow_directory_override
+            {
+                request.install_directory = Some(zup_plan::InstallDirectory::Override(
+                    zup_core::Template::parse(directory).map_err(|error| error.to_string())?,
+                ));
+            }
+            let installer = &build.targets[0].installer;
+            for component in &installer.components {
+                if selection.components.contains(&component.id) {
+                    request.components.enable.insert(component.id.clone());
+                } else if !component.required {
+                    request.components.disable.insert(component.id.clone());
+                }
+            }
+            let planned =
+                zup_plugin_build::plan_installation(build, &request, &zup_plan::NeverCancelled)
+                    .map_err(|error| error.to_string())?;
+            match target.operating_system() {
+                zup_core::TargetOperatingSystem::Windows => {
+                    zup_windows::resolve_target(
+                        &planned.plan,
+                        &zup_windows::WindowsTargetContext::for_build(selection.scope),
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                zup_core::TargetOperatingSystem::Linux => {
+                    zup_linux::resolve_target(
+                        &planned.plan,
+                        &zup_linux::LinuxInstallLocationResolver::for_build(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                _ => return Err("unsupported preview target".into()),
+            }
+            let mut preview = zup_presentation::PlanPreview::from_install_plan(&planned.plan);
+            preview.install_directory =
+                preview_path(&planned.plan.install_directory, target, selection.scope)?;
+            for change in preview
+                .groups
+                .iter_mut()
+                .flat_map(|group| &mut group.changes)
+            {
+                if let Some(location) = &mut change.location {
+                    let template = zup_core::Template::parse(location.as_str())
+                        .map_err(|error| error.to_string())?;
+                    *location = preview_path(&template, target, selection.scope)?;
+                }
+            }
+            return Ok(preview);
+        }
         use zup_presentation::{ChangeGroup, ChangeKind, PlannedChange, ResourceCategory};
 
         if let Some(reason) = &self.footprint.plan_failure {
@@ -666,7 +750,10 @@ impl Machine {
 
     /// Record a failure reported before a transaction started.
     pub fn fail(&mut self, message: &str) {
-        self.host.fail(message.to_owned(), false);
+        self.host.fail(
+            message.to_owned(),
+            zup_presentation::ProcessOutcome::Failure,
+        );
     }
 
     fn replan(&mut self) {
@@ -681,4 +768,28 @@ impl Machine {
             Err(reason) => self.host.plan_failed(reason),
         }
     }
+}
+
+fn preview_path(
+    template: &zup_core::Template,
+    target: zup_core::Target,
+    scope: SelectedScope,
+) -> Result<String, String> {
+    match target.operating_system() {
+        zup_core::TargetOperatingSystem::Windows => zup_platform::resolve_template_path(
+            template,
+            &target,
+            &zup_windows::CanonicalWindowsLocations,
+            scope,
+        ),
+        zup_core::TargetOperatingSystem::Linux => zup_platform::resolve_template_path(
+            template,
+            &target,
+            &zup_linux::LinuxInstallLocationResolver::for_build(),
+            scope,
+        ),
+        _ => return Err("unsupported preview target".into()),
+    }
+    .map(|path| path.to_string())
+    .map_err(|error| error.to_string())
 }

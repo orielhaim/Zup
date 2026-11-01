@@ -727,6 +727,200 @@
         "variants"
       ]
     },
+    "PlanResource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file"
+            },
+            "destination": {
+              "type": "string"
+            },
+            "size": {
+              "$ref": "#/$defs/ByteCount"
+            },
+            "digest": {
+              "$ref": "#/$defs/Digest"
+            },
+            "generated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "destination",
+            "size",
+            "digest",
+            "generated"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "launcher"
+            },
+            "name": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "working_directory": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "location",
+            "executable",
+            "arguments"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "path_entry"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "service"
+            },
+            "id": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "start": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "executable",
+            "arguments",
+            "start"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "protocol"
+            },
+            "scheme": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "scheme",
+            "executable",
+            "arguments"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file_association"
+            },
+            "id": {
+              "type": "string"
+            },
+            "extension": {
+              "type": "string"
+            },
+            "executable": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "extension",
+            "executable",
+            "arguments"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "prerequisite"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "name"
+          ]
+        }
+      ]
+    },
     "PlanDetails": {
       "description": "What an install plan would do.",
       "type": "object",
@@ -751,12 +945,19 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanResource"
+          }
         }
       },
       "required": [
         "scope",
         "estimated_bytes",
-        "change_count"
+        "change_count",
+        "resources"
       ]
     },
     "DoctorTarget": {

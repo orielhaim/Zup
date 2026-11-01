@@ -31,7 +31,7 @@ The optimized Linux binaries passed real install, modify, repair, upgrade, and u
 
 The permanent terminal tests compose real runtimes and exercise PTY interaction and redirected output on native Windows and Linux, including ARM64. Focused session, planning, generated-content retention, and process-interruption tests cover cancellation and recovery. Full Verification was not rerun. Interactive UAC/PolicyKit approval and legacy Windows consoles were not manually exercised.
 
-Recovery-required currently stops with transaction details; the terminal does not offer a recovery wizard. Thin launchers retain their initial bootstrap scope prompt and acquisition event protocol. Acquired Windows plugin planning remains unsupported; embedded plugin planning is covered. Windows installed self-uninstall still hands off to a staged process, so automation needing the final exit status should run a downloaded installer.
+Recovery-required currently stops with transaction details; the terminal does not offer a recovery wizard. Thin launchers retain their initial bootstrap scope prompt and acquisition event protocol. Embedded and acquired Windows content now use the same verified plugin planner. Windows installed self-uninstall still hands off to a staged process, so automation needing the final exit status should run a downloaded installer.
 
 ## Reproduce
 

@@ -142,11 +142,15 @@ impl Session {
         let selected = select(&manifest, &targets)?;
         let project_root = zup_build::project_root(&selected.manifest_path);
         let (installer, target) = the_window(&selected)?;
+        let loaded =
+            crate::project::materialize_project(selected, &resolver, zup_build::Writes::None)
+                .map_err(|error| PreviewError::Project(error.to_string()))?;
+        let scenario = Scenario::from_build(loaded.build).map_err(PreviewError::Project)?;
         let state = StateDirectory::under(&project_root, "preview");
         let mut session = Self {
-            runtime: Runtime::new(state.clone(), Scenario::from_installer(&installer)),
+            runtime: Runtime::new(state.clone(), scenario),
             resolver,
-            manifest: selected.manifest_path.clone(),
+            manifest: loaded.manifest_path.clone(),
             targets,
             project_root,
             state,
@@ -269,6 +273,22 @@ impl Session {
                 return;
             }
         };
+        let build = match crate::project::materialize_project(
+            selected,
+            &self.resolver,
+            zup_build::Writes::None,
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|loaded| Scenario::from_build(loaded.build))
+        {
+            Ok(scenario) => scenario,
+            Err(error) => {
+                println!("  plan     {error}");
+                return;
+            }
+        };
+        self.runtime.simulator_mut().reopen(&build);
+        *self.runtime.scenario_mut() = build;
         let window_changed = self
             .presented
             .is_some_and(|presented| presented != hash_bytes(&resolved.executable));

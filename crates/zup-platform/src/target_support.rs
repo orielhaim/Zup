@@ -72,32 +72,82 @@ impl TargetCapabilities {
             .filter(|launcher| launcher.location == zup_core::LauncherLocation::Menu)
             .count();
         let desktop = installer.launchers.len() - menu;
-        for (kind, count, support) in [
-            ("service", installer.services.len(), self.services),
-            ("menu launcher", menu, self.menu),
-            ("desktop launcher", desktop, self.desktop),
-            ("URI protocol", installer.protocols.len(), self.protocols),
-            (
-                "file association",
-                installer.file_associations.len(),
-                self.file_associations,
-            ),
-            ("PATH entry", installer.path.len(), self.search_path),
-            (
-                "package-manager prerequisite",
-                installer.prerequisites.len(),
-                self.prerequisites,
-            ),
-            ("plugin", installer.plugins.len(), self.plugins),
-        ] {
+        self.check_resources(
+            installer.target,
+            scope,
+            [
+                ("service", installer.services.len(), self.services),
+                ("menu launcher", menu, self.menu),
+                ("desktop launcher", desktop, self.desktop),
+                ("URI protocol", installer.protocols.len(), self.protocols),
+                (
+                    "file association",
+                    installer.file_associations.len(),
+                    self.file_associations,
+                ),
+                ("PATH entry", installer.path.len(), self.search_path),
+                (
+                    "package-manager prerequisite",
+                    installer.prerequisites.len(),
+                    self.prerequisites,
+                ),
+                ("plugin", installer.plugins.len(), self.plugins),
+            ],
+            &mut errors,
+        );
+        errors
+    }
+
+    pub fn planned_resource_errors(&self, plan: &zup_plan::InstallPlan) -> Vec<String> {
+        let menu = plan
+            .launchers
+            .iter()
+            .filter(|launcher| launcher.location == zup_core::LauncherLocation::Menu)
+            .count();
+        let mut errors = Vec::new();
+        self.check_resources(
+            plan.target,
+            plan.scope,
+            [
+                ("service", plan.services.len(), self.services),
+                ("menu launcher", menu, self.menu),
+                (
+                    "desktop launcher",
+                    plan.launchers.len() - menu,
+                    self.desktop,
+                ),
+                ("URI protocol", plan.protocols.len(), self.protocols),
+                (
+                    "file association",
+                    plan.file_associations.len(),
+                    self.file_associations,
+                ),
+                ("PATH entry", plan.path_entries.len(), self.search_path),
+                (
+                    "package-manager prerequisite",
+                    plan.prerequisites.len(),
+                    self.prerequisites,
+                ),
+            ],
+            &mut errors,
+        );
+        errors
+    }
+
+    fn check_resources<const N: usize>(
+        &self,
+        target: Target,
+        scope: SelectedScope,
+        resources: [(&str, usize, ScopeSupport); N],
+        errors: &mut Vec<String>,
+    ) {
+        for (kind, count, support) in resources {
             if count > 0 && !support.supports(scope) {
                 errors.push(format!(
-                    "target `{}` does not support {kind} resources in {scope} scope",
-                    installer.target
+                    "target `{target}` does not support {kind} resources in {scope} scope"
                 ));
             }
         }
-        errors
     }
 
     pub fn supports_preset(&self, frontend: Frontend) -> bool {
@@ -130,7 +180,7 @@ const LINUX: TargetCapabilities = TargetCapabilities {
     file_associations: ScopeSupport::User,
     search_path: ScopeSupport::Unsupported,
     prerequisites: ScopeSupport::Unsupported,
-    plugins: ScopeSupport::User,
+    plugins: ScopeSupport::Both,
     artifacts: ArtifactSupport::Native,
     elevation: Elevation::Polkit,
 };

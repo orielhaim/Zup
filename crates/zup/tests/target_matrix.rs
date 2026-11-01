@@ -391,23 +391,11 @@ fn a_multi_target_project_refuses_to_plan_without_an_explicit_selection() {
         .args(["--target", "alpha", "--format", "json"])
         .output()
         .unwrap();
-    // `plan` previews a Windows installation transaction. On a Windows host
-    // the selected profile plans; on a Linux host the Linux target is refused
-    // with the transaction it belongs to named.
-    if cfg!(windows) {
-        assert!(
-            explicit.status.success(),
-            "{}",
-            String::from_utf8_lossy(&explicit.stderr)
-        );
-        let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
-        assert_eq!(value["targets"][0]["target"], host_target());
-    } else {
-        assert!(!explicit.status.success());
-        assert!(
-            String::from_utf8_lossy(&explicit.stderr).contains("cannot plan Linux target"),
-            "{}",
-            String::from_utf8_lossy(&explicit.stderr)
-        );
-    }
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    assert_eq!(value["targets"][0]["target"], host_target());
 }

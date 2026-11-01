@@ -7,7 +7,7 @@ use zup_sdk::plugin::prelude::*;
 
 let plan = Plan::new()
     .generated_file(GeneratedFile::text("${install}/app.ini", contents))
-    .launcher(Launcher::menu("Acme", "${launcher}"))
+    .launcher(Launcher::menu("Acme", "${install}/acme.exe"))
     .path_entry(Path::new("${install}/bin"));
 
 plan.validate()?;
@@ -32,7 +32,7 @@ of its own when the WIT grows one.
 ## Launchers
 
 ```rust
-Launcher::desktop("Acme", "${launcher}")
+Launcher::desktop("Acme", "${install}/acme.exe")
     .with_arguments(["--background"])
     .with_working_directory("${install}")
 ```
@@ -51,8 +51,8 @@ must survive a version bump. `ServiceStart` is `Automatic`, `Manual` or `Disable
 ## Protocols and file associations
 
 ```rust
-Protocol::new("acme", "${launcher}").with_arguments(["--open"])
-FileAssociation::new("Acme.Document", ".acme", "${launcher}")
+Protocol::new("acme", "${install}/acme.exe").with_arguments(["--open"])
+FileAssociation::new("Acme.Document", ".acme", "${install}/acme.exe")
     .with_description("Acme document")
 ```
 

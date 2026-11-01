@@ -172,18 +172,16 @@ impl miette::Diagnostic for Failure {
 impl From<zup_runtime::OperationError> for Failure {
     fn from(error: zup_runtime::OperationError) -> Self {
         let message = error.to_string();
-        let inferred = ProcessOutcome::from_message(&message);
-        let outcome = if inferred == ProcessOutcome::Failure {
-            match error {
-                zup_runtime::OperationError::Downgrade { .. } => ProcessOutcome::Configuration,
-                zup_runtime::OperationError::Refused {
-                    stage: "scope" | "selection" | "capabilities" | "plan" | "resolve",
-                    ..
-                } => ProcessOutcome::Configuration,
-                _ => inferred,
-            }
-        } else {
-            inferred
+        let outcome = match error {
+            zup_runtime::OperationError::Cancelled => ProcessOutcome::Cancelled,
+            zup_runtime::OperationError::Downgrade { .. } => ProcessOutcome::Configuration,
+            zup_runtime::OperationError::Refused { stage, .. } => match stage {
+                "scope" | "selection" | "capabilities" | "plan" | "resolve" => {
+                    ProcessOutcome::Configuration
+                }
+                "ownership" => ProcessOutcome::OwnershipConflict,
+                _ => ProcessOutcome::Failure,
+            },
         };
         Self { outcome, message }
     }
@@ -268,7 +266,7 @@ pub(crate) fn run_cli<H: SessionHost>(
 
     let result = drive(&mut host, &cli, interactive, &mut report);
     let outcome = match &result {
-        Ok(outcome) => zup_session::process_outcome(outcome),
+        Ok(outcome) => ProcessOutcome::from(outcome),
         Err(error) => crate::error_outcome(error),
     };
     if let Ok(InstallOutcome::CommittedPendingReconciliation { transaction, .. }) = &result {
@@ -409,6 +407,7 @@ fn drive<H: SessionHost>(
             return Err(error);
         }
         match update {
+            zup_session::UpdatePreparation::Cancelled => return Ok(InstallOutcome::Cancelled),
             zup_session::UpdatePreparation::UpToDate { version } => {
                 report.result.message = Some(format!("already up to date: {version}"));
                 return Ok(InstallOutcome::Committed);
@@ -579,7 +578,7 @@ fn execute_with_events(
             while let Ok(event) = events.try_recv() { if let Err(error) = report.runtime_event(&event) { reporting_error = Some(error); } }
             let outcome = zup_runtime::outcome_of(executed);
             if let Some(error) = reporting_error {
-                let process = zup_session::process_outcome(&outcome);
+                let process = ProcessOutcome::from(&outcome);
                 return Err(Failure { outcome: if process == ProcessOutcome::Success { ProcessOutcome::Failure } else { process }, message: format!("reporting failed: {error}") }.into());
             }
             Ok(outcome)

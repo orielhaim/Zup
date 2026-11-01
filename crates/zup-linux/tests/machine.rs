@@ -340,7 +340,7 @@ fn machine_lock_serializes_one_application() {
         install_intent(&roots.state, None),
     );
     let failed = next_failed(&mut client_b);
-    assert_eq!(failed.kind, zup_protocol::failure::INSTALLATION_BUSY);
+    assert_eq!(failed.kind, zup_protocol::WorkerFailure::InstallationBusy);
     worker_b_handle
         .join()
         .expect("the worker exits")
@@ -403,7 +403,7 @@ fn machine_plan_substitution_is_refused() {
     )
     .expect("send");
     let failed = next_failed(&mut client);
-    assert_eq!(failed.kind, zup_protocol::failure::AUTHENTICATION);
+    assert_eq!(failed.kind, zup_protocol::WorkerFailure::Authentication);
     handle
         .join()
         .expect("the worker exits")
@@ -554,7 +554,7 @@ fn machine_cross_session_execute_is_refused() {
     .expect("send");
     assert_eq!(
         next_failed(&mut client_a).kind,
-        zup_protocol::failure::AUTHENTICATION
+        zup_protocol::WorkerFailure::Authentication
     );
     send_envelope_on(
         &mut client_b,
@@ -570,7 +570,7 @@ fn machine_cross_session_execute_is_refused() {
     .expect("send");
     assert_eq!(
         next_failed(&mut client_b).kind,
-        zup_protocol::failure::AUTHENTICATION
+        zup_protocol::WorkerFailure::Authentication
     );
     worker_a
         .join()
@@ -626,7 +626,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
 
         assert_eq!(
             next_failed(&mut client).kind,
-            zup_protocol::failure::PROTOCOL
+            zup_protocol::WorkerFailure::Protocol
         );
         handle
             .join()
@@ -667,7 +667,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
         .expect("send");
         assert_eq!(
             next_failed(&mut client).kind,
-            zup_protocol::failure::PROTOCOL
+            zup_protocol::WorkerFailure::Protocol
         );
         handle
             .join()
@@ -711,8 +711,8 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             Err(_) => {}
             Ok(envelope) => match envelope.message {
                 Message::Failed(failed)
-                    if failed.kind == zup_protocol::failure::AUTHENTICATION
-                        || failed.kind == zup_protocol::failure::PROTOCOL => {}
+                    if failed.kind == zup_protocol::WorkerFailure::Authentication
+                        || failed.kind == zup_protocol::WorkerFailure::Protocol => {}
                 other => panic!("a foreign frame is refused, got {other:?}"),
             },
         }
@@ -767,7 +767,7 @@ fn machine_package_substitution_is_detected() {
     )
     .expect("send");
     let failed = next_failed(&mut client);
-    assert_eq!(failed.kind, zup_protocol::failure::AUTHENTICATION);
+    assert_eq!(failed.kind, zup_protocol::WorkerFailure::Authentication);
     handle
         .join()
         .expect("the worker exits")
@@ -804,28 +804,32 @@ fn machine_unauthorized_state_roots_refuse() {
         (
             "relative",
             PathBuf::from("var/lib/zup"),
-            zup_protocol::failure::POLICY,
+            zup_protocol::WorkerFailure::Policy,
         ),
         (
             "traversal",
             roots.state.join("../escape"),
-            zup_protocol::failure::POLICY,
+            zup_protocol::WorkerFailure::Policy,
         ),
-        ("symlink", linked, zup_protocol::failure::AUTHENTICATION),
+        (
+            "symlink",
+            linked,
+            zup_protocol::WorkerFailure::Authentication,
+        ),
         (
             "group-writable",
             writable,
-            zup_protocol::failure::AUTHENTICATION,
+            zup_protocol::WorkerFailure::Authentication,
         ),
         (
             "missing-parent",
             missing,
-            zup_protocol::failure::AUTHENTICATION,
+            zup_protocol::WorkerFailure::Authentication,
         ),
         (
             "absolute-elsewhere",
             elsewhere,
-            zup_protocol::failure::AUTHENTICATION,
+            zup_protocol::WorkerFailure::Authentication,
         ),
     ];
     for (name, root, kind) in &cases {
@@ -898,7 +902,7 @@ fn machine_production_worker_refuses_foreign_state() {
     let failed = next_failed(&mut client);
     assert_eq!(
         failed.kind,
-        zup_protocol::failure::AUTHENTICATION,
+        zup_protocol::WorkerFailure::Authentication,
         "a production worker serves only its own state root"
     );
     handle
@@ -958,7 +962,8 @@ fn machine_wrong_peer_uid_is_refused() {
     match recv_envelope_on(&mut client, HANDSHAKE) {
         Err(_) => {}
         Ok(envelope) => match envelope.message {
-            Message::Failed(failed) if failed.kind == zup_protocol::failure::AUTHENTICATION => {}
+            Message::Failed(failed)
+                if failed.kind == zup_protocol::WorkerFailure::Authentication => {}
             other => panic!("a foreign uid gets no session, got {other:?}"),
         },
     }
@@ -994,7 +999,8 @@ fn machine_wrong_peer_pid_is_refused() {
     match recv_envelope_on(&mut client, HANDSHAKE) {
         Err(_) => {}
         Ok(envelope) => match envelope.message {
-            Message::Failed(failed) if failed.kind == zup_protocol::failure::AUTHENTICATION => {}
+            Message::Failed(failed)
+                if failed.kind == zup_protocol::WorkerFailure::Authentication => {}
             other => panic!("a foreign process gets no session, got {other:?}"),
         },
     }
@@ -1307,7 +1313,7 @@ fn machine_cancel_before_execute_mutates_nothing() {
     )
     .expect("send");
     let failed = next_failed(&mut client);
-    assert_eq!(failed.kind, zup_protocol::failure::CANCELLED);
+    assert_eq!(failed.kind, zup_protocol::WorkerFailure::Cancelled);
     handle
         .join()
         .expect("the worker exits")
@@ -1352,7 +1358,7 @@ fn machine_override_swap_is_refused() {
     intent_b.install_dir_override = Some(dir_b.display().to_string());
     send_prepare(&mut client, session, 1, intent_b);
     let failed = next_failed(&mut client);
-    assert_eq!(failed.kind, zup_protocol::failure::AUTHENTICATION);
+    assert_eq!(failed.kind, zup_protocol::WorkerFailure::Authentication);
     handle
         .join()
         .expect("the worker exits")

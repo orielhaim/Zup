@@ -196,7 +196,7 @@ fn a_busy_operation_does_not_stage_generated_content() {
                 scope: SelectedScope::User,
                 transaction_plan: plan,
                 state_root: state.clone(),
-                work_root: state.join("work"),
+
                 recovery_id: None,
                 bootstrap: None,
                 release: None,

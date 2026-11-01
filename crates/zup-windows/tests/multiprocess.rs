@@ -116,7 +116,7 @@ user = "${{location.user_data}}/AcmeApp"
     worker
 }
 
-async fn execute_with_test_worker(worker: &Worker) -> String {
+async fn execute_with_test_worker(worker: &Worker) -> zup_protocol::WorkerOutcome {
     let Worker {
         plan,
         version,
@@ -217,7 +217,6 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
                         .to_string()
                 }),
                 state_root: state_root.display().to_string(),
-                work_root: work_root.display().to_string(),
                 recovery_id,
                 recovery_intent: None,
                 release: release.clone(),
@@ -232,7 +231,9 @@ async fn execute_with_test_worker(worker: &Worker) -> String {
             .expect("worker response");
         match message.message {
             Message::Completed(completed) => return completed.outcome,
-            Message::Failed(failed) => panic!("worker failed: {}: {}", failed.kind, failed.message),
+            Message::Failed(failed) => {
+                panic!("worker failed: {:?}: {}", failed.kind, failed.message)
+            }
             _ => {}
         }
     }
@@ -268,7 +269,7 @@ async fn multi_process_named_pipe_handshake_and_execute() {
             payload_overlay_root: None,
         })
         .await,
-        "committed"
+        zup_protocol::WorkerOutcome::Committed
     );
     assert_eq!(std::fs::read(destination).unwrap(), b"hello-app");
 }
@@ -312,7 +313,7 @@ async fn authenticated_worker_consumes_generated_overlay() {
             payload_overlay_root: Some(overlay.clone()),
         })
         .await,
-        "committed"
+        zup_protocol::WorkerOutcome::Committed
     );
     assert_eq!(std::fs::read(destination).unwrap(), bytes);
 }

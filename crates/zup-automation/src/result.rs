@@ -426,6 +426,50 @@ pub struct PlanDetails {
     pub estimated_bytes: ByteCount,
     /// How many individual changes it holds.
     pub change_count: usize,
+    pub resources: Vec<PlanResource>,
+}
+
+#[cfg_attr(feature = "bindings", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlanResource {
+    File {
+        destination: String,
+        size: ByteCount,
+        digest: crate::Digest,
+        generated: bool,
+    },
+    Launcher {
+        name: String,
+        location: String,
+        executable: String,
+        arguments: Vec<String>,
+        working_directory: Option<String>,
+    },
+    PathEntry {
+        value: String,
+    },
+    Service {
+        id: String,
+        executable: String,
+        arguments: Vec<String>,
+        start: String,
+    },
+    Protocol {
+        scheme: String,
+        executable: String,
+        arguments: Vec<String>,
+    },
+    FileAssociation {
+        id: String,
+        extension: String,
+        executable: String,
+        arguments: Vec<String>,
+    },
+    Prerequisite {
+        id: String,
+        name: String,
+    },
 }
 
 /// What `zup doctor` found.

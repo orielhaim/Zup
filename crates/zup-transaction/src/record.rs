@@ -193,7 +193,8 @@ impl TransactionRecord {
                 return Err(CorruptReason::NodeStateMismatch);
             };
             if let NodeState::Applied { receipt } | NodeState::Verified { receipt } = state
-                && (receipt.validate().is_err() || !receipt_matches_node(node, receipt))
+                && (receipt.validate().is_err()
+                    || !receipt_matches_node(node, receipt, self.target))
             {
                 return Err(CorruptReason::InvalidReceipt);
             }
@@ -263,9 +264,97 @@ fn phase_accepts(
 fn receipt_matches_node(
     node: &crate::plan::TransactionNode,
     receipt: &crate::executor::OperationReceipt,
+    target: zup_core::Target,
 ) -> bool {
     use crate::executor::OperationReceipt;
     use crate::plan::NodeKind;
+    let expected_content = |size: u64, digest: &str| {
+        node.meta.expected_size == Some(size)
+            && digest.parse::<zup_core::Sha256Digest>().ok() == node.meta.expected_sha256
+    };
+    let destination_matches = |key: &zup_core::ResourceKey, destination: &str| match key {
+        zup_core::ResourceKey::File {
+            destination: expected,
+        }
+        | zup_core::ResourceKey::Maintenance {
+            destination: expected,
+            ..
+        } => expected == destination,
+        _ => false,
+    };
+    if let OperationReceipt::CreateFile {
+        destination,
+        created_directories,
+        ..
+    } = receipt
+    {
+        let Ok(destination) = zup_platform::TargetPath::new(target, destination) else {
+            return false;
+        };
+        if created_directories.iter().any(|directory| {
+            !zup_platform::TargetPath::new(target, directory).is_ok_and(|directory| {
+                directory.parent().is_some()
+                    && directory != destination
+                    && destination.starts_with(&directory)
+            })
+        }) {
+            return false;
+        }
+    }
+    let content_matches = match (&node.kind, receipt) {
+        (NodeKind::StageFile { .. }, OperationReceipt::StageFile { size, sha256, .. }) => {
+            expected_content(*size, sha256)
+        }
+        (
+            NodeKind::FileMutation { key, .. },
+            OperationReceipt::CreateFile {
+                destination,
+                installed_sha256,
+                installed_size,
+                executable,
+                ..
+            },
+        ) => {
+            destination_matches(key, destination)
+                && expected_content(*installed_size, installed_sha256)
+                && node.meta.executable.unwrap_or(false) == *executable
+        }
+        (
+            NodeKind::FileMutation { key, .. },
+            OperationReceipt::ReplaceFile {
+                destination,
+                new_sha256,
+                new_size,
+                executable,
+                previous_sha256,
+                previous_size,
+                ..
+            },
+        ) => {
+            destination_matches(key, destination)
+                && expected_content(*new_size, new_sha256)
+                && node.meta.executable.unwrap_or(false) == *executable
+                && matches!(node.meta.file_precondition, Some(crate::FilePrecondition::Exact { size, sha256 })
+                    if size == *previous_size && previous_sha256.parse::<zup_core::Sha256Digest>().ok() == Some(sha256))
+        }
+        (
+            NodeKind::FileRemoval { .. },
+            OperationReceipt::RemoveFile {
+                destination,
+                sha256,
+                size,
+                ..
+            },
+        ) => node.meta.removal.as_ref().is_some_and(|removal| {
+            removal.destination == *destination
+                && removal.sha256 == *sha256
+                && removal.size == *size
+        }),
+        _ => true,
+    };
+    if !content_matches {
+        return false;
+    }
     match (&node.kind, receipt) {
         (NodeKind::Barrier, OperationReceipt::Control) => true,
         (NodeKind::StageFile { .. }, OperationReceipt::StageFile { .. }) => true,

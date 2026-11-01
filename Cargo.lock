@@ -12247,8 +12247,10 @@ dependencies = [
  "zup-bundle",
  "zup-core",
  "zup-manifest",
+ "zup-plan",
  "zup-plugin-abi",
  "zup-plugin-contract",
+ "zup-plugin-runtime",
 ]
 
 [[package]]
@@ -12279,6 +12281,7 @@ dependencies = [
  "wat",
  "wit-component 0.262.0",
  "wit-parser 0.262.0",
+ "zup-acquire",
  "zup-build",
  "zup-bundle",
  "zup-core",
@@ -12299,6 +12302,7 @@ dependencies = [
  "zup-plan",
  "zup-platform",
  "zup-preset-protocol",
+ "zup-runtime",
  "zup-transaction",
 ]
 
@@ -12409,11 +12413,18 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "zup-build",
  "zup-core",
+ "zup-linux",
+ "zup-manifest",
+ "zup-plan",
+ "zup-platform",
+ "zup-plugin-build",
  "zup-presentation",
  "zup-preset-host",
  "zup-preset-protocol",
  "zup-runtime",
+ "zup-windows",
 ]
 
 [[package]]

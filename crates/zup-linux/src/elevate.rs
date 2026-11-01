@@ -291,12 +291,12 @@ pub(crate) fn drive_client(
                 emit_progress(&report, events);
                 continue;
             }
-            Message::Failed(failed) if failed.kind == zup_protocol::failure::STALE_PLAN => {
+            Message::Failed(failed) if failed.kind == zup_protocol::WorkerFailure::StalePlan => {
                 return Err(ExecError::StalePlan);
             }
             Message::Failed(failed) => {
                 return Err(ExecError::Worker(format!(
-                    "{}: {}",
+                    "{:?}: {}",
                     failed.kind, failed.message
                 )));
             }
@@ -371,14 +371,18 @@ pub(crate) fn drive_client(
         };
         match message {
             Message::Completed(completed) => {
-                return match completed.outcome.as_str() {
-                    "committed" => Ok(LinuxOutcome::Committed { version }),
-                    "rolled_back" => Ok(LinuxOutcome::RolledBack),
-                    "cancelled" => Err(ExecError::Cancelled),
-                    "recovery_required" => Ok(LinuxOutcome::RecoveryRequired {
-                        transaction: completed.transaction_id.to_string(),
-                    }),
-                    "committed_pending_reconciliation" => {
+                return match completed.outcome {
+                    zup_protocol::WorkerOutcome::Committed => {
+                        Ok(LinuxOutcome::Committed { version })
+                    }
+                    zup_protocol::WorkerOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
+                    zup_protocol::WorkerOutcome::Cancelled => Err(ExecError::Cancelled),
+                    zup_protocol::WorkerOutcome::RecoveryRequired => {
+                        Ok(LinuxOutcome::RecoveryRequired {
+                            transaction: completed.transaction_id.to_string(),
+                        })
+                    }
+                    zup_protocol::WorkerOutcome::CommittedPendingReconciliation => {
                         Ok(LinuxOutcome::CommittedPendingReconciliation {
                             detail: completed.detail.unwrap_or_else(|| {
                                 format!(
@@ -390,17 +394,17 @@ pub(crate) fn drive_client(
                         })
                     }
                     _ => Err(ExecError::Worker(format!(
-                        "unknown outcome {}",
+                        "unexpected outcome {:?}",
                         completed.outcome
                     ))),
                 };
             }
-            Message::Failed(failed) if failed.kind == zup_protocol::failure::CANCELLED => {
+            Message::Failed(failed) if failed.kind == zup_protocol::WorkerFailure::Cancelled => {
                 return Err(ExecError::Cancelled);
             }
             Message::Failed(failed) => {
                 return Err(ExecError::Worker(format!(
-                    "{}: {}",
+                    "{:?}: {}",
                     failed.kind, failed.message
                 )));
             }

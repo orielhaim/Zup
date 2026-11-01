@@ -248,9 +248,9 @@ pub(crate) fn prepare(
                 signal = &mut signal => {
                     signal.map_err(|error| error.to_string())?;
                     cancellation.cancel();
-                    return Err("update cancelled before installation".into());
+                    return Ok((zup_session::UpdatePreparation::Cancelled, None));
                 },
-                _ = cancellation.cancelled() => return Err("update cancelled before installation".into()),
+                _ = cancellation.cancelled() => return Ok((zup_session::UpdatePreparation::Cancelled, None)),
             }
         };
         while let Ok(event) = receiver.try_recv() {
@@ -258,6 +258,7 @@ pub(crate) fn prepare(
                 if !matches!(event, zup_presentation::InstallerEvent::Completed { .. } | zup_presentation::InstallerEvent::Failed { .. }) { events(event); }
             }
         }
+        if cancellation.is_cancelled() { return Ok((zup_session::UpdatePreparation::Cancelled, None)); }
         result
     }).map(|(preparation, updated)| {
         if let Some(updated) = updated {
@@ -304,6 +305,9 @@ pub(crate) fn run(
         Err(error) => return Err(error),
     };
     let build = match updated {
+        zup_session::UpdatePreparation::Cancelled => {
+            return Ok(zup_runtime::InstallOutcome::Cancelled);
+        }
         zup_session::UpdatePreparation::Ready { build } => build,
         zup_session::UpdatePreparation::Available { version } => {
             status(UpdateState::Available {

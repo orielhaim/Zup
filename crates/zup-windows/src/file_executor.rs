@@ -411,10 +411,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
     }
 
     fn removal_backup(&self, destination: &Path) -> PathBuf {
-        let mut name = std::ffi::OsString::from(".");
-        name.push(destination.file_name().unwrap_or_default());
-        name.push(format!(".zup-{}.bak", self.tx_id));
-        destination.with_file_name(name)
+        removal_backup_path(destination, &self.tx_id)
     }
 
     pub fn apply_owned_file_removal(
@@ -1092,7 +1089,13 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
-fn resource_token(key: &ResourceKey) -> String {
-    let digest = sha2::Sha256::digest(format!("{key:?}").as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+pub(crate) fn resource_token(key: &ResourceKey) -> String {
+    zup_core::hash_bytes(&serde_json::to_vec(key).expect("resource keys serialize")).to_hex()
+}
+
+pub(crate) fn removal_backup_path(destination: &Path, transaction: &str) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(destination.file_name().unwrap_or_default());
+    name.push(format!(".zup-{transaction}.bak"));
+    destination.with_file_name(name)
 }

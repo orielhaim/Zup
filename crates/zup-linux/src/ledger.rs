@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use zup_transaction::valid_file_key;
 
-use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest};
-use zup_exec::{
-    INSTALL_LEDGER_SCHEMA, InstallLedger, ObservedServiceState, OwnedResource, ServiceState,
-};
+use zup_core::{AppId, ResourceKey, SelectedScope};
+use zup_exec::{InstallLedger, ObservedServiceState, OwnedResource, ServiceState};
 use zup_transaction::{
     NodeKind, OperationReceipt, TransactionNode, TransactionPhase, TransactionPlan,
     TransactionRecord, TransactionStore,
@@ -12,7 +11,7 @@ use zup_transaction::{
 
 use crate::error::{ExecError, PathError};
 use crate::fs::OwnedDirectory;
-use crate::lowering::{target_path_from_host, to_host_path};
+use crate::lowering::to_host_path;
 
 pub struct LinuxLedgerStore {
     root: PathBuf,
@@ -24,19 +23,7 @@ impl LinuxLedgerStore {
     }
 
     pub fn path_for(&self, app_id: &AppId, scope: SelectedScope) -> PathBuf {
-        let digest = zup_core::hash_bytes(app_id.as_str().as_bytes());
-        let name: String = digest
-            .as_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let scope = match scope {
-            SelectedScope::User => "user",
-            SelectedScope::Machine => "machine",
-        };
-        self.root
-            .join("installations")
-            .join(format!("{name}-{scope}.json"))
+        zup_transaction::ledger_path(&self.root, app_id, scope)
     }
 
     pub fn load(
@@ -51,10 +38,7 @@ impl LinuxLedgerStore {
             Err(source) => return Err(PathError::io(&(path), source).into()),
         };
         let ledger: InstallLedger = serde_json::from_slice(&bytes)?;
-        if ledger.schema != INSTALL_LEDGER_SCHEMA
-            || ledger.app_id != *app_id
-            || ledger.scope != scope
-        {
+        if !zup_transaction::validate_ledger_identity(&ledger, app_id, scope) {
             return Err(ExecError::LedgerInvalid);
         }
         Ok(Some(ledger))
@@ -215,135 +199,17 @@ impl LinuxLedgerStore {
         if ledger.target != record.target {
             return Err(ExecError::Ownership("target identity".into()));
         }
-        if record.release.is_some() || ledger.version != record.app_version {
-            ledger.release = record.release.clone();
-        }
-        ledger.version = record.app_version.clone();
-        ledger.selected_components = record.plan.selected_components.clone();
-        ledger.install_directory = record.plan.install_directory.clone();
-        ledger.preset = record.plan.preset.clone();
-
+        zup_transaction::project_committed_files(record, &mut ledger)
+            .map_err(|_| ExecError::LedgerInvalid)?;
         for node in &record.plan.nodes {
             if matches!(
                 &node.kind,
                 NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. }
             ) {
                 publish_service_node(&mut ledger, record, node)?;
-                continue;
             }
-            let NodeKind::FileMutation { key, .. } = &node.kind else {
-                continue;
-            };
-            let Some(receipt) = record.receipt(&node.id) else {
-                continue;
-            };
-            let Some(source_relative) = node.meta.source_relative.clone() else {
-                return Err(ExecError::LedgerInvalid);
-            };
-            let (destination, digest, size, created_directories) = match receipt {
-                OperationReceipt::CreateFile {
-                    destination,
-                    installed_sha256,
-                    installed_size,
-                    created_directories,
-                    ..
-                } => {
-                    let mut directories = created_directories
-                        .iter()
-                        .map(|path| {
-                            target_path_from_host(Path::new(path), &record.target)
-                                .map_err(|_| ExecError::LedgerInvalid)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if let Some(OwnedResource::File {
-                        created_directories: old,
-                        ..
-                    }) = ledger.resources.get(key)
-                    {
-                        for directory in old {
-                            if !directories.contains(directory) {
-                                directories.push(directory.clone());
-                            }
-                        }
-                    }
-                    (destination, installed_sha256, *installed_size, directories)
-                }
-                OperationReceipt::ReplaceFile {
-                    destination,
-                    new_sha256,
-                    new_size,
-                    ..
-                } => {
-                    let directories = match ledger.resources.get(key) {
-                        Some(OwnedResource::File {
-                            created_directories,
-                            ..
-                        }) => created_directories.clone(),
-                        _ => Vec::new(),
-                    };
-                    (destination, new_sha256, *new_size, directories)
-                }
-                _ => return Err(ExecError::LedgerInvalid),
-            };
-            let expected_path = match key {
-                ResourceKey::File { destination }
-                | ResourceKey::Maintenance { destination, .. } => destination,
-                _ => return Err(ExecError::LedgerInvalid),
-            };
-            let sha256: Sha256Digest = digest.parse().map_err(|_| ExecError::LedgerInvalid)?;
-            if *destination != *expected_path
-                || node.meta.expected_sha256 != Some(sha256)
-                || node.meta.expected_size != Some(size)
-            {
-                return Err(ExecError::LedgerInvalid);
-            }
-            ledger.resources.insert(
-                key.clone(),
-                OwnedResource::File {
-                    destination: target_path_from_host(Path::new(destination), &record.target)
-                        .map_err(|_| ExecError::LedgerInvalid)?,
-                    source_relative,
-                    sha256,
-                    size,
-                    created_directories,
-                    privilege: node.meta.privilege.ok_or(ExecError::LedgerInvalid)?,
-                },
-            );
         }
-        for key in retired_ledger_keys(&record.plan)? {
-            let directories = match ledger.resources.get(&key) {
-                Some(OwnedResource::File {
-                    created_directories,
-                    ..
-                }) => created_directories.clone(),
-                _ => Vec::new(),
-            };
-            for directory in directories {
-                let inheritor = ledger.resources.iter().find_map(|(candidate, owned)| {
-                    if candidate == &key {
-                        return None;
-                    }
-                    match owned {
-                        OwnedResource::File { destination, .. }
-                            if destination.starts_with(&directory) =>
-                        {
-                            Some(candidate.clone())
-                        }
-                        _ => None,
-                    }
-                });
-                if let Some(inheritor) = inheritor
-                    && let Some(OwnedResource::File {
-                        created_directories,
-                        ..
-                    }) = ledger.resources.get_mut(&inheritor)
-                    && !created_directories.contains(&directory)
-                {
-                    created_directories.push(directory);
-                }
-            }
-            ledger.resources.remove(&key);
-        }
+        zup_transaction::retire_resources(&mut ledger, &retired_ledger_keys(&record.plan)?);
         ledger.committed_transaction = record.transaction_id.to_string();
         let path = self.path_for(&record.app_id, scope);
         let bytes = serde_json::to_vec_pretty(&ledger)?;
@@ -356,98 +222,31 @@ impl LinuxLedgerStore {
 
     pub fn repair_committed(&self, app_id: &AppId, scope: SelectedScope) -> Result<(), ExecError> {
         let journals = zup_transaction::FilesystemTransactionStore::private_at(&self.root);
-        let ids = journals
-            .list_ids()
-            .map_err(|error| ExecError::Executor(error.to_string()))?;
-        let mut committed = Vec::new();
-        for id in ids {
-            let record = journals
-                .load(&id)
-                .map_err(|error| ExecError::Executor(error.to_string()))?;
-            if record.app_id != *app_id || record.scope != scope {
-                continue;
+        let ledger = self.load(app_id, scope)?;
+        let records = zup_transaction::settled_records(&journals, app_id, scope, ledger.as_ref())
+            .map_err(|error| match error {
+            zup_transaction::ReconciliationError::RecoveryRequired(id) => {
+                ExecError::RecoveryRequired(id.to_string())
             }
-            if self
-                .load(app_id, scope)?
-                .as_ref()
-                .is_some_and(|ledger| ledger.target != record.target)
-            {
-                return Err(ExecError::Ownership("target identity".into()));
-            }
+            other => ExecError::Ownership(other.to_string()),
+        })?;
+        for record in records {
             match record.phase {
-                TransactionPhase::Committed => committed.push(record),
-                TransactionPhase::RolledBack => {}
-                _ => {
-                    return Err(ExecError::RecoveryRequired(
-                        record.transaction_id.to_string(),
-                    ));
+                TransactionPhase::Committed => {
+                    self.publish_committed(&record, scope)?;
                 }
+                TransactionPhase::RolledBack => {}
+                _ => unreachable!("settled_records accepts only terminal journals"),
             }
-        }
-        committed.sort_by_key(|record| record.transaction_id.as_uuid());
-        let mut latest = self
-            .load(app_id, scope)?
-            .map(|ledger| ledger.committed_transaction.parse::<uuid::Uuid>())
-            .transpose()
-            .map_err(|_| ExecError::LedgerInvalid)?;
-        for record in &committed {
-            let id = record.transaction_id.as_uuid();
-            if latest.is_none_or(|previous| id > previous) {
-                self.publish_ledger(record, scope)?;
-                latest = Some(id);
-            } else {
-                cleanup_committed_files(record)?;
-                cleanup_removed_directories(record)?;
-            }
-        }
-        if let Some(record) = committed.last() {
-            self.publish_committed(record, scope)?;
         }
         Ok(())
     }
 }
 
-fn valid_file_key(
-    key: &ResourceKey,
-    app_id: &AppId,
-    app_version: &semver::Version,
-    target: &zup_core::Target,
-) -> bool {
-    match key {
-        ResourceKey::File { .. } => true,
-        ResourceKey::Maintenance {
-            app_id: resource_app,
-            version,
-            destination,
-        } => {
-            resource_app == app_id.as_str()
-                && semver::Version::parse(version).is_ok_and(|parsed| &parsed == app_version)
-                && target_path_from_host(Path::new(destination), target).is_ok()
-        }
-        _ => false,
-    }
-}
-
 fn retired_ledger_keys(plan: &TransactionPlan) -> Result<BTreeSet<ResourceKey>, ExecError> {
-    let mut keys = BTreeSet::new();
-    for key in &plan.retired_keys {
-        let ledger_key = plan
-            .nodes
-            .iter()
-            .find(|node| {
-                matches!(
-                    &node.kind,
-                    NodeKind::BackendRemoval { key: node_key }
-                        if node_key == key
-                )
-            })
-            .and_then(service_ledger_key)
-            .unwrap_or_else(|| key.clone());
-        if !keys.insert(ledger_key) {
-            return Err(ExecError::Ownership("duplicate retired resources".into()));
-        }
-    }
-    Ok(keys)
+    zup_transaction::retired_ledger_keys(plan, |node| {
+        service_ledger_key(node).ok_or_else(|| ExecError::Ownership(node.id.to_string()))
+    })
 }
 
 fn is_service_backend(key: &ResourceKey) -> bool {

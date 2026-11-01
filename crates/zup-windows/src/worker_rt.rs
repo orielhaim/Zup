@@ -23,7 +23,6 @@ use crate::payload_overlay::{
     PayloadOverlayIdentity, cleanup_payload_overlay, validate_payload_overlay_base,
     verify_payload_overlay,
 };
-use zup_protocol::failure;
 use zup_transaction::FilePrecondition;
 use zup_transaction::{InstallationLock, LockScope};
 
@@ -395,7 +394,7 @@ pub fn current_exe() -> Result<PathBuf, WorkerError> {
 pub async fn run_worker(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
-) -> Result<String, WorkerError> {
+) -> Result<zup_protocol::WorkerOutcome, WorkerError> {
     if !crate::transport::is_process_elevated()
         .map_err(|e| WorkerError::AuthFailed(e.to_string()))?
     {
@@ -409,21 +408,14 @@ pub async fn run_worker(
 pub async fn run_worker_for_test(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
-) -> Result<String, WorkerError> {
+) -> Result<zup_protocol::WorkerOutcome, WorkerError> {
     run_worker_inner(bootstrap, cancel).await
-}
-
-fn release_record(release: &Option<zup_core::ReleaseIdentity>) -> crate::ReleaseRecord<'_> {
-    match release {
-        Some(identity) => crate::ReleaseRecord::Identity(identity),
-        None => crate::ReleaseRecord::None,
-    }
 }
 
 async fn run_worker_inner(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
-) -> Result<String, WorkerError> {
+) -> Result<zup_protocol::WorkerOutcome, WorkerError> {
     let client = crate::pipe::PipeClient::connect(&bootstrap.pipe_name)
         .await
         .map_err(|e| WorkerError::Protocol(e.to_string()))?;
@@ -586,10 +578,7 @@ async fn run_worker_inner(
         .map(|machine| machine.work_dir())
         .transpose()
         .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    let work_root = match &machine {
-        Some(machine) => machine.path().join("work"),
-        None => PathBuf::from(exec.work_root),
-    };
+    let work_root = state_root.join("work");
     let store = match &machine {
         Some(machine) => machine.transaction_store(),
         None => FilesystemTransactionStore::private_at(&state_root),
@@ -713,6 +702,7 @@ async fn run_worker_inner(
         Some(
             coordinator
                 .begin(app_id, scope, app_version, authorized)
+                .and_then(|open| open.with_release(exec.release.clone()))
                 .map_err(|e| WorkerError::Transaction(e.to_string()))?,
         )
     } else {
@@ -812,16 +802,14 @@ async fn run_worker_inner(
             let publication = if recovering {
                 ledgers.repair_committed(&r.app_id, scope)
             } else {
-                ledgers
-                    .publish_committed(&r, scope, release_record(&exec.release))
-                    .map(|_| ())
+                ledgers.publish_committed(&r, scope).map(|_| ())
             };
             let outcome = match publication {
                 Ok(()) => {
                     crate::integration::notify_committed_path_change(&r);
-                    "committed"
+                    zup_protocol::WorkerOutcome::Committed
                 }
-                Err(_) => "committed_pending_reconciliation",
+                Err(_) => zup_protocol::WorkerOutcome::CommittedPendingReconciliation,
             };
             (r.transaction_id.as_uuid(), outcome.to_owned())
         }
@@ -833,12 +821,19 @@ async fn run_worker_inner(
                 payload_overlay_base_root.as_deref(),
                 payload_overlay_root.as_deref(),
             );
-            (r.transaction_id.as_uuid(), "rolled_back".to_owned())
+            (
+                r.transaction_id.as_uuid(),
+                zup_protocol::WorkerOutcome::RolledBack,
+            )
         }
-        Ok((r, TransactionOutcome::RecoveryRequired)) => {
-            (r.transaction_id.as_uuid(), "recovery_required".to_owned())
-        }
-        Err(_) => (journal_id.as_uuid(), "recovery_required".to_owned()),
+        Ok((r, TransactionOutcome::RecoveryRequired)) => (
+            r.transaction_id.as_uuid(),
+            zup_protocol::WorkerOutcome::RecoveryRequired,
+        ),
+        Err(_) => (
+            journal_id.as_uuid(),
+            zup_protocol::WorkerOutcome::RecoveryRequired,
+        ),
     };
     drop(_lock);
 
@@ -850,7 +845,7 @@ async fn run_worker_inner(
             Message::Completed(zup_protocol::Completed {
                 detail: None,
                 transaction_id,
-                outcome: outcome.clone(),
+                outcome,
                 prerequisite_id: None,
                 exit_code: None,
             }),
@@ -869,7 +864,7 @@ async fn run_bootstrap_worker(
     incoming: SequenceTracker,
     mut outgoing: u64,
     cancel: CancellationToken,
-) -> Result<String, WorkerError> {
+) -> Result<zup_protocol::WorkerOutcome, WorkerError> {
     if exec.target != bootstrap.target {
         return Err(WorkerError::TargetMismatch);
     }
@@ -961,7 +956,7 @@ async fn run_bootstrap_worker(
                 bootstrap.session_id,
                 outgoing,
                 Message::Failed(zup_protocol::Failed {
-                    kind: failure::INSTALLATION_BUSY.to_owned(),
+                    kind: zup_protocol::WorkerFailure::InstallationBusy,
                     message: "another operation is running for this installation".to_owned(),
                 }),
             )
@@ -1011,13 +1006,13 @@ async fn run_bootstrap_worker(
                 Message::Completed(zup_protocol::Completed {
                     detail: None,
                     transaction_id: exec.bootstrap_id,
-                    outcome: "recovery_required".into(),
+                    outcome: zup_protocol::WorkerOutcome::RecoveryRequired,
                     prerequisite_id: None,
                     exit_code: None,
                 }),
             )
             .await;
-            return Ok("recovery_required".into());
+            return Ok(zup_protocol::WorkerOutcome::RecoveryRequired);
         }
     }
     let assessed_revision = state.revision;
@@ -1065,7 +1060,7 @@ async fn run_bootstrap_worker(
                 session_id: bootstrap.session_id,
                 sequence: outgoing,
                 message: Message::Failed(zup_protocol::Failed {
-                    kind: failure::CANCELLED.into(),
+                    kind: zup_protocol::WorkerFailure::Cancelled,
                     message: "bootstrap cancelled".into(),
                 }),
             })
@@ -1093,7 +1088,7 @@ async fn run_bootstrap_worker(
                 session_id: bootstrap.session_id,
                 sequence: outgoing,
                 message: Message::Failed(zup_protocol::Failed {
-                    kind: failure::TRANSACTION.into(),
+                    kind: zup_protocol::WorkerFailure::Transaction,
                     message: error.to_string(),
                 }),
             })
@@ -1101,7 +1096,9 @@ async fn run_bootstrap_worker(
         return Err(WorkerError::Transaction(error.to_string()));
     }
     let (outcome, prerequisite_id, exit_code) = match result {
-        Ok(zup_bootstrap::BootstrapOutcome::Ready) => ("committed", None, None),
+        Ok(zup_bootstrap::BootstrapOutcome::Ready) => {
+            (zup_protocol::WorkerOutcome::Committed, None, None)
+        }
         Ok(zup_bootstrap::BootstrapOutcome::RebootRequired { exit_code, .. }) => {
             let prerequisite_id = state
                 .operations
@@ -1123,9 +1120,15 @@ async fn run_bootstrap_worker(
                         .first()
                         .map(|operation| operation.id.to_string())
                 });
-            ("reboot_required", prerequisite_id, Some(exit_code))
+            (
+                zup_protocol::WorkerOutcome::RebootRequired,
+                prerequisite_id,
+                Some(exit_code),
+            )
         }
-        Ok(zup_bootstrap::BootstrapOutcome::RecoveryRequired) => ("recovery_required", None, None),
+        Ok(zup_bootstrap::BootstrapOutcome::RecoveryRequired) => {
+            (zup_protocol::WorkerOutcome::RecoveryRequired, None, None)
+        }
         Err(error) => return Err(WorkerError::Transaction(error.to_string())),
     };
     let _ = send_and_close(
@@ -1135,7 +1138,7 @@ async fn run_bootstrap_worker(
         Message::Completed(zup_protocol::Completed {
             detail: None,
             transaction_id: exec.bootstrap_id,
-            outcome: outcome.to_owned(),
+            outcome,
             prerequisite_id,
             exit_code,
         }),
@@ -1143,7 +1146,7 @@ async fn run_bootstrap_worker(
     .await;
     let _ = cancel;
     let _ = reader_task.await;
-    Ok(outcome.to_owned())
+    Ok(outcome)
 }
 
 fn validate_transaction_bundle_identity(

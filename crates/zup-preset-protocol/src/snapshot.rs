@@ -178,6 +178,7 @@ pub enum InstallerState {
     Blocked { blockers: Vec<String> },
     ConfirmUninstall,
     Succeeded,
+    RebootRequired,
     Failed,
     RecoveryRequired,
 }

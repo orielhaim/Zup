@@ -113,29 +113,51 @@ pub fn receipt_for(operation: &TransactionNode) -> OperationReceipt {
 }
 
 fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
-    let digest = Sha256Digest::from_bytes([0; 32]).to_hex();
+    let digest = operation
+        .meta
+        .expected_sha256
+        .unwrap_or_else(|| Sha256Digest::from_bytes([0; 32]))
+        .to_hex();
+    let size = operation.meta.expected_size.unwrap_or(1);
+    let destination = match &operation.kind {
+        NodeKind::FileMutation {
+            key:
+                zup_core::ResourceKey::File { destination }
+                | zup_core::ResourceKey::Maintenance { destination, .. },
+            ..
+        } => destination.clone(),
+        _ => String::new(),
+    };
     match &operation.kind {
         NodeKind::StageFile { .. } => OperationReceipt::StageFile {
             staged_path: "staged".into(),
-            size: 1,
+            size,
             sha256: digest,
         },
         NodeKind::FileMutation { delta, .. } => match delta {
             FileDelta::Create => OperationReceipt::CreateFile {
-                destination: "destination".into(),
+                destination,
                 installed_sha256: digest,
-                installed_size: 1,
+                installed_size: size,
                 executable: operation.meta.executable.unwrap_or(false),
                 created_directories: Vec::new(),
             },
             _ => OperationReceipt::ReplaceFile {
-                destination: "destination".into(),
-                previous_sha256: digest.clone(),
-                previous_size: 1,
+                destination,
+                previous_sha256: match operation.meta.file_precondition {
+                    Some(zup_transaction::FilePrecondition::Exact { sha256, .. }) => {
+                        sha256.to_hex()
+                    }
+                    _ => digest.clone(),
+                },
+                previous_size: match operation.meta.file_precondition {
+                    Some(zup_transaction::FilePrecondition::Exact { size, .. }) => size,
+                    _ => 1,
+                },
                 previous_mode: 0o644,
                 backup_path: "backup".into(),
                 new_sha256: digest,
-                new_size: 1,
+                new_size: size,
                 executable: operation.meta.executable.unwrap_or(false),
             },
         },
@@ -148,8 +170,8 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
             OperationReceipt::RemoveFile {
                 destination: removal.destination.clone(),
                 backup_path: removal.destination.clone(),
-                sha256: Sha256Digest::from_bytes([0; 32]),
-                size: 1,
+                sha256: removal.sha256,
+                size: removal.size,
                 mode: 0o644,
             }
         }

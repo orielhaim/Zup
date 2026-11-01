@@ -83,7 +83,7 @@ pub fn run_worker_mode(
     session: SessionId,
     expected_client_pid: u32,
     socket_path: &Path,
-) -> Result<String, IpcError> {
+) -> Result<zup_protocol::WorkerOutcome, IpcError> {
     if rustix::process::geteuid().as_raw() != 0 {
         return Err(IpcError::WorkerAuth(
             "the privileged worker runs as root after authorization".into(),
@@ -158,7 +158,10 @@ pub(crate) fn validate_rendezvous(socket: &Path, invoking_uid: u32) -> Result<()
     Ok(())
 }
 
-pub fn serve_session(stream: &mut UnixStream, context: WorkerContext) -> Result<String, IpcError> {
+pub fn serve_session(
+    stream: &mut UnixStream,
+    context: WorkerContext,
+) -> Result<zup_protocol::WorkerOutcome, IpcError> {
     let mut channel = SessionChannel {
         stream,
         session: context.session,
@@ -274,7 +277,7 @@ fn fail_closed(error: &IpcError) -> bool {
 fn serve_inner(
     channel: &mut SessionChannel<'_>,
     context: &WorkerContext,
-) -> Result<String, IpcError> {
+) -> Result<zup_protocol::WorkerOutcome, IpcError> {
     let peer =
         peer_identity(channel.stream).map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     if peer.uid != context.invoking_uid {
@@ -352,7 +355,7 @@ fn serve_inner(
     let _ = channel.send(Message::Completed(zup_protocol::Completed {
         detail: verdict.detail,
         transaction_id: verdict.transaction_id,
-        outcome: verdict.outcome.clone(),
+        outcome: verdict.outcome,
         prerequisite_id: None,
         exit_code: None,
     }));
@@ -364,7 +367,7 @@ fn serve_recovery(
     context: &WorkerContext,
     peer: &PeerPin,
     intent: PrepareOperation,
-) -> Result<String, IpcError> {
+) -> Result<zup_protocol::WorkerOutcome, IpcError> {
     let prepared = prepare_carrier(context, &intent)?;
     let id = zup_transaction::TransactionId::from_uuid(
         intent
@@ -432,25 +435,33 @@ fn serve_recovery(
     let fresh = zup_transaction::TransactionStore::load(&store, &id)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let (outcome, detail) = match (result, fresh.phase) {
-        (Ok(()), zup_transaction::TransactionPhase::Committed) => ("committed", None),
-        (Ok(()), zup_transaction::TransactionPhase::RolledBack) => ("rolled_back", None),
-        (Err(error), zup_transaction::TransactionPhase::Committed) => {
-            ("committed_pending_reconciliation", Some(error.to_string()))
+        (Ok(()), zup_transaction::TransactionPhase::Committed) => {
+            (zup_protocol::WorkerOutcome::Committed, None)
         }
-        (Err(error), _) => ("recovery_required", Some(error.to_string())),
+        (Ok(()), zup_transaction::TransactionPhase::RolledBack) => {
+            (zup_protocol::WorkerOutcome::RolledBack, None)
+        }
+        (Err(error), zup_transaction::TransactionPhase::Committed) => (
+            zup_protocol::WorkerOutcome::CommittedPendingReconciliation,
+            Some(error.to_string()),
+        ),
+        (Err(error), _) => (
+            zup_protocol::WorkerOutcome::RecoveryRequired,
+            Some(error.to_string()),
+        ),
         _ => (
-            "recovery_required",
+            zup_protocol::WorkerOutcome::RecoveryRequired,
             Some("recovery did not settle the transaction".into()),
         ),
     };
     channel.send(Message::Completed(zup_protocol::Completed {
         transaction_id: id.as_uuid(),
-        outcome: outcome.into(),
+        outcome,
         detail,
         prerequisite_id: None,
         exit_code: None,
     }))?;
-    Ok(outcome.into())
+    Ok(outcome)
 }
 
 fn worker_capabilities() -> Capabilities {
@@ -605,12 +616,6 @@ fn prepare_operation(
     }
     let build = targets.remove(0);
 
-    if !build.installer.plugins.is_empty() {
-        return Err(IpcError::Policy(
-            "machine scope refuses projects that need plugin execution in the privileged worker"
-                .into(),
-        ));
-    }
     if !build.installer.prerequisites.is_empty() {
         return Err(IpcError::Policy(
             "machine scope runs no prerequisite installers as root".into(),
@@ -1087,21 +1092,21 @@ fn verify_carrier_declares(
 struct ExecutionVerdict {
     detail: Option<String>,
     transaction_id: uuid::Uuid,
-    outcome: String,
+    outcome: zup_protocol::WorkerOutcome,
 }
 
-fn verdict(transaction_id: uuid::Uuid, outcome: &str) -> ExecutionVerdict {
+fn verdict(transaction_id: uuid::Uuid, outcome: zup_protocol::WorkerOutcome) -> ExecutionVerdict {
     ExecutionVerdict {
         detail: None,
         transaction_id,
-        outcome: outcome.to_owned(),
+        outcome,
     }
 }
 
 fn pending_verdict(transaction_id: uuid::Uuid, detail: String) -> ExecutionVerdict {
     ExecutionVerdict {
         transaction_id,
-        outcome: "committed_pending_reconciliation".into(),
+        outcome: zup_protocol::WorkerOutcome::CommittedPendingReconciliation,
         detail: Some(detail),
     }
 }
@@ -1112,10 +1117,14 @@ fn settled_name(
 ) -> ExecutionVerdict {
     let transaction_id = settled.record.transaction_id.as_uuid();
     let outcome = match settled.outcome {
-        zup_transaction::TransactionOutcome::Committed => "committed",
-        zup_transaction::TransactionOutcome::RolledBack if cancelled => "cancelled",
-        zup_transaction::TransactionOutcome::RolledBack => "rolled_back",
-        zup_transaction::TransactionOutcome::RecoveryRequired => "recovery_required",
+        zup_transaction::TransactionOutcome::Committed => zup_protocol::WorkerOutcome::Committed,
+        zup_transaction::TransactionOutcome::RolledBack if cancelled => {
+            zup_protocol::WorkerOutcome::Cancelled
+        }
+        zup_transaction::TransactionOutcome::RolledBack => zup_protocol::WorkerOutcome::RolledBack,
+        zup_transaction::TransactionOutcome::RecoveryRequired => {
+            zup_protocol::WorkerOutcome::RecoveryRequired
+        }
     };
     verdict(transaction_id, outcome)
 }
@@ -1210,12 +1219,20 @@ fn execute_prepared(
         ControlGate::FailClosed(error) => {
             return match open.release(&mut executor) {
                 Ok(_) => Err(error),
-                Err(_) => Ok(verdict(transaction_id, "recovery_required")),
+                Err(_) => Ok(verdict(
+                    transaction_id,
+                    zup_protocol::WorkerOutcome::RecoveryRequired,
+                )),
             };
         }
         ControlGate::Cancel | ControlGate::Disconnected => match open.release(&mut executor) {
             Ok(settled) => settled,
-            Err(_) => return Ok(verdict(transaction_id, "recovery_required")),
+            Err(_) => {
+                return Ok(verdict(
+                    transaction_id,
+                    zup_protocol::WorkerOutcome::RecoveryRequired,
+                ));
+            }
         },
         ControlGate::Continue => {
             let _ = channel.send(Message::Progress(ProgressReport {
@@ -1240,7 +1257,12 @@ fn execute_prepared(
             };
             match open.execute(&mut gated) {
                 Ok(settled) => settled,
-                Err(_) => return Ok(verdict(transaction_id, "recovery_required")),
+                Err(_) => {
+                    return Ok(verdict(
+                        transaction_id,
+                        zup_protocol::WorkerOutcome::RecoveryRequired,
+                    ));
+                }
             }
         }
     };
@@ -1299,7 +1321,10 @@ fn execute_prepared(
         completed: Some(total_files),
         total: Some(total_files),
     }));
-    Ok(verdict(transaction_id, "committed"))
+    Ok(verdict(
+        transaction_id,
+        zup_protocol::WorkerOutcome::Committed,
+    ))
 }
 
 struct GatedExecutor<'a, 'b> {

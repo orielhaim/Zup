@@ -228,7 +228,7 @@ fn a_cancelled_operation_reported_by_the_engine_returns_to_its_surface() {
         state: zup_runtime::RuntimeState::Cancelled,
     });
     host.observe(&RuntimeEvent::Completed {
-        outcome: "cancelled".into(),
+        outcome: zup_runtime::CompletionOutcome::Cancelled,
     });
     assert_eq!(host.snapshot().state, InstallerState::Options);
     assert!(host.snapshot().diagnostic.is_none());
@@ -271,7 +271,7 @@ fn a_recovery_failure_is_distinct_from_an_ordinary_one() {
     let mut host = install_host();
     host.accept(Action::Install);
     host.observe(&RuntimeEvent::Failed {
-        kind: "recovery_required".into(),
+        kind: zup_runtime::FailureKind::RecoveryRequired,
         message: "the journal is incomplete".into(),
     });
     assert_eq!(host.snapshot().state, InstallerState::RecoveryRequired);
@@ -281,13 +281,13 @@ fn a_recovery_failure_is_distinct_from_an_ordinary_one() {
 }
 
 #[test]
-fn a_reboot_is_a_failure_and_not_a_success() {
+fn a_reboot_has_its_own_terminal_state() {
     let mut host = install_host();
     host.accept(Action::Install);
     host.observe(&RuntimeEvent::Completed {
-        outcome: "reboot_required".into(),
+        outcome: zup_runtime::CompletionOutcome::RebootRequired,
     });
-    assert_eq!(host.snapshot().state, InstallerState::Failed);
+    assert_eq!(host.snapshot().state, InstallerState::RebootRequired);
 }
 
 #[test]
@@ -638,7 +638,7 @@ fn a_retry_repeats_the_intent_and_not_the_state_of_the_moment() {
     });
     host.accept(Action::Install);
     host.observe(&RuntimeEvent::Failed {
-        kind: "transaction".into(),
+        kind: zup_runtime::FailureKind::Transaction,
         message: "the disk is full".into(),
     });
     assert_eq!(host.snapshot().state, InstallerState::Failed);

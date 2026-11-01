@@ -37,23 +37,22 @@ impl OperationHost for WindowsOperationHost<'_> {
         let planning = zup_core::BuildPlan {
             targets: vec![build.clone()],
         };
-        match &self.content {
-            WindowsContent::Embedded(bundle) => {
-                let mut executor = zup_plugin_runtime::WasmtimePluginExecutor::load(
-                    bundle.package().clone(),
+        let mut executor = match &self.content {
+            WindowsContent::Embedded(bundle) => zup_plugin_runtime::WasmtimePluginExecutor::load(
+                bundle.package().clone(),
+                &build.installer.target,
+            ),
+            WindowsContent::Acquired(manifest, payload) => {
+                zup_plugin_runtime::WasmtimePluginExecutor::load_acquired(
+                    &manifest.plan,
+                    payload,
                     &build.installer.target,
                 )
-                .map_err(|error| error.to_string())?;
-                zup_plan::plan_with_plugins(&planning, request, &mut executor, cancellation)
-                    .map_err(|error| error.to_string())
             }
-            WindowsContent::Acquired(..) => zup_plan::plan(&planning, request)
-                .map(|plan| PlannedInstallation {
-                    plan,
-                    generated_files: Vec::new(),
-                })
-                .map_err(|error| error.to_string()),
         }
+        .map_err(|error| error.to_string())?;
+        zup_plan::plan_with_plugins(&planning, request, &mut executor, cancellation)
+            .map_err(|error| error.to_string())
     }
 
     fn resolve_target(&self, install: &InstallPlan) -> Result<TargetPlan, String> {

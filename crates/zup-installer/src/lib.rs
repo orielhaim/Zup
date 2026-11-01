@@ -45,7 +45,7 @@ pub(crate) fn error_outcome(error: &miette::Report) -> ProcessOutcome {
     if let Some(error) = error.downcast_ref::<execute::ExecutionError>() {
         return error.outcome();
     }
-    ProcessOutcome::from_message(&error.to_string())
+    ProcessOutcome::Failure
 }
 
 pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {

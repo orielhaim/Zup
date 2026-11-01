@@ -15,9 +15,7 @@
 //!    refused and a worker cannot make a parent apply one plan twice.
 
 use proptest::prelude::*;
-use zup_protocol::{
-    FAILURE_KINDS, PROTOCOL_VERSION, SequenceTracker, decode_payload, encode_payload,
-};
+use zup_protocol::{PROTOCOL_VERSION, SequenceTracker, decode_payload, encode_payload};
 
 fn check(data: &[u8]) {
     let Ok(envelope) = decode_payload(data) else {
@@ -35,14 +33,6 @@ fn check(data: &[u8]) {
         envelope, reparsed,
         "the wire round trip changed the message"
     );
-
-    if let zup_protocol::Message::Failed(failed) = &envelope.message {
-        assert!(
-            FAILURE_KINDS.contains(&failed.kind.as_str()),
-            "`{}` is not a kind this protocol defines",
-            failed.kind
-        );
-    }
 
     let mut wrong = envelope.clone();
     wrong.version = envelope.version.wrapping_add(1);

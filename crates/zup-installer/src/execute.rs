@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use zup_session::{automation_events, process_outcome};
+use zup_session::automation_events;
 
 use crate::lifecycle::PreparedRuntime;
 use zup_exec::LifecycleAction;
@@ -279,7 +279,7 @@ fn publish_outcome(
             )));
         }
     };
-    let process = process_outcome(&outcome);
+    let process = ProcessOutcome::from(&outcome);
     match output {
         OutputFormat::Human => {
             if outcome == InstallOutcome::Committed {
@@ -340,7 +340,7 @@ fn publish_outcome(
 
 fn outcome_error(outcome: &InstallOutcome) -> miette::Report {
     crate::terminal::Failure {
-        outcome: process_outcome(outcome),
+        outcome: ProcessOutcome::from(outcome),
         message: format!("transaction: {outcome:?}"),
     }
     .into()

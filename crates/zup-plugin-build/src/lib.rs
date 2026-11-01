@@ -41,6 +41,10 @@ pub enum PluginBuildError {
     Contract(#[from] ContractError),
     #[error(transparent)]
     Artifact(#[from] zup_bundle::PackageError),
+    #[error(transparent)]
+    Load(#[from] zup_plugin_runtime::LoadError),
+    #[error(transparent)]
+    Plan(#[from] zup_plan::PlanError),
 }
 
 pub fn compile_plugins(
@@ -197,6 +201,33 @@ fn read_source(path: &Path) -> Result<Vec<u8>, PluginBuildError> {
         });
     }
     Ok(source)
+}
+
+/// Execute source plugins on the build host with the requested target in their planning context.
+pub fn plan_installation(
+    build: &zup_core::BuildPlan,
+    request: &zup_plan::PlanRequest,
+    cancellation: &dyn zup_plan::CancellationQuery,
+) -> Result<zup_plan::PlannedInstallation, PluginBuildError> {
+    let target =
+        build
+            .by_target(&request.target)
+            .ok_or(zup_plan::PlanError::UnknownBuildTarget {
+                target: request.target,
+            })?;
+    let host =
+        Target::parse(zup_plugin_contract::HOST_TARGET).expect("the compiler host is supported");
+    let mut host_plan = target.clone();
+    host_plan.installer.target = host;
+    let artifacts = compile_plugins(&host_plan)?;
+    let mut executor =
+        zup_plugin_runtime::WasmtimePluginExecutor::from_compiled(&target.installer, &artifacts)?;
+    Ok(zup_plan::plan_with_plugins(
+        build,
+        request,
+        &mut executor,
+        cancellation,
+    )?)
 }
 
 #[cfg(test)]

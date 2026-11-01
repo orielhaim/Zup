@@ -189,11 +189,12 @@ fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, InstallPlan
         zup_build::Writes::None,
     )
     .expect("materialize");
-    let install = plan(
-        &build,
-        &PlanRequest::new(config.target, SelectedScope::User),
-    )
-    .expect("semantic plan");
+    let scope = if build.targets[0].installer.services.is_empty() {
+        SelectedScope::User
+    } else {
+        SelectedScope::Machine
+    };
+    let install = plan(&build, &PlanRequest::new(config.target, scope)).expect("semantic plan");
     (dir, install)
 }
 
@@ -202,7 +203,7 @@ fn resolve_fixed(
 ) -> Result<zup_platform::TargetPlan, zup_windows::TargetResolveError> {
     resolve_target(
         install,
-        &WindowsTargetContext::with_resolver(FixedInstallLocations, SelectedScope::User),
+        &WindowsTargetContext::with_resolver(FixedInstallLocations, install.scope),
     )
 }
 
@@ -222,7 +223,10 @@ fn pipeline(base: &str, scope: SelectedScope) -> (TempDir, zup_platform::TargetP
         .into_iter()
         .next()
         .expect("selected target");
-    let installer = compile(&manifest, &config, &overrides).expect("compile");
+    let mut installer = compile(&manifest, &config, &overrides).expect("compile");
+    if scope == SelectedScope::User {
+        installer.services.clear();
+    }
     let build = materialize(
         &project.join("zup.toml"),
         &manifest,

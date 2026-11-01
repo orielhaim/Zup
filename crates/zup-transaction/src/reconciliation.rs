@@ -79,3 +79,38 @@ pub fn reconcile_committed<T>(
         (Err(error), _) => Err(error),
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReconciliationError {
+    #[error(transparent)]
+    Store(#[from] crate::StoreError),
+    #[error("transaction target differs from the installed target")]
+    Target,
+    #[error("unfinished transaction {0} requires recovery")]
+    RecoveryRequired(crate::TransactionId),
+}
+
+/// Validate the entire history before allowing publication or cleanup of any record.
+pub fn settled_records(
+    store: &crate::FilesystemTransactionStore,
+    app_id: &zup_core::AppId,
+    scope: zup_core::SelectedScope,
+    ledger: Option<&zup_exec::InstallLedger>,
+) -> Result<Vec<TransactionRecord>, ReconciliationError> {
+    let mut settled = Vec::new();
+    for id in store.list_ids()? {
+        let record = store.load(&id)?;
+        if record.app_id != *app_id || record.scope != scope {
+            continue;
+        }
+        if ledger.is_some_and(|ledger| ledger.target != record.target) {
+            return Err(ReconciliationError::Target);
+        }
+        match record.phase {
+            TransactionPhase::Committed | TransactionPhase::RolledBack => settled.push(record),
+            _ => return Err(ReconciliationError::RecoveryRequired(record.transaction_id)),
+        }
+    }
+    settled.sort_by_key(|record| record.transaction_id.as_uuid());
+    Ok(settled)
+}

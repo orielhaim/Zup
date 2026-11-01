@@ -9,7 +9,7 @@ The developer CLI operates on projects and releases. Installed applications use 
 | `zup init` | create a project |
 | `zup check` | validate manifest and build inputs |
 | `zup doctor` | report build readiness |
-| `zup plan` | show installation plan without changing the machine |
+| `zup plan` | preview desired resources, including plugin output, on any build host |
 | `zup preview` | open the application installer UI on a simulated machine |
 | `zup build` | build configured artifacts |
 | `zup artifact inspect <file>` | inspect a built artifact |
@@ -18,6 +18,10 @@ The developer CLI operates on projects and releases. Installed applications use 
 | `zup completions <shell>` | emit shell completions |
 
 Common project selection flags include `--manifest` and repeatable `--target`.
+
+`zup plan --target <profile> --scope user|machine` runs source plugins in the build-host sandbox with the selected target in their context. Build validation uses the same planner. Preview paths use canonical target locations. The command does not inspect an installed ledger or accept `--state-root`; the generated installer computes the actual lifecycle changes against the destination machine under its installation lock.
+
+`zup init --scope` selects the allowed policy and accepts `user`, `machine`, or `either`. An operation selects one concrete scope and never accepts `either`.
 
 ## Preset authoring
 

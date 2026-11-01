@@ -376,11 +376,13 @@ fn check_linux_lowering(
     let scopes = config.install.scope.scopes().to_vec();
     for scope in &scopes {
         let request = zup_plan::PlanRequest::new(config.target, *scope);
-        let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
-            miette::miette!("semantic plan for target `{}`: {error}", config.target)
-        })?;
+        let install =
+            zup_plugin_build::plan_installation(build, &request, &zup_plan::NeverCancelled)
+                .map_err(|error| {
+                    miette::miette!("semantic plan for target `{}`: {error}", config.target)
+                })?;
         zup_linux::resolve_target(
-            &install,
+            &install.plan,
             &zup_linux::LinuxInstallLocationResolver::for_build(),
         )
         .map_err(|error| {
@@ -398,11 +400,13 @@ fn check_windows_lowering(
 
     for scope in &scopes {
         let request = zup_plan::PlanRequest::new(config.target, *scope);
-        let install = zup_plan::plan_without_plugins(build, &request).map_err(|error| {
-            miette::miette!("semantic plan for target `{}`: {error}", config.target)
-        })?;
+        let install =
+            zup_plugin_build::plan_installation(build, &request, &zup_plan::NeverCancelled)
+                .map_err(|error| {
+                    miette::miette!("semantic plan for target `{}`: {error}", config.target)
+                })?;
         zup_windows::resolve_target(
-            &install,
+            &install.plan,
             &zup_windows::WindowsTargetContext::for_build(*scope),
         )
         .map_err(|error| {

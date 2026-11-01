@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn machine_services_with_plugins_stay_refused() {
+    fn machine_services_support_plugins() {
         let config = config("linux-x64", Frontend::Console, InstallScope::Machine);
         let mut plan = plan();
         plan.installer.services.push(machine_service());
@@ -356,7 +356,7 @@ mod tests {
         });
         let errors = linux_capability_errors(&config, &plan);
         let text = errors.join("\n");
-        assert!(text.contains("plugin"), "{text}");
+        assert!(errors.is_empty(), "{text}");
     }
 
     fn machine_service() -> zup_core::Service {
