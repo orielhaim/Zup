@@ -4,9 +4,10 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zup_build::materialize;
+use zup_core::SelectedScope;
 use zup_core::{ComponentId, Privilege, Target, Variable};
 use zup_manifest::{TargetOverrides, compile, parse, select_targets};
-use zup_plan::{ComponentOverrides, PlanRequest, SelectedScope, plan};
+use zup_plan::{ComponentOverrides, PlanRequest, plan};
 
 fn write(path: PathBuf, contents: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -53,7 +54,14 @@ fn ids(values: &[&str]) -> BTreeSet<ComponentId> {
 #[test]
 fn user_default_plan() {
     let (_dir, build) = acme_project();
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).expect("user plan");
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .expect("user plan");
 
     let selected: Vec<_> = result
         .selected_components
@@ -78,11 +86,11 @@ fn user_default_plan() {
     assert!(!result.launchers.is_empty());
     assert_eq!(result.path_entries.len(), 1);
 
-    assert!(!result.summary.requires_authorization);
-    assert_eq!(result.summary.selected_component_count, 2);
+    assert!(!result.summary().unwrap().requires_authorization);
+    assert_eq!(result.summary().unwrap().selected_component_count, 2);
 
     let expected_bytes: u64 = result.files.iter().map(|f| f.size).sum();
-    assert_eq!(result.summary.install_bytes, expected_bytes);
+    assert_eq!(result.summary().unwrap().install_bytes, expected_bytes);
     assert!(expected_bytes > 0);
 }
 
@@ -98,7 +106,9 @@ fn machine_plan_with_service_enabled() {
             disable: BTreeSet::new(),
         },
     };
-    let result = plan(&build, &request).expect("machine plan");
+    let result = plan(&build, &request, None, &zup_plan::NeverCancelled)
+        .map(|installation| installation.plan)
+        .expect("machine plan");
 
     let selected: Vec<_> = result
         .selected_components
@@ -116,7 +126,7 @@ fn machine_plan_with_service_enabled() {
         "${location.programs}/Acme"
     );
 
-    assert!(result.summary.requires_authorization);
+    assert!(result.summary().unwrap().requires_authorization);
 
     let json = serde_json::to_string(&result).unwrap();
     assert!(!json.contains("${install}"));
@@ -127,7 +137,14 @@ fn machine_plan_with_service_enabled() {
 #[test]
 fn install_directory_variables_resolved_into_destinations() {
     let (_dir, build) = acme_project();
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::Machine)).unwrap();
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), SelectedScope::Machine),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .unwrap();
 
     for file in &result.files {
         let dest = file.destination.to_string();

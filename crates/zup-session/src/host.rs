@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use zup_core::{AppId, ComponentId, InstallScope, Installer, SelectedScope, TargetBuildPlan};
-use zup_exec::InstallLedger;
+use zup_plan::InstallLedger;
 use zup_preset_protocol::UpdateState;
 use zup_runtime::{InstallOutcome, OperationHost, PreparedOperation, RuntimeBackend, RuntimeEvent};
 
@@ -363,8 +363,10 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<zup_presentation::Installe
             completed,
             total,
             action,
+            phase,
+            ..
         } => vec![InstallerEvent::progress(
-            &zup_presentation::ProgressPresentation::new(*completed, *total, action),
+            &zup_presentation::ProgressPresentation::new(*phase, *completed, *total, action),
         )],
         RuntimeEvent::PrerequisiteCheck {
             id,

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use zup_core::{ComponentId, Installer, SelectedScope};
-use zup_exec::LifecycleAction;
+use zup_plan::LifecycleAction;
 use zup_presentation::{InstallerEvent, PlanPreview};
 use zup_runtime::{Operation, OperationSelection};
 use zup_session::OperationContext;
@@ -168,7 +168,7 @@ impl Console {
         Ok(match operations[selected] {
             Operation::Upgrade => crate::terminal::Command::Upgrade(Default::default()),
             Operation::Modify => crate::terminal::Command::Modify(Default::default()),
-            Operation::Repair { force_files } => crate::terminal::Command::Repair { force_files },
+            Operation::Repair { force } => crate::terminal::Command::Repair { force },
             Operation::Uninstall => crate::terminal::Command::Uninstall,
             Operation::Install | Operation::Apply => {
                 crate::terminal::Command::Install(Default::default())
@@ -339,7 +339,7 @@ impl Console {
             "  Managed content: {}",
             indicatif::HumanBytes(plan.estimated_bytes)
         );
-        if matches!(action, LifecycleAction::Repair { force_files: true }) {
+        if matches!(action, LifecycleAction::Repair { force: true }) {
             eprintln!("  Forced repair can replace your edits to managed files.");
         }
         if plan.requires_authorization {

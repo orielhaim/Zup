@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use zup_exec::LifecycleAction;
+use zup_plan::LifecycleAction;
 use zup_runtime::{InstallOutcome, OperationControl, PreparedOperation, runtime_request};
 
 use crate::host::{OperationContext, SessionDiscovery, SessionHost, selection_of};

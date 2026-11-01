@@ -3,16 +3,15 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zup_core::{AppId, BackendResourceId, Privilege, ResourceKey, SelectedScope};
-use zup_exec::{
-    ExecutionPlan, FileAssociationOperation, FileAssociationOperationKind, FileOperationKind,
-    InstallLedger, LauncherOperation, LauncherOperationKind, OwnedResource, PathOperation,
-    PathOperationKind, ProtocolOperation, ProtocolOperationKind, ServiceOperation,
-    ServiceOperationKind,
+use zup_plan::{
+    DesiredState, ExecutionPlan, FileAssociationOperation, InstallLedger, IntegrationChangeKind,
+    LauncherOperation, OwnedResource, PathOperation, PathOperationKind, ProtocolOperation,
+    ServiceOperation, TargetPath,
 };
-use zup_platform::{TargetPath, TargetPlan};
+
 use zup_transaction::{
-    BackendOperation, BackendOperationIntent, FileDelta, FilePrecondition, FileRemoval,
-    FileRemovalKind, FileWork, MAX_BACKEND_PAYLOAD_BYTES, TransactionInput,
+    BackendOperation, BackendOperationIntent, FileRemoval, MAX_BACKEND_PAYLOAD_BYTES,
+    TransactionInput,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,8 +69,8 @@ pub(crate) enum BackendReceipt {
     Launcher {
         launcher_path: TargetPath,
         privilege: Privilege,
-        previous: zup_exec::LauncherState,
-        installed: zup_exec::LauncherState,
+        previous: zup_plan::LauncherState,
+        installed: zup_plan::LauncherState,
     },
     Path {
         scope: SelectedScope,
@@ -88,29 +87,29 @@ pub(crate) enum BackendReceipt {
     Service {
         name: String,
         privilege: Privilege,
-        previous: zup_exec::ServiceState,
-        installed: zup_exec::ServiceState,
+        previous: zup_plan::ServiceState,
+        installed: zup_plan::ServiceState,
     },
     Protocol {
         scope: SelectedScope,
         scheme: String,
         privilege: Privilege,
-        previous: zup_exec::ProtocolState,
-        installed: zup_exec::ProtocolState,
+        previous: zup_plan::ProtocolState,
+        installed: zup_plan::ProtocolState,
     },
     FileAssociation {
         scope: SelectedScope,
         id: String,
         privilege: Privilege,
-        previous: zup_exec::FileAssociationState,
-        installed: zup_exec::FileAssociationState,
+        previous: zup_plan::FileAssociationState,
+        installed: zup_plan::FileAssociationState,
     },
     Extension {
         scope: SelectedScope,
         extension: String,
         privilege: Privilege,
-        previous: zup_exec::ExtensionState,
-        installed: zup_exec::ExtensionState,
+        previous: zup_plan::ExtensionState,
+        installed: zup_plan::ExtensionState,
     },
     AppsFeatures {
         scope: SelectedScope,
@@ -194,18 +193,6 @@ pub(crate) fn decode_apps_owned_payload(
     decode(bytes)
 }
 
-fn file_delta(kind: FileOperationKind) -> Result<FileDelta, TransactionPayloadError> {
-    Ok(match kind {
-        FileOperationKind::Create => FileDelta::Create,
-        FileOperationKind::Replace => FileDelta::Replace,
-        FileOperationKind::RestoreOwned => FileDelta::RestoreOwned,
-        FileOperationKind::RepairOwned => FileDelta::RepairOwned,
-        FileOperationKind::NoOp => FileDelta::NoOp,
-        FileOperationKind::Conflict => FileDelta::Conflict,
-        FileOperationKind::Drift => FileDelta::Drift,
-    })
-}
-
 fn backend_key(key: &ResourceKey) -> ResourceKey {
     ResourceKey::Backend {
         id: backend_id_for_key(key),
@@ -268,6 +255,7 @@ pub(crate) fn validate_backend_node(
     node: &zup_transaction::TransactionNode,
     ledger: Option<&InstallLedger>,
     scope: SelectedScope,
+    app_id: &AppId,
 ) -> Result<(), String> {
     let operation = node
         .meta
@@ -284,6 +272,12 @@ pub(crate) fn validate_backend_node(
     }
     let ledger_key = ledger_key_for_backend_node(node).map_err(|error| error.to_string())?;
     let owned = ledger.and_then(|ledger| ledger.resources.get(&ledger_key));
+    if node.meta.privilege != Some(operation.privilege)
+        || owned.is_some_and(|owned| owned.privilege() != operation.privilege)
+    {
+        return Err("backend privilege mismatch".into());
+    }
+
     match operation.intent {
         BackendOperationIntent::Remove => {
             let payload: RemovePayload =
@@ -312,7 +306,12 @@ pub(crate) fn validate_backend_node(
                     };
                     if payload_scope != scope
                         || decode_apps_owned_payload(payload).ok().as_ref() != Some(&state)
-                        || key_path.is_empty()
+                        || key_path
+                            != format!(
+                                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
+                                app_id
+                            )
+                        || operation.key != apps_key(app_id)
                     {
                         return Err("Apps & Features ownership mismatch".to_owned());
                     }
@@ -325,30 +324,147 @@ pub(crate) fn validate_backend_node(
                 decode(&operation.payload).map_err(|error| error.to_string())?;
             match payload {
                 ApplyPayload::Launcher(op) => {
-                    validate_semantic_owned(owned, &op.key, LedgerFamily::Launcher)
+                    let installed = match owned {
+                        Some(OwnedResource::Launcher {
+                            launcher_path,
+                            installed,
+                            ..
+                        }) if launcher_path == &op.launcher_path => Some(installed),
+                        None => None,
+                        _ => return Err("launcher ownership address mismatch".into()),
+                    };
+                    let previous = crate::integration::observed_launcher(op.previous)
+                        .map_err(|error| error.to_string())?;
+                    validate_transition(
+                        op.kind,
+                        &previous,
+                        installed,
+                        &zup_plan::LauncherState::Launcher {
+                            target: op.target,
+                            arguments: op.arguments,
+                            working_directory: op.working_directory,
+                        },
+                        &zup_plan::LauncherState::Absent,
+                    )
                 }
                 ApplyPayload::Path(op) => {
-                    validate_semantic_owned(owned, &op.key, LedgerFamily::Path)
+                    let matches = matches!(owned, Some(OwnedResource::PathEntry { value, .. }) if value == &op.value);
+                    if op.scope != scope
+                        || op.previously_owned != matches
+                        || match op.kind {
+                            PathOperationKind::Add => owned.is_some() || op.present,
+                            PathOperationKind::UpdateOwned => !matches || !op.present,
+                            PathOperationKind::RestoreOwned => !matches || op.present,
+                            _ => true,
+                        }
+                    {
+                        return Err("search path ownership mismatch".into());
+                    }
+                    Ok(())
                 }
                 ApplyPayload::Service(op) => {
-                    validate_semantic_owned(owned, &op.key, LedgerFamily::Service)
+                    let installed = match owned {
+                        Some(OwnedResource::Service {
+                            name, installed, ..
+                        }) if name.eq_ignore_ascii_case(&op.name) => Some(installed),
+                        None => None,
+                        _ => return Err("service ownership address mismatch".into()),
+                    };
+                    let previous = crate::integration::observed_service(op.previous)
+                        .map_err(|error| error.to_string())?;
+                    validate_transition(
+                        op.kind,
+                        &previous,
+                        installed,
+                        &zup_plan::ServiceState::Registration {
+                            display_name: op.display_name,
+                            command: op.command,
+                            start: op.start,
+                        },
+                        &zup_plan::ServiceState::Absent,
+                    )
                 }
                 ApplyPayload::Protocol(op) => {
-                    validate_semantic_owned(owned, &op.key, LedgerFamily::Protocol)
+                    if op.scope != scope {
+                        return Err("protocol scope mismatch".into());
+                    }
+                    let installed = match owned {
+                        Some(OwnedResource::Protocol { installed, .. }) => Some(installed),
+                        None => None,
+                        _ => return Err("protocol ownership mismatch".into()),
+                    };
+                    let previous = crate::integration::protocol_from_observed(&op.previous)
+                        .map_err(|error| error.to_string())?;
+                    validate_transition(
+                        op.kind,
+                        &previous,
+                        installed,
+                        &zup_plan::ProtocolState::Registration {
+                            command: op.command,
+                        },
+                        &zup_plan::ProtocolState::Absent,
+                    )
                 }
                 ApplyPayload::FileAssociation(op) => {
-                    validate_semantic_owned(owned, &op.key, LedgerFamily::Association)
+                    if op.scope != scope {
+                        return Err("association scope mismatch".into());
+                    }
+                    let installed = match owned {
+                        Some(OwnedResource::FileAssociation { installed, .. }) => Some(installed),
+                        None => None,
+                        _ => return Err("association ownership mismatch".into()),
+                    };
+                    let previous = crate::integration::file_association_from_observed(
+                        &op.previous_association,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    validate_transition(
+                        op.association_kind,
+                        &previous,
+                        installed,
+                        &zup_plan::FileAssociationState::Registration {
+                            description: op.description,
+                            command: op.command,
+                        },
+                        &zup_plan::FileAssociationState::Absent,
+                    )
                 }
                 ApplyPayload::Extension(op) => {
-                    let key = ResourceKey::FileAssociationExtension {
-                        extension: zup_core::FileExtension::new(&op.extension)
-                            .map_err(|error| error.to_string())?,
+                    if op.scope != scope {
+                        return Err("extension scope mismatch".into());
+                    }
+                    let installed = match owned {
+                        Some(OwnedResource::Extension { installed, .. }) => Some(installed),
+                        None => None,
+                        _ => return Err("extension ownership mismatch".into()),
                     };
-                    validate_semantic_owned(owned, &key, LedgerFamily::Extension)
+                    let previous =
+                        crate::integration::extension_from_observed(&op.previous_extension)
+                            .map_err(|error| error.to_string())?;
+                    validate_transition(
+                        op.extension_kind,
+                        &previous,
+                        installed,
+                        &zup_plan::ExtensionState::Mapped {
+                            association_id: op.id,
+                        },
+                        &zup_plan::ExtensionState::Absent,
+                    )
                 }
                 ApplyPayload::AppsFeatures {
                     operation: apps_operation,
                 } => {
+                    if apps_operation.scope != scope
+                        || apps_operation.privilege != operation.privilege
+                        || operation.key != apps_key(app_id)
+                        || apps_operation.key_path
+                            != format!(
+                                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
+                                app_id
+                            )
+                    {
+                        return Err("Apps & Features address mismatch".into());
+                    }
                     let Some(OwnedResource::Backend { id, payload, .. }) = owned else {
                         if apps_operation.previous.is_some() {
                             return Err("Apps & Features ownership is missing".to_owned());
@@ -385,7 +501,10 @@ pub(crate) fn ledger_key_for_backend_node(
             ApplyPayload::Service(operation) => operation.key,
             ApplyPayload::Protocol(operation) => operation.key,
             ApplyPayload::FileAssociation(operation) => operation.key,
-            ApplyPayload::Extension(operation) => operation.key,
+            ApplyPayload::Extension(operation) => ResourceKey::FileAssociationExtension {
+                extension: zup_core::FileExtension::new(&operation.extension)
+                    .map_err(|error| TransactionPayloadError::Identity(error.to_string()))?,
+            },
             ApplyPayload::AppsFeatures { .. } => operation.key.clone(),
         },
         BackendOperationIntent::Remove => match decode::<RemovePayload>(&operation.payload)
@@ -408,36 +527,23 @@ pub(crate) fn ledger_key_for_backend_node(
     Ok(key)
 }
 
-#[derive(Clone, Copy)]
-enum LedgerFamily {
-    Launcher,
-    Path,
-    Service,
-    Protocol,
-    Association,
-    Extension,
-}
-
-fn validate_semantic_owned(
-    owned: Option<&OwnedResource>,
-    _key: &ResourceKey,
-    family: LedgerFamily,
+fn validate_transition<T: PartialEq>(
+    kind: IntegrationChangeKind,
+    observed: &T,
+    installed: Option<&T>,
+    desired: &T,
+    absent: &T,
 ) -> Result<(), String> {
-    match (family, owned) {
-        (LedgerFamily::Launcher, None)
-        | (LedgerFamily::Path, None)
-        | (LedgerFamily::Service, None)
-        | (LedgerFamily::Protocol, None)
-        | (LedgerFamily::Association, None)
-        | (LedgerFamily::Extension, None) => Ok(()),
-        (LedgerFamily::Launcher, Some(OwnedResource::Launcher { .. }))
-        | (LedgerFamily::Path, Some(OwnedResource::PathEntry { .. }))
-        | (LedgerFamily::Service, Some(OwnedResource::Service { .. }))
-        | (LedgerFamily::Protocol, Some(OwnedResource::Protocol { .. }))
-        | (LedgerFamily::Association, Some(OwnedResource::FileAssociation { .. }))
-        | (LedgerFamily::Extension, Some(OwnedResource::Extension { .. })) => Ok(()),
-        _ => Err("backend ownership family mismatch".to_owned()),
-    }
+    let valid = match kind {
+        IntegrationChangeKind::Create => installed.is_none() && observed == absent,
+        IntegrationChangeKind::UpdateOwned => installed == Some(observed),
+        IntegrationChangeKind::RestoreOwned => observed == absent && installed == Some(desired),
+        IntegrationChangeKind::RepairOwned => observed != absent && installed == Some(desired),
+        _ => false,
+    };
+    valid
+        .then_some(())
+        .ok_or_else(|| "backend ownership precondition mismatch".into())
 }
 
 pub(crate) struct AppsPlanningInput {
@@ -453,25 +559,31 @@ pub(crate) struct AppsPlanningInput {
 
 pub(crate) fn compile_execution_plan(
     execution: &ExecutionPlan,
-    target: Option<&TargetPlan>,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
     scope: SelectedScope,
     app_id: &AppId,
     ledger: Option<&InstallLedger>,
     apps: AppsPlanningInput,
 ) -> Result<TransactionInput, TransactionPayloadError> {
-    let target_triple = target
-        .map(|target| target.target)
-        .or_else(|| ledger.map(|ledger| ledger.target))
-        .ok_or_else(|| {
-            TransactionPayloadError::Identity("target is missing from plan and ledger".into())
-        })?;
+    let binding = execution
+        .validate_desired(target)
+        .map_err(|error| TransactionPayloadError::Identity(error.to_string()))?;
+    execution
+        .validate_generation(ledger)
+        .map_err(|error| TransactionPayloadError::Identity(error.to_string()))?;
+    if binding.app_id != *app_id || binding.scope != scope {
+        return Err(TransactionPayloadError::Identity(
+            "deployment identity mismatch".into(),
+        ));
+    }
+    let target_triple = binding.target;
     if apps.app_id != *app_id {
         return Err(TransactionPayloadError::Identity(
             "Apps & Features app identity mismatch".into(),
         ));
     }
     let mut input = TransactionInput::new(target_triple);
-    input.observed_transaction = ledger.map(|ledger| ledger.committed_transaction.clone());
+    input.observed_transaction = binding.observed_transaction;
     input.selected_components = execution.selected_components.clone();
     input.install_directory = target
         .map(|target| target.install_directory.clone())
@@ -485,22 +597,7 @@ pub(crate) fn compile_execution_plan(
     };
 
     for file in &execution.files {
-        input.files.push(FileWork {
-            key: file.key.clone(),
-            source_relative: file.source_relative.clone(),
-            destination: file.destination.clone(),
-            precondition: match file.precondition {
-                zup_exec::FilePrecondition::Absent => FilePrecondition::Absent,
-                zup_exec::FilePrecondition::Exact { size, sha256 } => {
-                    FilePrecondition::Exact { size, sha256 }
-                }
-            },
-            expected_sha256: file.expected_sha256,
-            expected_size: file.expected_size,
-            privilege: file.privilege,
-            executable: file.executable,
-            delta: file_delta(file.kind)?,
-        });
+        input.files.push(file.clone());
     }
     for removal in &execution.removals {
         match &removal.owned {
@@ -513,10 +610,7 @@ pub(crate) fn compile_execution_plan(
             } => {
                 input.removals.push(FileRemoval {
                     key: removal.key.clone(),
-                    kind: match removal.kind {
-                        zup_exec::RemovalKind::RemoveOwned => FileRemovalKind::RemoveOwned,
-                        zup_exec::RemovalKind::Drift => FileRemovalKind::Drift,
-                    },
+                    kind: removal.kind,
                     scope: removal.scope,
                     privilege: removal.privilege,
                     destination: destination.clone(),
@@ -547,12 +641,12 @@ pub(crate) fn compile_execution_plan(
     }
 
     for launcher in &execution.launchers {
-        if launcher.kind == LauncherOperationKind::NoOp {
+        if launcher.kind == IntegrationChangeKind::NoOp {
             continue;
         }
         if matches!(
             launcher.kind,
-            LauncherOperationKind::Conflict | LauncherOperationKind::Drift
+            IntegrationChangeKind::Conflict | IntegrationChangeKind::Drift
         ) {
             return Err(TransactionPayloadError::NotExecutable("launcher".into()));
         }
@@ -581,12 +675,12 @@ pub(crate) fn compile_execution_plan(
         )?);
     }
     for service in &execution.services {
-        if service.kind == ServiceOperationKind::NoOp {
+        if service.kind == IntegrationChangeKind::NoOp {
             continue;
         }
         if matches!(
             service.kind,
-            ServiceOperationKind::Conflict | ServiceOperationKind::Drift
+            IntegrationChangeKind::Conflict | IntegrationChangeKind::Drift
         ) {
             return Err(TransactionPayloadError::NotExecutable("service".into()));
         }
@@ -598,12 +692,12 @@ pub(crate) fn compile_execution_plan(
         )?);
     }
     for protocol in &execution.protocols {
-        if protocol.kind == ProtocolOperationKind::NoOp {
+        if protocol.kind == IntegrationChangeKind::NoOp {
             continue;
         }
         if matches!(
             protocol.kind,
-            ProtocolOperationKind::Conflict | ProtocolOperationKind::Drift
+            IntegrationChangeKind::Conflict | IntegrationChangeKind::Drift
         ) {
             return Err(TransactionPayloadError::NotExecutable("protocol".into()));
         }
@@ -615,23 +709,23 @@ pub(crate) fn compile_execution_plan(
         )?);
     }
     for association in &execution.file_associations {
-        if association.association_kind == FileAssociationOperationKind::NoOp
-            && association.extension_kind == FileAssociationOperationKind::NoOp
+        if association.association_kind == IntegrationChangeKind::NoOp
+            && association.extension_kind == IntegrationChangeKind::NoOp
         {
             continue;
         }
         if matches!(
             association.association_kind,
-            FileAssociationOperationKind::Conflict | FileAssociationOperationKind::Drift
+            IntegrationChangeKind::Conflict | IntegrationChangeKind::Drift
         ) || matches!(
             association.extension_kind,
-            FileAssociationOperationKind::Conflict | FileAssociationOperationKind::Drift
+            IntegrationChangeKind::Conflict | IntegrationChangeKind::Drift
         ) {
             return Err(TransactionPayloadError::NotExecutable(
                 "file association".into(),
             ));
         }
-        if association.association_kind != FileAssociationOperationKind::NoOp {
+        if association.association_kind != IntegrationChangeKind::NoOp {
             input.backend_operations.push(backend_operation(
                 &association.key,
                 association.privilege,
@@ -639,12 +733,11 @@ pub(crate) fn compile_execution_plan(
                 Vec::new(),
             )?);
         }
-        if association.extension_kind != FileAssociationOperationKind::NoOp {
+        if association.extension_kind != IntegrationChangeKind::NoOp {
             let extension = zup_core::FileExtension::new(&association.extension)
                 .map_err(|error| TransactionPayloadError::Unsupported(error.to_string()))?;
             let extension_key = ResourceKey::FileAssociationExtension { extension };
-            let dependencies = if association.association_kind == FileAssociationOperationKind::NoOp
-            {
+            let dependencies = if association.association_kind == IntegrationChangeKind::NoOp {
                 Vec::new()
             } else {
                 vec![association.key.clone()]
@@ -747,4 +840,67 @@ pub(crate) fn receipt_bytes(receipt: &BackendReceipt) -> Result<Vec<u8>, Transac
 
 pub(crate) fn receipt_from_bytes(bytes: &[u8]) -> Result<BackendReceipt, TransactionPayloadError> {
     decode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_authority_cannot_be_retargeted_to_another_registry_key() {
+        let app = AppId::new("com.zup.authority").unwrap();
+        let scope = SelectedScope::User;
+        let operation = AppsFeaturesOperation {
+            scope,
+            privilege: Privilege::User,
+            key_path: format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{app}"),
+            previous: None,
+            installed: AppsFeaturesState {
+                values: BTreeMap::new(),
+            },
+        };
+        for (path, permitted) in [
+            (operation.key_path.clone(), true),
+            ("Software\\Foreign".into(), false),
+        ] {
+            let mut operation = operation.clone();
+            operation.key_path = path;
+            let mut input = TransactionInput::new(zup_core::Target::parse("windows-x64").unwrap());
+            input.backend_operations.push(BackendOperation {
+                key: apps_key(&app),
+                id: apps_backend_id(&app),
+                privilege: Privilege::User,
+                intent: BackendOperationIntent::Apply,
+                payload: encode(&ApplyPayload::AppsFeatures { operation }).unwrap(),
+                dependencies: vec![],
+            });
+            let plan = zup_transaction::compile_transaction(&input).unwrap();
+            let node = plan
+                .nodes
+                .iter()
+                .find(|node| node.meta.backend.is_some())
+                .unwrap();
+            assert_eq!(
+                validate_backend_node(node, None, scope, &app).is_ok(),
+                permitted
+            );
+        }
+    }
+
+    #[test]
+    fn owned_updates_and_repairs_require_the_correct_prior_authority() {
+        assert!(
+            validate_transition(IntegrationChangeKind::UpdateOwned, &1, Some(&1), &2, &0).is_ok()
+        );
+        assert!(
+            validate_transition(IntegrationChangeKind::UpdateOwned, &2, Some(&1), &2, &0).is_err()
+        );
+        assert!(
+            validate_transition(IntegrationChangeKind::RepairOwned, &2, Some(&1), &1, &0).is_ok()
+        );
+        assert!(validate_transition(IntegrationChangeKind::RepairOwned, &2, None, &1, &0).is_err());
+        assert!(
+            validate_transition(IntegrationChangeKind::RepairOwned, &2, Some(&1), &3, &0).is_err()
+        );
+    }
 }

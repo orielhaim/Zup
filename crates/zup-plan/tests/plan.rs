@@ -2,14 +2,12 @@ use std::collections::BTreeSet;
 use std::fs;
 
 use rstest::rstest;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zup_build::{Sha256Digest, materialize};
+use zup_build::materialize;
 use zup_core::{ComponentId, InstallScope, Privilege, ProtocolScheme, ServiceId, Target, Template};
+use zup_core::{ResourceKey, SelectedScope};
 use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
-use zup_plan::{
-    ComponentOverrides, InstallPlan, PlanError, PlanRequest, ResourceKey, SelectedScope, plan,
-};
+use zup_plan::{ComponentOverrides, DesiredState, PlanError, PlanRequest, plan};
 
 fn target() -> Target {
     Target::parse("windows-x64").unwrap()
@@ -81,7 +79,7 @@ fn overrides(enable: &[&str], disable: &[&str]) -> ComponentOverrides {
     }
 }
 
-fn selected_names(plan: &InstallPlan) -> Vec<String> {
+fn selected_names(plan: &DesiredState) -> Vec<String> {
     plan.selected_components
         .iter()
         .map(|id| id.as_str().to_owned())
@@ -118,12 +116,19 @@ default = false
 "#,
     );
     let build = build_plan_from(&source, &[("dist/app.txt", b"app")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .unwrap();
     assert_eq!(result.prerequisites.len(), 1);
     assert_eq!(result.prerequisites[0].id.as_str(), "vc-runtime");
-    assert_eq!(result.summary.prerequisite_count, 1);
-    assert_eq!(result.summary.download_bytes, 1024);
-    assert!(result.summary.requires_authorization);
+    assert_eq!(result.summary().unwrap().prerequisite_count, 1);
+    assert_eq!(result.summary().unwrap().download_bytes, 1024);
+    assert!(result.summary().unwrap().requires_authorization);
 }
 
 #[test]
@@ -144,7 +149,14 @@ package = { type = "remote", url = "https://cdn.example.test/runtime.exe", filen
 "#,
     );
     let build = build_plan_from(&source, &[("dist/app.txt", b"app")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .unwrap();
     assert!(result.prerequisites.is_empty());
 }
 
@@ -190,7 +202,13 @@ scope = "{allowed_str}"
 "#
     );
     let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), requested));
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), requested),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan);
     assert_eq!(result.is_ok(), ok, "err: {:?}", result.err());
     if !ok {
         assert!(matches!(result, Err(PlanError::ScopeNotAllowed { .. })));
@@ -205,7 +223,8 @@ fn install_directory_override_is_rejected_when_not_authored() {
         Template::parse(r"C:\Apps\Acme").unwrap(),
     ));
     assert!(matches!(
-        plan(&build, &request),
+        plan(&build, &request, None, &zup_plan::NeverCancelled)
+            .map(|installation| installation.plan),
         Err(PlanError::InstallDirectoryOverrideNotAllowed)
     ));
 }
@@ -235,9 +254,9 @@ default = false
 requires = ["core"]
 "#;
 
-fn graph_plan(request: PlanRequest) -> Result<InstallPlan, PlanError> {
+fn graph_plan(request: PlanRequest) -> Result<DesiredState, PlanError> {
     let build = build_plan_from(&with(GRAPH), &[("dist/a.txt", b"a")]);
-    plan(&build, &request)
+    plan(&build, &request, None, &zup_plan::NeverCancelled).map(|installation| installation.plan)
 }
 
 #[rstest]
@@ -290,7 +309,10 @@ requires = ["base"]
             components: overrides(&[], &["base"]),
             ..PlanRequest::new(target(), SelectedScope::User)
         },
-    );
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan);
     assert!(matches!(
         result,
         Err(PlanError::DependencyExplicitlyDisabled { .. })
@@ -345,7 +367,10 @@ when = '!component("cli")'
             install_directory: None,
             components: overrides(&["cli"], &[]),
         },
+        None,
+        &zup_plan::NeverCancelled,
     )
+    .map(|installation| installation.plan)
     .unwrap();
     assert_eq!(with_cli.path_entries.len(), 1);
     assert_eq!(
@@ -361,7 +386,10 @@ when = '!component("cli")'
             install_directory: None,
             components: overrides(&[], &["cli"]),
         },
+        None,
+        &zup_plan::NeverCancelled,
     )
+    .map(|installation| installation.plan)
     .unwrap();
     assert_eq!(without_cli.path_entries.len(), 1);
     assert_eq!(
@@ -399,7 +427,10 @@ when = 'component("core") && component("cli")'
             install_directory: None,
             components: overrides(&[], &["cli"]),
         },
+        None,
+        &zup_plan::NeverCancelled,
     )
+    .map(|installation| installation.plan)
     .unwrap();
     assert!(without_cli.files.is_empty());
 
@@ -411,7 +442,10 @@ when = 'component("core") && component("cli")'
             install_directory: None,
             components: overrides(&["cli"], &[]),
         },
+        None,
+        &zup_plan::NeverCancelled,
     )
+    .map(|installation| installation.plan)
     .unwrap();
     assert_eq!(with_cli.files.len(), 1);
 }
@@ -445,14 +479,21 @@ component = "cli"
         &source,
         &[("dist/a.txt", b"aaa"), ("dist/b.txt", b"bbbbbb")],
     );
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .unwrap();
     assert_eq!(result.files.len(), 1);
     assert_eq!(result.files[0].source_relative.as_str(), "a.txt");
     assert_eq!(result.files[0].size, 3);
-    assert_eq!(result.summary.file_count, 1);
-    assert_eq!(result.summary.install_bytes, 3);
-    assert_eq!(result.summary.selected_component_count, 1);
-    assert_eq!(result.summary.resource_count, 0);
+    assert_eq!(result.summary().unwrap().file_count, 1);
+    assert_eq!(result.summary().unwrap().install_bytes, 3);
+    assert_eq!(result.summary().unwrap().selected_component_count, 1);
+    assert_eq!(result.summary().unwrap().resource_count, 0);
 }
 
 #[test]
@@ -465,14 +506,19 @@ destination = "${install}/tools"
 "#,
     );
     let build = build_plan_from(&source, &[("dist/bin/acme.exe", b"exe!")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User)).unwrap();
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .unwrap();
     let file = &result.files[0];
     assert_eq!(file.source_relative.as_str(), "bin/acme.exe");
     assert_eq!(file.size, 4);
 
-    let mut hasher = Sha256::new();
-    hasher.update(b"exe!");
-    assert_eq!(file.sha256, Sha256Digest::from_hasher(hasher));
+    assert_eq!(file.sha256, zup_core::hash_bytes(b"exe!"));
     assert_eq!(
         file.destination.to_string(),
         "${location.user_data}/Programs/Acme/tools/acme.exe"
@@ -576,15 +622,16 @@ fn resources_collide_only_while_they_are_both_active(
     #[case] survivors: Option<usize>,
 ) {
     let build = build_plan_from(&with(body), &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), SelectedScope::User));
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan);
     let Some(survivors) = survivors else {
         let error = result.expect_err("expected a collision");
-        let collided = matches!(
-            error,
-            PlanError::ActiveLauncherCollision { .. }
-                | PlanError::ActiveProtocolCollision { .. }
-                | PlanError::ActivePathCollision { .. }
-        );
+        let collided = matches!(error, PlanError::ResourceCollision { .. });
         assert!(collided, "expected a collision, got {error:?}");
         return;
     };
@@ -642,8 +689,15 @@ executable = "${install}/a.txt"
 "#,
     );
     let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
-    let result = plan(&build, &PlanRequest::new(target(), scope)).unwrap();
-    assert_eq!(result.summary.requires_authorization, authorized);
+    let result = plan(
+        &build,
+        &PlanRequest::new(target(), scope),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .unwrap();
+    assert_eq!(result.summary().unwrap().requires_authorization, authorized);
 
     assert_eq!(result.files[0].privilege, privilege);
     assert_eq!(result.launchers[0].privilege, privilege);
@@ -685,9 +739,11 @@ component = "service"
     let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
     let user = PlanRequest::new(target(), SelectedScope::User);
 
-    let without = plan(&build, &user).unwrap();
+    let without = plan(&build, &user, None, &zup_plan::NeverCancelled)
+        .map(|installation| installation.plan)
+        .unwrap();
     assert!(without.services.is_empty());
-    assert!(!without.summary.requires_authorization);
+    assert!(!without.summary().unwrap().requires_authorization);
 
     let with_svc = plan(
         &build,
@@ -695,11 +751,14 @@ component = "service"
             components: overrides(&["service"], &[]),
             ..user
         },
+        None,
+        &zup_plan::NeverCancelled,
     )
+    .map(|installation| installation.plan)
     .unwrap();
     assert_eq!(with_svc.scope, SelectedScope::User);
     assert_eq!(with_svc.services[0].privilege, Privilege::System);
-    assert!(with_svc.summary.requires_authorization);
+    assert!(with_svc.summary().unwrap().requires_authorization);
 }
 
 #[test]
@@ -730,8 +789,12 @@ executable = "${install}/a.exe"
     );
     let build = build_plan_from(&source, &[("dist/a.txt", b"a")]);
     let request = PlanRequest::new(target(), SelectedScope::Machine);
-    let a = plan(&build, &request).unwrap();
-    let b = plan(&build, &request).unwrap();
+    let a = plan(&build, &request, None, &zup_plan::NeverCancelled)
+        .map(|installation| installation.plan)
+        .unwrap();
+    let b = plan(&build, &request, None, &zup_plan::NeverCancelled)
+        .map(|installation| installation.plan)
+        .unwrap();
     assert_eq!(a, b);
     assert_eq!(
         serde_json::to_string(&a).unwrap(),
@@ -837,14 +900,24 @@ destination = "${install}"
     .unwrap();
     let target = Target::parse("windows-x64").unwrap();
 
-    let result = plan(&build, &PlanRequest::new(target, SelectedScope::User)).unwrap();
+    let result = plan(
+        &build,
+        &PlanRequest::new(target, SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .unwrap();
     assert_eq!(result.target, target);
     assert_eq!(result.files[0].size, 7);
 
     let error = plan(
         &build,
         &PlanRequest::new(Target::parse("windows-arm64").unwrap(), SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
     )
+    .map(|installation| installation.plan)
     .unwrap_err();
     assert!(matches!(error, PlanError::UnknownBuildTarget { .. }));
 }
@@ -870,12 +943,17 @@ fn an_explicit_group_requires_an_optional_component_in_every_frontend() {
     cli.default = false;
     let mut request = PlanRequest::new(target(), SelectedScope::User);
     assert!(matches!(
-        plan(&build, &request),
+        plan(&build, &request, None, &zup_plan::NeverCancelled)
+            .map(|installation| installation.plan),
         Err(PlanError::ComponentGroupSelectionRequired { .. })
     ));
     request
         .components
         .enable
         .insert(ComponentId::new("cli").unwrap());
-    assert!(plan(&build, &request).is_ok());
+    assert!(
+        plan(&build, &request, None, &zup_plan::NeverCancelled)
+            .map(|installation| installation.plan)
+            .is_ok()
+    );
 }

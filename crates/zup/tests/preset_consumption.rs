@@ -14,11 +14,11 @@
 use sha2::Digest;
 
 use zup_artifact::preset::{PresetPackageView, PresetPackageWriter};
+use zup_core::PortableSourceFilePolicy;
 use zup_core::{
     Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
     NonEmptyString, Target, Template,
 };
-use zup_platform::PortableSourceFilePolicy;
 use zup_preset_compose::{PresetProblem, asset_settings, select, validate_settings};
 use zup_preset_protocol::{Capabilities, Capability, PresetDescription};
 

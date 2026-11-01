@@ -6,20 +6,26 @@ use common::fake::FakeExecutor;
 use common::{digest, file, removal_input, sample_app_id, sample_version, target};
 use rstest::rstest;
 use zup_core::{Privilege, RelativePath, SelectedScope};
-use zup_exec::{InstallLedger, OwnedResource};
+use zup_plan::{FileOperationKind, FilePrecondition};
+use zup_plan::{InstallLedger, OwnedResource};
 use zup_transaction::{
-    FileDelta, FilePrecondition, FilesystemTransactionStore, OwnershipError, ReconciliationState,
-    TransactionCoordinator, TransactionInput, TransactionStore, compile_transaction,
-    reconcile_committed, validate_ownership,
+    FilesystemTransactionStore, OwnershipError, ReconciliationState, TransactionCoordinator,
+    TransactionInput, TransactionStore, compile_transaction, reconcile_committed,
+    validate_ownership,
 };
 
 fn ledger() -> InstallLedger {
-    let mut ledger = InstallLedger::new(sample_app_id(), target(), SelectedScope::User);
-    ledger.committed_transaction = "generation".into();
+    let mut ledger = InstallLedger::new(
+        sample_app_id(),
+        target(),
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
+    ledger.committed_transaction = "00000000-0000-7000-8000-000000000001".parse().unwrap();
     ledger
 }
 
-fn owned_file(work: &zup_transaction::FileWork) -> OwnedResource {
+fn owned_file(work: &zup_plan::FileOperation) -> OwnedResource {
     OwnedResource::File {
         destination: work.destination.clone(),
         source_relative: work.source_relative.clone(),
@@ -31,31 +37,31 @@ fn owned_file(work: &zup_transaction::FileWork) -> OwnedResource {
 }
 
 #[rstest]
-#[case(FileDelta::Create)]
-#[case(FileDelta::Replace)]
-#[case(FileDelta::RestoreOwned)]
-#[case(FileDelta::RepairOwned)]
-fn file_changes_are_bound_to_committed_ownership(#[case] delta: FileDelta) {
+#[case(FileOperationKind::Create)]
+#[case(FileOperationKind::Replace)]
+#[case(FileOperationKind::RestoreOwned)]
+#[case(FileOperationKind::RepairOwned)]
+fn file_changes_are_bound_to_committed_ownership(#[case] delta: FileOperationKind) {
     let mut ledger = ledger();
     let mut work = file("a", b"old");
-    work.delta = delta;
+    work.kind = delta;
     work.precondition = match delta {
-        FileDelta::Create | FileDelta::RestoreOwned => FilePrecondition::Absent,
-        FileDelta::Replace | FileDelta::RepairOwned => FilePrecondition::Exact {
+        FileOperationKind::Create | FileOperationKind::RestoreOwned => FilePrecondition::Absent,
+        FileOperationKind::Replace | FileOperationKind::RepairOwned => FilePrecondition::Exact {
             size: 3,
             sha256: digest(b"old"),
         },
         _ => unreachable!("only file mutations are parameterized"),
     };
-    if delta != FileDelta::Create {
+    if delta != FileOperationKind::Create {
         ledger.resources.insert(work.key.clone(), owned_file(&work));
     }
     let mut input = TransactionInput::new(target());
-    input.observed_transaction = Some(ledger.committed_transaction.clone());
+    input.observed_transaction = Some(ledger.committed_transaction);
     input.files.push(work.clone());
     let plan = compile_transaction(&input).unwrap();
     validate_ownership(&plan, Some(&ledger), &BTreeSet::new()).unwrap();
-    if delta == FileDelta::Create {
+    if delta == FileOperationKind::Create {
         ledger.resources.insert(work.key.clone(), owned_file(&work));
     } else if let OwnedResource::File { sha256, .. } = ledger.resources.get_mut(&work.key).unwrap()
     {
@@ -72,7 +78,7 @@ fn removal_cannot_forget_or_retarget_committed_resources() {
     let mut ledger = ledger();
     let mut input = removal_input();
     input.uninstall = true;
-    input.observed_transaction = Some(ledger.committed_transaction.clone());
+    input.observed_transaction = Some(ledger.committed_transaction);
     let removal = &input.removals[0];
     ledger.resources.insert(
         removal.key.clone(),
@@ -101,12 +107,12 @@ fn removal_cannot_forget_or_retarget_committed_resources() {
         Err(OwnershipError::Retired)
     ));
     ledger.resources.remove(&extra.key);
-    ledger.committed_transaction = "new-generation".into();
+    ledger.committed_transaction = "00000000-0000-7000-8000-000000000002".parse().unwrap();
     assert!(matches!(
         validate_ownership(&plan, Some(&ledger), &retired),
         Err(OwnershipError::Generation)
     ));
-    ledger.committed_transaction = "generation".into();
+    ledger.committed_transaction = "00000000-0000-7000-8000-000000000001".parse().unwrap();
     if let OwnedResource::File { size, .. } = ledger.resources.get_mut(&removal.key).unwrap() {
         *size += 1;
     }
@@ -196,5 +202,71 @@ fn unsettled_history_blocks_reconciliation_before_any_cleanup() {
             .unwrap()
             .reconciliation,
         ReconciliationState::Pending { .. }
+    ));
+}
+
+#[test]
+fn reconciliation_uses_generation_edges_instead_of_clock_order() {
+    use zup_transaction::{
+        LedgerPublication, NodeState, OperationReceipt, TransactionRecord, ledger_publication,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let store = FilesystemTransactionStore::private_at(root.path());
+    let first: zup_core::TransactionId = "ffffffff-ffff-7fff-bfff-ffffffffffff".parse().unwrap();
+    let second: zup_core::TransactionId = "00000000-0000-7000-8000-000000000001".parse().unwrap();
+    let make_record = |id, observed| {
+        let mut input = TransactionInput::new(target());
+        input.observed_transaction = observed;
+        let mut record = TransactionRecord::new(
+            id,
+            sample_app_id(),
+            SelectedScope::User,
+            sample_version(),
+            compile_transaction(&input).unwrap(),
+        );
+        record.phase = zup_transaction::TransactionPhase::Committed;
+        for state in record.nodes.values_mut() {
+            *state = NodeState::Applied {
+                receipt: Box::new(OperationReceipt::Control),
+            };
+        }
+        store.create(&record).unwrap();
+        record
+    };
+    make_record(first, None);
+    let mut successor = make_record(second, Some(first));
+    let records =
+        zup_transaction::settled_records(&store, &sample_app_id(), SelectedScope::User, None)
+            .unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record.transaction_id)
+            .collect::<Vec<_>>(),
+        [first, second]
+    );
+    let mut installed = InstallLedger::new(sample_app_id(), target(), SelectedScope::User, first);
+    assert_eq!(
+        ledger_publication(&successor, Some(&installed)).unwrap(),
+        LedgerPublication::Advance
+    );
+    installed.committed_transaction = second;
+    assert_eq!(
+        ledger_publication(&successor, Some(&installed)).unwrap(),
+        LedgerPublication::Current
+    );
+    installed.committed_transaction = zup_core::TransactionId::new_v7();
+    assert!(ledger_publication(&successor, Some(&installed)).is_err());
+    successor.reconciliation = ReconciliationState::Complete;
+    assert_eq!(
+        ledger_publication(&successor, Some(&installed)).unwrap(),
+        LedgerPublication::Settled
+    );
+
+    make_record(zup_core::TransactionId::new_v7(), None);
+    assert!(matches!(
+        zup_transaction::settled_records(&store, &sample_app_id(), SelectedScope::User, None),
+        Err(zup_transaction::ReconciliationError::Generations)
     ));
 }

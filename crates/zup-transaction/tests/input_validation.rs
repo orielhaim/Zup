@@ -1,12 +1,13 @@
+use zup_plan::RemovalKind;
 mod common;
 
 use zup_core::{
     BackendResourceId, ComponentId, Privilege, RelativePath, ResourceKey, SelectedScope,
 };
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_transaction::{
-    BackendOperation, FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork,
-    TransactionInput, TransactionInputError, TransactionResource,
+    BackendOperation, FileRemoval, TransactionInput, TransactionInputError, TransactionResource,
 };
 
 use common::{digest, target, tpath};
@@ -21,9 +22,9 @@ fn file_key(name: &str) -> ResourceKey {
     }
 }
 
-fn file_work(key: ResourceKey, source: &str, destination: TargetPath) -> FileWork {
+fn file_work(key: ResourceKey, source: &str, destination: TargetPath) -> FileOperation {
     let contents = b"payload";
-    FileWork {
+    FileOperation {
         key,
         source_relative: RelativePath::new(source).unwrap(),
         destination,
@@ -31,15 +32,16 @@ fn file_work(key: ResourceKey, source: &str, destination: TargetPath) -> FileWor
         expected_sha256: digest(contents),
         expected_size: contents.len() as u64,
         privilege: Privilege::User,
-        delta: FileDelta::Create,
+        kind: FileOperationKind::Create,
         executable: false,
+        conflict: None,
     }
 }
 
 fn removal(key: ResourceKey, destination: TargetPath) -> FileRemoval {
     FileRemoval {
         key,
-        kind: FileRemovalKind::RemoveOwned,
+        kind: RemovalKind::RemoveOwned,
         scope: SelectedScope::User,
         privilege: Privilege::User,
         destination,

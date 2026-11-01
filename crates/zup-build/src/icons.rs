@@ -2,12 +2,12 @@ use std::fs;
 use std::path::Path;
 
 use zup_assets::{IconCache, IconFormat, IconSource, IconTarget};
+use zup_core::SourceFilePolicy;
 use zup_core::{
     CompiledIcon, IconRole, Installer, RelativePath, ResolvedFile, TargetIcons,
     TargetOperatingSystem, Template, hash_bytes,
 };
 use zup_manifest::IconConfig;
-use zup_platform::SourceFilePolicy;
 
 use crate::error::BuildError;
 use crate::materialize::resolve_project_source;

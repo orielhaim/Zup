@@ -154,7 +154,7 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
                 let intent = zup_protocol::PrepareOperation {
                     recovery_id: Some(id.as_uuid()),
                     operation: "recover".into(),
-                    force_files: false,
+                    force: false,
                     install_dir_override: None,
                     selected_components: Vec::new(),
                     disabled_components: Vec::new(),

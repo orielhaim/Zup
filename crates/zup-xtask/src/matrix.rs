@@ -21,8 +21,6 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-manifest",
     "zup-build",
     "zup-plan",
-    "zup-platform",
-    "zup-exec",
     "zup-transaction",
     "zup-bootstrap",
     "zup-bundle",

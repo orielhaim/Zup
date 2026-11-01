@@ -425,9 +425,9 @@ impl LinuxRuntimeBackend {
         let intent = zup_protocol::PrepareOperation {
             recovery_id: None,
             operation: self.operation.name().to_owned(),
-            force_files: matches!(
+            force: matches!(
                 self.operation,
-                Operation::Repair { force_files } if force_files
+                Operation::Repair { force } if force
             ),
             install_dir_override: self
                 .selection
@@ -675,6 +675,7 @@ pub(crate) async fn recover_installation(
             ));
         }
         let request = RuntimeRequest {
+            intent: None,
             target: record.target,
             app_id: record.app_id,
             app_version: record.app_version,

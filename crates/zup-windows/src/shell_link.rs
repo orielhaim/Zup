@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use zup_core::Target;
-use zup_exec::ObservedLauncherState;
-use zup_platform::TargetPath;
+use zup_plan::{ObservedLauncherState, TargetPath};
 
 use crate::cmdline::{quote_arg, split_command_line};
 use crate::lowering::{host_path, target_path_from_host};

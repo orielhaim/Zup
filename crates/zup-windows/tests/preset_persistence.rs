@@ -1,4 +1,5 @@
 #![cfg(windows)]
+use zup_plan::RemovalKind;
 
 use std::path::{Path, PathBuf};
 
@@ -6,11 +7,9 @@ use zup_core::{
     AppId, InstalledPreset, NonEmptyString, PresetAsset, PresetRuntime, ResourceKey, SelectedScope,
     Sha256Digest, Target,
 };
-use zup_exec::InstallLedger;
-use zup_transaction::{
-    FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork, TransactionInput,
-    TransactionPlan, compile_transaction,
-};
+use zup_plan::InstallLedger;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
+use zup_transaction::{FileRemoval, TransactionInput, TransactionPlan, compile_transaction};
 
 fn zup_core_preset_protocol_version() -> u32 {
     1
@@ -28,9 +27,8 @@ fn version() -> semver::Version {
     "1.0.0".parse().expect("a version")
 }
 
-fn target_path(path: &Path) -> zup_platform::TargetPath {
-    zup_platform::TargetPath::new(target(), zup_windows::plain_path_text(path))
-        .expect("a target path")
+fn target_path(path: &Path) -> zup_plan::TargetPath {
+    zup_plan::TargetPath::new(target(), zup_windows::plain_path_text(path)).expect("a target path")
 }
 
 fn window(executable: &[u8], logo: &[u8]) -> InstalledPreset {
@@ -85,7 +83,7 @@ fn content_files(
 fn install_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -> TransactionPlan {
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root, scope, ui) {
-        input.files.push(FileWork {
+        input.files.push(FileOperation {
             key: ResourceKey::File {
                 destination: zup_windows::plain_path_text(&path),
             },
@@ -95,8 +93,10 @@ fn install_plan(state_root: &Path, scope: SelectedScope, ui: &InstalledPreset) -
             expected_sha256: sha256,
             expected_size: 1,
             privilege: scope.authorization(),
-            delta: FileDelta::Create,
+            kind: FileOperationKind::Create,
             executable: false,
+
+            conflict: None,
         });
     }
     input.preset = Some(ui.clone());
@@ -107,7 +107,7 @@ fn retire_plan_against(
     state_root: &Path,
     scope: SelectedScope,
     ui: &InstalledPreset,
-    observed: Option<String>,
+    observed: Option<zup_core::TransactionId>,
 ) -> TransactionPlan {
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root, scope, ui) {
@@ -117,7 +117,7 @@ fn retire_plan_against(
         input.retired_keys.push(key.clone());
         input.removals.push(FileRemoval {
             key,
-            kind: FileRemovalKind::RemoveOwned,
+            kind: RemovalKind::RemoveOwned,
             scope,
             privilege: scope.authorization(),
             destination: target_path(&path),
@@ -199,8 +199,13 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
     let first = window(b"the first preset", b"<svg id='one'/>");
     let second = window(b"the second preset", b"<svg id='two'/>");
     let mut previous = install_plan(state_root.path(), SelectedScope::User, &first);
-    let mut ledger = InstallLedger::new(app_id(), target(), SelectedScope::User);
-    ledger.committed_transaction = zup_transaction::TransactionId::new_v7().to_string();
+    let mut ledger = InstallLedger::new(
+        app_id(),
+        target(),
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
+    ledger.committed_transaction = zup_core::TransactionId::new_v7();
     ledger.version = version();
     ledger.preset = Some(first.clone());
     for (path, digest) in content_files(state_root.path(), SelectedScope::User, &first) {
@@ -208,7 +213,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
             ResourceKey::File {
                 destination: zup_windows::plain_path_text(&path),
             },
-            zup_exec::OwnedResource::File {
+            zup_plan::OwnedResource::File {
                 destination: target_path(&path),
                 sha256: digest,
                 size: 1,
@@ -221,7 +226,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
 
     let mut input = TransactionInput::new(target());
     for (path, sha256) in content_files(state_root.path(), SelectedScope::User, &second) {
-        input.files.push(FileWork {
+        input.files.push(FileOperation {
             key: ResourceKey::File {
                 destination: zup_windows::plain_path_text(&path),
             },
@@ -231,8 +236,10 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
             expected_sha256: sha256,
             expected_size: 1,
             privilege: zup_core::Privilege::User,
-            delta: FileDelta::Create,
+            kind: FileOperationKind::Create,
             executable: false,
+
+            conflict: None,
         });
     }
     for (path, sha256) in content_files(state_root.path(), SelectedScope::User, &first) {
@@ -242,7 +249,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
         input.retired_keys.push(key.clone());
         input.removals.push(FileRemoval {
             key,
-            kind: FileRemovalKind::RemoveOwned,
+            kind: RemovalKind::RemoveOwned,
             scope: SelectedScope::User,
             privilege: zup_core::Privilege::User,
             destination: target_path(&path),
@@ -252,7 +259,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
         });
     }
     input.preset = Some(second.clone());
-    input.observed_transaction = Some(ledger.committed_transaction.clone());
+    input.observed_transaction = Some(ledger.committed_transaction);
     let replacing = compile_transaction(&input).expect("the plan compiles");
     validate(
         state_root.path(),
@@ -273,8 +280,13 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
 fn dropping_the_window_without_retiring_its_content_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
     let ui = window(b"a preset executable", b"<svg/>");
-    let mut ledger = InstallLedger::new(app_id(), target(), SelectedScope::User);
-    ledger.committed_transaction = zup_transaction::TransactionId::new_v7().to_string();
+    let mut ledger = InstallLedger::new(
+        app_id(),
+        target(),
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
+    ledger.committed_transaction = zup_core::TransactionId::new_v7();
     ledger.version = version();
     ledger.preset = Some(ui.clone());
     for (path, digest) in content_files(state_root.path(), SelectedScope::User, &ui) {
@@ -282,7 +294,7 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
             ResourceKey::File {
                 destination: zup_windows::plain_path_text(&path),
             },
-            zup_exec::OwnedResource::File {
+            zup_plan::OwnedResource::File {
                 destination: target_path(&path),
                 sha256: digest,
                 size: 1,
@@ -293,7 +305,7 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
         );
     }
     let mut input = TransactionInput::new(target());
-    input.observed_transaction = Some(ledger.committed_transaction.clone());
+    input.observed_transaction = Some(ledger.committed_transaction);
     let empty = compile_transaction(&input).expect("an empty plan");
     let error = validate(
         state_root.path(),
@@ -311,7 +323,7 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
             state_root.path(),
             SelectedScope::User,
             &ui,
-            Some(ledger.committed_transaction.clone()),
+            Some(ledger.committed_transaction),
         ),
         Some(ledger),
     )

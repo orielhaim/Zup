@@ -6,13 +6,14 @@ use std::path::Path;
 
 use zup_core::{RelativePath, ResourceKey, SelectedScope, Sha256Digest, Target};
 use zup_linux::test_support::{compose_fixture, v1_files};
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_runtime::{
     ExecutionPolicy, InstallOutcome, OperationControl, RuntimeControl, RuntimeRequest,
 };
 use zup_transaction::{
-    FileDelta, FilePrecondition, FileWork, FilesystemTransactionStore, InstallationLock,
-    TransactionInput, TransactionStore, compile_transaction,
+    FilesystemTransactionStore, InstallationLock, TransactionInput, TransactionStore,
+    compile_transaction,
 };
 
 fn target() -> Target {
@@ -27,7 +28,7 @@ fn plan_for(bytes: &[u8], source: &str) -> zup_transaction::TransactionPlan {
     let (size, sha256) = digest(bytes);
     let destination = "/tmp/zup-generated-ownership.desktop";
     let mut input = TransactionInput::new(target());
-    input.files.push(FileWork {
+    input.files.push(FileOperation {
         key: ResourceKey::File {
             destination: destination.into(),
         },
@@ -38,7 +39,9 @@ fn plan_for(bytes: &[u8], source: &str) -> zup_transaction::TransactionPlan {
         expected_size: size,
         privilege: zup_core::Privilege::User,
         executable: false,
-        delta: FileDelta::Create,
+        kind: FileOperationKind::Create,
+
+        conflict: None,
     });
     compile_transaction(&input).expect("plan")
 }
@@ -190,6 +193,7 @@ fn a_busy_operation_does_not_stage_generated_content() {
     let report = backend
         .execute_blocking(
             &RuntimeRequest {
+                intent: None,
                 target: plan.target,
                 app_id: zup_core::AppId::new("com.example.fresh").expect("id"),
                 app_version: semver::Version::new(1, 0, 0),

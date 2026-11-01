@@ -4,7 +4,7 @@ use std::{
 };
 
 use zup_core::{AppId, ResourceKey, SelectedScope};
-use zup_exec::{INSTALL_LEDGER_SCHEMA, InstallLedger};
+use zup_plan::{INSTALL_LEDGER_SCHEMA, InstallLedger};
 
 use crate::{NodeKind, OwnershipError, TransactionNode, TransactionPlan};
 
@@ -21,15 +21,11 @@ pub fn validate_ledger_identity(
     app_id: &AppId,
     scope: SelectedScope,
 ) -> bool {
-    ledger
-        .committed_transaction
-        .parse::<crate::TransactionId>()
-        .is_ok()
-        && ledger.schema == INSTALL_LEDGER_SCHEMA
+    ledger.schema == INSTALL_LEDGER_SCHEMA
         && ledger.app_id == *app_id
         && ledger.scope == scope
         && ledger.resources.iter().all(|(key, owned)| match owned {
-            zup_exec::OwnedResource::File {
+            zup_plan::OwnedResource::File {
                 destination,
                 created_directories,
                 ..
@@ -40,7 +36,8 @@ pub fn validate_ledger_identity(
                     _ => return false,
                 };
                 destination.target() == &ledger.target
-                    && destination.as_str() == identity
+                    && zup_plan::TargetPath::new(ledger.target, identity)
+                        .is_ok_and(|identity| destination.equivalent(&identity))
                     && created_directories.iter().all(|directory| {
                         directory.target() == &ledger.target
                             && directory.parent().is_some()
@@ -91,7 +88,7 @@ pub fn valid_file_key(
         } => {
             owner == app_id.as_str()
                 && semver::Version::parse(resource_version).is_ok_and(|parsed| &parsed == version)
-                && zup_platform::TargetPath::new(*target, destination).is_ok()
+                && zup_plan::TargetPath::new(*target, destination).is_ok()
         }
         _ => false,
     }
@@ -106,9 +103,9 @@ pub fn project_committed_files(
     ledger: &mut InstallLedger,
 ) -> Result<(), LedgerProjectionError> {
     use crate::OperationReceipt;
-    use zup_exec::OwnedResource;
+    use zup_plan::OwnedResource;
     let path = |text: &str| {
-        zup_platform::TargetPath::new(record.target, text).map_err(|_| LedgerProjectionError)
+        zup_plan::TargetPath::new(record.target, text).map_err(|_| LedgerProjectionError)
     };
     if record.release.is_some() || ledger.version != record.app_version {
         ledger.release = record.release.clone();
@@ -177,7 +174,7 @@ pub fn project_committed_files(
 }
 
 pub fn retire_resources(ledger: &mut InstallLedger, retired: &BTreeSet<ResourceKey>) {
-    use zup_exec::OwnedResource;
+    use zup_plan::OwnedResource;
     for key in retired {
         let directories = match ledger.resources.get(key) {
             Some(OwnedResource::File {

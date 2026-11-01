@@ -1,26 +1,22 @@
 use std::collections::BTreeMap;
 
 use zup_core::{ResourceKey, SelectedScope};
-use zup_plan::InstallPlan;
-use zup_platform::{
-    TargetFile, TargetPath, TargetPlan, TargetPlanSummary, lower_target_plan_files,
-    resolve_template_path,
-};
+use zup_plan::{DesiredFile, DesiredState, TargetPath, resolve_files, resolve_template_path};
 
 use crate::error::{PathError, PlanError};
 use crate::locations::LinuxInstallLocationResolver;
 use crate::lowering::to_host_path;
 
 pub fn resolve_target(
-    plan: &InstallPlan,
+    plan: &DesiredState,
     resolver: &LinuxInstallLocationResolver,
-) -> Result<TargetPlan, PlanError> {
+) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, PlanError> {
     if plan.target.operating_system() != zup_core::TargetOperatingSystem::Linux {
         return Err(PlanError::UnsupportedTarget {
             target: plan.target.to_string(),
         });
     }
-    refuse_unsupported(plan)?;
+    plan.validate()?;
 
     let scope = plan.scope;
     let resolve = |template: &zup_core::Template, kind: &'static str| {
@@ -30,65 +26,15 @@ pub fn resolve_target(
         Ok::<TargetPath, PlanError>(path)
     };
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum OwnedKind {
-        Directory,
-        File,
-    }
-
-    let mut owned: BTreeMap<String, (OwnedKind, &'static str)> = BTreeMap::new();
-    let mut claim =
-        |path: &TargetPath, kind: &'static str, path_kind: OwnedKind| -> Result<(), PathError> {
-            let name = path.to_string();
-            if let Some((_, first)) = owned.get(&name) {
-                return Err(PathError::Collision {
-                    kind,
-                    first: (*first).to_owned(),
-                    second: name,
-                });
-            }
-
-            for (existing, (existing_kind, first)) in &owned {
-                let conflict = match (path_kind, *existing_kind) {
-                    (OwnedKind::Directory, OwnedKind::Directory) => false,
-                    (OwnedKind::File, OwnedKind::Directory) => is_ancestor(&name, existing),
-                    (OwnedKind::Directory, OwnedKind::File) => is_ancestor(existing, &name),
-                    (OwnedKind::File, OwnedKind::File) => {
-                        is_ancestor(existing, &name) || is_ancestor(&name, existing)
-                    }
-                };
-                if conflict {
-                    return Err(PathError::Collision {
-                        kind,
-                        first: (*first).to_owned(),
-                        second: name,
-                    });
-                }
-            }
-            owned.insert(name, (path_kind, kind));
-            Ok(())
-        };
-
     let install_directory = resolve(&plan.install_directory, "install directory")?;
-    claim(
-        &install_directory,
-        "install directory",
-        OwnedKind::Directory,
-    )?;
 
-    let mut lowered = lower_target_plan_files(plan, resolve).map_err(|error| match error {
-        zup_platform::TargetPlanFilesError::Resolve(error) => error,
-        zup_platform::TargetPlanFilesError::SizeOverflow => PlanError::SizeOverflow,
-    })?;
-    for file in lowered.files() {
-        claim(&file.destination, "file destination", OwnedKind::File)?;
-    }
+    let mut files = resolve_files(plan, resolve)?;
 
     let mut services = Vec::with_capacity(plan.services.len());
     if scope == SelectedScope::Machine {
         let mut service_ids: BTreeMap<String, String> = BTreeMap::new();
         for service in &plan.services {
-            let binary = resolve(&service.binary, "service binary")?;
+            let binary = resolve(&service.command.executable, "service binary")?;
             let identity = service.id.as_str().to_owned();
             if let Some(first) = service_ids.get(&identity) {
                 return Err(PathError::Collision {
@@ -107,14 +53,17 @@ pub fn resolve_target(
                     reason: error.to_string(),
                 })?;
 
-            let synthetic = zup_platform::TargetService {
+            let synthetic = zup_plan::DesiredService {
                 key: ResourceKey::Service {
                     id: service.id.clone(),
                 },
                 id: service.id.clone(),
                 name: service.name.clone(),
                 display_name: service.display_name.clone(),
-                command: zup_platform::CommandSpec::new(binary.clone(), service.arguments.clone()),
+                command: zup_plan::CommandSpec::new(
+                    binary.clone(),
+                    service.command.arguments.clone(),
+                ),
                 start: service.start,
                 privilege: service.privilege,
             };
@@ -130,14 +79,14 @@ pub fn resolve_target(
                     reason: error.to_string(),
                 }
             })?;
-            services.push(zup_platform::TargetService {
+            services.push(zup_plan::DesiredService {
                 key: ResourceKey::Service {
                     id: service.id.clone(),
                 },
                 id: service.id.clone(),
                 name: service.name.clone(),
                 display_name: service.display_name.clone(),
-                command: zup_platform::CommandSpec::new(binary, service.arguments.clone()),
+                command: zup_plan::CommandSpec::new(binary, service.command.arguments.clone()),
                 start: service.start,
                 privilege: service.privilege,
             });
@@ -146,8 +95,8 @@ pub fn resolve_target(
 
     let data_home = resolver.data_home().map_err(|source| PlanError::Template {
         kind: "XDG data home",
-        source: zup_platform::TemplateResolveError::InstallLocation(
-            zup_platform::InstallLocationError::ResolutionFailed {
+        source: zup_plan::TemplateResolveError::InstallLocation(
+            zup_plan::InstallLocationError::ResolutionFailed {
                 location: zup_core::InstallLocation::UserData,
                 scope: plan.scope,
                 source: Box::new(source),
@@ -165,35 +114,25 @@ pub fn resolve_target(
         },
     )?;
     for generated in &integration.files {
-        claim(
-            &generated.destination,
-            "integration destination",
-            OwnedKind::File,
-        )?;
-        lowered
-            .push_file(TargetFile {
-                key: generated.key.clone(),
-                source_relative: zup_core::RelativePath::new(&generated.source_relative).map_err(
-                    |_| PathError::Invalid {
-                        kind: "integration source",
-                        path: generated.source_relative.clone(),
-                        reason: "generated source name is not a relative path".into(),
-                    },
-                )?,
-                destination: generated.destination.clone(),
-                size: generated.size,
-                sha256: generated.sha256,
-                executable: false,
-                privilege: zup_core::Privilege::User,
-            })
-            .map_err(|_| PlanError::SizeOverflow)?;
+        files.push(DesiredFile {
+            key: generated.key.clone(),
+            source_relative: zup_core::RelativePath::new(&generated.source_relative).map_err(
+                |_| PathError::Invalid {
+                    kind: "integration source",
+                    path: generated.source_relative.clone(),
+                    reason: "generated source name is not a relative path".into(),
+                },
+            )?,
+            destination: generated.destination.clone(),
+            size: generated.size,
+            sha256: generated.sha256,
+            executable: false,
+            privilege: zup_core::Privilege::User,
+        });
     }
 
-    let file_count = lowered.files().len();
-    let install_bytes = lowered.install_bytes();
-    let resource_count = services.len();
-    let (prerequisites, files) = lowered.into_parts();
-    let target = TargetPlan {
+    let prerequisites = plan.prerequisites.clone();
+    let target = DesiredState {
         app: plan.app.clone(),
         target: plan.target,
         scope: plan.scope,
@@ -206,26 +145,11 @@ pub fn resolve_target(
         services,
         protocols: Vec::new(),
         file_associations: Vec::new(),
-        summary: TargetPlanSummary {
-            file_count,
-            install_bytes,
-            resource_count,
-            requires_authorization: plan.summary.requires_authorization,
-            selected_component_count: plan.selected_components.len(),
-            prerequisite_count: plan.prerequisites.len(),
-            download_bytes: 0,
-        },
 
         preset: None,
     };
     validate_target_plan(&target)?;
     Ok(target)
-}
-
-fn is_ancestor(ancestor: &str, path: &str) -> bool {
-    path.len() > ancestor.len()
-        && path.starts_with(ancestor)
-        && path.as_bytes()[ancestor.len()] == b'/'
 }
 
 fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), PathError> {
@@ -250,22 +174,9 @@ fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), Path
     Ok(())
 }
 
-fn refuse_unsupported(plan: &InstallPlan) -> Result<(), PlanError> {
-    let capabilities =
-        zup_platform::capabilities(&plan.target).ok_or_else(|| PlanError::UnsupportedTarget {
-            target: plan.target.to_string(),
-        })?;
-    let reasons = capabilities.planned_resource_errors(plan);
-    if reasons.is_empty() {
-        Ok(())
-    } else {
-        Err(PlanError::Unsupported {
-            reasons: reasons.join("; "),
-        })
-    }
-}
-
-pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), PlanError> {
+pub fn validate_target_plan(
+    plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+) -> Result<(), PlanError> {
     let mut refused: Vec<String> = Vec::new();
     if plan.target.operating_system() != zup_core::TargetOperatingSystem::Linux {
         refused.push(format!(
@@ -291,6 +202,7 @@ pub fn validate_target_plan(plan: &TargetPlan) -> Result<(), PlanError> {
     unsupported("URI protocol", plan.protocols.len());
     unsupported("file association", plan.file_associations.len());
     if refused.is_empty() {
+        plan.validate_resolved()?;
         Ok(())
     } else {
         Err(PlanError::Unsupported {
@@ -304,13 +216,15 @@ mod tests {
     use super::*;
     use zup_core::Target;
 
-    fn resolve(input: &InstallPlan) -> Result<TargetPlan, PlanError> {
+    fn resolve(
+        input: &DesiredState,
+    ) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, PlanError> {
         resolve_target(input, &LinuxInstallLocationResolver::for_build())
     }
 
-    fn plan() -> InstallPlan {
+    fn plan() -> DesiredState {
         let target = Target::parse("linux-x64").expect("a Linux target");
-        InstallPlan {
+        DesiredState {
             app: zup_core::App {
                 id: zup_core::AppId::new("com.example.tool").expect("an id"),
                 name: zup_core::NonEmptyString::new("Tool").expect("a name"),
@@ -331,20 +245,13 @@ mod tests {
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: zup_plan::PlanSummary {
-                file_count: 0,
-                install_bytes: 0,
-                selected_component_count: 0,
-                resource_count: 0,
-                requires_authorization: false,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
+            preset: None,
         }
     }
 
-    fn file(name: &str) -> zup_plan::PlannedFile {
-        zup_plan::PlannedFile {
+    fn file(name: &str) -> zup_plan::DesiredFile {
+        zup_plan::DesiredFile {
             key: ResourceKey::File {
                 destination: format!("${{location.programs}}/tool/{name}"),
             },
@@ -382,7 +289,10 @@ mod tests {
         assert!(
             matches!(
                 resolve(&input),
-                Err(PlanError::Path(PathError::Collision { .. }))
+                Err(PlanError::Contract(
+                    zup_plan::ContractError::Duplicate(_)
+                        | zup_plan::ContractError::PathCollision { .. }
+                ))
             ),
             "two files may not claim one destination"
         );
@@ -398,7 +308,10 @@ mod tests {
         assert!(
             matches!(
                 resolve(&input),
-                Err(PlanError::Path(PathError::Collision { .. }))
+                Err(PlanError::Contract(
+                    zup_plan::ContractError::Duplicate(_)
+                        | zup_plan::ContractError::PathCollision { .. }
+                ))
             ),
             "a file cannot contain another file"
         );
@@ -418,24 +331,25 @@ mod tests {
     #[test]
     fn services_are_refused_with_everything_named() {
         let mut input = plan();
-        input.services.push(zup_plan::PlannedService {
+        input.services.push(zup_plan::DesiredService {
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },
             id: zup_core::ServiceId::new("tool").expect("an id"),
             name: zup_core::NonEmptyString::new("Tool").expect("a name"),
             display_name: None,
-            binary: zup_core::Template::parse("${location.programs}/tool/tool")
-                .expect("a template"),
-            arguments: Vec::new(),
             start: zup_core::ServiceStart::Automatic,
             privilege: zup_core::Privilege::System,
+            command: zup_plan::CommandSpec::new(
+                zup_core::Template::parse("${location.programs}/tool/tool").expect("a template"),
+                Vec::new(),
+            ),
         });
 
-        input.launchers.push(zup_plan::PlannedLauncher {
+        input.launchers.push(zup_plan::DesiredLauncher {
             key: ResourceKey::Launcher {
                 location: zup_core::LauncherLocation::Menu,
-                name: "tool".to_owned(),
+                name: "Tool".to_owned(),
             },
             location: zup_core::LauncherLocation::Menu,
             name: zup_core::NonEmptyString::new("Tool").expect("a name"),
@@ -444,6 +358,8 @@ mod tests {
             arguments: Vec::new(),
             working_directory: None,
             privilege: zup_core::Privilege::User,
+
+            launcher_path: (),
         });
         let error = resolve(&input).expect_err("services refuse");
         let message = error.to_string();
@@ -464,10 +380,10 @@ mod tests {
     fn machine_launchers_are_refused_not_lowered() {
         let mut input = plan();
         input.scope = SelectedScope::Machine;
-        input.launchers.push(zup_plan::PlannedLauncher {
+        input.launchers.push(zup_plan::DesiredLauncher {
             key: ResourceKey::Launcher {
                 location: zup_core::LauncherLocation::Menu,
-                name: "tool".to_owned(),
+                name: "Tool".to_owned(),
             },
             location: zup_core::LauncherLocation::Menu,
             name: zup_core::NonEmptyString::new("Tool").expect("a name"),
@@ -476,6 +392,8 @@ mod tests {
             arguments: Vec::new(),
             working_directory: None,
             privilege: zup_core::Privilege::System,
+
+            launcher_path: (),
         });
         let error = resolve(&input).expect_err("machine launchers refuse");
         assert!(error.to_string().contains("launcher"), "{error}");
@@ -497,19 +415,20 @@ mod tests {
         );
     }
 
-    fn machine_service(start: zup_core::ServiceStart) -> zup_plan::PlannedService {
-        zup_plan::PlannedService {
+    fn machine_service(start: zup_core::ServiceStart) -> zup_plan::DesiredService {
+        zup_plan::DesiredService {
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },
             id: zup_core::ServiceId::new("tool").expect("an id"),
             name: zup_core::NonEmptyString::new("Tool").expect("a name"),
             display_name: None,
-            binary: zup_core::Template::parse("${location.programs}/tool/tool")
-                .expect("a template"),
-            arguments: vec!["--serve".to_owned()],
             start,
             privilege: zup_core::Privilege::System,
+            command: zup_plan::CommandSpec::new(
+                zup_core::Template::parse("${location.programs}/tool/tool").expect("a template"),
+                vec!["--serve".to_owned()],
+            ),
         }
     }
 
@@ -530,7 +449,7 @@ mod tests {
             resolved.services[0].command.arguments,
             vec!["--serve".to_owned()]
         );
-        assert_eq!(resolved.summary.resource_count, 1);
+        assert_eq!(resolved.summary().unwrap().resource_count, 1);
         let unit = crate::services::unit_name(&resolved.services[0].id).expect("a unit name");
         let again = crate::services::unit_name(&zup_core::ServiceId::new("tool").expect("an id"))
             .expect("a unit name");
@@ -550,15 +469,18 @@ mod tests {
         assert!(
             matches!(
                 resolve(&input),
-                Err(PlanError::Path(PathError::Collision { .. }))
+                Err(PlanError::Contract(
+                    zup_plan::ContractError::Duplicate(_)
+                        | zup_plan::ContractError::PathCollision { .. }
+                ))
             ),
             "one identity is one service"
         );
     }
 
-    fn empty_plan() -> TargetPlan {
+    fn empty_plan() -> DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
         let target = Target::parse("linux-x64").expect("a Linux target");
-        TargetPlan {
+        DesiredState {
             app: zup_core::App {
                 id: zup_core::AppId::new("com.example.tool").expect("an id"),
                 name: zup_core::NonEmptyString::new("Tool").expect("a name"),
@@ -569,7 +491,7 @@ mod tests {
             },
             target,
             scope: SelectedScope::User,
-            install_directory: zup_platform::TargetPath::new(
+            install_directory: zup_plan::TargetPath::new(
                 target,
                 "/home/u/.local/lib/zup/apps/tool",
             )
@@ -582,15 +504,7 @@ mod tests {
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: zup_platform::TargetPlanSummary {
-                file_count: 0,
-                install_bytes: 0,
-                resource_count: 0,
-                requires_authorization: false,
-                selected_component_count: 0,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
             preset: None,
         }
     }
@@ -609,30 +523,27 @@ mod tests {
         let mut plan = empty_plan();
         plan.scope = SelectedScope::Machine;
         plan.services.push(target_service(&plan.target.clone()));
-        plan.launchers.push(zup_platform::TargetLauncher {
+        plan.launchers.push(zup_plan::DesiredLauncher {
             key: zup_core::ResourceKey::Launcher {
                 location: zup_core::LauncherLocation::Menu,
-                name: "tool".to_owned(),
+                name: "Tool".to_owned(),
             },
             location: zup_core::LauncherLocation::Menu,
             name: zup_core::NonEmptyString::new("Tool").expect("a name"),
-            launcher_path: zup_platform::TargetPath::new(
+            launcher_path: zup_plan::TargetPath::new(
                 plan.target,
                 "/home/u/.local/share/applications/tool.desktop",
             )
             .expect("a path"),
-            target: zup_platform::TargetPath::new(
-                plan.target,
-                "/home/u/.local/lib/zup/apps/tool/tool",
-            )
-            .expect("a path"),
+            target: zup_plan::TargetPath::new(plan.target, "/home/u/.local/lib/zup/apps/tool/tool")
+                .expect("a path"),
             arguments: Vec::new(),
             working_directory: None,
             privilege: zup_core::Privilege::User,
         });
 
         let error = validate_target_plan(&plan).expect_err("machine scope with launchers refuses");
-        let reasons = error.reasons();
+        let reasons = error.to_string();
         assert!(
             reasons.contains("launcher"),
             "launchers are named: {reasons}"
@@ -643,22 +554,22 @@ mod tests {
         plan.scope = SelectedScope::User;
         let error = validate_target_plan(&plan).expect_err("user scope with services refuses");
         assert!(
-            error.reasons().contains("service"),
+            error.to_string().contains("service"),
             "services are named: {}",
-            error.reasons()
+            error
         );
     }
 
-    fn target_service(target: &zup_core::Target) -> zup_platform::TargetService {
-        zup_platform::TargetService {
+    fn target_service(target: &zup_core::Target) -> zup_plan::DesiredService<zup_plan::TargetPath> {
+        zup_plan::DesiredService {
             key: zup_core::ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },
             id: zup_core::ServiceId::new("tool").expect("an id"),
             name: zup_core::NonEmptyString::new("Tool").expect("a name"),
             display_name: None,
-            command: zup_platform::CommandSpec::new(
-                zup_platform::TargetPath::new(*target, "/opt/tool/tool").expect("a path"),
+            command: zup_plan::CommandSpec::new(
+                zup_plan::TargetPath::new(*target, "/opt/tool/tool").expect("a path"),
                 Vec::new(),
             ),
             start: zup_core::ServiceStart::Automatic,
@@ -672,9 +583,9 @@ mod tests {
         plan.target = zup_core::Target::parse("windows-x64").expect("a target");
         let error = validate_target_plan(&plan).expect_err("a Windows target refuses");
         assert!(
-            error.reasons().contains("not a Linux target"),
+            error.to_string().contains("not a Linux target"),
             "{}",
-            error.reasons()
+            error.to_string()
         );
     }
 }

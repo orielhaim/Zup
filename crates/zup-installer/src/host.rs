@@ -179,7 +179,7 @@ impl SessionHost for WindowsSessionHost {
             && context
                 .ledger
                 .as_ref()
-                .and_then(zup_exec::InstallLedger::release_identity)
+                .and_then(zup_plan::InstallLedger::release_identity)
                 .is_none()
         {
             return Err(
@@ -267,7 +267,7 @@ impl SessionHost for WindowsSessionHost {
         if let Some(prior) = context
             .ledger
             .as_ref()
-            .and_then(zup_exec::InstallLedger::release_identity)
+            .and_then(zup_plan::InstallLedger::release_identity)
             && prior.variant != acquired.resolved.variant.id
         {
             return Err("the authenticated release does not match the installed variant".into());
@@ -345,7 +345,7 @@ impl SessionHost for WindowsSessionHost {
                 content.release.cache.root().to_path_buf(),
             )
             .map_err(|error| error.to_string())?
-        } else if prepared.action == zup_exec::LifecycleAction::Uninstall {
+        } else if prepared.action == zup_plan::LifecycleAction::Uninstall {
             zup_windows::WindowsRuntimeBackend::from_path(self.executable.clone(), None)
                 .map_err(|error| error.to_string())?
         } else {
@@ -453,7 +453,7 @@ impl SessionHost for WindowsSessionHost {
             .app_id
             .as_ref()
             .ok_or_else(|| "the session host was not discovered".to_owned())?;
-        if prepared.action == zup_exec::LifecycleAction::Uninstall {
+        if prepared.action == zup_plan::LifecycleAction::Uninstall {
             zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
                 .map_err(|error| error.to_string())?;
         }
@@ -670,33 +670,31 @@ pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
 
 pub(crate) fn terminal_handoff(
     context: crate::run::RuntimeContext,
-    action: zup_exec::LifecycleAction,
+    action: zup_plan::LifecycleAction,
     args: &crate::cli::LifecycleArgs,
     accepted: crate::handoff::Accepted,
 ) -> miette::Result<()> {
     let operation = match action {
-        zup_exec::LifecycleAction::Install => {
+        zup_plan::LifecycleAction::Install => {
             crate::terminal::Command::Install(crate::terminal::Components {
                 enable: args.enable.clone(),
                 disable: args.disable.clone(),
             })
         }
-        zup_exec::LifecycleAction::Upgrade => {
+        zup_plan::LifecycleAction::Upgrade => {
             crate::terminal::Command::Upgrade(crate::terminal::Components {
                 enable: args.enable.clone(),
                 disable: args.disable.clone(),
             })
         }
-        zup_exec::LifecycleAction::Modify => {
+        zup_plan::LifecycleAction::Modify => {
             crate::terminal::Command::Modify(crate::terminal::Components {
                 enable: args.enable.clone(),
                 disable: args.disable.clone(),
             })
         }
-        zup_exec::LifecycleAction::Repair { force_files } => {
-            crate::terminal::Command::Repair { force_files }
-        }
-        zup_exec::LifecycleAction::Uninstall => crate::terminal::Command::Uninstall,
+        zup_plan::LifecycleAction::Repair { force } => crate::terminal::Command::Repair { force },
+        zup_plan::LifecycleAction::Uninstall => crate::terminal::Command::Uninstall,
     };
     let cli = crate::terminal::Cli {
         operation: Some(operation),

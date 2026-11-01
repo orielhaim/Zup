@@ -43,9 +43,7 @@ pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
         Some(Commands::Modify(args)) => lifecycle::run(context, lifecycle::Verb::Modify, args),
         Some(Commands::Repair(args)) => lifecycle::run(
             context,
-            lifecycle::Verb::Repair {
-                force_files: args.force_files,
-            },
+            lifecycle::Verb::Repair { force: args.force },
             args.install,
         ),
         Some(Commands::Update(args)) => crate::maintenance::run_update(context, args),
@@ -168,7 +166,7 @@ pub struct RepairArgs {
     #[command(flatten)]
     pub install: LifecycleArgs,
     #[arg(long)]
-    pub force_files: bool,
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]

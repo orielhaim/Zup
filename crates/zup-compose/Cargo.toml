@@ -14,7 +14,6 @@ zup-binary.workspace = true
 zup-bundle.workspace = true
 zup-core.workspace = true
 zup-pe.workspace = true
-zup-platform.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

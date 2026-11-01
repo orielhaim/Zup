@@ -164,6 +164,7 @@ export default defineConfig({
             items: [
               { text: 'zup.toml', link: 'manifest' },
               { text: 'CLI', link: 'cli' },
+              { text: 'Deployment contract', link: 'deployment-contract' },
             ],
           },
           {

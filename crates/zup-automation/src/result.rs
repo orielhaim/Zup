@@ -418,6 +418,8 @@ pub struct Composition {
 #[cfg_attr(feature = "bindings", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PlanDetails {
+    /// Whether resource changes were compared against the destination machine.
+    pub machine_state_observed: bool,
     /// `user` or `machine`.
     pub scope: String,
     /// Where it would install, when the project chose a directory.

@@ -30,6 +30,7 @@ impl RuntimeBackend for FakeBackend {
                 return Err(SessionError::AuthorizationRequired);
             }
             let _ = events.send(RuntimeEvent::Progress {
+                phase: zup_core::OperationPhase::Files,
                 completed: 1,
                 total: 1,
                 action: "Finished".into(),
@@ -41,6 +42,7 @@ impl RuntimeBackend for FakeBackend {
 
 fn request() -> RuntimeRequest {
     RuntimeRequest {
+        intent: None,
         target: Target::parse("windows-x64").unwrap(),
         app_id: zup_core::AppId::new("com.example.runtime").unwrap(),
         app_version: "1.0.0".parse().unwrap(),

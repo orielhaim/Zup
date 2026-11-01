@@ -273,6 +273,7 @@ fn files(machine: &mut Machine, completed: u64, total: u64) {
         id: "application".into(),
     });
     machine.observe(&RuntimeEvent::Progress {
+        phase: zup_core::OperationPhase::Files,
         completed,
         total,
         action: "Writing application files".into(),

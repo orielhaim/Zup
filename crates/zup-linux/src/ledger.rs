@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use zup_transaction::valid_file_key;
 
 use zup_core::{AppId, ResourceKey, SelectedScope};
-use zup_exec::{InstallLedger, ObservedServiceState, OwnedResource, ServiceState};
+use zup_plan::{InstallLedger, ObservedServiceState, OwnedResource, ServiceState};
 use zup_transaction::{
     NodeKind, OperationReceipt, TransactionNode, TransactionPhase, TransactionPlan,
-    TransactionRecord, TransactionStore,
+    TransactionRecord,
 };
 
 use crate::error::{ExecError, PathError};
@@ -144,29 +144,25 @@ impl LinuxLedgerStore {
             return Err(ExecError::LedgerUncommitted);
         }
         let previous = self.load(&record.app_id, scope)?;
-        if previous
-            .as_ref()
-            .is_some_and(|ledger| ledger.target != record.target)
+        match zup_transaction::ledger_publication(record, previous.as_ref())
+            .map_err(|error| ExecError::Ownership(error.to_string()))?
         {
-            return Err(ExecError::Ownership("target identity".into()));
-        }
-        let installed_transaction = previous
-            .as_ref()
-            .map(|ledger| ledger.committed_transaction.parse::<uuid::Uuid>())
-            .transpose()
-            .map_err(|_| ExecError::LedgerInvalid)?;
-        if installed_transaction.is_some_and(|id| id > record.transaction_id.as_uuid()) {
-            cleanup_committed_files(record)?;
-            cleanup_removed_directories(record)?;
-            return Ok(previous.expect("newer installation exists"));
-        }
-        if previous
-            .as_ref()
-            .is_some_and(|ledger| ledger.committed_transaction == record.transaction_id.to_string())
-        {
-            cleanup_committed_files(record)?;
-            cleanup_removed_directories(record)?;
-            return Ok(previous.expect("checked above"));
+            zup_transaction::LedgerPublication::Settled => {
+                return Ok(previous.unwrap_or_else(|| {
+                    InstallLedger::new(
+                        record.app_id.clone(),
+                        record.target,
+                        scope,
+                        record.transaction_id,
+                    )
+                }));
+            }
+            zup_transaction::LedgerPublication::Current => {
+                cleanup_committed_files(record)?;
+                cleanup_removed_directories(record)?;
+                return Ok(previous.expect("published generation has a ledger"));
+            }
+            zup_transaction::LedgerPublication::Advance => {}
         }
         if record.plan.uninstall {
             let retired_ledger_keys = retired_ledger_keys(&record.plan)?;
@@ -192,10 +188,17 @@ impl LinuxLedgerStore {
                 record.app_id.clone(),
                 record.target,
                 scope,
+                record.transaction_id,
             ));
         }
-        let mut ledger = previous
-            .unwrap_or_else(|| InstallLedger::new(record.app_id.clone(), record.target, scope));
+        let mut ledger = previous.unwrap_or_else(|| {
+            InstallLedger::new(
+                record.app_id.clone(),
+                record.target,
+                scope,
+                record.transaction_id,
+            )
+        });
         if ledger.target != record.target {
             return Err(ExecError::Ownership("target identity".into()));
         }
@@ -210,7 +213,7 @@ impl LinuxLedgerStore {
             }
         }
         zup_transaction::retire_resources(&mut ledger, &retired_ledger_keys(&record.plan)?);
-        ledger.committed_transaction = record.transaction_id.to_string();
+        ledger.committed_transaction = record.transaction_id;
         let path = self.path_for(&record.app_id, scope);
         let bytes = serde_json::to_vec_pretty(&ledger)?;
         write_ledger(&path, &bytes, scope)?;
@@ -232,6 +235,8 @@ impl LinuxLedgerStore {
         })?;
         for record in records {
             match record.phase {
+                TransactionPhase::Committed
+                    if record.reconciliation == zup_transaction::ReconciliationState::Complete => {}
                 TransactionPhase::Committed => {
                     self.publish_committed(&record, scope)?;
                 }
@@ -360,6 +365,10 @@ fn publish_service_node(
         serde_json::from_slice(payload).map_err(|_| ExecError::LedgerInvalid)?;
     let key = service.key.clone();
     let previous = match &service.previous {
+        ObservedServiceState::InvalidService => match ledger.resources.get(&service.key) {
+            Some(OwnedResource::Service { previous, .. }) => previous.clone(),
+            _ => return Err(ExecError::LedgerInvalid),
+        },
         ObservedServiceState::Absent => ServiceState::Absent,
         ObservedServiceState::Service {
             display_name,
@@ -564,27 +573,10 @@ fn cleanup_removed_directories(record: &TransactionRecord) -> Result<(), ExecErr
 
 fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Result<(), ExecError> {
     let store = zup_transaction::FilesystemTransactionStore::private_at(root);
-    let ids = store
-        .list_ids()
-        .map_err(|error| ExecError::Executor(error.to_string()))?;
-    for id in ids {
-        let record = store
-            .load(&id)
-            .map_err(|error| ExecError::Executor(error.to_string()))?;
-        if record.app_id != uninstall.app_id
-            || record.scope != uninstall.scope
-            || id.as_uuid() >= uninstall.transaction_id.as_uuid()
-        {
-            continue;
-        }
-        if !matches!(
-            record.phase,
-            TransactionPhase::Committed | TransactionPhase::RolledBack
-        ) {
-            return Err(ExecError::RecoveryRequired(
-                record.transaction_id.to_string(),
-            ));
-        }
+    let records = zup_transaction::retired_records(&store, uninstall)
+        .map_err(|error| ExecError::Ownership(error.to_string()))?;
+    for record in records {
+        let id = record.transaction_id;
         let directory = root.join("transactions").join(id.to_string());
         if std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
             std::fs::remove_dir_all(&directory)
@@ -612,7 +604,8 @@ fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_transaction::FileDelta;
+    use zup_plan::FileOperationKind;
+    use zup_transaction::TransactionStore;
 
     fn transaction_id() -> zup_transaction::TransactionId {
         zup_transaction::TransactionId::new_v7()
@@ -657,10 +650,7 @@ mod tests {
         let install = committed(false, 2);
         ledgers.repair_committed(&app, SelectedScope::User).unwrap();
         let ledger = ledgers.load(&app, SelectedScope::User).unwrap().unwrap();
-        assert_eq!(
-            ledger.committed_transaction,
-            install.transaction_id.to_string()
-        );
+        assert_eq!(ledger.committed_transaction, install.transaction_id);
         assert_eq!(
             journals
                 .load(&install.transaction_id)
@@ -769,7 +759,7 @@ mod tests {
                 key: ResourceKey::File {
                     destination: String::from("/tmp/whatever"),
                 },
-                delta: FileDelta::Replace,
+                delta: FileOperationKind::Replace,
             },
             declaration_order: 0,
             meta: Default::default(),

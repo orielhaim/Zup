@@ -86,6 +86,7 @@ pub struct Capabilities {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecuteTransaction {
+    pub intent: Option<zup_plan::DeploymentIntent>,
     pub target: Target,
     pub plan_json: String,
     pub plan_hash: String,
@@ -178,7 +179,7 @@ pub const PRIVILEGED_OPERATIONS: &[&str] = &[
 pub struct PrepareOperation {
     pub recovery_id: Option<uuid::Uuid>,
     pub operation: String,
-    pub force_files: bool,
+    pub force: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_dir_override: Option<String>,
     #[serde(default)]
@@ -273,6 +274,7 @@ pub struct ExecuteOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressReport {
+    pub phase: zup_core::OperationPhase,
     pub kind: ProgressKind,
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

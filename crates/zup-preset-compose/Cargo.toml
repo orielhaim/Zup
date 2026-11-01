@@ -15,7 +15,6 @@ thiserror.workspace = true
 zup-artifact.workspace = true
 zup-build.workspace = true
 zup-core.workspace = true
-zup-platform.workspace = true
 zup-preset-protocol.workspace = true
 
 [dev-dependencies]

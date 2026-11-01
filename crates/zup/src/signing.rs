@@ -113,7 +113,7 @@ pub fn run_prepare(root: PathBuf, args: SignPrepareCommand) -> miette::Result<Au
             format!("signing plan: {error}"),
         )
     })?;
-    zup_platform::publish(&path, &encoded).map_err(|error| {
+    zup_core::publish(&path, &encoded).map_err(|error| {
         crate::failure::error(
             "zup.signing.plan_unwritable",
             format!("`{}`: {error}", path.display()),
@@ -631,7 +631,7 @@ pub fn run_verify(root: PathBuf, args: SignVerifyCommand) -> miette::Result<Auto
             format!("release description: {error}"),
         )
     })?;
-    zup_platform::publish(&path, &encoded).map_err(|error| {
+    zup_core::publish(&path, &encoded).map_err(|error| {
         crate::failure::error(
             "zup.signing.manifest_unwritable",
             format!("`{}`: {error}", path.display()),

@@ -1,5 +1,5 @@
 use zup_core::{InstallScope, Installer, SelectedScope};
-use zup_exec::InstallLedger;
+use zup_plan::InstallLedger;
 use zup_preset_protocol::{
     Capabilities, ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions,
     InstallationHealth, MaintenanceState, ProductIdentity, SelectionRequirement,

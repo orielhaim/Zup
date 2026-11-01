@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::PathError;
 use zup_core::{Target, TargetOperatingSystem};
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
 
 const NAME_MAX: usize = 255;
 

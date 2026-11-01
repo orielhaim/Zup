@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use zup_toolchain::ToolchainComponent;
 
 use crate::toolchain::ToolchainResolver;
+use zup_core::SourceFilePolicy;
 use zup_core::{ResolvedTargetConfig, Sha256Digest, Source, TargetOverrides};
-use zup_platform::SourceFilePolicy;
 
-static PORTABLE_SOURCE_POLICY: zup_platform::PortableSourceFilePolicy =
-    zup_platform::PortableSourceFilePolicy;
+static PORTABLE_SOURCE_POLICY: zup_core::PortableSourceFilePolicy =
+    zup_core::PortableSourceFilePolicy;
 
 pub fn source_policy_for(_target: &zup_core::Target) -> &'static dyn SourceFilePolicy {
     &PORTABLE_SOURCE_POLICY

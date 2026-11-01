@@ -1,7 +1,6 @@
 use windows_registry::{Key, Type};
 use zup_core::{SelectedScope, Target};
-use zup_exec::SearchPath;
-use zup_platform::TargetPath;
+use zup_plan::{SearchPath, TargetPath};
 
 use crate::registry::{RegistryError, RegistryValue};
 

@@ -330,6 +330,7 @@ fn operation_events() -> Vec<RuntimeEvent> {
             id: "application".into(),
         },
         RuntimeEvent::Progress {
+            phase: zup_core::OperationPhase::Files,
             completed: 2_048,
             total: 4_096,
             action: "Writing application files".into(),

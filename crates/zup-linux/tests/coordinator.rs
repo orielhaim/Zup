@@ -1,4 +1,5 @@
 #![cfg(target_os = "linux")]
+use zup_plan::RemovalKind;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -8,11 +9,11 @@ use zup_core::{
     AppId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest, Target, hash_reader,
 };
 use zup_linux::{ExecError, LinuxFileExecutor};
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_transaction::{
-    FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork,
-    FilesystemTransactionStore, OperationExecutor, OperationId, OperationReceipt, ReconcileResult,
-    TransactionCoordinator, TransactionInput, TransactionNode, TransactionOutcome,
+    FileRemoval, FilesystemTransactionStore, OperationExecutor, OperationId, OperationReceipt,
+    ReconcileResult, TransactionCoordinator, TransactionInput, TransactionNode, TransactionOutcome,
     compile_transaction, recover,
 };
 
@@ -34,8 +35,8 @@ fn work(
     destination: TargetPath,
     precondition: FilePrecondition,
     executable: bool,
-) -> FileWork {
-    FileWork {
+) -> FileOperation {
+    FileOperation {
         key: ResourceKey::File {
             destination: destination.to_string(),
         },
@@ -46,9 +47,10 @@ fn work(
         expected_size: bytes.len() as u64,
         privilege: Privilege::User,
         executable,
-        delta: match precondition {
-            FilePrecondition::Absent => FileDelta::Create,
-            FilePrecondition::Exact { .. } => FileDelta::Replace,
+        conflict: None,
+        kind: match precondition {
+            FilePrecondition::Absent => FileOperationKind::Create,
+            FilePrecondition::Exact { .. } => FileOperationKind::Replace,
         },
     }
 }
@@ -316,7 +318,7 @@ fn removal(bytes: &[u8], destination: TargetPath) -> FileRemoval {
         key: ResourceKey::File {
             destination: destination.to_string(),
         },
-        kind: FileRemovalKind::RemoveOwned,
+        kind: RemovalKind::RemoveOwned,
         scope: SelectedScope::User,
         privilege: Privilege::User,
         destination,

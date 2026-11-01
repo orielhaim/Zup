@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use zup_plan::RemovalKind;
 
 use miette::Diagnostic;
 use petgraph::algo::is_cyclic_directed;
@@ -9,13 +10,13 @@ use thiserror::Error;
 use zup_core::{
     ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey, Sha256Digest, Target,
 };
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
 
 use crate::id::OperationId;
 use crate::input::{
-    BackendOperation, BackendOperationIntent, FileDelta, FilePrecondition, FileRemoval,
-    FileRemovalKind, FileWork, TransactionInput, TransactionInputError,
+    BackendOperation, BackendOperationIntent, FileRemoval, TransactionInput, TransactionInputError,
 };
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 
 pub const TRANSACTION_PLAN_SCHEMA: u32 = 2;
 
@@ -76,7 +77,7 @@ pub enum NodeKind {
     },
     FileMutation {
         key: ResourceKey,
-        delta: FileDelta,
+        delta: FileOperationKind,
     },
     FileRemoval {
         key: ResourceKey,
@@ -157,7 +158,7 @@ pub struct TransactionPlan {
     pub preset: Option<InstalledPreset>,
     /// Committed transaction this plan was prepared against.
     /// `None` means no installation existed.
-    pub observed_transaction: Option<String>,
+    pub observed_transaction: Option<zup_core::TransactionId>,
 }
 
 impl TransactionPlan {
@@ -382,20 +383,20 @@ pub fn compile_transaction(
     let mut file_ids = Vec::new();
     let mut file_ids_by_key = BTreeMap::new();
     for file in &input.files {
-        match file.delta {
-            FileDelta::NoOp => {
+        match file.kind {
+            FileOperationKind::NoOp => {
                 audit.files_unchanged += 1;
                 audit.noop_total += 1;
             }
-            FileDelta::Conflict | FileDelta::Drift => {
+            FileOperationKind::Conflict | FileOperationKind::Drift => {
                 return Err(TransactionPlanError::UnresolvedConflict {
                     reason: format!("file {:?}", file.key),
                 });
             }
-            FileDelta::Create
-            | FileDelta::Replace
-            | FileDelta::RestoreOwned
-            | FileDelta::RepairOwned => {
+            FileOperationKind::Create
+            | FileOperationKind::Replace
+            | FileOperationKind::RestoreOwned
+            | FileOperationKind::RepairOwned => {
                 let stage_id = OperationId::stage_file(&file.key);
                 push(
                     TransactionNode {
@@ -411,14 +412,14 @@ pub fn compile_transaction(
                     &mut nodes,
                 );
                 stage_ids.push(stage_id);
-                let mutation_id = OperationId::resource(file_delta_token(file.delta), &file.key);
+                let mutation_id = OperationId::resource(file_delta_token(file.kind), &file.key);
                 push(
                     TransactionNode {
                         id: mutation_id.clone(),
                         phase: Phase::FileMutation,
                         kind: NodeKind::FileMutation {
                             key: file.key.clone(),
-                            delta: file.delta,
+                            delta: file.kind,
                         },
                         declaration_order: 0,
                         meta: file_meta(file),
@@ -480,7 +481,7 @@ pub fn compile_transaction(
     let mut file_removal_ids = Vec::new();
     let mut removal_ids_by_key = std::collections::BTreeMap::new();
     for removal in &input.removals {
-        if removal.kind == FileRemovalKind::Drift {
+        if removal.kind == RemovalKind::Drift {
             audit.drifted_removals += 1;
             continue;
         }
@@ -622,7 +623,7 @@ pub fn compile_transaction(
         execution_order,
         rollback_order,
         preset: input.preset.clone(),
-        observed_transaction: input.observed_transaction.clone(),
+        observed_transaction: input.observed_transaction,
     };
     plan.validate()?;
     Ok(plan)
@@ -644,7 +645,7 @@ fn barrier(id: &'static str) -> TransactionNode {
     }
 }
 
-fn file_meta(file: &FileWork) -> NodeMeta {
+fn file_meta(file: &FileOperation) -> NodeMeta {
     NodeMeta {
         source_relative: Some(file.source_relative.clone()),
         file_precondition: Some(file.precondition),
@@ -658,7 +659,10 @@ fn file_meta(file: &FileWork) -> NodeMeta {
 
 fn reject_conflicts(input: &TransactionInput) -> Result<(), TransactionPlanError> {
     for file in &input.files {
-        if matches!(file.delta, FileDelta::Conflict | FileDelta::Drift) {
+        if matches!(
+            file.kind,
+            FileOperationKind::Conflict | FileOperationKind::Drift
+        ) {
             return Err(TransactionPlanError::UnresolvedConflict {
                 reason: format!("file {:?}", file.key),
             });
@@ -667,15 +671,15 @@ fn reject_conflicts(input: &TransactionInput) -> Result<(), TransactionPlanError
     Ok(())
 }
 
-fn file_delta_token(delta: FileDelta) -> &'static str {
+fn file_delta_token(delta: FileOperationKind) -> &'static str {
     match delta {
-        FileDelta::Create => "file_create",
-        FileDelta::Replace => "file_replace",
-        FileDelta::RestoreOwned => "file_restore_owned",
-        FileDelta::RepairOwned => "file_repair_owned",
-        FileDelta::NoOp => "file_noop",
-        FileDelta::Conflict => "file_conflict",
-        FileDelta::Drift => "file_drift",
+        FileOperationKind::Create => "file_create",
+        FileOperationKind::Replace => "file_replace",
+        FileOperationKind::RestoreOwned => "file_restore_owned",
+        FileOperationKind::RepairOwned => "file_repair_owned",
+        FileOperationKind::NoOp => "file_noop",
+        FileOperationKind::Conflict => "file_conflict",
+        FileOperationKind::Drift => "file_drift",
     }
 }
 

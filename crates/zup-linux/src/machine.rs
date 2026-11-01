@@ -673,13 +673,13 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), PathError> {
 
 pub fn normalize_published_modes(
     state_root: &Path,
-    ledger: &zup_exec::InstallLedger,
+    ledger: &zup_plan::InstallLedger,
 ) -> Result<(), PathError> {
     let store = crate::ledger::LinuxLedgerStore::new(state_root);
     let ledger_path = store.path_for(&ledger.app_id, ledger.scope);
     set_mode(&ledger_path, MACHINE_PUBLIC_FILE_MODE)?;
     for owned in ledger.resources.values() {
-        let zup_exec::OwnedResource::File { destination, .. } = owned else {
+        let zup_plan::OwnedResource::File { destination, .. } = owned else {
             continue;
         };
         let host = crate::lowering::to_host_path(destination)?;

@@ -8,6 +8,9 @@ pub use zup_core::SelectedScope;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum PlanError {
+    #[error(transparent)]
+    #[diagnostic(code(zup_plan::invalid_contract))]
+    Contract(#[from] crate::ContractError),
     #[error("planning cancelled")]
     #[diagnostic(code(zup_plan::cancelled))]
     Cancelled,
@@ -49,10 +52,6 @@ pub enum PlanError {
         failure: PluginFailure,
     },
 
-    #[error("plugin `{plugin_id}` planning was cancelled")]
-    #[diagnostic(code(zup_plan::plugin_cancelled))]
-    PluginCancelled { plugin_id: PluginId },
-
     #[error("plugin `{plugin_id}` returned invalid resource `{resource}`: {reason}")]
     #[diagnostic(code(zup_plan::plugin_resource_rejected))]
     PluginResourceRejected {
@@ -61,9 +60,9 @@ pub enum PlanError {
         reason: String,
     },
 
-    #[error("plugin resource collision for `{resource}` at `{identity}`")]
-    #[diagnostic(code(zup_plan::plugin_resource_collision))]
-    PluginResourceCollision {
+    #[error("resource collision for `{resource}` at `{identity}`")]
+    #[diagnostic(code(zup_plan::resource_collision))]
+    ResourceCollision {
         plugin_id: Option<PluginId>,
         resource: String,
         identity: String,
@@ -112,34 +111,6 @@ pub enum PlanError {
     #[error("template resolution failed for variable `{variable}`")]
     #[diagnostic(code(zup_plan::template_resolution))]
     TemplateResolutionError { variable: Variable },
-
-    #[error("active launcher collision at `{location}` / `{name}`")]
-    #[diagnostic(code(zup_plan::active_launcher_collision))]
-    ActiveLauncherCollision { location: String, name: String },
-
-    #[error("active search-path entry collision at `{value}`")]
-    #[diagnostic(code(zup_plan::active_path_collision))]
-    ActivePathCollision { value: String },
-
-    #[error("active service collision for `{id}`")]
-    #[diagnostic(code(zup_plan::active_service_collision))]
-    ActiveServiceCollision { id: String },
-
-    #[error("active protocol collision for scheme `{scheme}`")]
-    #[diagnostic(code(zup_plan::active_protocol_collision))]
-    ActiveProtocolCollision { scheme: String },
-
-    #[error("active file association collision for id `{id}`")]
-    #[diagnostic(code(zup_plan::active_file_association_collision))]
-    ActiveFileAssociationCollision { id: String },
-
-    #[error("active file extension collision for `{extension}`")]
-    #[diagnostic(code(zup_plan::active_extension_collision))]
-    ActiveExtensionCollision { extension: String },
-
-    #[error("active file destination collision at `{destination}`")]
-    #[diagnostic(code(zup_plan::active_file_collision))]
-    ActiveFileCollision { destination: String },
 
     #[error("plan size overflow")]
     #[diagnostic(code(zup_plan::size_overflow))]

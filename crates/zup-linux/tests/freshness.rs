@@ -5,9 +5,9 @@ use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 
 use zup_core::{AppId, SelectedScope, Target};
-use zup_exec::InstallLedger;
 use zup_linux::LinuxRuntimeBackend;
 use zup_linux::test_support::{compose_fixture, v1_files};
+use zup_plan::InstallLedger;
 use zup_runtime::{
     ExecutionPolicy, InstallOutcome, Operation, OperationControl, RuntimeControl, RuntimeRequest,
 };
@@ -29,6 +29,7 @@ fn plan() -> zup_transaction::TransactionPlan {
 
 fn request(root: &Path, plan: zup_transaction::TransactionPlan) -> RuntimeRequest {
     RuntimeRequest {
+        intent: None,
         target: plan.target,
         app_id: app_id(),
         app_version: semver::Version::new(1, 0, 0),
@@ -140,11 +141,16 @@ fn an_operation_prepared_earlier_is_rejected_when_the_ledger_changes() {
     std::fs::create_dir_all(&state).expect("state");
     let mut input =
         zup_transaction::TransactionInput::new(Target::parse("linux-x64").expect("target"));
-    input.observed_transaction = Some("00000000-0000-0000-0000-000000000001".into());
+    input.observed_transaction = Some("00000000-0000-0000-0000-000000000001".parse().unwrap());
     let pending = compile_transaction(&input).expect("plan");
-    let mut ledger = InstallLedger::new(app_id(), pending.target, SelectedScope::User);
+    let mut ledger = InstallLedger::new(
+        app_id(),
+        pending.target,
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.version = semver::Version::new(1, 0, 0);
-    ledger.committed_transaction = "00000000-0000-0000-0000-000000000001".into();
+    ledger.committed_transaction = "00000000-0000-0000-0000-000000000001".parse().unwrap();
     let store = zup_linux::LinuxLedgerStore::new(&state);
     store_ledger(&store.path_for(&app_id(), SelectedScope::User), &ledger);
     store
@@ -192,9 +198,14 @@ fn a_plan_from_an_earlier_generation_is_rejected(
     let state = scratch.path().join("state");
     std::fs::create_dir_all(&state).expect("state");
     let prepared = plan();
-    let mut ledger = InstallLedger::new(app_id(), prepared.target, SelectedScope::User);
+    let mut ledger = InstallLedger::new(
+        app_id(),
+        prepared.target,
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.version = semver::Version::parse(version).expect("version");
-    ledger.committed_transaction = committed.into();
+    ledger.committed_transaction = committed.parse().unwrap();
     ledger.selected_components = components
         .iter()
         .map(|id| zup_core::ComponentId::new(id).expect("component"))
@@ -224,11 +235,16 @@ fn the_same_generation_is_accepted_again() {
     std::fs::create_dir_all(&state).expect("state");
     let mut prepared =
         zup_transaction::TransactionInput::new(Target::parse("linux-x64").expect("target"));
-    prepared.observed_transaction = Some("00000000-0000-0000-0000-000000000001".into());
+    prepared.observed_transaction = Some("00000000-0000-0000-0000-000000000001".parse().unwrap());
     let prepared = compile_transaction(&prepared).expect("plan");
-    let mut ledger = InstallLedger::new(app_id(), prepared.target, SelectedScope::User);
+    let mut ledger = InstallLedger::new(
+        app_id(),
+        prepared.target,
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.version = semver::Version::new(1, 0, 0);
-    ledger.committed_transaction = "00000000-0000-0000-0000-000000000001".into();
+    ledger.committed_transaction = "00000000-0000-0000-0000-000000000001".parse().unwrap();
     let store = zup_linux::LinuxLedgerStore::new(&state);
     store_ledger(&store.path_for(&app_id(), SelectedScope::User), &ledger);
     store
@@ -243,9 +259,14 @@ fn an_initial_plan_is_rejected_once_another_install_commits() {
     let state = scratch.path().join("state");
     std::fs::create_dir_all(&state).expect("state");
     let prepared = plan();
-    let mut ledger = InstallLedger::new(app_id(), prepared.target, SelectedScope::User);
+    let mut ledger = InstallLedger::new(
+        app_id(),
+        prepared.target,
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.version = semver::Version::new(1, 0, 0);
-    ledger.committed_transaction = "00000000-0000-0000-0000-000000000009".into();
+    ledger.committed_transaction = "00000000-0000-0000-0000-000000000009".parse().unwrap();
     let store = zup_linux::LinuxLedgerStore::new(&state);
     store_ledger(&store.path_for(&app_id(), SelectedScope::User), &ledger);
     let (_operation, runtime) = controls();
@@ -271,11 +292,16 @@ fn a_stale_uninstall_is_rejected_without_a_journal() {
     let mut input =
         zup_transaction::TransactionInput::new(Target::parse("linux-x64").expect("target"));
     input.uninstall = true;
-    input.observed_transaction = Some("00000000-0000-0000-0000-000000000001".into());
+    input.observed_transaction = Some("00000000-0000-0000-0000-000000000001".parse().unwrap());
     let prepared = compile_transaction(&input).expect("plan");
-    let mut ledger = InstallLedger::new(app_id(), prepared.target, SelectedScope::User);
+    let mut ledger = InstallLedger::new(
+        app_id(),
+        prepared.target,
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.version = semver::Version::new(1, 0, 0);
-    ledger.committed_transaction = "00000000-0000-0000-0000-000000000002".into();
+    ledger.committed_transaction = "00000000-0000-0000-0000-000000000002".parse().unwrap();
     let store = zup_linux::LinuxLedgerStore::new(&state);
     store_ledger(&store.path_for(&app_id(), SelectedScope::User), &ledger);
     let (_operation, runtime) = controls();
@@ -320,10 +346,16 @@ fn store_ledger(path: &Path, ledger: &InstallLedger) {
 fn reconciliation_rejects_a_corrupted_ledger_generation() {
     let scratch = tempfile::tempdir().expect("scratch");
     let store = zup_linux::LinuxLedgerStore::new(scratch.path());
-    let mut ledger = InstallLedger::new(app_id(), Target::LINUX_X64, SelectedScope::User);
-    ledger.committed_transaction = "invalid".into();
+    let ledger = InstallLedger::new(
+        app_id(),
+        Target::LINUX_X64,
+        SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
+    );
     let path = store.path_for(&app_id(), SelectedScope::User);
-    store_ledger(&path, &ledger);
+    let mut value = serde_json::to_value(&ledger).expect("ledger");
+    value["committed_transaction"] = serde_json::json!("invalid");
+    zup_transaction::publish_private(&path, &serde_json::to_vec(&value).unwrap()).unwrap();
     let before = std::fs::read(&path).expect("ledger");
     assert!(
         store

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
 pub struct Request {
-    pub action: Option<zup_exec::LifecycleAction>,
+    pub action: Option<zup_plan::LifecycleAction>,
     pub enable: Vec<String>,
     pub disable: Vec<String>,
     pub install_directory: Option<PathBuf>,
@@ -12,7 +12,7 @@ pub struct Request {
 }
 
 impl Request {
-    pub fn new(action: zup_exec::LifecycleAction) -> Self {
+    pub fn new(action: zup_plan::LifecycleAction) -> Self {
         Self {
             action: Some(action),
             ..Self::default()

@@ -12,6 +12,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 zup-core.workspace = true
+zup-plan.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

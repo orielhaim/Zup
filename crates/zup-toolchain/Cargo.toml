@@ -7,11 +7,11 @@ repository.workspace = true
 description = "Compatibility contract for the zup binaries a build composes an artifact from"
 
 [dependencies]
+zup-plan.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 zup-core.workspace = true
-zup-platform.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

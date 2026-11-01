@@ -782,10 +782,10 @@ struct View {
 
 impl Render for View {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use gpui::base::{Disableable, StyledExt};
+        use gpui::base::{Disableable,StyledExt};
         use gpui::component::button::Button;
-        use gpui::component::{ActiveTheme, Theme};
-        use gpui::{FontWeight, ParentElement, Styled, div, px};
+        use gpui::component::{ActiveTheme,Theme};
+        use gpui::{FontWeight,ParentElement,Styled,div,px};
 
         let theme: &Theme = cx.theme();
         let body = div()

@@ -1,8 +1,9 @@
 use std::fs;
 
 use crate::transaction_payload::{BackendReceipt, NativeReconcileResult};
-use zup_exec::{LauncherOperation, LauncherOperationKind, LauncherState, ObservedLauncherState};
-use zup_platform::TargetPath;
+use zup_plan::{
+    IntegrationChangeKind, LauncherOperation, LauncherState, ObservedLauncherState, TargetPath,
+};
 
 use crate::durable::move_durable;
 use crate::lowering::host_path;
@@ -99,7 +100,7 @@ fn installed(op: &LauncherOperation) -> LauncherState {
 fn write(
     launcher_path: &TargetPath,
     value: &LauncherState,
-    icon: Option<&zup_platform::TargetPath>,
+    icon: Option<&zup_plan::TargetPath>,
 ) -> Result<(), ShortcutError> {
     let host = host_path(launcher_path);
     match value {
@@ -143,9 +144,10 @@ fn write(
 pub fn apply(op: &LauncherOperation) -> Result<BackendReceipt, ShortcutError> {
     if !matches!(
         op.kind,
-        LauncherOperationKind::Create
-            | LauncherOperationKind::UpdateOwned
-            | LauncherOperationKind::RestoreOwned
+        IntegrationChangeKind::Create
+            | IntegrationChangeKind::UpdateOwned
+            | IntegrationChangeKind::RestoreOwned
+            | IntegrationChangeKind::RepairOwned
     ) {
         return Err(ShortcutError::NotExecutable);
     }
@@ -226,7 +228,7 @@ mod tests {
                 location: LauncherLocation::Desktop,
                 name: "Acme".into(),
             },
-            kind: LauncherOperationKind::Create,
+            kind: IntegrationChangeKind::Create,
             launcher_path: launcher_path.clone(),
             target: target.clone(),
             arguments: vec!["a b".into(), "quoted\"text".into(), "世界".into()],
@@ -255,7 +257,7 @@ mod tests {
         else {
             panic!("shortcut receipt")
         };
-        op.kind = LauncherOperationKind::UpdateOwned;
+        op.kind = IntegrationChangeKind::UpdateOwned;
         op.previous = read_shortcut(&launcher_path).unwrap();
         op.arguments = vec!["new".into()];
         let upgraded = apply(&op).unwrap();

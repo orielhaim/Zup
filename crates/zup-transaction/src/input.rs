@@ -1,12 +1,14 @@
 use std::fmt;
+use zup_plan::FileOperation;
+use zup_plan::RemovalKind;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zup_core::{
-    BackendResourceId, ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey,
-    SelectedScope, Sha256Digest, Target,
+    BackendResourceId, ComponentId, InstalledPreset, Privilege, ResourceKey, SelectedScope,
+    Sha256Digest, Target,
 };
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
 
 pub const MAX_BACKEND_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_BACKEND_DEPENDENCIES: usize = 256;
@@ -34,43 +36,10 @@ impl fmt::Display for TransactionResource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileDelta {
-    Create,
-    Replace,
-    RestoreOwned,
-    RepairOwned,
-    NoOp,
-    Conflict,
-    Drift,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileRemovalKind {
-    RemoveOwned,
-    Drift,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileWork {
-    pub key: ResourceKey,
-    pub source_relative: RelativePath,
-    pub destination: TargetPath,
-    pub precondition: FilePrecondition,
-    pub expected_sha256: Sha256Digest,
-    pub expected_size: u64,
-    pub privilege: Privilege,
-    #[serde(default)]
-    pub executable: bool,
-    pub delta: FileDelta,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRemoval {
     pub key: ResourceKey,
-    pub kind: FileRemovalKind,
+    pub kind: RemovalKind,
     pub scope: SelectedScope,
     pub privilege: Privilege,
     pub destination: TargetPath,
@@ -183,13 +152,13 @@ pub struct TransactionInput {
     pub install_directory: Option<TargetPath>,
     pub uninstall: bool,
     pub retired_keys: Vec<ResourceKey>,
-    pub files: Vec<FileWork>,
+    pub files: Vec<FileOperation>,
     pub removals: Vec<FileRemoval>,
     pub backend_operations: Vec<BackendOperation>,
     pub preset: Option<InstalledPreset>,
     /// Committed transaction this plan was prepared against.
     /// `None` means no installation existed.
-    pub observed_transaction: Option<String>,
+    pub observed_transaction: Option<zup_core::TransactionId>,
 }
 
 impl TransactionInput {
@@ -342,11 +311,4 @@ pub enum TransactionInputError {
         resource: TransactionResource,
         dependency: TransactionResource,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum FilePrecondition {
-    Absent,
-    Exact { size: u64, sha256: Sha256Digest },
 }

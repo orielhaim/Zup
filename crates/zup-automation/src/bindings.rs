@@ -92,8 +92,10 @@ pub fn typescript() -> String {
         );
         out.push('\n');
         out.push_str("export ");
-        out.push_str(declaration.trim_end());
-        out.push('\n');
+        for line in declaration.trim_end().lines() {
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
     }
     out
 }

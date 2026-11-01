@@ -6,14 +6,17 @@ use std::path::PathBuf;
 
 use zup_bundle::DirectoryPayloadSource;
 use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, Target};
-use zup_exec::{HostSnapshot, InstallLedger, LifecycleAction, OwnedResource};
 use zup_linux::test_support::SharedFakeSystemd;
 use zup_linux::{
-    DesiredService, LinuxFileExecutor, LinuxLedgerStore, MachineRoots, ServiceCompilation,
-    ServiceSupport, SystemdManager as _, SystemdRoots, compile_machine_execution_plan,
+    LinuxFileExecutor, LinuxLedgerStore, MachineRoots, ServiceCompilation, ServiceSupport,
+    SystemdManager as _, SystemdRoots, SystemdUnit, compile_machine_execution_plan,
     snapshot_services, snapshot_target,
 };
-use zup_platform::{CommandSpec, TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
+use zup_plan::{
+    CommandSpec, DesiredFile, DesiredState, HostSnapshot, InstallLedger, LifecycleAction,
+    OwnedResource, TargetPath,
+};
+
 use zup_transaction::{
     FilesystemTransactionStore, NodeKind, NodeState, TransactionCoordinator, TransactionOutcome,
     TransactionPhase, TransactionStore, compile_transaction,
@@ -84,11 +87,16 @@ impl Fixture {
         .expect("a path")
     }
 
-    fn plan(&self, version: &str, start: ServiceStart, arguments: Vec<String>) -> TargetPlan {
+    fn plan(
+        &self,
+        version: &str,
+        start: ServiceStart,
+        arguments: Vec<String>,
+    ) -> DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
         let binary = self.binary();
         let destination = binary.clone();
         let (size, sha256) = zup_core::hash_reader(PAYLOAD_BYTES).expect("bytes hash");
-        let service = zup_platform::TargetService {
+        let service = zup_plan::DesiredService {
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new(SERVICE_ID).expect("an id"),
             },
@@ -99,7 +107,7 @@ impl Fixture {
             start,
             privilege: Privilege::System,
         };
-        TargetPlan {
+        DesiredState {
             app: app(version),
             target: target(),
             scope: SelectedScope::Machine,
@@ -110,7 +118,7 @@ impl Fixture {
             .expect("a path"),
             selected_components: Vec::new(),
             prerequisites: Vec::new(),
-            files: vec![TargetFile {
+            files: vec![DesiredFile {
                 key: ResourceKey::File {
                     destination: destination.to_string(),
                 },
@@ -126,21 +134,13 @@ impl Fixture {
             services: vec![service],
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: TargetPlanSummary {
-                file_count: 1,
-                install_bytes: size,
-                resource_count: 1,
-                requires_authorization: true,
-                selected_component_count: 0,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
             preset: None,
         }
     }
 
-    fn unit(&self, plan: &TargetPlan) -> String {
-        DesiredService::derive(&plan.services[0])
+    fn unit(&self, plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>) -> String {
+        SystemdUnit::derive(&plan.services[0])
             .expect("a service derives")
             .unit
     }
@@ -155,7 +155,10 @@ impl Fixture {
         self.manager.borrow_mut().seed_fragment(unit, &fragment);
     }
 
-    fn snapshot(&self, plan: &TargetPlan) -> HostSnapshot {
+    fn snapshot(
+        &self,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    ) -> HostSnapshot {
         let mut snapshot = snapshot_target(plan);
         snapshot.services =
             snapshot_services(plan, &mut self.manager.clone(), &self.systemd).expect("a snapshot");
@@ -193,13 +196,13 @@ impl Fixture {
                         observed.key == *key
                             && match (&observed.state, installed) {
                                 (
-                                    zup_exec::ObservedServiceState::Service {
+                                    zup_plan::ObservedServiceState::Service {
                                         display_name,
                                         command,
                                         start,
                                         ..
                                     },
-                                    zup_exec::ServiceState::Registration {
+                                    zup_plan::ServiceState::Registration {
                                         display_name: wanted_display,
                                         command: wanted_command,
                                         start: wanted_start,
@@ -232,15 +235,14 @@ impl Fixture {
 
     fn run(
         &mut self,
-        plan: &TargetPlan,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         action: LifecycleAction,
-        force: bool,
     ) -> Result<(TransactionOutcome, Option<InstallLedger>), String> {
         let ledgers = self.ledgers();
         let ledger = self.load_ledger();
         let snapshot = self.snapshot(plan);
         let owned_matches = self.owned_matches(ledger.as_ref(), &snapshot);
-        let execution = zup_exec::plan_lifecycle(
+        let execution = zup_plan::plan_lifecycle(
             action,
             (action != LifecycleAction::Uninstall).then_some(plan),
             Some(&snapshot),
@@ -256,13 +258,10 @@ impl Fixture {
                 roots: &self.roots,
                 systemd: &self.systemd,
                 manager: &mut manager,
-                force_services: force,
             },
         )
         .map_err(|error| format!("input: {error}"))?;
-        input.observed_transaction = ledger
-            .as_ref()
-            .map(|ledger| ledger.committed_transaction.clone());
+        input.observed_transaction = ledger.as_ref().map(|ledger| ledger.committed_transaction);
         let plan_compiled =
             compile_transaction(&input).map_err(|error| format!("transaction: {error}"))?;
         ledgers
@@ -315,21 +314,23 @@ impl Fixture {
 
     fn commit(
         &mut self,
-        plan: &TargetPlan,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         action: LifecycleAction,
-        force: bool,
     ) -> Option<InstallLedger> {
         let (outcome, ledger) = self
-            .run(plan, action, force)
+            .run(plan, action)
             .expect("planning accepts the transition");
         assert_eq!(outcome, TransactionOutcome::Committed);
         ledger
     }
 
-    fn begin(&mut self, plan: &TargetPlan) -> zup_transaction::TransactionRecord {
+    fn begin(
+        &mut self,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    ) -> zup_transaction::TransactionRecord {
         let snapshot = self.snapshot(plan);
         let owned_matches = self.owned_matches(None, &snapshot);
-        let execution = zup_exec::plan_lifecycle(
+        let execution = zup_plan::plan_lifecycle(
             LifecycleAction::Install,
             Some(plan),
             Some(&snapshot),
@@ -345,7 +346,6 @@ impl Fixture {
                 roots: &self.roots,
                 systemd: &self.systemd,
                 manager: &mut manager,
-                force_services: false,
             },
         )
         .expect("an input compiles");
@@ -370,11 +370,14 @@ impl Fixture {
             .preserve()
     }
 
-    fn begin_uninstall(&mut self, plan: &TargetPlan) -> zup_transaction::TransactionRecord {
+    fn begin_uninstall(
+        &mut self,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    ) -> zup_transaction::TransactionRecord {
         let ledger = self.load_ledger().expect("an installation exists");
         let snapshot = self.snapshot(plan);
         let owned_matches = self.owned_matches(Some(&ledger), &snapshot);
-        let execution = zup_exec::plan_lifecycle(
+        let execution = zup_plan::plan_lifecycle(
             LifecycleAction::Uninstall,
             None,
             Some(&snapshot),
@@ -390,11 +393,10 @@ impl Fixture {
                 roots: &self.roots,
                 systemd: &self.systemd,
                 manager: &mut manager,
-                force_services: false,
             },
         )
         .expect("an input compiles");
-        input.observed_transaction = Some(ledger.committed_transaction.clone());
+        input.observed_transaction = Some(ledger.committed_transaction);
         let compiled = compile_transaction(&input).expect("a transaction compiles");
         self.ledgers()
             .validate_plan(
@@ -491,11 +493,11 @@ fn install_registers_boot_policy_without_starting() {
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
     let reloads_before = fixture.manager.borrow().reloads;
-    let ledger = fixture.commit(&plan, LifecycleAction::Install, false);
+    let ledger = fixture.commit(&plan, LifecycleAction::Install);
     assert_eq!(fixture.policy(&unit), "enabled");
     assert!(fixture.manager.borrow().reloads > reloads_before);
 
-    let expected = DesiredService::derive(&plan.services[0]).expect("a service derives");
+    let expected = SystemdUnit::derive(&plan.services[0]).expect("a service derives");
     assert_eq!(
         fixture.source(&unit).expect("a source exists"),
         expected.bytes
@@ -523,7 +525,7 @@ fn install_registers_boot_policy_without_starting() {
         matches!(
             owned,
             OwnedResource::Service {
-                installed: zup_exec::ServiceState::Registration {
+                installed: zup_plan::ServiceState::Registration {
                     start: ServiceStart::Automatic,
                     ..
                 },
@@ -553,7 +555,7 @@ fn start_policy_transitions_reconcile() {
         } else {
             LifecycleAction::Upgrade
         };
-        ledger = fixture.commit(&plan, action, false);
+        ledger = fixture.commit(&plan, action);
         assert_eq!(fixture.policy(&unit), policy, "{version} reconciles");
         if start == ServiceStart::Disabled {
             assert!(
@@ -571,7 +573,7 @@ fn source_updates_land_transactionally() {
     let v1 = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&v1);
     fixture.seed(&unit);
-    fixture.commit(&v1, LifecycleAction::Install, false);
+    fixture.commit(&v1, LifecycleAction::Install);
     let before = fixture.source(&unit).expect("a source exists");
     let v2 = fixture.plan(
         "2.0.0",
@@ -584,7 +586,7 @@ fn source_updates_land_transactionally() {
         "identity is stable across versions"
     );
     let reloads = fixture.manager.borrow().reloads;
-    fixture.commit(&v2, LifecycleAction::Upgrade, false);
+    fixture.commit(&v2, LifecycleAction::Upgrade);
     let after = fixture.source(&unit).expect("a source exists");
     assert_ne!(before, after, "the source updates");
     assert!(
@@ -599,19 +601,19 @@ fn repair_restores_the_source() {
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
-    fixture.commit(&plan, LifecycleAction::Install, false);
+    fixture.commit(&plan, LifecycleAction::Install);
     let healthy = fixture.source(&unit).expect("a source exists");
 
     std::fs::remove_file(fixture.systemd.unit_dir.join(&unit)).expect("a deletion");
     eprintln!("STEP repair-after-delete");
-    fixture.commit(&plan, LifecycleAction::Repair { force_files: false }, false);
+    fixture.commit(&plan, LifecycleAction::Repair { force: false });
     assert_eq!(fixture.source(&unit).expect("a source restores"), healthy);
 
     std::fs::write(fixture.systemd.unit_dir.join(&unit), b"[Unit]\n# damaged\n").expect("damage");
     eprintln!("STEP repair-damaged-no-force");
     assert!(
         fixture
-            .run(&plan, LifecycleAction::Repair { force_files: false }, false)
+            .run(&plan, LifecycleAction::Repair { force: false })
             .is_err(),
         "repair without force refuses damaged owned content"
     );
@@ -629,14 +631,14 @@ fn repair_restores_the_source() {
         .fail_next
         .insert("reload".into(), "injected failure".into());
     let (outcome, _) = fixture
-        .run(&plan, LifecycleAction::Repair { force_files: true }, true)
+        .run(&plan, LifecycleAction::Repair { force: true })
         .expect("failed repair settles");
     assert_eq!(outcome, TransactionOutcome::RolledBack);
     assert_eq!(
         fixture.source(&unit).expect("previous source survives"),
         damaged
     );
-    fixture.commit(&plan, LifecycleAction::Repair { force_files: true }, true);
+    fixture.commit(&plan, LifecycleAction::Repair { force: true });
     assert_eq!(fixture.source(&unit).expect("force restores"), healthy);
 }
 
@@ -646,7 +648,7 @@ fn repair_restores_external_policy_drift() {
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
-    fixture.commit(&plan, LifecycleAction::Install, false);
+    fixture.commit(&plan, LifecycleAction::Install);
 
     fixture
         .manager
@@ -656,15 +658,15 @@ fn repair_restores_external_policy_drift() {
     assert_eq!(fixture.policy(&unit), "disabled");
     assert!(
         fixture
-            .run(&plan, LifecycleAction::Repair { force_files: false }, false)
+            .run(&plan, LifecycleAction::Repair { force: false })
             .is_err(),
         "drift refuses without force"
     );
-    fixture.commit(&plan, LifecycleAction::Repair { force_files: true }, true);
+    fixture.commit(&plan, LifecycleAction::Repair { force: true });
     assert_eq!(fixture.policy(&unit), "enabled");
 
     let reloads = fixture.manager.borrow().reloads;
-    fixture.commit(&plan, LifecycleAction::Repair { force_files: false }, false);
+    fixture.commit(&plan, LifecycleAction::Repair { force: false });
     assert_eq!(
         fixture.manager.borrow().reloads,
         reloads,
@@ -678,11 +680,11 @@ fn uninstall_retires_only_what_zup_owns() {
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
-    fixture.commit(&plan, LifecycleAction::Install, false);
+    fixture.commit(&plan, LifecycleAction::Install);
 
     let neighbor = fixture.systemd.unit_dir.join("unrelated.service");
     std::fs::write(&neighbor, b"[Unit]\n").expect("a neighbor");
-    fixture.commit(&plan, LifecycleAction::Uninstall, false);
+    fixture.commit(&plan, LifecycleAction::Uninstall);
     assert!(fixture.source(&unit).is_none(), "the source retires");
     assert_eq!(
         fixture.policy(&unit),
@@ -732,7 +734,7 @@ fn unrelated_admin_enablement_is_preserved() {
     let v1 = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&v1);
     fixture.seed(&unit);
-    fixture.commit(&v1, LifecycleAction::Install, false);
+    fixture.commit(&v1, LifecycleAction::Install);
 
     fixture.manager.borrow_mut().extra_links.insert(
         unit.clone(),
@@ -743,7 +745,7 @@ fn unrelated_admin_enablement_is_preserved() {
         ServiceStart::Manual,
         vec!["--serve".into(), "--port=8080".into()],
     );
-    let result = fixture.run(&v2, LifecycleAction::Upgrade, false);
+    let result = fixture.run(&v2, LifecycleAction::Upgrade);
     let outcome = result.expect("the transition reaches a stable outcome").0;
     assert!(
         !matches!(outcome, TransactionOutcome::Committed),
@@ -751,17 +753,17 @@ fn unrelated_admin_enablement_is_preserved() {
     );
     assert_eq!(fixture.policy(&unit), "enabled", "nothing was removed");
 
-    let v1_bytes = DesiredService::derive(&v1.services[0]).expect("a service derives");
+    let v1_bytes = SystemdUnit::derive(&v1.services[0]).expect("a service derives");
     assert_eq!(
         fixture.source(&unit).expect("a source remains"),
         v1_bytes.bytes
     );
     assert!(
-        fixture.run(&v2, LifecycleAction::Upgrade, false).is_ok(),
+        fixture.run(&v2, LifecycleAction::Upgrade).is_ok(),
         "the compensated world plans cleanly"
     );
     fixture.manager.borrow_mut().extra_links.clear();
-    fixture.commit(&v2, LifecycleAction::Upgrade, false);
+    fixture.commit(&v2, LifecycleAction::Upgrade);
     assert_eq!(fixture.policy(&unit), "disabled");
 }
 
@@ -774,7 +776,7 @@ fn a_lost_reply_reconciles_to_installed() {
 
     let record = fixture.begin(&plan);
     let record = fixture.crash_mid_apply(record);
-    let expected = DesiredService::derive(&plan.services[0]).expect("a service derives");
+    let expected = SystemdUnit::derive(&plan.services[0]).expect("a service derives");
     std::fs::write(fixture.systemd.unit_dir.join(&unit), &expected.bytes).expect("a source");
     fixture
         .manager
@@ -797,7 +799,7 @@ fn a_reload_failure_resumes() {
 
     let record = fixture.begin(&plan);
     let record = fixture.crash_mid_apply(record);
-    let expected = DesiredService::derive(&plan.services[0]).expect("a service derives");
+    let expected = SystemdUnit::derive(&plan.services[0]).expect("a service derives");
     std::fs::write(fixture.systemd.unit_dir.join(&unit), &expected.bytes).expect("a source");
     assert_eq!(fixture.policy(&unit), "disabled");
     let (record, outcome) = fixture.recover(record);
@@ -815,7 +817,7 @@ fn a_mask_before_crash_reconciles() {
     fixture.seed(&unit);
     let record = fixture.begin(&plan);
     let record = fixture.crash_mid_apply(record);
-    let expected = DesiredService::derive(&plan.services[0]).expect("a service derives");
+    let expected = SystemdUnit::derive(&plan.services[0]).expect("a service derives");
     std::fs::write(fixture.systemd.unit_dir.join(&unit), &expected.bytes).expect("a source");
     fixture
         .manager
@@ -838,7 +840,7 @@ fn an_interrupted_uninstall_converges() {
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
-    fixture.commit(&plan, LifecycleAction::Install, false);
+    fixture.commit(&plan, LifecycleAction::Install);
 
     let record = fixture.begin_uninstall(&plan);
     let record = fixture.crash_mid_apply(record);
@@ -852,7 +854,7 @@ fn an_interrupted_uninstall_converges() {
     fixture.publish(&record);
     assert!(fixture.source(&unit).is_none());
 
-    fixture.commit(&plan, LifecycleAction::Install, false);
+    fixture.commit(&plan, LifecycleAction::Install);
     let record = fixture.begin_uninstall(&plan);
     let record = fixture.crash_mid_apply(record);
     std::fs::remove_file(fixture.systemd.unit_dir.join(&unit)).expect("source gone");
@@ -871,7 +873,7 @@ fn a_swapped_binary_refuses_before_registration() {
     fixture.seed(&unit);
 
     std::fs::write(fixture.payload.join("tool"), b"attacker-bytes").expect("a swap");
-    let result = fixture.run(&plan, LifecycleAction::Install, false);
+    let result = fixture.run(&plan, LifecycleAction::Install);
     let (outcome, ledger) = result.expect("the failure reaches a stable outcome");
     assert!(
         !matches!(outcome, TransactionOutcome::Committed),
@@ -891,7 +893,7 @@ fn tampered_unit_bytes_refuse_at_apply() {
 
     let snapshot = fixture.snapshot(&plan);
     let owned_matches = fixture.owned_matches(None, &snapshot);
-    let execution = zup_exec::plan_lifecycle(
+    let execution = zup_plan::plan_lifecycle(
         LifecycleAction::Install,
         Some(&plan),
         Some(&snapshot),
@@ -907,7 +909,6 @@ fn tampered_unit_bytes_refuse_at_apply() {
             roots: &fixture.roots,
             systemd: &fixture.systemd,
             manager: &mut manager,
-            force_services: false,
         },
     )
     .expect("an input compiles");
@@ -972,12 +973,11 @@ fn neighboring_unit_files_survive_transitions() {
         } else {
             LifecycleAction::Upgrade
         };
-        fixture.commit(&plan, action, false);
+        fixture.commit(&plan, action);
     }
     fixture.commit(
         &fixture.plan("2.0.0", ServiceStart::Disabled, vec!["--serve".into()]),
         LifecycleAction::Uninstall,
-        false,
     );
     assert_eq!(
         std::fs::read(&neighbor)

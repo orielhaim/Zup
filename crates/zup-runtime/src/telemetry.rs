@@ -15,6 +15,19 @@ pub fn operation_work(node: &zup_transaction::TransactionNode) -> u64 {
     }
 }
 
+pub fn operation_phase(node: &zup_transaction::TransactionNode) -> zup_core::OperationPhase {
+    use zup_core::OperationPhase;
+    match node.kind {
+        NodeKind::StageFile { .. }
+        | NodeKind::FileMutation { .. }
+        | NodeKind::FileRemoval { .. } => OperationPhase::Files,
+        NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
+            OperationPhase::System
+        }
+        NodeKind::Barrier => OperationPhase::Finish,
+    }
+}
+
 pub fn operation_action(node: &zup_transaction::TransactionNode) -> &'static str {
     match &node.kind {
         NodeKind::StageFile { .. } | NodeKind::FileMutation { .. } => "Installing files…",
@@ -88,6 +101,7 @@ where
             .completed_work
             .saturating_add(operation_work(operation));
         (self.emit)(RuntimeEvent::Progress {
+            phase: operation_phase(operation),
             completed: self.completed_work.min(self.total_work),
             total: self.total_work,
             action: operation_action(operation).into(),

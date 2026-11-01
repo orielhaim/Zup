@@ -23,7 +23,7 @@ use crate::payload_overlay::{
     PayloadOverlayIdentity, cleanup_payload_overlay, validate_payload_overlay_base,
     verify_payload_overlay,
 };
-use zup_transaction::FilePrecondition;
+use zup_plan::FilePrecondition;
 use zup_transaction::{InstallationLock, LockScope};
 
 use crate::pipe::{ClientReader, ClientWriter, HANDSHAKE_TIMEOUT, PipeError, frame_client};
@@ -320,6 +320,7 @@ impl WorkerSession {
             session_id: self.bootstrap.session_id,
             sequence: 0,
             message: Message::Progress(zup_protocol::ProgressReport {
+                phase: zup_core::OperationPhase::Files,
                 kind: zup_protocol::ProgressKind::OperationStarted,
                 detail: "bootstrap plan accepted".into(),
                 completed: None,
@@ -364,6 +365,7 @@ impl WorkerSession {
             session_id: self.bootstrap.session_id,
             sequence: 0,
             message: Message::Progress(zup_protocol::ProgressReport {
+                phase: zup_core::OperationPhase::Files,
                 kind: zup_protocol::ProgressKind::OperationStarted,
                 detail: "plan accepted".into(),
                 completed: None,
@@ -675,6 +677,7 @@ async fn run_worker_inner(
             session_id: bootstrap.session_id,
             sequence: outgoing,
             message: Message::Progress(ProgressReport {
+                phase: zup_core::OperationPhase::Prepare,
                 kind: ProgressKind::OperationStarted,
                 detail: "transaction accepted".into(),
                 completed: None,
@@ -692,6 +695,55 @@ async fn run_worker_inner(
         crate::ledger::InstallLedgerStore::new(&state_root)
             .repair_committed(&app_id, scope)
             .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+        let intent = exec.intent.as_ref().ok_or_else(|| {
+            WorkerError::AuthFailed("fresh execution requires deployment intent".into())
+        })?;
+        let executable =
+            current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let bundle = EmbeddedBundle::open(&executable)
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let build = bundle
+            .package()
+            .build_plan()
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let build = build
+            .targets
+            .first()
+            .ok_or_else(|| WorkerError::AuthFailed("worker bundle has no target".into()))?;
+        let ledger = crate::ledger::InstallLedgerStore::new(&state_root)
+            .load(&app_id, scope)
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let host = crate::operation_host::WindowsOperationHost {
+            app_id: app_id.clone(),
+            scope,
+            frontend: bundle.frontend(),
+            state_root: state_root.clone(),
+            content: crate::operation_host::WindowsContent::Embedded(&bundle),
+            acquire_prerequisites: false,
+        };
+        let prepared = zup_runtime::prepare_operation(
+            &zup_runtime::OperationInput {
+                build,
+                installer: &executable,
+                scope,
+                operation: intent.action.into(),
+                selection: zup_runtime::OperationSelection {
+                    enable: intent.enable.clone(),
+                    disable: intent.disable.clone(),
+                    install_directory: intent.install_directory.clone(),
+                },
+                prior: ledger.as_ref(),
+                state_root: &state_root,
+                cancellation: &zup_plan::NeverCancelled,
+            },
+            &host,
+        )
+        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        if prepared.transaction_plan != authorized {
+            return Err(WorkerError::AuthFailed(
+                "deployment changed or requested effects differ from authenticated content".into(),
+            ));
+        }
         crate::ledger::InstallLedgerStore::new(&state_root)
             .validate_plan(&app_id, scope, &app_version, &authorized)
             .map_err(|e| WorkerError::Transaction(e.to_string()))?;
@@ -714,7 +766,7 @@ async fn run_worker_inner(
         None => existing_record.expect("recovery loads its journal"),
     };
 
-    let total_work = transaction_work_total(&record.plan);
+    let total_work = record.plan.total_work();
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<ProgressReport>();
     let mut progress_sequence = outgoing;
     let progress_session = bootstrap.session_id;
@@ -973,6 +1025,7 @@ async fn run_bootstrap_worker(
             session_id: bootstrap.session_id,
             sequence: outgoing,
             message: Message::Progress(ProgressReport {
+                phase: zup_core::OperationPhase::Prepare,
                 kind: ProgressKind::OperationStarted,
                 detail: "Checking prerequisites…".into(),
                 completed: None,
@@ -1321,35 +1374,6 @@ async fn send_and_close(
         .await
 }
 
-fn operation_work(operation: &TransactionNode) -> u64 {
-    if matches!(
-        operation.kind,
-        zup_transaction::NodeKind::StageFile { .. }
-            | zup_transaction::NodeKind::FileMutation { .. }
-    ) {
-        operation.meta.expected_size.unwrap_or(1).max(1)
-    } else {
-        1
-    }
-}
-
-fn transaction_work_total(plan: &TransactionPlan) -> u64 {
-    plan.total_work()
-}
-
-fn operation_action(operation: &TransactionNode) -> String {
-    match &operation.kind {
-        zup_transaction::NodeKind::StageFile { .. }
-        | zup_transaction::NodeKind::FileMutation { .. } => "Installing files…".into(),
-        zup_transaction::NodeKind::BackendOperation { .. }
-        | zup_transaction::NodeKind::BackendRemoval { .. } => {
-            "Updating application settings…".into()
-        }
-        zup_transaction::NodeKind::FileRemoval { .. } => "Removing files…".into(),
-        zup_transaction::NodeKind::Barrier => "Finishing…".into(),
-    }
-}
-
 struct WorkerFileExecutor {
     inner: WindowsFileExecutor<AutoPayloadSource>,
     cancel: TokenProbe,
@@ -1389,6 +1413,7 @@ impl OperationExecutor for WorkerFileExecutor {
             return Ok(());
         };
         let _ = self.progress.send(ProgressReport {
+            phase: zup_core::OperationPhase::Files,
             kind: ProgressKind::OperationProgress,
             detail: format!("blocked: {}", detail.replace('\n', ", ")),
             completed: Some(self.completed_work.min(self.total_work)),
@@ -1445,10 +1470,11 @@ impl OperationExecutor for WorkerFileExecutor {
 
         self.completed_work = self
             .completed_work
-            .saturating_add(operation_work(operation));
+            .saturating_add(zup_runtime::operation_work(operation));
         let _ = self.progress.send(ProgressReport {
+            phase: zup_runtime::operation_phase(operation),
             kind: ProgressKind::OperationProgress,
-            detail: operation_action(operation),
+            detail: zup_runtime::operation_action(operation).into(),
             completed: Some(self.completed_work.min(self.total_work)),
             total: Some(self.total_work),
         });

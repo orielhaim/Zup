@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use zup_core::{ResourceKey, Sha256Digest};
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
 
 use crate::plan::TransactionNode;
 

@@ -260,7 +260,7 @@ fn repair_restores_owned_integration() {
         installer: installer.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: Operation::Repair { force_files: false },
+        action: Operation::Repair { force: false },
         install_dir_override: None,
         selection: Default::default(),
     })
@@ -277,7 +277,7 @@ fn repair_restores_owned_integration() {
         installer: installer.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: Operation::Repair { force_files: false },
+        action: Operation::Repair { force: false },
         install_dir_override: None,
         selection: Default::default(),
     });
@@ -291,7 +291,7 @@ fn repair_restores_owned_integration() {
         installer: installer.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: Operation::Repair { force_files: true },
+        action: Operation::Repair { force: true },
         install_dir_override: None,
         selection: Default::default(),
     })

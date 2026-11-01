@@ -1,14 +1,15 @@
 #![allow(dead_code)]
+use zup_plan::RemovalKind;
 pub mod fake;
 
 use zup_core::{
     BackendResourceId, Privilege, RelativePath, ResourceKey, SelectedScope, Sha256Digest, Target,
     hash_reader,
 };
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_transaction::{
-    BackendOperation, FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork,
-    TransactionInput, TransactionPlan, compile_transaction,
+    BackendOperation, FileRemoval, TransactionInput, TransactionPlan, compile_transaction,
 };
 
 pub fn target() -> Target {
@@ -28,15 +29,15 @@ pub fn digest(bytes: &[u8]) -> Sha256Digest {
 /// The flag is a parameter rather than hard-coded so a test can ask for the
 /// truth it wants to assert: an executor that reported `true` for every file
 /// would pass every test that only ever builds a non-executable payload.
-pub fn file_with(name: &str, contents: &[u8], executable: bool) -> FileWork {
-    FileWork {
+pub fn file_with(name: &str, contents: &[u8], executable: bool) -> FileOperation {
+    FileOperation {
         executable,
         ..file(name, contents)
     }
 }
 
-pub fn file(name: &str, contents: &[u8]) -> FileWork {
-    FileWork {
+pub fn file(name: &str, contents: &[u8]) -> FileOperation {
+    FileOperation {
         key: ResourceKey::File {
             destination: format!(r"C:\PF\Acme\{name}"),
         },
@@ -46,8 +47,10 @@ pub fn file(name: &str, contents: &[u8]) -> FileWork {
         expected_sha256: digest(contents),
         expected_size: contents.len() as u64,
         privilege: Privilege::User,
-        delta: FileDelta::Create,
+        kind: FileOperationKind::Create,
         executable: false,
+
+        conflict: None,
     }
 }
 
@@ -83,7 +86,7 @@ pub fn removal_input() -> TransactionInput {
     input.retired_keys.push(key.clone());
     input.removals.push(FileRemoval {
         key,
-        kind: FileRemovalKind::RemoveOwned,
+        kind: RemovalKind::RemoveOwned,
         scope: SelectedScope::User,
         privilege: Privilege::User,
         destination: tpath(r"C:\PF\Acme\old.exe"),

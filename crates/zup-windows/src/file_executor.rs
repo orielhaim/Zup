@@ -7,9 +7,8 @@ use sha2::Digest as _;
 use thiserror::Error;
 use zup_bundle::{PayloadError, PayloadSource};
 use zup_core::{ResourceKey, Sha256Digest, hash_reader};
-use zup_transaction::{
-    FileDelta, FilePrecondition, NodeKind, OperationId, ReconcileResult, TransactionNode,
-};
+use zup_plan::{FileOperationKind, FilePrecondition};
+use zup_transaction::{NodeKind, OperationId, ReconcileResult, TransactionNode};
 
 use crate::durable::{DurableError, move_durable};
 use crate::lowering::{host_path, target_path_from_host};
@@ -300,7 +299,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 }
             }
             NodeKind::FileMutation {
-                delta: FileDelta::Create | FileDelta::RestoreOwned,
+                delta: FileOperationKind::Create | FileOperationKind::RestoreOwned,
                 ..
             } => match file_identity(destination)? {
                 None => Ok(ReconcileResult::NotApplied),
@@ -316,7 +315,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
                 _ => Ok(ReconcileResult::Ambiguous),
             },
             NodeKind::FileMutation {
-                delta: FileDelta::Replace | FileDelta::RepairOwned,
+                delta: FileOperationKind::Replace | FileOperationKind::RepairOwned,
                 ..
             } => {
                 let FilePrecondition::Exact { size, sha256 } = node
@@ -866,10 +865,10 @@ pub fn apply_node<P: PayloadSource>(
                 .cloned()
                 .unwrap_or(FilePrecondition::Absent);
             match delta {
-                FileDelta::Create | FileDelta::RestoreOwned => {
+                FileOperationKind::Create | FileOperationKind::RestoreOwned => {
                     exec.create_file(op, dest, sha256, size, key)
                 }
-                FileDelta::Replace | FileDelta::RepairOwned => {
+                FileOperationKind::Replace | FileOperationKind::RepairOwned => {
                     exec.replace_file(op, dest, sha256, size, &precondition, key)
                 }
                 _ => Err(WindowsFileExecutorError::Unsupported {

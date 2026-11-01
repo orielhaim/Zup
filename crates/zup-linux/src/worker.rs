@@ -491,7 +491,7 @@ struct PreparedPlan {
     carrier_path: PathBuf,
     carrier_pin: Option<FilePin>,
     plan: zup_transaction::TransactionPlan,
-    target_plan: zup_platform::TargetPlan,
+    target_plan: zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     state_root: PathBuf,
     roots: MachineRoots,
     systemd: crate::machine::SystemdRoots,
@@ -632,7 +632,7 @@ fn prepare_operation(
         zup_protocol::privileged_operation::UPGRADE => zup_runtime::Operation::Upgrade,
         zup_protocol::privileged_operation::MODIFY => zup_runtime::Operation::Modify,
         zup_protocol::privileged_operation::REPAIR => zup_runtime::Operation::Repair {
-            force_files: intent.force_files,
+            force: intent.force,
         },
         zup_protocol::privileged_operation::UNINSTALL => zup_runtime::Operation::Uninstall,
         zup_protocol::privileged_operation::APPLY => zup_runtime::Operation::Apply,
@@ -657,9 +657,7 @@ fn prepare_operation(
     crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
 
-    let settled_before = seed
-        .as_ref()
-        .map(|ledger| ledger.committed_transaction.clone());
+    let settled_before = seed.as_ref().map(|ledger| ledger.committed_transaction);
     recover_pending(
         &state_root,
         &app_id,
@@ -746,7 +744,7 @@ fn prepare_operation(
         let settled_after = ledger_store
             .load(&target_plan.app.id, SelectedScope::Machine)
             .map_err(|error| IpcError::Transaction(error.to_string()))?
-            .map(|ledger| ledger.committed_transaction.clone());
+            .map(|ledger| ledger.committed_transaction);
         if settled_after != settled_before {
             return Err(IpcError::WorkerStalePlan);
         }
@@ -927,7 +925,7 @@ fn recover_one(
 fn ledger_store_publish(
     state_root: &Path,
     record: &zup_transaction::TransactionRecord,
-) -> Result<zup_exec::InstallLedger, IpcError> {
+) -> Result<zup_plan::InstallLedger, IpcError> {
     crate::ledger::LinuxLedgerStore::new(state_root)
         .publish_committed(record, SelectedScope::Machine)
         .map_err(|error| IpcError::Transaction(error.to_string()))
@@ -954,10 +952,10 @@ fn is_preset_source(source: &zup_core::RelativePath) -> bool {
 }
 
 fn enforce_machine_policy(
-    target: &zup_platform::TargetPlan,
+    target: &zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     roots: &MachineRoots,
 ) -> Result<(), IpcError> {
-    let policy = |path: &zup_platform::TargetPath| {
+    let policy = |path: &zup_plan::TargetPath| {
         let host = crate::lowering::to_host_path(path)
             .map_err(|error| IpcError::Policy(format!("destination: {error}")))?;
         authorize_machine_destination(&host, roots)
@@ -1236,6 +1234,7 @@ fn execute_prepared(
         },
         ControlGate::Continue => {
             let _ = channel.send(Message::Progress(ProgressReport {
+                phase: zup_core::OperationPhase::Prepare,
                 kind: ProgressKind::OperationStarted,
                 detail: prepared.operation.clone(),
                 completed: None,
@@ -1244,6 +1243,7 @@ fn execute_prepared(
             if fault == WorkerFault::ProgressDuringExecute {
                 channel.fail_next_send = true;
                 let _ = channel.send(Message::Progress(ProgressReport {
+                    phase: zup_core::OperationPhase::Files,
                     kind: ProgressKind::OperationProgress,
                     detail: prepared.operation.clone(),
                     completed: Some(0),
@@ -1282,6 +1282,7 @@ fn execute_prepared(
     if fault == WorkerFault::DisconnectAfterCommit {
         channel.fail_next_send = true;
         let _ = channel.send(Message::Progress(ProgressReport {
+            phase: zup_core::OperationPhase::Files,
             kind: ProgressKind::OperationProgress,
             detail: prepared.operation.clone(),
             completed: Some(total_files),
@@ -1316,6 +1317,7 @@ fn execute_prepared(
         }
     };
     let _ = channel.send(Message::Progress(ProgressReport {
+        phase: zup_core::OperationPhase::Files,
         kind: ProgressKind::OperationProgress,
         detail: prepared.operation.clone(),
         completed: Some(total_files),
@@ -1456,7 +1458,7 @@ mod tests {
     fn machine_policy_rejects_a_foreign_destination() {
         let target = zup_core::Target::parse("linux-x64").expect("a target");
         let roots = MachineRoots::production();
-        let outside = zup_platform::TargetPath::new(target, "/etc/tool").expect("a path");
+        let outside = zup_plan::TargetPath::new(target, "/etc/tool").expect("a path");
         assert!(
             authorize_machine_destination(
                 &crate::lowering::to_host_path(&outside).expect("lowers"),

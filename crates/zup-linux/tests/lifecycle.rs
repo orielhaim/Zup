@@ -149,7 +149,7 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
 
     std::fs::remove_file(install.join("keep.dat")).expect("delete");
     std::fs::write(install.join("unrelated.txt"), b"not owned").expect("an unrelated file");
-    let outcome = run_installer(&v1, &user.state, Operation::Repair { force_files: false });
+    let outcome = run_installer(&v1, &user.state, Operation::Repair { force: false });
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "a repair commits: {outcome:?}"
@@ -165,7 +165,7 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         installer: v1.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: Operation::Repair { force_files: false },
+        action: Operation::Repair { force: false },
         install_dir_override: None,
         selection: Default::default(),
     });
@@ -179,7 +179,7 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         "the refusal leaves the bytes alone"
     );
 
-    let outcome = run_installer(&v1, &user.state, Operation::Repair { force_files: true });
+    let outcome = run_installer(&v1, &user.state, Operation::Repair { force: true });
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "a forced repair commits: {outcome:?}"
@@ -342,7 +342,7 @@ fn repair_runs_from_the_maintenance_copy_without_the_download() {
     let outcome = run_installer(
         &maintenance,
         &user.state,
-        Operation::Repair { force_files: false },
+        Operation::Repair { force: false },
     );
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),

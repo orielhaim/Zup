@@ -63,6 +63,7 @@ fn group(value: &zup_presentation::ChangeGroup) -> ChangeGroup {
 
 pub fn plan(value: &zup_presentation::PlanPreview) -> PlanPreview {
     PlanPreview {
+        basis: value.basis,
         scope: scope(value.scope),
         install_directory: value.install_directory.clone(),
         selected_components: components(&value.selected_components),

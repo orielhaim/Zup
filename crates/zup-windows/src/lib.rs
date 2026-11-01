@@ -152,7 +152,6 @@ pub use ledger::{InstallLedgerStore, LedgerError};
 pub use locations::CanonicalWindowsLocations;
 pub use lowering::{
     TargetPathLoweringError, TargetPathValidationError, to_host_path, validate_windows_target_path,
-    windows_target_path_identity,
 };
 #[cfg(windows)]
 pub use machine_authority::MachineRoot;

@@ -1,31 +1,30 @@
 use zup_core::Privilege;
-use zup_exec::{ExecutionPlan, FileOperationKind, OwnedResource, ServiceOperationKind};
-use zup_platform::TargetPlan;
-use zup_transaction::{
-    BackendOperation, FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, FileWork,
-    TransactionInput,
+use zup_plan::{
+    DesiredState, ExecutionPlan, FileOperationKind, IntegrationChangeKind, OwnedResource,
 };
+
+use zup_transaction::{BackendOperation, FileRemoval, TransactionInput};
 
 use crate::error::{ExecError, PlanError};
 use crate::integration::GENERATED_PREFIX;
 use crate::refresh::RefreshRequest;
 
 pub fn snapshot_services(
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     manager: &mut dyn crate::systemd::SystemdManager,
     systemd: &crate::machine::SystemdRoots,
-) -> Result<Vec<zup_exec::ObservedService>, ExecError> {
+) -> Result<Vec<zup_plan::ObservedService>, ExecError> {
     crate::service_ops::snapshot_services(target, manager, systemd)
 }
 
 pub fn requires_service_manager(
-    target: &TargetPlan,
-    ledger: Option<&zup_exec::InstallLedger>,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    ledger: Option<&zup_plan::InstallLedger>,
 ) -> bool {
     !target.services.is_empty() || ledger_has_services(ledger)
 }
 
-pub fn ledger_has_services(ledger: Option<&zup_exec::InstallLedger>) -> bool {
+pub fn ledger_has_services(ledger: Option<&zup_plan::InstallLedger>) -> bool {
     ledger.is_some_and(|ledger| {
         ledger
             .resources
@@ -36,7 +35,7 @@ pub fn ledger_has_services(ledger: Option<&zup_exec::InstallLedger>) -> bool {
 
 pub fn compile_execution_plan(
     execution: &ExecutionPlan,
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
 ) -> Result<TransactionInput, PlanError> {
     let input = compile_files_only(execution, target)?;
     for (kind, count) in [
@@ -65,9 +64,11 @@ pub fn compile_execution_plan(
 
 fn compile_files_only(
     execution: &ExecutionPlan,
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
 ) -> Result<TransactionInput, PlanError> {
-    let mut input = TransactionInput::new(target.target);
+    let binding = execution.validate_desired(Some(target))?;
+    let mut input = TransactionInput::new(binding.target);
+    input.observed_transaction = binding.observed_transaction;
     input.selected_components = execution.selected_components.clone();
     input.install_directory = Some(target.install_directory.clone());
     input.uninstall = execution.uninstall;
@@ -102,34 +103,7 @@ fn compile_files_only(
                 });
             }
         }
-        input.files.push(FileWork {
-            key: file.key.clone(),
-            source_relative: file.source_relative.clone(),
-            destination: file.destination.clone(),
-            precondition: match file.precondition {
-                zup_exec::FilePrecondition::Absent => FilePrecondition::Absent,
-                zup_exec::FilePrecondition::Exact { size, sha256 } => {
-                    FilePrecondition::Exact { size, sha256 }
-                }
-            },
-            expected_sha256: file.expected_sha256,
-            expected_size: file.expected_size,
-            privilege: file.privilege,
-            executable: file.executable,
-            delta: match file.kind {
-                FileOperationKind::Create => FileDelta::Create,
-                FileOperationKind::Replace => FileDelta::Replace,
-                FileOperationKind::RestoreOwned => FileDelta::RestoreOwned,
-                FileOperationKind::RepairOwned => FileDelta::RepairOwned,
-                FileOperationKind::NoOp => FileDelta::NoOp,
-                FileOperationKind::Conflict | FileOperationKind::Drift => {
-                    return Err(PlanError::Undecided {
-                        destination: file.destination.to_string(),
-                        kind: file.kind,
-                    });
-                }
-            },
-        });
+        input.files.push(file.clone());
     }
 
     for removal in &execution.removals {
@@ -165,10 +139,7 @@ fn compile_files_only(
             }
             input.removals.push(FileRemoval {
                 key: removal.key.clone(),
-                kind: match removal.kind {
-                    zup_exec::RemovalKind::RemoveOwned => FileRemovalKind::RemoveOwned,
-                    zup_exec::RemovalKind::Drift => FileRemovalKind::Drift,
-                },
+                kind: removal.kind,
                 scope: removal.scope,
                 privilege: removal.privilege,
                 destination: destination.clone(),
@@ -214,20 +185,17 @@ pub struct ServiceCompilation<'a> {
     pub systemd: &'a crate::machine::SystemdRoots,
 
     pub manager: &'a mut dyn crate::systemd::SystemdManager,
-
-    pub force_services: bool,
 }
 
 pub fn compile_machine_execution_plan(
     execution: &ExecutionPlan,
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     compilation: ServiceCompilation<'_>,
 ) -> Result<TransactionInput, PlanError> {
     let ServiceCompilation {
         roots,
         systemd,
         manager,
-        force_services,
     } = compilation;
     if target.scope != zup_core::SelectedScope::Machine {
         return Err(PlanError::UnsupportedKind {
@@ -297,7 +265,7 @@ pub fn compile_machine_execution_plan(
 
         validate_service_binary(op, &target_files, roots, &unit)?;
 
-        let derived = crate::services::DesiredService::derive(&target_service_for(op, target)?)
+        let derived = crate::services::SystemdUnit::derive(&target_service_for(op, target)?)
             .map_err(|error| PlanError::Service {
                 unit: unit.clone(),
                 reason: error.to_string(),
@@ -311,7 +279,7 @@ pub fn compile_machine_execution_plan(
 
         let previous_source =
             crate::service_ops::read_canonical_source(&canonical).map_err(into_service)?;
-        if matches!(op.kind, ServiceOperationKind::Create)
+        if matches!(op.kind, IntegrationChangeKind::Create)
             && previous_source
                 .as_ref()
                 .is_some_and(|bytes| bytes != &derived.bytes)
@@ -330,7 +298,7 @@ pub fn compile_machine_execution_plan(
                     reason: format!("systemd is unavailable: {error}"),
                 })?;
         let operation = match op.kind {
-            ServiceOperationKind::Create | ServiceOperationKind::UpdateOwned => {
+            IntegrationChangeKind::Create | IntegrationChangeKind::UpdateOwned => {
                 crate::service_exec::apply_operation(
                     op,
                     &unit,
@@ -341,12 +309,11 @@ pub fn compile_machine_execution_plan(
                 )
                 .map_err(into_service)?
             }
-            ServiceOperationKind::RestoreOwned => {
-                if previous_source.is_some() && !force_services {
+            IntegrationChangeKind::RestoreOwned | IntegrationChangeKind::RepairOwned => {
+                if op.kind == IntegrationChangeKind::RestoreOwned && previous_source.is_some() {
                     return Err(PlanError::Service {
                         unit,
-                        reason: "the planner could not decide, so there is no transaction to run"
-                            .into(),
+                        reason: "a missing service was recreated after observation".into(),
                     });
                 }
                 crate::service_exec::apply_operation(
@@ -359,17 +326,8 @@ pub fn compile_machine_execution_plan(
                 )
                 .map_err(into_service)?
             }
-            ServiceOperationKind::Drift if force_services => crate::service_exec::apply_operation(
-                op,
-                &unit,
-                &derived.bytes,
-                true,
-                &previous_policy,
-                previous_source.as_deref(),
-            )
-            .map_err(into_service)?,
-            ServiceOperationKind::NoOp => continue,
-            ServiceOperationKind::Conflict | ServiceOperationKind::Drift => {
+            IntegrationChangeKind::NoOp => continue,
+            IntegrationChangeKind::Conflict | IntegrationChangeKind::Drift => {
                 return Err(PlanError::Service {
                     unit,
                     reason: "the planner could not decide, so there is no transaction to run"
@@ -418,7 +376,7 @@ pub fn compile_machine_execution_plan(
     Ok(input)
 }
 
-fn parse_service_id(op: &zup_exec::ServiceOperation) -> Result<zup_core::ServiceId, PlanError> {
+fn parse_service_id(op: &zup_plan::ServiceOperation) -> Result<zup_core::ServiceId, PlanError> {
     zup_core::ServiceId::new(&op.id).map_err(|error| PlanError::Service {
         unit: op.name.clone(),
         reason: format!("service id: {error}"),
@@ -445,7 +403,7 @@ fn check_no_full_override(unit: &str) -> Result<(), crate::error::ExecError> {
 }
 
 fn validate_service_binary(
-    op: &zup_exec::ServiceOperation,
+    op: &zup_plan::ServiceOperation,
     target_files: &std::collections::BTreeMap<String, bool>,
     roots: &crate::locations::MachineRoots,
     unit: &str,
@@ -468,9 +426,9 @@ fn validate_service_binary(
 }
 
 fn target_service_for(
-    op: &zup_exec::ServiceOperation,
-    target: &TargetPlan,
-) -> Result<zup_platform::TargetService, PlanError> {
+    op: &zup_plan::ServiceOperation,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+) -> Result<zup_plan::DesiredService<zup_plan::TargetPath>, PlanError> {
     let planned = target
         .services
         .iter()
@@ -497,8 +455,8 @@ mod tests {
     use super::*;
     use crate::test_support::FakeSystemd;
     use zup_core::{ResourceKey, ServiceId, ServiceStart};
-    use zup_exec::{ObservedServiceState, ServiceOperation, ServiceOperationKind};
-    use zup_platform::{CommandSpec, TargetPath};
+    use zup_plan::{CommandSpec, TargetPath};
+    use zup_plan::{IntegrationChangeKind, ObservedServiceState, ServiceOperation};
 
     fn target() -> zup_core::Target {
         zup_core::Target::parse("linux-x64").expect("a target")
@@ -524,7 +482,7 @@ mod tests {
         base: &tempfile::TempDir,
         start: ServiceStart,
         arguments: Vec<String>,
-    ) -> TargetPlan {
+    ) -> DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
         let binary_host = base.path().join("opt").join("acme").join("tool");
         let app = zup_core::App {
             id: zup_core::AppId::new("com.example.tool").expect("an id"),
@@ -537,7 +495,7 @@ mod tests {
         let executable = TargetPath::new(target(), binary_host.to_string_lossy()).expect("a path");
         let destination = executable.clone();
         let (size, sha256) = zup_core::hash_reader(b"elf".as_slice()).expect("bytes hash");
-        let payload = zup_platform::TargetFile {
+        let payload = zup_plan::DesiredFile {
             key: ResourceKey::File {
                 destination: destination.to_string(),
             },
@@ -548,7 +506,7 @@ mod tests {
             privilege: Privilege::System,
             executable: true,
         };
-        let service = zup_platform::TargetService {
+        let service = zup_plan::DesiredService {
             key: ResourceKey::Service {
                 id: ServiceId::new("tool").expect("an id"),
             },
@@ -559,7 +517,7 @@ mod tests {
             start,
             privilege: Privilege::System,
         };
-        TargetPlan {
+        DesiredState {
             app,
             target: target(),
             scope: zup_core::SelectedScope::Machine,
@@ -576,15 +534,7 @@ mod tests {
             services: vec![service],
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: zup_platform::TargetPlanSummary {
-                file_count: 1,
-                install_bytes: 3,
-                resource_count: 1,
-                requires_authorization: true,
-                selected_component_count: 0,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
             preset: None,
         }
     }
@@ -593,7 +543,7 @@ mod tests {
         executable: &TargetPath,
         arguments: Vec<String>,
         start: ServiceStart,
-        kind: ServiceOperationKind,
+        kind: IntegrationChangeKind,
     ) -> ServiceOperation {
         ServiceOperation {
             key: ResourceKey::Service {
@@ -613,6 +563,7 @@ mod tests {
 
     fn execution(services: Vec<ServiceOperation>) -> ExecutionPlan {
         ExecutionPlan {
+            binding: None,
             selected_components: Vec::new(),
             install_directory: None,
             uninstall: false,
@@ -623,37 +574,36 @@ mod tests {
             services,
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: zup_exec::ExecutionSummary::default(),
         }
     }
 
     fn compile(
-        plan: &TargetPlan,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         execution: &ExecutionPlan,
         roots: &crate::locations::MachineRoots,
         systemd: &crate::machine::SystemdRoots,
         manager: &mut dyn crate::systemd::SystemdManager,
-        force: bool,
     ) -> Result<TransactionInput, PlanError> {
+        let mut execution = execution.clone();
+        execution.binding = Some(zup_plan::DeploymentBinding::desired(plan, None));
         compile_machine_execution_plan(
-            execution,
+            &execution,
             plan,
             ServiceCompilation {
                 roots,
                 systemd,
                 manager,
-                force_services: force,
             },
         )
     }
 
     #[rstest::rstest]
-    #[case::create(ServiceOperationKind::Create, 1)]
-    #[case::update(ServiceOperationKind::UpdateOwned, 1)]
-    #[case::restore(ServiceOperationKind::RestoreOwned, 1)]
-    #[case::noop(ServiceOperationKind::NoOp, 0)]
+    #[case::create(IntegrationChangeKind::Create, 1)]
+    #[case::update(IntegrationChangeKind::UpdateOwned, 1)]
+    #[case::restore(IntegrationChangeKind::RestoreOwned, 1)]
+    #[case::noop(IntegrationChangeKind::NoOp, 0)]
     fn executable_deltas_become_typed_operations(
-        #[case] kind: ServiceOperationKind,
+        #[case] kind: IntegrationChangeKind,
         #[case] expected: usize,
     ) {
         let (base, roots, systemd) = isolated();
@@ -667,7 +617,7 @@ mod tests {
             kind,
         );
         let execution = execution(vec![operation]);
-        let input = compile(&plan, &execution, &roots, &systemd, &mut manager, false)
+        let input = compile(&plan, &execution, &roots, &systemd, &mut manager)
             .expect("an executable delta compiles");
         assert_eq!(input.backend_operations.len(), expected, "{kind:?}");
         for operation in &input.backend_operations {
@@ -694,10 +644,10 @@ mod tests {
             &executable,
             vec!["--serve".into()],
             to,
-            ServiceOperationKind::UpdateOwned,
+            IntegrationChangeKind::UpdateOwned,
         );
         let execution = execution(vec![desired]);
-        let input = compile(&plan, &execution, &roots, &systemd, &mut manager, false)
+        let input = compile(&plan, &execution, &roots, &systemd, &mut manager)
             .expect("a transition compiles");
         assert_eq!(input.backend_operations.len(), 1, "{to:?}");
     }
@@ -711,11 +661,11 @@ mod tests {
             &executable,
             vec!["--serve".into()],
             ServiceStart::Automatic,
-            ServiceOperationKind::Create,
+            IntegrationChangeKind::Create,
         )]);
         let mut manager = FakeSystemd::default();
         manager.version = "239".into();
-        let error = compile(&plan, &execution, &roots, &systemd, &mut manager, false)
+        let error = compile(&plan, &execution, &roots, &systemd, &mut manager)
             .expect_err("systemd 239 cannot run Type=exec units");
         assert!(error.to_string().contains("239"), "{error}");
         assert!(
@@ -728,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn drift_needs_force_and_conflict_always_refuses() {
+    fn only_explicit_owned_repairs_can_restore_drift() {
         let (base, roots, systemd) = isolated();
         let plan = service_plan(&base, ServiceStart::Automatic, vec!["--serve".into()]);
         let executable = plan.services[0].command.executable.clone();
@@ -737,24 +687,36 @@ mod tests {
                 &executable,
                 vec!["--serve".into()],
                 ServiceStart::Automatic,
-                ServiceOperationKind::Drift,
+                IntegrationChangeKind::Drift,
             )])
         };
         let mut manager = FakeSystemd::default();
-        assert!(compile(&plan, &drift(), &roots, &systemd, &mut manager, false).is_err());
+        assert!(compile(&plan, &drift(), &roots, &systemd, &mut manager).is_err());
         let mut manager = FakeSystemd::default();
         assert!(
-            compile(&plan, &drift(), &roots, &systemd, &mut manager, true).is_ok(),
+            compile(
+                &plan,
+                &execution(vec![operation_at(
+                    &executable,
+                    vec!["--serve".into()],
+                    ServiceStart::Automatic,
+                    IntegrationChangeKind::RepairOwned
+                )]),
+                &roots,
+                &systemd,
+                &mut manager
+            )
+            .is_ok(),
             "force restores owned content"
         );
         let conflict = execution(vec![operation_at(
             &executable,
             vec!["--serve".into()],
             ServiceStart::Automatic,
-            ServiceOperationKind::Conflict,
+            IntegrationChangeKind::Conflict,
         )]);
         let mut manager = FakeSystemd::default();
-        assert!(compile(&plan, &conflict, &roots, &systemd, &mut manager, true).is_err());
+        assert!(compile(&plan, &conflict, &roots, &systemd, &mut manager).is_err());
     }
 
     #[test]
@@ -768,7 +730,7 @@ mod tests {
                 &executable,
                 vec!["--serve".into()],
                 start,
-                ServiceOperationKind::Create,
+                IntegrationChangeKind::Create,
             )])
         };
         let mut manager = FakeSystemd::default();
@@ -778,7 +740,6 @@ mod tests {
             &roots,
             &systemd,
             &mut manager,
-            false,
         )
         .expect("a plan compiles");
         let mut manager = FakeSystemd::default();
@@ -788,7 +749,6 @@ mod tests {
             &roots,
             &systemd,
             &mut manager,
-            false,
         )
         .expect("a plan compiles");
         let left_plan = zup_transaction::compile_transaction(&left_input).expect("a plan");
@@ -808,13 +768,13 @@ mod tests {
             &executable,
             vec!["--serve".into()],
             ServiceStart::Automatic,
-            ServiceOperationKind::Create,
+            IntegrationChangeKind::Create,
         )]);
         let mut manager = FakeSystemd::default();
         manager
             .fail_always
             .insert("unit_file_state".to_owned(), "the bus is gone".to_owned());
-        assert!(compile(&plan, &execution, &roots, &systemd, &mut manager, false).is_err());
+        assert!(compile(&plan, &execution, &roots, &systemd, &mut manager).is_err());
         assert!(
             std::fs::read_dir(&systemd.unit_dir)
                 .expect("the unit tree reads")
@@ -834,10 +794,10 @@ mod tests {
             &executable,
             vec!["--serve".into()],
             ServiceStart::Automatic,
-            ServiceOperationKind::Create,
+            IntegrationChangeKind::Create,
         )]);
         let mut manager = FakeSystemd::default();
-        assert!(compile(&plan, &execution, &roots, &systemd, &mut manager, false).is_err());
+        assert!(compile(&plan, &execution, &roots, &systemd, &mut manager).is_err());
     }
 
     #[test]
@@ -855,23 +815,24 @@ mod tests {
         );
     }
 
-    fn ledger_with_services(service: bool) -> Option<zup_exec::InstallLedger> {
+    fn ledger_with_services(service: bool) -> Option<zup_plan::InstallLedger> {
         use zup_core::{AppId, SelectedScope};
-        let mut ledger = zup_exec::InstallLedger::new(
+        let mut ledger = zup_plan::InstallLedger::new(
             AppId::new("com.example.tool").expect("an id"),
             target(),
             SelectedScope::Machine,
+            zup_core::TransactionId::new_v7(),
         );
         if service {
             ledger.resources.insert(
                 ResourceKey::Service {
                     id: ServiceId::new("tool").expect("an id"),
                 },
-                zup_exec::OwnedResource::Service {
+                zup_plan::OwnedResource::Service {
                     name: "Tool".to_owned(),
                     privilege: Privilege::System,
-                    previous: zup_exec::ServiceState::Absent,
-                    installed: zup_exec::ServiceState::Absent,
+                    previous: zup_plan::ServiceState::Absent,
+                    installed: zup_plan::ServiceState::Absent,
                 },
             );
         }
@@ -919,22 +880,22 @@ mod tests {
         );
 
         let mut execution = execution(vec![]);
-        execution.removals.push(zup_exec::RemovalOperation {
+        execution.removals.push(zup_plan::RemovalOperation {
             key: ResourceKey::Service {
                 id: ServiceId::new("tool").expect("an id"),
             },
-            kind: zup_exec::RemovalKind::RemoveOwned,
+            kind: zup_plan::RemovalKind::RemoveOwned,
             scope: zup_core::SelectedScope::Machine,
             privilege: Privilege::System,
-            owned: zup_exec::OwnedResource::Service {
+            owned: zup_plan::OwnedResource::Service {
                 name: "Tool".to_owned(),
                 privilege: Privilege::System,
-                previous: zup_exec::ServiceState::Absent,
-                installed: zup_exec::ServiceState::Absent,
+                previous: zup_plan::ServiceState::Absent,
+                installed: zup_plan::ServiceState::Absent,
             },
         });
         let mut manager = FakeSystemd::default();
-        let input = compile(&desired, &execution, &roots, &systemd, &mut manager, false)
+        let input = compile(&desired, &execution, &roots, &systemd, &mut manager)
             .expect("a service removal compiles");
         assert_eq!(input.backend_operations.len(), 1);
         assert!(

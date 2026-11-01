@@ -925,6 +925,10 @@
       "description": "What an install plan would do.",
       "type": "object",
       "properties": {
+        "machine_state_observed": {
+          "description": "Whether resource changes were compared against the destination machine.",
+          "type": "boolean"
+        },
         "scope": {
           "description": "`user` or `machine`.",
           "type": "string"
@@ -954,6 +958,7 @@
         }
       },
       "required": [
+        "machine_state_observed",
         "scope",
         "estimated_bytes",
         "change_count",

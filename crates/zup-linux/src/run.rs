@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use zup_bundle::{PackagePayloadSource, PayloadError, PayloadReader, PayloadSource};
 use zup_core::{ResourceKey, SelectedScope, Sha256Digest};
-use zup_exec::{InstallLedger, OwnedResource};
+use zup_plan::{InstallLedger, OwnedResource};
 
 use crate::carrier::Carrier;
 use crate::error::{ExecError, PathError};

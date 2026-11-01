@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Versioned preset protocol and presentation domain model shared by zup installer hosts and presets"
 
 [dependencies]
+zup-core.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror.workspace = true

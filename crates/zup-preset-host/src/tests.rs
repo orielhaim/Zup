@@ -1,5 +1,5 @@
 use zup_core::{ComponentId as EngineComponentId, InstallScope, Installer, SelectedScope};
-use zup_exec::{InstallLedger, LifecycleAction};
+use zup_plan::{InstallLedger, LifecycleAction};
 use zup_preset_protocol::{
     Action, Capabilities, ComponentId, DiagnosticKind, InstallationHealth, InstallerState,
     OperationPhase, Surface,
@@ -64,6 +64,7 @@ fn installer() -> Installer {
 
 fn preview(scope: SelectedScope) -> zup_presentation::PlanPreview {
     zup_presentation::PlanPreview {
+        basis: zup_presentation::PlanBasis::Simulation,
         application: "com.acme.app".into(),
         version: "1.4.0".into(),
         scope,
@@ -98,6 +99,7 @@ fn maintenance_host() -> HostState {
         installer.app.id.clone(),
         installer.target,
         SelectedScope::Machine,
+        zup_core::TransactionId::new_v7(),
     );
     ledger.version = installer.app.version.clone();
     ledger.selected_components = vec![EngineComponentId::new("core").expect("id")];
@@ -168,6 +170,7 @@ fn an_install_runs_reports_progress_and_succeeds() {
     );
 
     host.observe(&RuntimeEvent::Progress {
+        phase: zup_core::OperationPhase::Files,
         completed: 40,
         total: 100,
         action: "Installing files".into(),
@@ -181,7 +184,7 @@ fn an_install_runs_reports_progress_and_succeeds() {
     });
     assert_eq!(
         host.snapshot().progress.as_ref().expect("progress").label,
-        "Registering services…"
+        "Applying changes…"
     );
 
     host.finish_with(&InstallOutcome::Committed);
@@ -195,6 +198,7 @@ fn a_cancelled_operation_returns_to_its_surface() {
     let mut host = install_host();
     host.accept(Action::Install);
     host.observe(&RuntimeEvent::Progress {
+        phase: zup_core::OperationPhase::Files,
         completed: 10,
         total: 100,
         action: "Installing files".into(),
@@ -206,6 +210,7 @@ fn a_cancelled_operation_returns_to_its_surface() {
     );
 
     host.observe(&RuntimeEvent::Progress {
+        phase: zup_core::OperationPhase::Files,
         completed: 20,
         total: 100,
         action: "Installing files".into(),
@@ -826,6 +831,7 @@ fn a_fresh_session_over_an_existing_installation_names_what_it_replaces() {
         installer.app.id.clone(),
         installer.target,
         SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
     );
     ledger.version = semver::Version::parse("1.0.0").expect("version");
     let options = surface::install_options(

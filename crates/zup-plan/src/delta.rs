@@ -1,22 +1,21 @@
-//! Pure delta planner: TargetPlan + HostSnapshot → ExecutionPlan.
+//! Pure delta planner: DesiredState<crate::TargetPath, crate::TargetPath> + HostSnapshot → ExecutionPlan.
 
 use std::collections::BTreeMap;
 
+use crate::DesiredState;
 use miette::Diagnostic;
 use thiserror::Error;
 use tracing::{info, info_span};
 use zup_core::ResourceKey;
-use zup_platform::TargetPlan;
 
 use crate::observe::{
     HostSnapshot, ObservedFileAssociationState, ObservedFileState, ObservedLauncherState,
     ObservedProtocolState, ObservedServiceState,
 };
 use crate::operation::{
-    Conflict, ExecutionPlan, ExecutionSummary, FileAssociationOperation,
-    FileAssociationOperationKind, FileOperation, FileOperationKind, FilePrecondition,
-    LauncherOperation, LauncherOperationKind, PathOperation, PathOperationKind, ProtocolOperation,
-    ProtocolOperationKind, ServiceOperation, ServiceOperationKind,
+    Conflict, ExecutionPlan, FileAssociationOperation, FileOperation, FileOperationKind,
+    FilePrecondition, IntegrationChangeKind, LauncherOperation, PathOperation, PathOperationKind,
+    ProtocolOperation, ServiceOperation,
 };
 use crate::{
     ExtensionState, FileAssociationState, InstallLedger, LauncherState, OwnedResource,
@@ -26,35 +25,35 @@ use crate::{
 /// Errors produced while computing an execution plan (consistency / overflow).
 #[derive(Debug, Error, Diagnostic)]
 pub enum ExecutionPlanError {
+    #[error(transparent)]
+    #[diagnostic(code(zup_plan::invalid_contract))]
+    Contract(#[from] crate::ContractError),
     #[error("missing snapshot observation for `{key}`")]
-    #[diagnostic(code(zup_exec::missing_snapshot_observation))]
+    #[diagnostic(code(zup_plan::missing_snapshot_observation))]
     MissingSnapshotObservation { key: String },
 
     #[error("duplicate snapshot observation for `{key}`")]
-    #[diagnostic(code(zup_exec::duplicate_snapshot_observation))]
+    #[diagnostic(code(zup_plan::duplicate_snapshot_observation))]
     DuplicateSnapshotObservation { key: String },
 
     #[error("snapshot resource mismatch for `{key}`: {reason}")]
-    #[diagnostic(code(zup_exec::snapshot_resource_mismatch))]
+    #[diagnostic(code(zup_plan::snapshot_resource_mismatch))]
     SnapshotResourceMismatch { key: String, reason: String },
 
-    #[error("execution summary size overflow")]
-    #[diagnostic(code(zup_exec::size_overflow))]
-    SizeOverflow,
-
     #[error("installation ledger identity or schema mismatch")]
-    #[diagnostic(code(zup_exec::ledger_mismatch))]
+    #[diagnostic(code(zup_plan::ledger_mismatch))]
     LedgerMismatch,
 }
 
 /// Compare desired and observed state. Pure - zero I/O.
 pub fn plan_execution(
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
 ) -> Result<ExecutionPlan, ExecutionPlanError> {
     let _span = info_span!("plan_execution").entered();
 
+    target.validate_resolved()?;
     validate_snapshot(target, snapshot)?;
     if ledger.is_some_and(|ledger| {
         ledger.schema != crate::INSTALL_LEDGER_SCHEMA
@@ -65,35 +64,22 @@ pub fn plan_execution(
         return Err(ExecutionPlanError::LedgerMismatch);
     }
 
-    let mut summary = ExecutionSummary {
-        requires_authorization: target.summary.requires_authorization,
-        ..Default::default()
-    };
-
-    let files = plan_files(target, snapshot, ledger, &mut summary)?;
-    let launchers = plan_launchers(target, snapshot, ledger, &mut summary);
-    let path_entries = plan_paths(target, snapshot, ledger, &mut summary);
-    let services = plan_services(target, snapshot, ledger, &mut summary);
-    let protocols = plan_protocols(target, snapshot, ledger, &mut summary);
-    let file_associations = plan_file_associations(target, snapshot, ledger, &mut summary);
+    let files = plan_files(target, snapshot, ledger);
+    let launchers = plan_launchers(target, snapshot, ledger);
+    let path_entries = plan_paths(target, snapshot, ledger);
+    let services = plan_services(target, snapshot, ledger);
+    let protocols = plan_protocols(target, snapshot, ledger);
+    let file_associations = plan_file_associations(target, snapshot, ledger);
 
     info!(
-        create = summary.files_create
-            + summary.launchers_create
-            + summary.path_entries_add
-            + summary.services_create
-            + summary.protocols_create
-            + summary.file_associations_create,
-        conflict = summary.files_conflict
-            + summary.launchers_conflict
-            + summary.path_entries_conflict
-            + summary.services_conflict
-            + summary.protocols_conflict
-            + summary.file_associations_conflict,
+        files = files.len(),
+        launchers = launchers.len(),
+        services = services.len(),
         "execution plan complete"
     );
 
     Ok(ExecutionPlan {
+        binding: Some(crate::DeploymentBinding::desired(target, ledger)),
         selected_components: target.selected_components.clone(),
         install_directory: Some(target.install_directory.clone()),
         uninstall: false,
@@ -104,7 +90,6 @@ pub fn plan_execution(
         services,
         protocols,
         file_associations,
-        summary,
     })
 }
 
@@ -113,40 +98,9 @@ fn key_debug(key: &ResourceKey) -> String {
 }
 
 fn validate_snapshot(
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
 ) -> Result<(), ExecutionPlanError> {
-    check_unique(&snapshot.files.iter().map(|o| &o.key).collect::<Vec<_>>())?;
-    check_unique(
-        &snapshot
-            .launchers
-            .iter()
-            .map(|o| &o.key)
-            .collect::<Vec<_>>(),
-    )?;
-    check_unique(
-        &snapshot
-            .path_entries
-            .iter()
-            .map(|o| &o.key)
-            .collect::<Vec<_>>(),
-    )?;
-    check_unique(&snapshot.services.iter().map(|o| &o.key).collect::<Vec<_>>())?;
-    check_unique(
-        &snapshot
-            .protocols
-            .iter()
-            .map(|o| &o.key)
-            .collect::<Vec<_>>(),
-    )?;
-    check_unique(
-        &snapshot
-            .file_associations
-            .iter()
-            .map(|o| &o.key)
-            .collect::<Vec<_>>(),
-    )?;
-
     // Files: key + destination identity.
     let mut seen = BTreeMap::new();
     for observed in &snapshot.files {
@@ -215,7 +169,6 @@ fn validate_snapshot(
         }
     }
 
-    // Search path, services, protocols, associations: key presence only.
     check_pairs(
         &target
             .path_entries
@@ -257,18 +210,60 @@ fn validate_snapshot(
         "file association",
     )?;
 
-    Ok(())
-}
-
-fn check_unique(keys: &[&ResourceKey]) -> Result<(), ExecutionPlanError> {
-    let mut seen = BTreeMap::new();
-    for key in keys {
-        if seen.insert(*key, ()).is_some() {
-            return Err(ExecutionPlanError::DuplicateSnapshotObservation {
-                key: key_debug(key),
-            });
+    let mismatch = |key: &ResourceKey, reason: &str| ExecutionPlanError::SnapshotResourceMismatch {
+        key: key_debug(key),
+        reason: reason.into(),
+    };
+    for resource in &target.path_entries {
+        let observed = snapshot
+            .path_entries
+            .iter()
+            .find(|observed| observed.key == resource.key)
+            .expect("presence validated");
+        if observed.desired != resource.value || observed.scope != resource.scope {
+            return Err(mismatch(&resource.key, "path identity or scope mismatch"));
         }
     }
+    for resource in &target.services {
+        let observed = snapshot
+            .services
+            .iter()
+            .find(|observed| observed.key == resource.key)
+            .expect("presence validated");
+        if observed.id != resource.id {
+            return Err(mismatch(&resource.key, "service identity mismatch"));
+        }
+    }
+    for resource in &target.protocols {
+        let observed = snapshot
+            .protocols
+            .iter()
+            .find(|observed| observed.key == resource.key)
+            .expect("presence validated");
+        if observed.scheme != resource.scheme || observed.scope != resource.scope {
+            return Err(mismatch(
+                &resource.key,
+                "protocol identity or scope mismatch",
+            ));
+        }
+    }
+    for resource in &target.file_associations {
+        let observed = snapshot
+            .file_associations
+            .iter()
+            .find(|observed| observed.key == resource.key)
+            .expect("presence validated");
+        if observed.id != resource.id.as_str()
+            || observed.extension != resource.extension.as_str()
+            || observed.scope != resource.scope
+        {
+            return Err(mismatch(
+                &resource.key,
+                "association identity, extension or scope mismatch",
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -304,13 +299,18 @@ fn check_pairs(
 }
 
 fn plan_files(
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
-    summary: &mut ExecutionSummary,
-) -> Result<Vec<FileOperation>, ExecutionPlanError> {
+) -> Vec<FileOperation> {
     let mut out = Vec::with_capacity(target.files.len());
-    for (desired, observed) in target.files.iter().zip(snapshot.files.iter()) {
+    let observations: BTreeMap<_, _> = snapshot
+        .files
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for desired in target.files.iter() {
+        let observed = observations[&desired.key];
         let owned = ledger.and_then(|ledger| ledger.resources.get(&desired.key));
         let installed = match owned {
             Some(OwnedResource::File {
@@ -318,26 +318,16 @@ fn plan_files(
                 sha256,
                 size,
                 ..
-            }) if destination == &desired.destination => Some((*size, *sha256)),
+            }) if destination.equivalent(&desired.destination) => Some((*size, *sha256)),
             _ => None,
         };
-        summary.total_desired_bytes = summary
-            .total_desired_bytes
-            .checked_add(desired.size)
-            .ok_or(ExecutionPlanError::SizeOverflow)?;
 
         let (kind, precondition, conflict) = if owned.is_some() && installed.is_none()
             || installed.is_some_and(|identity| !matches!(&observed.state, ObservedFileState::File { size, sha256 } if (*size, *sha256) == identity))
         {
-            summary.files_conflict += 1;
             (FileOperationKind::Drift, FilePrecondition::Absent, Some(Conflict::File { path: observed.path.to_string() }))
         } else { match &observed.state {
             ObservedFileState::Absent => {
-                summary.files_create += 1;
-                summary.write_bytes = summary
-                    .write_bytes
-                    .checked_add(desired.size)
-                    .ok_or(ExecutionPlanError::SizeOverflow)?;
                 (FileOperationKind::Create, FilePrecondition::Absent, None)
             }
             ObservedFileState::File { size, sha256 } => {
@@ -346,22 +336,14 @@ fn plan_files(
                     sha256: *sha256,
                 };
                 if *sha256 == desired.sha256 {
-                    summary.files_unchanged += 1;
                     (FileOperationKind::NoOp, precondition, None)
                 } else if installed.is_some() {
-                    summary.files_replace += 1;
-                    summary.write_bytes = summary
-                        .write_bytes
-                        .checked_add(desired.size)
-                        .ok_or(ExecutionPlanError::SizeOverflow)?;
                     (FileOperationKind::Replace, precondition, None)
                 } else {
-                    summary.files_conflict += 1;
                     (FileOperationKind::Conflict, precondition, Some(Conflict::File { path: observed.path.to_string() }))
                 }
             }
             ObservedFileState::NonFile => {
-                summary.files_conflict += 1;
                 (
                     FileOperationKind::Conflict,
                     FilePrecondition::Absent,
@@ -385,20 +367,25 @@ fn plan_files(
             conflict,
         });
     }
-    Ok(out)
+    out
 }
 
 fn plan_launchers(
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
-    summary: &mut ExecutionSummary,
 ) -> Vec<LauncherOperation> {
     let icon = target.files.iter().find_map(|file| {
         matches!(file.key, ResourceKey::Maintenance { .. }).then(|| file.destination.clone())
     });
     let mut out = Vec::with_capacity(target.launchers.len());
-    for (desired, observed) in target.launchers.iter().zip(snapshot.launchers.iter()) {
+    let observations: BTreeMap<_, _> = snapshot
+        .launchers
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for desired in target.launchers.iter() {
+        let observed = observations[&desired.key];
         let owned = ledger.and_then(|l| l.resources.get(&desired.key));
         let installed = match owned {
             Some(OwnedResource::Launcher {
@@ -424,9 +411,8 @@ fn plan_launchers(
         let (kind, conflict) = if owned.is_some() && installed.is_none()
             || installed.is_some_and(|installed| current.as_ref() != Some(installed))
         {
-            summary.launchers_conflict += 1;
             (
-                LauncherOperationKind::Drift,
+                IntegrationChangeKind::Drift,
                 Some(Conflict::LauncherAlreadyOwnedByDifferentTarget {
                     launcher_path: observed.launcher_path.to_string(),
                     reason: "owned launcher changed after installation".to_owned(),
@@ -434,10 +420,7 @@ fn plan_launchers(
             )
         } else {
             match &observed.state {
-                ObservedLauncherState::Absent => {
-                    summary.launchers_create += 1;
-                    (LauncherOperationKind::Create, None)
-                }
+                ObservedLauncherState::Absent => (IntegrationChangeKind::Create, None),
                 ObservedLauncherState::Launcher {
                     target,
                     arguments,
@@ -447,16 +430,13 @@ fn plan_launchers(
                         && *arguments == desired.arguments
                         && *working_directory == desired.working_directory;
                     if matches {
-                        summary.launchers_unchanged += 1;
-                        (LauncherOperationKind::NoOp, None)
+                        (IntegrationChangeKind::NoOp, None)
                     } else {
                         if installed.is_some() {
-                            summary.launchers_create += 1;
-                            (LauncherOperationKind::UpdateOwned, None)
+                            (IntegrationChangeKind::UpdateOwned, None)
                         } else {
-                            summary.launchers_conflict += 1;
                             (
-                                LauncherOperationKind::Conflict,
+                                IntegrationChangeKind::Conflict,
                                 Some(Conflict::LauncherAlreadyOwnedByDifferentTarget {
                                     launcher_path: observed.launcher_path.to_string(),
                                     reason: "existing launcher content differs from desired"
@@ -466,25 +446,19 @@ fn plan_launchers(
                         }
                     }
                 }
-                ObservedLauncherState::InvalidLauncher => {
-                    summary.launchers_conflict += 1;
-                    (
-                        LauncherOperationKind::Conflict,
-                        Some(Conflict::LauncherAlreadyOwnedByDifferentTarget {
-                            launcher_path: observed.launcher_path.to_string(),
-                            reason: "existing file is not a valid shell link".to_owned(),
-                        }),
-                    )
-                }
-                ObservedLauncherState::NonFile => {
-                    summary.launchers_conflict += 1;
-                    (
-                        LauncherOperationKind::Conflict,
-                        Some(Conflict::TargetNonFile {
-                            path: observed.launcher_path.to_string(),
-                        }),
-                    )
-                }
+                ObservedLauncherState::InvalidLauncher => (
+                    IntegrationChangeKind::Conflict,
+                    Some(Conflict::LauncherAlreadyOwnedByDifferentTarget {
+                        launcher_path: observed.launcher_path.to_string(),
+                        reason: "existing file is not a valid shell link".to_owned(),
+                    }),
+                ),
+                ObservedLauncherState::NonFile => (
+                    IntegrationChangeKind::Conflict,
+                    Some(Conflict::TargetNonFile {
+                        path: observed.launcher_path.to_string(),
+                    }),
+                ),
             }
         };
 
@@ -505,36 +479,32 @@ fn plan_launchers(
 }
 
 fn plan_paths(
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
-    summary: &mut ExecutionSummary,
 ) -> Vec<PathOperation> {
     let mut out = Vec::with_capacity(target.path_entries.len());
-    for (desired, observed) in target.path_entries.iter().zip(snapshot.path_entries.iter()) {
+    let observations: BTreeMap<_, _> = snapshot
+        .path_entries
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for desired in target.path_entries.iter() {
+        let observed = observations[&desired.key];
         let owned = matches!(ledger.and_then(|l| l.resources.get(&desired.key)), Some(OwnedResource::PathEntry { value, .. }) if value.equivalent(&desired.value));
         // Membership of an already target-normalized entry. Splitting, case
         // folding, and host formatting happened in the inspecting adapter.
         let present = observed.search_path.contains(&desired.value);
         let (kind, conflict) = match present {
-            true => {
-                summary.path_entries_present += 1;
-                (PathOperationKind::Present, None)
-            }
-            false if owned => {
-                summary.path_entries_conflict += 1;
-                (
-                    PathOperationKind::Drift,
-                    Some(Conflict::PathEntryConflict {
-                        value: desired.value.to_string(),
-                        reason: "previously owned search-path entry is missing".into(),
-                    }),
-                )
-            }
-            false => {
-                summary.path_entries_add += 1;
-                (PathOperationKind::Add, None)
-            }
+            true => (PathOperationKind::Present, None),
+            false if owned => (
+                PathOperationKind::Drift,
+                Some(Conflict::PathEntryConflict {
+                    value: desired.value.to_string(),
+                    reason: "previously owned search-path entry is missing".into(),
+                }),
+            ),
+            false => (PathOperationKind::Add, None),
         };
         out.push(PathOperation {
             key: desired.key.clone(),
@@ -551,13 +521,18 @@ fn plan_paths(
 }
 
 fn plan_services(
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
-    summary: &mut ExecutionSummary,
 ) -> Vec<ServiceOperation> {
     let mut out = Vec::with_capacity(target.services.len());
-    for (desired, observed) in target.services.iter().zip(snapshot.services.iter()) {
+    let observations: BTreeMap<_, _> = snapshot
+        .services
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for desired in target.services.iter() {
+        let observed = observations[&desired.key];
         let owned = ledger.and_then(|l| l.resources.get(&desired.key));
         let installed = match owned {
             Some(OwnedResource::Service {
@@ -566,24 +541,24 @@ fn plan_services(
             _ => None,
         };
         let current = match &observed.state {
-            ObservedServiceState::Absent => ServiceState::Absent,
+            ObservedServiceState::Absent => Some(ServiceState::Absent),
+            ObservedServiceState::InvalidService => None,
             ObservedServiceState::Service {
                 display_name,
                 command,
                 start,
                 ..
-            } => ServiceState::Registration {
+            } => Some(ServiceState::Registration {
                 display_name: display_name.clone(),
                 command: command.clone(),
                 start: *start,
-            },
+            }),
         };
         let (kind, conflict) = if owned.is_some() && installed.is_none()
-            || installed.is_some_and(|installed| installed != &current)
+            || installed.is_some_and(|installed| Some(installed) != current.as_ref())
         {
-            summary.services_conflict += 1;
             (
-                ServiceOperationKind::Drift,
+                IntegrationChangeKind::Drift,
                 Some(Conflict::ServiceAlreadyExistsWithDifferentConfiguration {
                     service: desired.name.to_string(),
                     reason: "owned service changed after installation".to_owned(),
@@ -591,10 +566,14 @@ fn plan_services(
             )
         } else {
             match &observed.state {
-                ObservedServiceState::Absent => {
-                    summary.services_create += 1;
-                    (ServiceOperationKind::Create, None)
-                }
+                ObservedServiceState::Absent => (IntegrationChangeKind::Create, None),
+                ObservedServiceState::InvalidService => (
+                    IntegrationChangeKind::Conflict,
+                    Some(Conflict::ServiceAlreadyExistsWithDifferentConfiguration {
+                        service: desired.name.to_string(),
+                        reason: "existing service is malformed".into(),
+                    }),
+                ),
                 ObservedServiceState::Service {
                     display_name,
                     command,
@@ -610,16 +589,13 @@ fn plan_services(
                         && commands_match(command, &desired.command)
                         && *start == desired.start;
                     if matches {
-                        summary.services_unchanged += 1;
-                        (ServiceOperationKind::NoOp, None)
+                        (IntegrationChangeKind::NoOp, None)
                     } else {
                         if installed.is_some() {
-                            summary.services_create += 1;
-                            (ServiceOperationKind::UpdateOwned, None)
+                            (IntegrationChangeKind::UpdateOwned, None)
                         } else {
-                            summary.services_conflict += 1;
                             (
-                                ServiceOperationKind::Conflict,
+                                IntegrationChangeKind::Conflict,
                                 Some(Conflict::ServiceAlreadyExistsWithDifferentConfiguration {
                                     service: desired.name.to_string(),
                                     reason: "existing service configuration differs".to_owned(),
@@ -652,30 +628,33 @@ fn plan_services(
 }
 
 fn plan_protocols(
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
-    summary: &mut ExecutionSummary,
 ) -> Vec<ProtocolOperation> {
     let mut out = Vec::with_capacity(target.protocols.len());
-    for (desired, observed) in target.protocols.iter().zip(snapshot.protocols.iter()) {
+    let observations: BTreeMap<_, _> = snapshot
+        .protocols
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for desired in target.protocols.iter() {
+        let observed = observations[&desired.key];
         let owned = ledger.and_then(|l| l.resources.get(&desired.key));
         let observed_owned = matches!(owned, Some(OwnedResource::Protocol { installed, .. }) if protocol_observed_matches(installed, &observed.state));
         let has_ownership = matches!(owned, Some(OwnedResource::Protocol { .. }));
         let (kind, conflict) = match &observed.state {
             ObservedProtocolState::Absent => {
                 if has_ownership {
-                    summary.protocols_conflict += 1;
                     (
-                        ProtocolOperationKind::Drift,
+                        IntegrationChangeKind::Drift,
                         Some(Conflict::ProtocolAlreadyRegistered {
                             scheme: desired.scheme.to_string(),
                             reason: "zup-owned protocol disappeared".into(),
                         }),
                     )
                 } else {
-                    summary.protocols_create += 1;
-                    (ProtocolOperationKind::Create, None)
+                    (IntegrationChangeKind::Create, None)
                 }
             }
             ObservedProtocolState::Registration {
@@ -684,24 +663,20 @@ fn plan_protocols(
             } => {
                 let matches = *url_protocol_marker && commands_match(command, &desired.command);
                 if matches && (!has_ownership || observed_owned) {
-                    summary.protocols_unchanged += 1;
-                    (ProtocolOperationKind::NoOp, None)
+                    (IntegrationChangeKind::NoOp, None)
                 } else if observed_owned {
-                    summary.protocols_create += 1;
-                    (ProtocolOperationKind::UpdateOwned, None)
+                    (IntegrationChangeKind::UpdateOwned, None)
                 } else if has_ownership {
-                    summary.protocols_conflict += 1;
                     (
-                        ProtocolOperationKind::Drift,
+                        IntegrationChangeKind::Drift,
                         Some(Conflict::ProtocolAlreadyRegistered {
                             scheme: desired.scheme.to_string(),
                             reason: "zup-owned protocol drifted after installation".into(),
                         }),
                     )
                 } else {
-                    summary.protocols_conflict += 1;
                     (
-                        ProtocolOperationKind::Conflict,
+                        IntegrationChangeKind::Conflict,
                         Some(Conflict::ProtocolAlreadyRegistered {
                             scheme: desired.scheme.to_string(),
                             reason: "existing protocol handler differs or is incomplete".to_owned(),
@@ -709,20 +684,17 @@ fn plan_protocols(
                     )
                 }
             }
-            ObservedProtocolState::Malformed { reason } => {
-                summary.protocols_conflict += 1;
-                (
-                    if has_ownership {
-                        ProtocolOperationKind::Drift
-                    } else {
-                        ProtocolOperationKind::Conflict
-                    },
-                    Some(Conflict::ProtocolAlreadyRegistered {
-                        scheme: desired.scheme.to_string(),
-                        reason: reason.clone(),
-                    }),
-                )
-            }
+            ObservedProtocolState::Malformed { reason } => (
+                if has_ownership {
+                    IntegrationChangeKind::Drift
+                } else {
+                    IntegrationChangeKind::Conflict
+                },
+                Some(Conflict::ProtocolAlreadyRegistered {
+                    scheme: desired.scheme.to_string(),
+                    reason: reason.clone(),
+                }),
+            ),
         };
 
         out.push(ProtocolOperation {
@@ -740,17 +712,18 @@ fn plan_protocols(
 }
 
 fn plan_file_associations(
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
     ledger: Option<&InstallLedger>,
-    summary: &mut ExecutionSummary,
 ) -> Vec<FileAssociationOperation> {
     let mut out = Vec::with_capacity(target.file_associations.len());
-    for (desired, observed) in target
+    let observations: BTreeMap<_, _> = snapshot
         .file_associations
         .iter()
-        .zip(snapshot.file_associations.iter())
-    {
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for desired in target.file_associations.iter() {
+        let observed = observations[&desired.key];
         let ext_key = ResourceKey::FileAssociationExtension {
             extension: desired.extension.clone(),
         };
@@ -776,79 +749,73 @@ fn plan_file_associations(
         };
 
         let association_kind = if owned_id.is_some() && !id_owned_matches {
-            FileAssociationOperationKind::Drift
+            IntegrationChangeKind::Drift
         } else if id_ok {
-            FileAssociationOperationKind::NoOp
+            IntegrationChangeKind::NoOp
         } else if matches!(
             observed.association_state,
             ObservedFileAssociationState::Absent
         ) && owned_id.is_none()
         {
-            FileAssociationOperationKind::Create
+            IntegrationChangeKind::Create
         } else if id_owned_matches {
-            FileAssociationOperationKind::UpdateOwned
+            IntegrationChangeKind::UpdateOwned
         } else if owned_id.is_some() {
-            FileAssociationOperationKind::Drift
+            IntegrationChangeKind::Drift
         } else {
-            FileAssociationOperationKind::Conflict
+            IntegrationChangeKind::Conflict
         };
         let extension_kind = if owned_ext.is_some() && !ext_owned_matches {
-            FileAssociationOperationKind::Drift
+            IntegrationChangeKind::Drift
         } else if ext_ok {
-            FileAssociationOperationKind::NoOp
+            IntegrationChangeKind::NoOp
         } else if matches!(
             observed.extension_state,
             crate::observe::ObservedExtensionState::Absent
         ) && owned_ext.is_none()
         {
-            FileAssociationOperationKind::Create
+            IntegrationChangeKind::Create
         } else if ext_owned_matches {
-            FileAssociationOperationKind::UpdateOwned
+            IntegrationChangeKind::UpdateOwned
         } else if owned_ext.is_some() {
-            FileAssociationOperationKind::Drift
+            IntegrationChangeKind::Drift
         } else {
-            FileAssociationOperationKind::Conflict
+            IntegrationChangeKind::Conflict
         };
 
-        let (kind, conflict) =
-            if [association_kind, extension_kind].contains(&FileAssociationOperationKind::Drift) {
-                summary.file_associations_conflict += 1;
-                (
-                    FileAssociationOperationKind::Drift,
-                    Some(Conflict::FileAssociationConflict {
-                        id: desired.id.to_string(),
-                        reason: "zup-owned association drifted".into(),
-                    }),
-                )
-            } else if [association_kind, extension_kind]
-                .contains(&FileAssociationOperationKind::Conflict)
-            {
-                summary.file_associations_conflict += 1;
-                (
-                    FileAssociationOperationKind::Conflict,
-                    Some(Conflict::FileAssociationConflict {
-                        id: desired.id.to_string(),
-                        reason: "foreign association differs".into(),
-                    }),
-                )
-            } else if association_kind == FileAssociationOperationKind::NoOp
-                && extension_kind == FileAssociationOperationKind::NoOp
-            {
-                summary.file_associations_unchanged += 1;
-                (FileAssociationOperationKind::NoOp, None)
-            } else {
-                summary.file_associations_create += 1;
-                (
-                    if [association_kind, extension_kind]
-                        .contains(&FileAssociationOperationKind::UpdateOwned)
-                    {
-                        FileAssociationOperationKind::UpdateOwned
-                    } else {
-                        FileAssociationOperationKind::Create
-                    },
-                    None,
-                )
-            };
+        let (kind, conflict) = if [association_kind, extension_kind]
+            .contains(&IntegrationChangeKind::Drift)
+        {
+            (
+                IntegrationChangeKind::Drift,
+                Some(Conflict::FileAssociationConflict {
+                    id: desired.id.to_string(),
+                    reason: "zup-owned association drifted".into(),
+                }),
+            )
+        } else if [association_kind, extension_kind].contains(&IntegrationChangeKind::Conflict) {
+            (
+                IntegrationChangeKind::Conflict,
+                Some(Conflict::FileAssociationConflict {
+                    id: desired.id.to_string(),
+                    reason: "foreign association differs".into(),
+                }),
+            )
+        } else if association_kind == IntegrationChangeKind::NoOp
+            && extension_kind == IntegrationChangeKind::NoOp
+        {
+            (IntegrationChangeKind::NoOp, None)
+        } else {
+            (
+                if [association_kind, extension_kind].contains(&IntegrationChangeKind::UpdateOwned)
+                {
+                    IntegrationChangeKind::UpdateOwned
+                } else {
+                    IntegrationChangeKind::Create
+                },
+                None,
+            )
+        };
 
         out.push(FileAssociationOperation {
             key: desired.key.clone(),
@@ -918,6 +885,6 @@ fn extension_observed_matches(
 }
 
 /// Semantic command equality (target-aware path semantics; args exact).
-fn commands_match(a: &zup_platform::CommandSpec, b: &zup_platform::CommandSpec) -> bool {
+fn commands_match(a: &crate::CommandSpec, b: &crate::CommandSpec) -> bool {
     a.executable.equivalent(&b.executable) && a.arguments == b.arguments
 }

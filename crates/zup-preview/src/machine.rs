@@ -391,37 +391,22 @@ impl Scenario {
             let planned =
                 zup_plugin_build::plan_installation(build, &request, &zup_plan::NeverCancelled)
                     .map_err(|error| error.to_string())?;
-            match target.operating_system() {
-                zup_core::TargetOperatingSystem::Windows => {
-                    zup_windows::resolve_target(
-                        &planned.plan,
-                        &zup_windows::WindowsTargetContext::for_build(selection.scope),
-                    )
-                    .map_err(|error| error.to_string())?;
-                }
-                zup_core::TargetOperatingSystem::Linux => {
-                    zup_linux::resolve_target(
-                        &planned.plan,
-                        &zup_linux::LinuxInstallLocationResolver::for_build(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                }
+            let resolved = match target.operating_system() {
+                zup_core::TargetOperatingSystem::Windows => zup_windows::resolve_target(
+                    &planned.plan,
+                    &zup_windows::WindowsTargetContext::for_build(selection.scope),
+                )
+                .map_err(|error| error.to_string())?,
+                zup_core::TargetOperatingSystem::Linux => zup_linux::resolve_target(
+                    &planned.plan,
+                    &zup_linux::LinuxInstallLocationResolver::for_build(),
+                )
+                .map_err(|error| error.to_string())?,
                 _ => return Err("unsupported preview target".into()),
-            }
-            let mut preview = zup_presentation::PlanPreview::from_install_plan(&planned.plan);
-            preview.install_directory =
-                preview_path(&planned.plan.install_directory, target, selection.scope)?;
-            for change in preview
-                .groups
-                .iter_mut()
-                .flat_map(|group| &mut group.changes)
-            {
-                if let Some(location) = &mut change.location {
-                    let template = zup_core::Template::parse(location.as_str())
-                        .map_err(|error| error.to_string())?;
-                    *location = preview_path(&template, target, selection.scope)?;
-                }
-            }
+            };
+            let mut preview = zup_presentation::PlanPreview::from_desired_state(&resolved)
+                .map_err(|error| error.to_string())?;
+            preview.basis = zup_presentation::PlanBasis::Simulation;
             return Ok(preview);
         }
         use zup_presentation::{ChangeGroup, ChangeKind, PlannedChange, ResourceCategory};
@@ -637,6 +622,7 @@ impl Scenario {
             )
             .collect();
         Ok(zup_presentation::PlanPreview {
+            basis: zup_presentation::PlanBasis::Simulation,
             application: self.product.name.clone(),
             version: self.product.version.clone(),
             scope: selection.scope,
@@ -776,13 +762,13 @@ fn preview_path(
     scope: SelectedScope,
 ) -> Result<String, String> {
     match target.operating_system() {
-        zup_core::TargetOperatingSystem::Windows => zup_platform::resolve_template_path(
+        zup_core::TargetOperatingSystem::Windows => zup_plan::resolve_template_path(
             template,
             &target,
             &zup_windows::CanonicalWindowsLocations,
             scope,
         ),
-        zup_core::TargetOperatingSystem::Linux => zup_platform::resolve_template_path(
+        zup_core::TargetOperatingSystem::Linux => zup_plan::resolve_template_path(
             template,
             &target,
             &zup_linux::LinuxInstallLocationResolver::for_build(),

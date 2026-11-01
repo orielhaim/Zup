@@ -4,9 +4,9 @@
 //! Nothing here names an operating-system facility: a service is a service
 //! wherever it lives, and a registration is a registration.
 
+use crate::{CommandSpec, TargetPath};
 use serde::{Deserialize, Serialize};
 use zup_core::{ProtocolScheme, ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest};
-use zup_platform::{CommandSpec, TargetPath};
 
 /// Observed state of one desired target file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +120,7 @@ pub struct ObservedService {
 #[serde(rename_all = "snake_case")]
 pub enum ObservedServiceState {
     Absent,
+    InvalidService,
     Service {
         display_name: String,
         command: CommandSpec,
@@ -206,7 +207,7 @@ pub enum ObservedExtensionState {
 
 /// Immutable snapshot of observed host state for planned resources.
 ///
-/// Every collection follows `TargetPlan` ordering. Inspection never mutates.
+/// Every collection follows `DesiredState<crate::TargetPath, crate::TargetPath>` ordering. Inspection never mutates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HostSnapshot {
     pub files: Vec<ObservedFile>,

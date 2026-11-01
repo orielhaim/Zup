@@ -98,7 +98,7 @@ impl TargetCapabilities {
         errors
     }
 
-    pub fn planned_resource_errors(&self, plan: &zup_plan::InstallPlan) -> Vec<String> {
+    pub fn planned_resource_errors<P, L>(&self, plan: &crate::DesiredState<P, L>) -> Vec<String> {
         let menu = plan
             .launchers
             .iter()
@@ -159,7 +159,7 @@ const FRONTENDS: &[Frontend] = &[Frontend::Gui, Frontend::Console, Frontend::Hea
 const WINDOWS: TargetCapabilities = TargetCapabilities {
     frontends: FRONTENDS,
     scopes: ScopeSupport::Both,
-    services: ScopeSupport::Machine,
+    services: ScopeSupport::Both,
     menu: ScopeSupport::Both,
     desktop: ScopeSupport::Both,
     protocols: ScopeSupport::Both,

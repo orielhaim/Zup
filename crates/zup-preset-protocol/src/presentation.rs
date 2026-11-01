@@ -1,53 +1,16 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanBasis {
+    DesiredState,
+    Simulation,
+    ObservedMachine,
+}
+
 use serde::{Deserialize, Serialize};
 
 use crate::{ComponentId, InstallScope};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationPhase {
-    Prepare,
-    Download,
-    Verify,
-    Files,
-    System,
-    Finish,
-}
-
-impl OperationPhase {
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::Prepare => "Prepare",
-            Self::Download => "Download",
-            Self::Verify => "Verify",
-            Self::Files => "Files",
-            Self::System => "System",
-            Self::Finish => "Finish",
-        }
-    }
-
-    pub fn from_action(action: &str) -> Self {
-        let action = action.to_ascii_lowercase();
-        if action.contains("download") {
-            Self::Download
-        } else if action.contains("verif") || action.contains("signature") {
-            Self::Verify
-        } else if action.contains("service")
-            || action.contains("launcher")
-            || action.contains("path")
-            || action.contains("protocol")
-            || action.contains("system")
-            || action.contains("settings")
-        {
-            Self::System
-        } else if action.contains("finish") || action.contains("commit") {
-            Self::Finish
-        } else if action.contains("file") || action.contains("install") {
-            Self::Files
-        } else {
-            Self::Prepare
-        }
-    }
-}
+pub use zup_core::OperationPhase;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressPresentation {
@@ -179,6 +142,7 @@ pub struct RequirementPresentation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanPreview {
+    pub basis: PlanBasis,
     pub scope: InstallScope,
     pub install_directory: String,
     pub selected_components: Vec<ComponentId>,

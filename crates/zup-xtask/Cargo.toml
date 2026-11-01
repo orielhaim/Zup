@@ -12,6 +12,7 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+zup-plan.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
@@ -20,7 +21,6 @@ zup-artifact.workspace = true
 zup-automation = { workspace = true, features = ["bindings"] }
 zup-binary.workspace = true
 zup-core.workspace = true
-zup-platform.workspace = true
 zup-preset-protocol.workspace = true
 zup-publish-github.workspace = true
 zup-toolchain.workspace = true

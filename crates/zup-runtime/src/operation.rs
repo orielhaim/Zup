@@ -2,9 +2,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zup_core::{ComponentId, ResourceKey, SelectedScope, TargetBuildPlan, Template};
-use zup_exec::{ExecutionPlan, HostSnapshot, InstallLedger, LifecycleAction, plan_lifecycle};
-use zup_plan::{CancellationQuery, InstallPlan, PlanRequest, PlannedInstallation};
-use zup_platform::TargetPlan;
+use zup_plan::{
+    CancellationQuery, DesiredState, ExecutionPlan, HostSnapshot, InstallLedger, LifecycleAction,
+    PlanRequest, PlannedInstallation, plan_lifecycle,
+};
+
 use zup_transaction::{TransactionInput, TransactionPlan, compile_transaction};
 
 use crate::BootstrapRequest;
@@ -20,7 +22,7 @@ pub enum Operation {
     Install,
     Upgrade,
     Modify,
-    Repair { force_files: bool },
+    Repair { force: bool },
     Uninstall,
     Apply,
 }
@@ -44,7 +46,7 @@ impl From<LifecycleAction> for Operation {
             LifecycleAction::Install => Self::Install,
             LifecycleAction::Upgrade => Self::Upgrade,
             LifecycleAction::Modify => Self::Modify,
-            LifecycleAction::Repair { force_files } => Self::Repair { force_files },
+            LifecycleAction::Repair { force } => Self::Repair { force },
             LifecycleAction::Uninstall => Self::Uninstall,
         }
     }
@@ -71,7 +73,7 @@ pub enum OperationError {
 }
 
 impl OperationError {
-    fn refused(stage: &'static str, message: impl std::fmt::Display) -> Self {
+    pub fn refused(stage: &'static str, message: impl std::fmt::Display) -> Self {
         Self::Refused {
             stage,
             message: message.to_string(),
@@ -93,6 +95,14 @@ impl std::fmt::Display for OperationError {
 }
 
 impl std::error::Error for OperationError {}
+impl From<zup_plan::PlanError> for OperationError {
+    fn from(error: zup_plan::PlanError) -> Self {
+        match error {
+            zup_plan::PlanError::Cancelled => Self::Cancelled,
+            error => Self::refused("plan", error),
+        }
+    }
+}
 
 pub fn resolve_operation(
     operation: Operation,
@@ -103,7 +113,7 @@ pub fn resolve_operation(
         Operation::Install => Ok(LifecycleAction::Install),
         Operation::Upgrade => Ok(LifecycleAction::Upgrade),
         Operation::Modify => Ok(LifecycleAction::Modify),
-        Operation::Repair { force_files } => Ok(LifecycleAction::Repair { force_files }),
+        Operation::Repair { force } => Ok(LifecycleAction::Repair { force }),
         Operation::Uninstall => Ok(LifecycleAction::Uninstall),
         Operation::Apply => {
             let Some(installed) = installed else {
@@ -128,7 +138,7 @@ pub fn maintenance_operations(
     let mut operations = match package.cmp(installed) {
         std::cmp::Ordering::Greater => vec![Operation::Upgrade],
         std::cmp::Ordering::Equal => {
-            vec![Operation::Modify, Operation::Repair { force_files: false }]
+            vec![Operation::Modify, Operation::Repair { force: false }]
         }
         std::cmp::Ordering::Less => Vec::new(),
     };
@@ -154,7 +164,7 @@ pub struct ContentAccess<'a> {
 }
 
 pub trait OperationHost {
-    fn check_capabilities(&self, _input: &OperationInput) -> Result<(), String> {
+    fn validate_context(&self, _input: &OperationInput) -> Result<(), String> {
         Ok(())
     }
 
@@ -162,20 +172,18 @@ pub trait OperationHost {
         &self,
         build: &TargetBuildPlan,
         request: &PlanRequest,
-        _cancellation: &dyn CancellationQuery,
-    ) -> Result<PlannedInstallation, String> {
+        cancellation: &dyn CancellationQuery,
+    ) -> Result<PlannedInstallation, OperationError> {
         let planning = zup_core::BuildPlan {
             targets: vec![build.clone()],
         };
-        zup_plan::plan(&planning, request)
-            .map(|plan| PlannedInstallation {
-                plan,
-                generated_files: Vec::new(),
-            })
-            .map_err(|error| error.to_string())
+        zup_plan::plan(&planning, request, None, cancellation).map_err(OperationError::from)
     }
 
-    fn resolve_target(&self, install: &InstallPlan) -> Result<TargetPlan, String>;
+    fn resolve_target(
+        &self,
+        install: &DesiredState,
+    ) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String>;
 
     fn resolve_target_for_uninstall(&self) -> bool {
         false
@@ -183,21 +191,20 @@ pub trait OperationHost {
 
     fn observe(
         &self,
-        target: Option<&TargetPlan>,
+        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
         ledger: Option<&InstallLedger>,
     ) -> Result<(Option<HostSnapshot>, BTreeMap<ResourceKey, bool>), String>;
 
     fn compile(
         &self,
-        action: LifecycleAction,
         execution: &ExecutionPlan,
-        target: Option<&TargetPlan>,
+        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
         ledger: Option<&InstallLedger>,
     ) -> Result<TransactionInput, String>;
 
     fn attach_content(
         &self,
-        target: &mut TargetPlan,
+        target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         content: &ContentAccess,
         preset: Option<&zup_core::PresetRuntime>,
     ) -> Result<(), String>;
@@ -215,7 +222,7 @@ pub trait OperationHost {
 
     fn prepare_bootstrap(
         &self,
-        _install: &InstallPlan,
+        _install: &DesiredState,
     ) -> Result<Option<BootstrapRequest>, String> {
         Ok(None)
     }
@@ -223,8 +230,8 @@ pub trait OperationHost {
 
 #[derive(Debug)]
 pub struct PlannedOperation {
-    pub install_plan: InstallPlan,
-    pub target_plan: TargetPlan,
+    pub install_plan: DesiredState,
+    pub target_plan: DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     pub generated_files: Vec<zup_plan::GeneratedFile>,
     pub bootstrap: Option<BootstrapRequest>,
 }
@@ -233,7 +240,7 @@ pub struct PlannedOperation {
 pub enum OperationBody {
     Planned(Box<PlannedOperation>),
     Uninstall {
-        target_plan: Option<Box<TargetPlan>>,
+        target_plan: Option<Box<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>>,
     },
 }
 
@@ -248,14 +255,14 @@ pub struct PreparedOperation {
 }
 
 impl PreparedOperation {
-    pub fn target_plan(&self) -> Option<&TargetPlan> {
+    pub fn target_plan(&self) -> Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>> {
         match &self.body {
             OperationBody::Planned(planned) => Some(&planned.target_plan),
             OperationBody::Uninstall { target_plan } => target_plan.as_deref(),
         }
     }
 
-    pub fn install_plan(&self) -> Option<&InstallPlan> {
+    pub fn install_plan(&self) -> Option<&DesiredState> {
         match &self.body {
             OperationBody::Planned(planned) => Some(&planned.install_plan),
             OperationBody::Uninstall { .. } => None,
@@ -291,18 +298,23 @@ pub fn prepare_operation<H: OperationHost>(
         .scope
         .select(Some(input.scope))
         .map_err(|error| OperationError::refused("scope", error))?;
-    let capabilities =
-        zup_platform::capabilities(&input.build.installer.target).ok_or_else(|| {
-            OperationError::refused(
-                "capabilities",
-                format!("unsupported target `{}`", input.build.installer.target),
-            )
-        })?;
-    let errors = capabilities.resource_errors(&input.build.installer, input.scope);
-    if !errors.is_empty() {
-        return Err(OperationError::refused("capabilities", errors.join("\n")));
+    let capabilities = zup_plan::capabilities(&input.build.installer.target).ok_or_else(|| {
+        OperationError::refused(
+            "capabilities",
+            format!("unsupported target `{}`", input.build.installer.target),
+        )
+    })?;
+    if !capabilities.scopes.supports(input.scope)
+        || !capabilities
+            .frontends
+            .contains(&input.build.installer.frontend)
+    {
+        return Err(OperationError::refused(
+            "capabilities",
+            "unsupported target scope or frontend",
+        ));
     }
-    host.check_capabilities(input)
+    host.validate_context(input)
         .map_err(|message| OperationError::refused("capabilities", message))?;
     let installer = &input.build.installer;
     if matches!(input.operation, Operation::Repair { .. })
@@ -380,7 +392,7 @@ pub fn prepare_operation<H: OperationHost>(
         )
         .map_err(|error| OperationError::refused("lifecycle", error))?;
         let transaction_input = host
-            .compile(action, &execution, target.as_ref(), Some(ledger))
+            .compile(&execution, target.as_ref(), Some(ledger))
             .map_err(|message| OperationError::refused("transaction", message))?;
         let transaction_plan = compile_transaction(&transaction_input)
             .map_err(|error| OperationError::refused("transaction", error))?;
@@ -411,15 +423,7 @@ pub fn prepare_operation<H: OperationHost>(
         action,
         install_directory,
     )?;
-    let planned = host
-        .plan_build(input.build, &plan_request, input.cancellation)
-        .map_err(|message| {
-            if input.cancellation.is_cancelled() {
-                OperationError::Cancelled
-            } else {
-                OperationError::refused("plan", message)
-            }
-        })?;
+    let planned = host.plan_build(input.build, &plan_request, input.cancellation)?;
     let mut target = host
         .resolve_target(&planned.plan)
         .map_err(|message| OperationError::refused("target", message))?;
@@ -447,7 +451,7 @@ pub fn prepare_operation<H: OperationHost>(
     )
     .map_err(|error| OperationError::refused("lifecycle", error))?;
     let transaction_input = host
-        .compile(action, &execution, Some(&target), input.prior)
+        .compile(&execution, Some(&target), input.prior)
         .map_err(|message| OperationError::refused("transaction", message))?;
     let transaction_plan = compile_transaction(&transaction_input)
         .map_err(|error| OperationError::refused("transaction", error))?;
@@ -581,7 +585,7 @@ fn apply_selection(
 }
 
 pub fn attach_maintenance_copy(
-    target: &mut TargetPlan,
+    target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     installer: &Path,
     state_root: &Path,
     scope: SelectedScope,
@@ -593,7 +597,7 @@ pub fn attach_maintenance_copy(
     let (size, sha256) = zup_core::hash_reader(file).map_err(|error| {
         OperationError::refused("content", format!("installer executable: {error}"))
     })?;
-    let destination = zup_platform::TargetPath::new(
+    let destination = zup_plan::TargetPath::new(
         target.target,
         zup_transaction::maintenance_runtime_path(
             state_root,
@@ -605,7 +609,7 @@ pub fn attach_maintenance_copy(
         .to_string_lossy(),
     )
     .map_err(|error| OperationError::refused("content", error))?;
-    target.files.push(zup_platform::TargetFile {
+    target.files.push(zup_plan::DesiredFile {
         key: zup_core::ResourceKey::Maintenance {
             app_id: target.app.id.to_string(),
             version: target.app.version.to_string(),
@@ -619,9 +623,7 @@ pub fn attach_maintenance_copy(
         privilege: scope.authorization(),
         executable: true,
     });
-    target.summary.file_count += 1;
-    target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
-    target.summary.resource_count += 1;
+
     Ok(())
 }
 
@@ -634,6 +636,12 @@ pub fn runtime_request(
     options: RequestOptions,
 ) -> crate::RuntimeRequest {
     crate::RuntimeRequest {
+        intent: Some(zup_plan::DeploymentIntent {
+            action: prepared.action,
+            enable: prepared.selection.enable.clone(),
+            disable: prepared.selection.disable.clone(),
+            install_directory: prepared.selection.install_directory.clone(),
+        }),
         target: prepared
             .target_plan()
             .map(|target| target.target)
@@ -673,7 +681,7 @@ mod tests {
     #[case(Operation::Apply, Some("1.0.0"), "2.0.0", LifecycleAction::Upgrade)]
     #[case(Operation::Apply, Some("2.0.0"), "2.0.0", LifecycleAction::Modify)]
     #[case(Operation::Upgrade, Some("2.0.0"), "2.0.0", LifecycleAction::Upgrade)]
-    #[case(Operation::Repair { force_files: true }, Some("1.0.0"), "1.0.0", LifecycleAction::Repair { force_files: true })]
+    #[case(Operation::Repair { force: true }, Some("1.0.0"), "1.0.0", LifecycleAction::Repair { force: true })]
     #[case(
         Operation::Uninstall,
         Some("1.0.0"),
@@ -708,12 +716,14 @@ mod tests {
     }
 
     struct StubHost {
-        target: zup_platform::TargetPlan,
+        target: zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         plan_calls: std::cell::Cell<usize>,
     }
 
     impl StubHost {
-        fn installing(target: zup_platform::TargetPlan) -> Self {
+        fn installing(
+            target: zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        ) -> Self {
             Self {
                 target,
                 plan_calls: std::cell::Cell::new(0),
@@ -727,18 +737,21 @@ mod tests {
             _build: &TargetBuildPlan,
             _request: &PlanRequest,
             _cancellation: &dyn CancellationQuery,
-        ) -> Result<PlannedInstallation, String> {
+        ) -> Result<PlannedInstallation, OperationError> {
             self.plan_calls.set(self.plan_calls.get() + 1);
-            Err("no planner in this test".into())
+            Err(OperationError::refused("plan", "no planner in this test"))
         }
 
-        fn resolve_target(&self, _install: &InstallPlan) -> Result<TargetPlan, String> {
+        fn resolve_target(
+            &self,
+            _install: &DesiredState,
+        ) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String> {
             Err("no resolver in this test".into())
         }
 
         fn observe(
             &self,
-            _target: Option<&TargetPlan>,
+            _target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
             _ledger: Option<&InstallLedger>,
         ) -> Result<(Option<HostSnapshot>, BTreeMap<zup_core::ResourceKey, bool>), String> {
             Ok((Some(HostSnapshot::default()), BTreeMap::new()))
@@ -746,9 +759,8 @@ mod tests {
 
         fn compile(
             &self,
-            _action: LifecycleAction,
             execution: &ExecutionPlan,
-            _target: Option<&TargetPlan>,
+            _target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
             _ledger: Option<&InstallLedger>,
         ) -> Result<TransactionInput, String> {
             let mut input = TransactionInput::new(self.target.target);
@@ -758,7 +770,7 @@ mod tests {
 
         fn attach_content(
             &self,
-            _target: &mut TargetPlan,
+            _target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
             _content: &ContentAccess,
             _preset: Option<&zup_core::PresetRuntime>,
         ) -> Result<(), String> {
@@ -766,9 +778,9 @@ mod tests {
         }
     }
 
-    fn fixture_target() -> zup_platform::TargetPlan {
+    fn fixture_target() -> zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
         let target = Target::parse("windows-x64").expect("valid target");
-        zup_platform::TargetPlan {
+        zup_plan::DesiredState {
             app: zup_core::App {
                 id: zup_core::AppId::new("com.example.stub").expect("valid id"),
                 name: zup_core::NonEmptyString::new("Stub").expect("valid name"),
@@ -779,8 +791,7 @@ mod tests {
             },
             target,
             scope: SelectedScope::User,
-            install_directory: zup_platform::TargetPath::new(target, "C:\\Stub")
-                .expect("valid path"),
+            install_directory: zup_plan::TargetPath::new(target, "C:\\Stub").expect("valid path"),
             selected_components: Vec::new(),
             prerequisites: Vec::new(),
             files: Vec::new(),
@@ -789,15 +800,7 @@ mod tests {
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: zup_platform::TargetPlanSummary {
-                file_count: 0,
-                install_bytes: 0,
-                resource_count: 0,
-                requires_authorization: false,
-                selected_component_count: 0,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
             preset: None,
         }
     }
@@ -851,6 +854,7 @@ mod tests {
             build.installer.app.id.clone(),
             build.installer.target,
             SelectedScope::User,
+            zup_core::TransactionId::new_v7(),
         );
         ledger.version = build.installer.app.version.clone();
         ledger
@@ -917,7 +921,7 @@ mod tests {
                 &build,
                 &installer,
                 root.path(),
-                Operation::Repair { force_files: false },
+                Operation::Repair { force: false },
                 Some(&ledger),
             )
         };

@@ -10,13 +10,13 @@ use zup_build::materialize;
 #[cfg(windows)]
 use zup_core::INSTALL_LOCATIONS;
 use zup_core::{InstallLocation, SelectedScope, Target};
-#[cfg(windows)]
-use zup_exec::ObservedFileState;
-#[cfg(all(windows, feature = "test-launcher"))]
-use zup_exec::{FileOperationKind, plan_execution};
 use zup_manifest::{TargetOverrides, compile, parse, select_targets};
-use zup_plan::{InstallPlan, PlanRequest, plan};
-use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
+#[cfg(windows)]
+use zup_plan::ObservedFileState;
+use zup_plan::{DesiredState, PlanRequest, plan};
+#[cfg(all(windows, feature = "test-launcher"))]
+use zup_plan::{FileOperationKind, plan_execution};
+use zup_plan::{InstallLocationError, InstallLocationResolver, TargetPath};
 #[cfg(all(windows, feature = "test-launcher"))]
 use zup_windows::{InspectReads, inspect_target_with};
 use zup_windows::{TargetResolveError, WindowsTargetContext, resolve_target};
@@ -167,7 +167,7 @@ executable = "${install}/Acme.exe"
 "#
 }
 
-fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, InstallPlan) {
+fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, DesiredState) {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("project");
     write(&project.join("zup.toml"), b"");
@@ -194,20 +194,36 @@ fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, InstallPlan
     } else {
         SelectedScope::Machine
     };
-    let install = plan(&build, &PlanRequest::new(config.target, scope)).expect("semantic plan");
+    let install = plan(
+        &build,
+        &PlanRequest::new(config.target, scope),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .expect("semantic plan");
     (dir, install)
 }
 
 fn resolve_fixed(
-    install: &InstallPlan,
-) -> Result<zup_platform::TargetPlan, zup_windows::TargetResolveError> {
+    install: &DesiredState,
+) -> Result<
+    zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    zup_windows::TargetResolveError,
+> {
     resolve_target(
         install,
         &WindowsTargetContext::with_resolver(FixedInstallLocations, install.scope),
     )
 }
 
-fn pipeline(base: &str, scope: SelectedScope) -> (TempDir, zup_platform::TargetPlan) {
+fn pipeline(
+    base: &str,
+    scope: SelectedScope,
+) -> (
+    TempDir,
+    zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+) {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("project");
     write(&project.join("zup.toml"), b"");
@@ -234,7 +250,14 @@ fn pipeline(base: &str, scope: SelectedScope) -> (TempDir, zup_platform::TargetP
         zup_build::Writes::None,
     )
     .expect("materialize");
-    let install = plan(&build, &PlanRequest::new(config.target, scope)).expect("install plan");
+    let install = plan(
+        &build,
+        &PlanRequest::new(config.target, scope),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .map(|installation| installation.plan)
+    .expect("install plan");
 
     let context = WindowsTargetContext::with_resolver(
         FakeInstallLocations {
@@ -329,122 +352,6 @@ fn resolved_template_components_are_validated_after_semantic_planning() {
 }
 
 #[test]
-fn case_only_file_destinations_collide_after_target_lowering() {
-    let source = format!(
-        "{}\n[[files]]\nsource = \"x/Foo.dll\"\ndestination = \"${{install}}/Payload.dll\"\n\n[[files]]\nsource = \"y/foo.dll\"\ndestination = \"${{install}}/payload.dll\"\n",
-        acme_manifest()
-    );
-    let (_dir, install) = semantic_plan(
-        &source,
-        &[
-            ("dist/Acme.exe", b"main-correct".as_slice()),
-            ("dist/acme-agent.exe", b"agent-new".as_slice()),
-            ("dist/bin/acme.exe", b"cli-new".as_slice()),
-            ("dist/x/Foo.dll", b"one".as_slice()),
-            ("dist/y/foo.dll", b"two".as_slice()),
-        ],
-    );
-    let error = resolve_fixed(&install).expect_err("case-only collision");
-    assert!(
-        matches!(
-            error,
-            TargetResolveError::TargetCollision {
-                ref kind, ..
-            } if kind == "file destination"
-        ),
-        "{error}"
-    );
-}
-
-#[test]
-fn target_resource_identities_collide_case_insensitively() {
-    let base = acme_manifest();
-    let prefix = base.split("[[components]]").next().unwrap();
-    let cases = [
-        (
-            "PATH entry",
-            r#"
-[[path]]
-value = "${install}/Bin"
-
-[[path]]
-value = "${install}/bin"
-"#,
-        ),
-        (
-            "service id",
-            r#"
-[[services]]
-id = "Agent"
-name = "Agent"
-binary = "${install}/Agent.exe"
-start = "manual"
-
-[[services]]
-id = "agent"
-name = "agent"
-binary = "${install}/Agent.exe"
-start = "manual"
-"#,
-        ),
-        (
-            "protocol scheme",
-            r#"
-[[protocols]]
-scheme = "Acme"
-executable = "${install}/Acme.exe"
-
-[[protocols]]
-scheme = "acme"
-executable = "${install}/Acme.exe"
-"#,
-        ),
-        (
-            "file association id",
-            r#"
-[[file_associations]]
-extension = ".one"
-id = "Acme.One"
-executable = "${install}/Acme.exe"
-
-[[file_associations]]
-extension = ".two"
-id = "acme.one"
-executable = "${install}/Acme.exe"
-"#,
-        ),
-        (
-            "launcher link path",
-            r#"
-[[launchers]]
-location = "desktop"
-name = "Launch"
-target = "${install}/Acme.exe"
-
-[[launchers]]
-location = "desktop"
-name = "launch"
-target = "${install}/Acme.exe"
-"#,
-        ),
-    ];
-
-    for (kind, body) in cases {
-        let source = format!("{prefix}\n{body}");
-        let (_dir, install) = semantic_plan(&source, &[("dist/app.txt", b"app".as_slice())]);
-        let error = resolve_fixed(&install).expect_err(kind);
-        assert!(
-            matches!(
-                error,
-                TargetResolveError::TargetCollision { kind: ref actual, .. }
-                    if actual == kind
-            ),
-            "{kind}: {error}"
-        );
-    }
-}
-
-#[test]
 fn resolve_target_leaves_no_templates_and_sets_lnk() {
     let (_dir, target) = pipeline("C:/fake", SelectedScope::User);
 
@@ -519,7 +426,7 @@ fn inspect_target_with_fakes_and_plan_execution() {
 
     assert_eq!(
         plan.launchers[0].kind,
-        zup_exec::LauncherOperationKind::Create
+        zup_plan::IntegrationChangeKind::Create
     );
 
     assert_eq!(fs::read(pf.join("acme-agent.exe")).unwrap(), b"agent-OLD");
@@ -571,10 +478,10 @@ mod transaction_fingerprint {
         Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Target,
         Template,
     };
-    use zup_exec::LifecycleAction;
+    use zup_plan::LifecycleAction;
     use zup_plan::{
         CancellationQuery, NeverCancelled, PlanRequest, PluginExecutor, PluginFailure,
-        PluginPlanningContext, PluginResource, PluginResourceProposal, plan_with_plugins,
+        PluginPlanningContext, PluginResource, PluginResourceProposal, plan,
     };
     use zup_windows::{WindowsTargetContext, plan_target_lifecycle, resolve_target};
 
@@ -665,10 +572,10 @@ mod transaction_fingerprint {
             target: Target::parse("windows-x64").unwrap(),
             resources,
         };
-        let planned = plan_with_plugins(
+        let planned = plan(
             &build_plan(),
             &PlanRequest::new(Target::parse("windows-x64").unwrap(), SelectedScope::User),
-            &mut executor,
+            Some(&mut executor),
             &NeverCancelled,
         )
         .unwrap();
@@ -729,4 +636,27 @@ mod transaction_fingerprint {
         );
         assert_ne!(first_fingerprint, changed);
     }
+}
+
+#[test]
+fn native_service_names_are_unique_across_logical_ids() {
+    let base = acme_manifest();
+    let prefix = base.split("[[components]]").next().unwrap();
+    let source = format!(
+        r#"{prefix}
+[[services]]
+id = "first"
+name = "SharedService"
+binary = "${{install}}/app.txt"
+[[services]]
+id = "second"
+name = "sharedservice"
+binary = "${{install}}/app.txt"
+"#
+    );
+    let (_directory, desired) = semantic_plan(&source, &[("dist/app.txt", b"service")]);
+    let error = resolve_fixed(&desired).unwrap_err();
+    assert!(
+        matches!(error, TargetResolveError::TargetCollision { ref kind, .. } if kind == "service name")
+    );
 }

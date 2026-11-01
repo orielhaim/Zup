@@ -208,7 +208,7 @@ pub fn compose_windows(
     let composed = zup_pe::resources::update_rcdata(&template, &documents)?;
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|error| ComposeError::io(parent, error))?;
-    zup_platform::publish(output, &composed).map_err(|error| ComposeError::Io {
+    zup_core::publish(output, &composed).map_err(|error| ComposeError::Io {
         path: output.display().to_string(),
         source: std::io::Error::other(error.to_string()),
     })?;
@@ -235,7 +235,7 @@ pub fn apply_windows_icon(
     }
     let image = std::fs::read(output).map_err(|error| ComposeError::io(output, error))?;
     let stamped = zup_pe::resources::update_icons(&image, images, group)?;
-    zup_platform::publish(output, &stamped).map_err(|error| ComposeError::Io {
+    zup_core::publish(output, &stamped).map_err(|error| ComposeError::Io {
         path: output.display().to_string(),
         source: std::io::Error::other(error.to_string()),
     })?;

@@ -344,7 +344,7 @@ pub fn check_target_lowering(
     build: &zup_build::BuildPlan,
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
-    let capabilities = zup_platform::capabilities(&config.target)
+    let capabilities = zup_plan::capabilities(&config.target)
         .ok_or_else(|| miette::miette!("unsupported target `{}`", config.target))?;
     let plan = build
         .by_target(&config.target)

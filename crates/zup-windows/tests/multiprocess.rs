@@ -5,13 +5,12 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use zup_core::{Privilege, RelativePath, ResourceKey, Target, hash_reader};
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_protocol::{
     ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello, SessionId, WireEnvelope,
 };
-use zup_transaction::{
-    FileDelta, FilePrecondition, FileWork, TransactionInput, TransactionPlan, compile_transaction,
-};
+use zup_transaction::{TransactionInput, TransactionPlan, compile_transaction};
 use zup_windows::launch_worker_for_test;
 use zup_windows::{
     PipeServer, UserSid, WorkerBootstrap, format_bootstrap, frame_server,
@@ -32,7 +31,7 @@ fn target_path(path: &Path) -> TargetPath {
 
 fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> TransactionInput {
     let mut input = TransactionInput::new(target());
-    input.files.push(FileWork {
+    input.files.push(FileOperation {
         key: ResourceKey::File {
             destination: destination.to_string_lossy().into_owned(),
         },
@@ -42,8 +41,10 @@ fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> Transa
         expected_sha256: digest(bytes),
         expected_size: bytes.len() as u64,
         privilege: Privilege::User,
-        delta: FileDelta::Create,
+        kind: FileOperationKind::Create,
         executable: false,
+
+        conflict: None,
     });
     input
 }
@@ -202,6 +203,7 @@ async fn execute_with_test_worker(worker: &Worker) -> zup_protocol::WorkerOutcom
             session_id,
             sequence: 2,
             message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
+                intent: None,
                 target: plan.target,
                 plan_json,
                 plan_hash,

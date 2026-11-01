@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use zup_acquire::CachePolicy;
 use zup_core::SelectedScope;
-use zup_exec::LifecycleAction;
+use zup_plan::LifecycleAction;
 use zup_presentation::OutputFormat;
 use zup_runtime::{
     ExecutionPolicy, Operation, OperationInput, OperationSelection, RuntimeRequest,
@@ -49,7 +49,7 @@ pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::
 #[derive(Debug, Clone, Copy)]
 pub enum Verb {
     Modify,
-    Repair { force_files: bool },
+    Repair { force: bool },
     Upgrade,
 }
 
@@ -57,7 +57,7 @@ impl Verb {
     pub fn action(self) -> Operation {
         match self {
             Self::Modify => Operation::Modify,
-            Self::Repair { force_files } => Operation::Repair { force_files },
+            Self::Repair { force } => Operation::Repair { force },
             Self::Upgrade => Operation::Upgrade,
         }
     }
@@ -183,7 +183,7 @@ fn run_handoff(
         zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
         zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
         zup_acquire::HandoffMode::Repair => LifecycleAction::Repair {
-            force_files: matches!(request, Operation::Repair { force_files: true }),
+            force: matches!(request, Operation::Repair { force: true }),
         },
     };
     if let Some(action) = named_action(request)
@@ -217,7 +217,7 @@ pub(crate) fn named_action(operation: Operation) -> Option<LifecycleAction> {
         Operation::Install => Some(LifecycleAction::Install),
         Operation::Upgrade => Some(LifecycleAction::Upgrade),
         Operation::Modify => Some(LifecycleAction::Modify),
-        Operation::Repair { force_files } => Some(LifecycleAction::Repair { force_files }),
+        Operation::Repair { force } => Some(LifecycleAction::Repair { force }),
         Operation::Uninstall => Some(LifecycleAction::Uninstall),
         Operation::Apply => None,
     }
@@ -260,7 +260,7 @@ fn run_graph_transition(
 
     if let Some(identity) = ledger
         .as_ref()
-        .and_then(zup_exec::InstallLedger::release_identity)
+        .and_then(zup_plan::InstallLedger::release_identity)
     {
         if identity.app_id != installer.app.id {
             return Err(miette::miette!(
@@ -314,8 +314,8 @@ fn run_graph_transition(
         miette::miette!("release acquisition: {error}")
     })?;
 
-    if let Operation::Repair { force_files } = request {
-        let drifted = drifted_digests(&state_root, &build.installer, scope, force_files)?;
+    if let Operation::Repair { force } = request {
+        let drifted = drifted_digests(&state_root, &build.installer, scope, force)?;
         if drifted.is_empty() {
             return Ok(());
         }
@@ -325,7 +325,7 @@ fn run_graph_transition(
         let narrowed = acquire::Acquired { plan, ..acquired };
         return run_acquired_transition(
             acquire::Request {
-                action: Some(LifecycleAction::Repair { force_files }),
+                action: Some(LifecycleAction::Repair { force }),
                 scope: Some(scope),
                 ..acquire::Request::default()
             },
@@ -359,13 +359,13 @@ fn drifted_digests(
     state_root: &Path,
     installer: &zup_core::Installer,
     scope: SelectedScope,
-    _force_files: bool,
+    _force: bool,
 ) -> miette::Result<BTreeSet<zup_core::Sha256Digest>> {
     let ledger = zup_windows::InstallLedgerStore::new(state_root)
         .load(&installer.app.id, scope)
         .map_err(|error| miette::miette!("installation ledger: {error}"))?
         .ok_or_else(|| miette::miette!("installation not found in the {scope} scope"))?;
-    Ok(zup_exec::owned_content_digests(&ledger))
+    Ok(zup_plan::owned_content_digests(&ledger))
 }
 
 pub fn run_acquired_transition(
@@ -411,7 +411,7 @@ pub fn run_acquired_transition(
     }
     if let Some(installed) = prior
         .as_ref()
-        .and_then(zup_exec::InstallLedger::release_identity)
+        .and_then(zup_plan::InstallLedger::release_identity)
         && installed.variant != acquired.resolved.variant.id
     {
         return Err(miette::miette!(

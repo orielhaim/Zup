@@ -55,6 +55,7 @@ pub enum SessionError {
 
 #[derive(Clone)]
 pub struct RuntimeRequest {
+    pub intent: Option<zup_plan::DeploymentIntent>,
     pub target: Target,
     pub app_id: AppId,
     pub app_version: semver::Version,
@@ -200,6 +201,7 @@ impl RuntimeControl {
 /// Coalesced execution progress. A slow consumer observes the latest snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OperationProgress {
+    pub phase: Option<zup_core::OperationPhase>,
     pub state: Option<RuntimeState>,
     pub completed: u64,
     pub total: u64,
@@ -215,7 +217,10 @@ impl OperationProgress {
                 completed,
                 total,
                 action,
+                phase,
+                ..
             } => {
+                self.phase = Some(*phase);
                 self.completed = *completed;
                 self.total = *total;
                 self.action.clone_from(action);
@@ -562,6 +567,7 @@ pub enum RuntimeEvent {
         id: String,
     },
     Progress {
+        phase: zup_core::OperationPhase,
         completed: u64,
         total: u64,
         action: String,

@@ -5,7 +5,7 @@ pub enum PathError {
     #[error("Linux path component `{component}` is invalid: {reason}")]
     InvalidComponent { component: String, reason: String },
     #[error(transparent)]
-    Path(#[from] zup_platform::TargetPathError),
+    Path(#[from] zup_plan::TargetPathError),
     #[error("cannot resolve {kind} `{path}`: {reason}")]
     Invalid {
         kind: &'static str,
@@ -76,6 +76,10 @@ impl PathError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
+    #[error(transparent)]
+    Contract(#[from] zup_plan::ContractError),
+    #[error(transparent)]
+    Binding(#[from] zup_plan::BindingMismatch),
     #[error("this installation cannot proceed on Linux: {reasons}")]
     Unsupported { reasons: String },
     #[error("{0}")]
@@ -88,7 +92,7 @@ pub enum PlanError {
     Template {
         kind: &'static str,
         #[source]
-        source: zup_platform::TemplateResolveError,
+        source: zup_plan::TemplateResolveError,
     },
     #[error("target path `{path}` is not a valid Linux path: {reason}")]
     InvalidTargetPath { path: String, reason: String },
@@ -99,7 +103,7 @@ pub enum PlanError {
     )]
     Undecided {
         destination: String,
-        kind: zup_exec::FileOperationKind,
+        kind: zup_plan::FileOperationKind,
     },
     #[error("cannot transact service `{unit}`: {reason}")]
     Service { unit: String, reason: String },
@@ -125,15 +129,6 @@ pub enum PlanError {
     Type { value: String },
     #[error(transparent)]
     Path(#[from] PathError),
-}
-
-impl PlanError {
-    pub fn reasons(&self) -> &str {
-        match self {
-            Self::Unsupported { reasons } => reasons,
-            _ => "",
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -197,7 +192,7 @@ pub enum ExecError {
     #[error("lock: {0}")]
     Lock(#[from] zup_transaction::LockError),
     #[error("lifecycle: {0}")]
-    Lifecycle(#[from] zup_exec::LifecycleError),
+    Lifecycle(#[from] zup_plan::LifecycleError),
     #[error("transaction plan: {0}")]
     Compile(#[from] zup_transaction::TransactionPlanError),
     #[error("transaction store: {0}")]

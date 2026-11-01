@@ -7,16 +7,17 @@ repository.workspace = true
 description = "Desired-state installation planner for zup"
 
 [dependencies]
+serde_json.workspace = true
+typed-path.workspace = true
+semver.workspace = true
 miette.workspace = true
 serde.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 zup-core.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 zup-build.workspace = true
 zup-manifest.workspace = true

@@ -20,4 +20,4 @@ pub use session::{
     SessionLog, TokenProbe, discover_recovery, execute, outcome_of,
 };
 pub use simulate::{SimulatedJob, SimulatedLifecycle, run_simulated};
-pub use telemetry::{EventingExecutor, operation_action, operation_work};
+pub use telemetry::{EventingExecutor, operation_action, operation_phase, operation_work};

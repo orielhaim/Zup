@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use rstest::rstest;
 use zup_core::{InstallLocation, SelectedScope, Target, Template, Variable, VariableValue};
-use zup_platform::{
+use zup_plan::{
     InstallLocationError, InstallLocationResolver, TargetPath, TemplateResolveError,
     resolve_template_path,
 };

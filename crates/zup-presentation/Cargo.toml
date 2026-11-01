@@ -14,6 +14,5 @@ zup-acquire.workspace = true
 zup-core.workspace = true
 zup-runtime.workspace = true
 zup-plan.workspace = true
-zup-platform.workspace = true
 zup-preset-protocol.workspace = true
 zup-transaction.workspace = true
