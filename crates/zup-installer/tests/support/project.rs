@@ -208,13 +208,16 @@ impl Setup {
 /// never composed, so the verb runner is a free function rather than a method: a
 /// test drives the setup file and the persisted copy with the same code.
 pub fn run(exe: &Path, state: &State, verb: &str, extra: &[&str]) -> std::process::Output {
-    std::process::Command::new(exe)
+    eprintln!("run {} {verb} {extra:?}", exe.display());
+    let output = std::process::Command::new(exe)
         .arg(verb)
         .args(["--scope", "user", "--state-root"])
         .arg(state.path())
         .args(extra)
         .output()
-        .unwrap_or_else(|error| panic!("run `{} {verb}`: {error}", exe.display()))
+        .unwrap_or_else(|error| panic!("run `{} {verb}`: {error}", exe.display()));
+    eprintln!("{verb} finished: {}", output.status);
+    output
 }
 
 /// Run a lifecycle verb and require it to succeed.

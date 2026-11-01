@@ -186,6 +186,24 @@ pub(crate) struct UninstallRunnerArgs {
 }
 
 impl Cli {
+    pub(crate) fn graphical(&self) -> bool {
+        match &self.command {
+            None => true,
+            Some(Commands::Install(args) | Commands::Modify(args) | Commands::Upgrade(args)) => {
+                args.ui
+            }
+            Some(Commands::Repair(args)) => args.install.ui,
+            Some(Commands::Uninstall(args)) => args.ui,
+            Some(Commands::UninstallRunner(args)) => args.uninstall.ui,
+            Some(
+                Commands::Update(_)
+                | Commands::Worker { .. }
+                | Commands::TerminalRunner(_)
+                | Commands::Recover(_),
+            ) => false,
+        }
+    }
+
     pub(crate) fn output_format(&self) -> OutputFormat {
         match &self.command {
             Some(Commands::Install(args))

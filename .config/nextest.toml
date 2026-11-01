@@ -1,6 +1,10 @@
 [profile.default]
 test-threads = 8
 
+[[profile.default.overrides]]
+filter = 'package(zup-installer) & (binary(generated_files) | binary(frontends))'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # Tests that need the staged toolchain (`cargo xtask toolchain build`) or a
 # second Cargo invocation. Fast CI uses this profile. Full verification uses
 # the default profile after the toolchain exists.

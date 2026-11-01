@@ -8,10 +8,6 @@ pub fn gui() -> ExitCode {
         Err(error) => {
             #[cfg(target_os = "linux")]
             eprintln!("{error}");
-            #[cfg(not(target_os = "linux"))]
-            if was_launched_interactively() {
-                show_error(&error.to_string());
-            }
             failure_exit(&error)
         }
     }
@@ -60,18 +56,8 @@ fn run_frontend(frontend: Frontend) -> miette::Result<()> {
     crate::run(frontend)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn was_launched_interactively() -> bool {
-    let arguments = std::env::args_os().skip(1);
-    let mut arguments = arguments.peekable();
-    if arguments.peek().is_none() {
-        return true;
-    }
-    arguments.any(|argument| argument == "__uninstall_runner")
-}
-
 #[cfg(windows)]
-fn show_error(message: &str) {
+pub(crate) fn show_error(message: &str) {
     use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     use windows::core::PCWSTR;
 
@@ -88,11 +74,6 @@ fn show_error(message: &str) {
             MB_ICONERROR | MB_OK,
         );
     }
-}
-
-#[cfg(all(not(target_os = "linux"), not(windows)))]
-fn show_error(message: &str) {
-    eprintln!("{message}");
 }
 
 use zup_presentation::OutputFormat;
