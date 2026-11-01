@@ -226,7 +226,7 @@ fn uninstall_uses_ownership_after_source_components_are_removed() {
     }
     let v1 = scratch.path().join("v1");
     zup_linux::test_support::compose_installer(
-        &zup_linux::test_support::genuine_template("console"),
+        std::path::Path::new(zup_linux::test_support::inert_template()),
         &v1,
         &zup_bundle::BundleWriter::encode(&build, &[]).unwrap(),
     );
