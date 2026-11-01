@@ -129,6 +129,25 @@ pub enum ObservedServiceState {
     },
 }
 
+impl ObservedServiceState {
+    pub fn configuration(&self) -> Option<crate::ServiceState> {
+        match self {
+            Self::Absent => Some(crate::ServiceState::Absent),
+            Self::InvalidService => None,
+            Self::Service {
+                display_name,
+                command,
+                start,
+                ..
+            } => Some(crate::ServiceState::Registration {
+                display_name: display_name.clone(),
+                command: command.clone(),
+                start: *start,
+            }),
+        }
+    }
+}
+
 /// Running/stopped is diagnostics only - not desired configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

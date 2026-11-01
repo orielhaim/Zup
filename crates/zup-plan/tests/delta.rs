@@ -447,11 +447,7 @@ fn missing_observation_rejected() {
 }
 
 #[test]
-fn a_host_wide_resource_stays_host_wide_under_a_per_user_installation() {
-    // A per-user installation that declares a machine-scope service is planning a
-    // host-wide mutation. Planning must carry that privilege through unchanged rather
-    // than lowering it to the installation's own scope, because the operation is what
-    // decides whether the user is asked to authorize, not the scope it was found under.
+fn user_state_cannot_authorize_system_service_ownership() {
     let mut target = sample_target();
     target.scope = SelectedScope::User;
     target.files[0].privilege = Privilege::User;
@@ -469,14 +465,12 @@ fn a_host_wide_resource_stays_host_wide_under_a_per_user_installation() {
     snapshot.protocols[0].scope = SelectedScope::User;
     snapshot.file_associations[0].scope = SelectedScope::User;
 
-    let plan = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(plan.services[0].privilege, Privilege::System);
-    assert_eq!(plan.files[0].privilege, Privilege::User);
-    assert_eq!(plan.launchers[0].privilege, Privilege::User);
-    assert_eq!(plan.path_entries[0].privilege, Privilege::User);
-    assert_eq!(plan.path_entries[0].scope, SelectedScope::User);
-    assert_eq!(plan.protocols[0].privilege, Privilege::User);
-    assert_eq!(plan.file_associations[0].privilege, Privilege::User);
+    assert!(matches!(
+        plan_execution(&target, &snapshot, None),
+        Err(zup_plan::ExecutionPlanError::Contract(
+            zup_plan::ContractError::Capability(_)
+        ))
+    ));
 }
 
 #[test]

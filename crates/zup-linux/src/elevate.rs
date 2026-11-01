@@ -75,10 +75,7 @@ pub(crate) fn plan_expected(
         })?;
     let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
     let ledger = ledger_store.load(&build.installer.app.id, SelectedScope::Machine)?;
-    let mut selection = request.selection.clone();
-    if selection.install_directory.is_none() {
-        selection.install_directory = request.install_dir_override.clone();
-    }
+    let selection = request.selection.clone();
     let host = crate::operation_host::LinuxOperationHost {
         installer: request.installer.clone(),
         machine: Some(crate::operation_host::MachineHost {
@@ -112,7 +109,8 @@ pub(crate) fn plan_expected(
             zup_runtime::Operation::Repair { force } if force
         ),
         install_dir_override: request
-            .install_dir_override
+            .selection
+            .install_directory
             .as_ref()
             .map(|directory| directory.display().to_string()),
         selected_components: request.selection.enable.clone(),

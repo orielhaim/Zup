@@ -372,6 +372,7 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
         arguments: vec!["--serve".into()],
     };
     let mut target = make_target("1.0.0", vec![]);
+    target.scope = SelectedScope::Machine;
     target.services.push(DesiredService {
         key: key.clone(),
         id: id.clone(),
@@ -382,6 +383,7 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
         privilege: Privilege::System,
     });
     let mut owned = ledger(&[]);
+    owned.scope = SelectedScope::Machine;
     owned.resources.insert(
         key.clone(),
         OwnedResource::Service {

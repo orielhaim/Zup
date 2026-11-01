@@ -22,7 +22,6 @@ pub struct LinuxRuntimeBackend {
     pub installer: PathBuf,
     pub operation: Operation,
     pub selection: OperationSelection,
-    pub install_dir_override: Option<PathBuf>,
     pub generated: BTreeMap<String, Vec<u8>>,
 }
 
@@ -382,7 +381,6 @@ impl LinuxRuntimeBackend {
                     scope: SelectedScope::Machine,
                     state_root: Some(request.state_root.clone()),
                     action: self.operation,
-                    install_dir_override: self.selection.install_directory.clone(),
                     selection: self.selection.clone(),
                 },
                 &crate::locations::MachineRoots::production(),
@@ -429,6 +427,7 @@ impl LinuxRuntimeBackend {
                 self.operation,
                 Operation::Repair { force } if force
             ),
+
             install_dir_override: self
                 .selection
                 .install_directory
@@ -471,7 +470,6 @@ impl LinuxRuntimeBackend {
                     scope: SelectedScope::Machine,
                     state_root: Some(state_root.clone()),
                     action: self.operation,
-                    install_dir_override: self.selection.install_directory.clone(),
                     selection: self.selection.clone(),
                 };
                 let (intent, expected) =
@@ -691,7 +689,6 @@ pub(crate) async fn recover_installation(
             installer,
             operation: Operation::Apply,
             selection: Default::default(),
-            install_dir_override: None,
             generated: Default::default(),
         }
         .execute_blocking(&request, &control)

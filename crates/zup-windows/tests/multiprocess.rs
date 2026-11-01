@@ -51,6 +51,7 @@ fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> Transa
 
 struct Worker {
     plan: Option<TransactionPlan>,
+    authority: zup_core::SelectedScope,
     install_directory: PathBuf,
     version: String,
     payload_root: PathBuf,
@@ -143,6 +144,7 @@ async fn execute_with_test_worker(
 ) -> Result<zup_protocol::WorkerOutcome, zup_protocol::WorkerFailure> {
     let Worker {
         plan,
+        authority,
         install_directory,
         version,
         payload_root,
@@ -219,8 +221,8 @@ async fn execute_with_test_worker(
         target: plan.target,
         expected_plan_hash: plan_hash.clone(),
     };
-    let worker =
-        launch_worker_for_test(&zup_bin, &format_bootstrap(&bootstrap)).expect("spawn worker");
+    let worker = launch_worker_for_test(&zup_bin, &format_bootstrap(&bootstrap), *authority)
+        .expect("spawn worker");
     tokio::time::timeout(Duration::from_secs(5), server.connect())
         .await
         .expect("worker connect timeout")
@@ -307,8 +309,13 @@ async fn execute_with_test_worker(
     }
 }
 
+#[rstest::rstest]
+#[case(zup_core::SelectedScope::User)]
+#[case(zup_core::SelectedScope::Machine)]
 #[tokio::test]
-async fn multi_process_named_pipe_handshake_and_execute() {
+async fn a_worker_executes_only_within_its_authority_domain(
+    #[case] authority: zup_core::SelectedScope,
+) {
     let dir = TempDir::new().unwrap();
     let payload_root = dir.path().join("payload");
     let target_root = dir.path().join("target");
@@ -320,27 +327,31 @@ async fn multi_process_named_pipe_handshake_and_execute() {
     std::fs::write(payload_root.join("App.exe"), b"hello-app").unwrap();
     let registration = app_id(&work_root);
     let destination = target_root.join("App.exe");
-    assert_eq!(
-        execute_with_test_worker(&Worker {
-            plan: None,
-            install_directory: target_root,
-            version: "1.0.0".to_owned(),
-            payload_root,
-            state_root,
-            work_root,
-            recovery_id: None,
-            release: None,
-            payload_overlay_root: None,
-        })
-        .await,
-        Ok(zup_protocol::WorkerOutcome::Committed)
-    );
-    assert_eq!(std::fs::read(destination).unwrap(), b"hello-app");
-    windows_registry::CURRENT_USER
-        .remove_tree(format!(
-            "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{registration}"
-        ))
-        .unwrap();
+    let outcome = execute_with_test_worker(&Worker {
+        plan: None,
+        authority,
+        install_directory: target_root,
+        version: "1.0.0".to_owned(),
+        payload_root,
+        state_root,
+        work_root,
+        recovery_id: None,
+        release: None,
+        payload_overlay_root: None,
+    })
+    .await;
+    if authority == zup_core::SelectedScope::Machine {
+        assert_eq!(outcome, Err(zup_protocol::WorkerFailure::Authentication));
+        assert!(!destination.exists());
+    } else {
+        assert_eq!(outcome, Ok(zup_protocol::WorkerOutcome::Committed));
+        assert_eq!(std::fs::read(destination).unwrap(), b"hello-app");
+        windows_registry::CURRENT_USER
+            .remove_tree(format!(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{registration}"
+            ))
+            .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -373,6 +384,7 @@ async fn authenticated_worker_rejects_an_overlay_not_declared_by_its_content() {
     assert_eq!(
         execute_with_test_worker(&Worker {
             plan: Some(plan),
+            authority: zup_core::SelectedScope::User,
             install_directory: target_root,
             version: "1.0.0".to_owned(),
             payload_root,

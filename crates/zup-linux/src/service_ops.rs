@@ -172,7 +172,7 @@ pub fn snapshot_services(
     Ok(out)
 }
 
-fn observe_unit(
+pub(crate) fn observe_unit(
     unit: &str,
     path: &Path,
     target: zup_core::Target,

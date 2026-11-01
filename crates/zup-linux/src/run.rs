@@ -20,8 +20,6 @@ pub struct LinuxRunRequest {
     pub state_root: Option<PathBuf>,
     pub action: zup_runtime::Operation,
 
-    pub install_dir_override: Option<PathBuf>,
-
     pub selection: zup_runtime::OperationSelection,
 }
 
@@ -72,10 +70,7 @@ fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> 
     } else {
         refuse_redirected_hierarchy(&context.state_root)?;
     }
-    let mut selection = request.selection.clone();
-    if selection.install_directory.is_none() {
-        selection.install_directory = request.install_dir_override.clone();
-    }
+    let selection = request.selection.clone();
     let bound = host.bind(&context).map_err(ExecError::Ownership)?;
     let input = zup_runtime::OperationInput {
         build: &discovery.build,

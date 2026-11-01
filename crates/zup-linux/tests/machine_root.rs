@@ -327,7 +327,6 @@ fn root_public_run_dispatches_machine_scope() {
         scope: SelectedScope::Machine,
         state_root: None,
         action,
-        install_dir_override: None,
         selection: Default::default(),
     };
     let tool = PathBuf::from("/opt/tool/tool");

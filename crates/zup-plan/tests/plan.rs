@@ -720,7 +720,7 @@ executable = "${install}/a.txt"
 }
 
 #[test]
-fn a_service_makes_a_user_scope_plan_system_authorized() {
+fn system_services_require_machine_ownership_when_selected() {
     let source = with(
         r#"
 [[components]]
@@ -754,11 +754,11 @@ component = "service"
         None,
         &zup_plan::NeverCancelled,
     )
-    .map(|installation| installation.plan)
-    .unwrap();
-    assert_eq!(with_svc.scope, SelectedScope::User);
-    assert_eq!(with_svc.services[0].privilege, Privilege::System);
-    assert!(with_svc.summary().unwrap().requires_authorization);
+    .unwrap_err();
+    assert!(matches!(
+        with_svc,
+        PlanError::Contract(zup_plan::ContractError::Capability(_))
+    ));
 }
 
 #[test]

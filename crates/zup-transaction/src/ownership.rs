@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use thiserror::Error;
-use zup_core::ResourceKey;
+use zup_core::{ResourceKey, SelectedScope};
 use zup_plan::{InstallLedger, OwnedResource};
 
 use crate::{NodeKind, OperationId, TransactionPlan};
@@ -13,6 +13,8 @@ pub enum OwnershipError {
     Target,
     #[error("installation generation")]
     Generation,
+    #[error("resource authority exceeds installation scope: {0}")]
+    Authority(OperationId),
     #[error("retired resources")]
     Retired,
     #[error("{0}")]
@@ -23,10 +25,11 @@ pub enum OwnershipError {
 /// Requires structural validation and native key normalization; backend effects stay caller-owned.
 pub fn validate_ownership<'a>(
     plan: &'a TransactionPlan,
+    scope: SelectedScope,
     ledger: Option<&InstallLedger>,
     retired_ledger_keys: &BTreeSet<ResourceKey>,
 ) -> Result<BTreeSet<&'a ResourceKey>, OwnershipError> {
-    if ledger.is_some_and(|ledger| ledger.target != plan.target) {
+    if ledger.is_some_and(|ledger| ledger.target != plan.target || ledger.scope != scope) {
         return Err(OwnershipError::Target);
     }
     match (
@@ -49,6 +52,18 @@ pub fn validate_ownership<'a>(
         return Err(OwnershipError::Retired);
     }
     for node in &plan.nodes {
+        if node
+            .meta
+            .privilege
+            .is_some_and(|privilege| privilege != scope.authorization())
+            || node
+                .meta
+                .removal
+                .as_ref()
+                .is_some_and(|removal| removal.scope != scope)
+        {
+            return Err(OwnershipError::Authority(node.id.clone()));
+        }
         let valid = match &node.kind {
             NodeKind::FileMutation { key, delta } => {
                 let owned = ledger.and_then(|ledger| ledger.resources.get(key));

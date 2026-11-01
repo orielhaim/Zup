@@ -19,7 +19,7 @@ use crate::operation::{
 };
 use crate::{
     ExtensionState, FileAssociationState, InstallLedger, LauncherState, OwnedResource,
-    ProtocolState, ServiceState,
+    ProtocolState,
 };
 
 /// Errors produced while computing an execution plan (consistency / overflow).
@@ -540,20 +540,7 @@ fn plan_services(
             }) if name == desired.name.as_str() => Some(installed),
             _ => None,
         };
-        let current = match &observed.state {
-            ObservedServiceState::Absent => Some(ServiceState::Absent),
-            ObservedServiceState::InvalidService => None,
-            ObservedServiceState::Service {
-                display_name,
-                command,
-                start,
-                ..
-            } => Some(ServiceState::Registration {
-                display_name: display_name.clone(),
-                command: command.clone(),
-                start: *start,
-            }),
-        };
+        let current = observed.state.configuration();
         let (kind, conflict) = if owned.is_some() && installed.is_none()
             || installed.is_some_and(|installed| Some(installed) != current.as_ref())
         {

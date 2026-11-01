@@ -68,7 +68,6 @@ pub fn run_machine_faulted(
             scope: zup_core::SelectedScope::Machine,
             state_root: Some(test_roots.state.clone()),
             action,
-            install_dir_override: None,
             selection: Default::default(),
         },
         &test_roots.roots,
@@ -89,8 +88,10 @@ pub fn run_machine_isolated(
             scope: zup_core::SelectedScope::Machine,
             state_root: Some(test_roots.state.clone()),
             action,
-            install_dir_override,
-            selection: Default::default(),
+            selection: zup_runtime::OperationSelection {
+                install_directory: install_dir_override,
+                ..Default::default()
+            },
         },
         &test_roots.roots,
         &test_roots.systemd,
@@ -152,8 +153,10 @@ pub fn plan_for_test(
         scope: zup_core::SelectedScope::Machine,
         state_root: Some(test_roots.state.clone()),
         action,
-        install_dir_override,
-        selection: Default::default(),
+        selection: zup_runtime::OperationSelection {
+            install_directory: install_dir_override,
+            ..Default::default()
+        },
     };
     let (intent, expected) = crate::elevate::plan_expected(
         &request,
@@ -186,8 +189,10 @@ pub fn run_machine_elevated_for_test(
             scope: zup_core::SelectedScope::Machine,
             state_root: Some(state.to_path_buf()),
             action,
-            install_dir_override,
-            selection: Default::default(),
+            selection: zup_runtime::OperationSelection {
+                install_directory: install_dir_override,
+                ..Default::default()
+            },
         },
         launcher,
     )
@@ -1176,7 +1181,6 @@ pub fn run_installer(installer: &Path, state: &Path, action: Operation) -> Linux
         scope: SelectedScope::User,
         state_root: Some(state.to_path_buf()),
         action,
-        install_dir_override: None,
         selection: Default::default(),
     })
     .expect("the run reaches a stable outcome")

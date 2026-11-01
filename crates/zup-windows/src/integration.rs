@@ -534,22 +534,9 @@ pub(crate) fn observed_launcher(
 pub(crate) fn observed_service(
     observed: zup_plan::ObservedServiceState,
 ) -> Result<ServiceState, IntegrationError> {
-    Ok(match observed {
-        zup_plan::ObservedServiceState::InvalidService => {
-            return Err(IntegrationError::Drift("service is malformed".into()));
-        }
-        zup_plan::ObservedServiceState::Absent => ServiceState::Absent,
-        zup_plan::ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => ServiceState::Registration {
-            display_name,
-            command,
-            start,
-        },
-    })
+    observed
+        .configuration()
+        .ok_or_else(|| IntegrationError::Drift("service is malformed".into()))
 }
 
 fn rollback_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {

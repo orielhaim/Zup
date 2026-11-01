@@ -59,7 +59,7 @@ fn backend() -> BackendOperation {
     BackendOperation::apply(
         ResourceKey::Backend { id: id.clone() },
         id,
-        Privilege::System,
+        Privilege::User,
         b"opaque-backend-payload".to_vec(),
     )
 }

@@ -423,7 +423,7 @@ pub async fn run_worker(
     {
         return Err(WorkerError::AuthFailed("worker is not elevated".into()));
     }
-    run_worker_inner(bootstrap, cancel).await
+    run_worker_inner(bootstrap, cancel, zup_core::SelectedScope::Machine).await
 }
 
 #[doc(hidden)]
@@ -431,13 +431,15 @@ pub async fn run_worker(
 pub async fn run_worker_for_test(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
+    authorized_scope: zup_core::SelectedScope,
 ) -> Result<zup_protocol::WorkerOutcome, WorkerError> {
-    run_worker_inner(bootstrap, cancel).await
+    run_worker_inner(bootstrap, cancel, authorized_scope).await
 }
 
 async fn run_worker_inner(
     bootstrap: WorkerBootstrap,
     cancel: CancellationToken,
+    authorized_scope: zup_core::SelectedScope,
 ) -> Result<zup_protocol::WorkerOutcome, WorkerError> {
     let client = crate::pipe::PipeClient::connect(&bootstrap.pipe_name)
         .await
@@ -573,6 +575,11 @@ async fn run_worker_inner(
             "machine" => zup_core::SelectedScope::Machine,
             _ => return Err(WorkerError::Protocol("invalid install scope".into())),
         };
+        if scope != authorized_scope {
+            return Err(WorkerError::AuthFailed(
+                "transaction scope exceeds worker authority".into(),
+            ));
+        }
         {
             let executable =
                 current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;

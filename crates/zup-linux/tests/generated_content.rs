@@ -183,7 +183,6 @@ fn a_busy_operation_does_not_stage_generated_content() {
             disable: Vec::new(),
             install_directory: None,
         },
-        install_dir_override: None,
         generated: BTreeMap::from([(
             "__zup_generated__/applications/app.desktop".into(),
             b"[Desktop Entry]\n".to_vec(),

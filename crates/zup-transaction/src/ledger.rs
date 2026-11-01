@@ -27,7 +27,7 @@ pub fn validate_ledger_identity(
         && ledger.scope == scope
         && ledger.install_directory.as_ref().is_none_or(|path| path.target() == &ledger.target)
         && ledger.resources.iter().all(|(key, owned)| {
-            if !identities.insert(key.canonical_for(&ledger.target)) { return false; }
+            if owned.privilege() != scope.authorization() || !identities.insert(key.canonical_for(&ledger.target)) { return false; }
             match owned {
             zup_plan::OwnedResource::File {
                 destination,

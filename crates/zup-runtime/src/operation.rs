@@ -185,10 +185,6 @@ pub trait OperationHost {
         install: &DesiredState,
     ) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String>;
 
-    fn resolve_target_for_uninstall(&self) -> bool {
-        false
-    }
-
     fn observe(
         &self,
         target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
@@ -239,9 +235,7 @@ pub struct PlannedOperation {
 #[derive(Debug)]
 pub enum OperationBody {
     Planned(Box<PlannedOperation>),
-    Uninstall {
-        target_plan: Option<Box<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>>,
-    },
+    Uninstall,
 }
 
 #[derive(Debug)]
@@ -258,28 +252,28 @@ impl PreparedOperation {
     pub fn target_plan(&self) -> Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>> {
         match &self.body {
             OperationBody::Planned(planned) => Some(&planned.target_plan),
-            OperationBody::Uninstall { target_plan } => target_plan.as_deref(),
+            OperationBody::Uninstall => None,
         }
     }
 
     pub fn install_plan(&self) -> Option<&DesiredState> {
         match &self.body {
             OperationBody::Planned(planned) => Some(&planned.install_plan),
-            OperationBody::Uninstall { .. } => None,
+            OperationBody::Uninstall => None,
         }
     }
 
     pub fn generated_files(&self) -> &[zup_plan::GeneratedFile] {
         match &self.body {
             OperationBody::Planned(planned) => &planned.generated_files,
-            OperationBody::Uninstall { .. } => &[],
+            OperationBody::Uninstall => &[],
         }
     }
 
     pub fn bootstrap(&self) -> Option<&BootstrapRequest> {
         match &self.body {
             OperationBody::Planned(planned) => planned.bootstrap.as_ref(),
-            OperationBody::Uninstall { .. } => None,
+            OperationBody::Uninstall => None,
         }
     }
 }
@@ -345,41 +339,7 @@ pub fn prepare_operation<H: OperationHost>(
                 ),
             ));
         }
-        let target = if host.resolve_target_for_uninstall() {
-            let plan_request = plan_request(
-                installer,
-                input.scope,
-                Some(ledger),
-                &OperationSelection::default(),
-                LifecycleAction::Modify,
-                persisted_install_directory(Some(ledger)),
-            )?;
-            let planned = host
-                .plan_build(input.build, &plan_request, input.cancellation)
-                .map_err(|message| {
-                    if input.cancellation.is_cancelled() {
-                        OperationError::Cancelled
-                    } else {
-                        OperationError::refused("plan", message)
-                    }
-                })?;
-            let mut target = host
-                .resolve_target(&planned.plan)
-                .map_err(|message| OperationError::refused("target", message))?;
-            host.attach_content(
-                &mut target,
-                &ContentAccess {
-                    installer: input.installer,
-                    state_root: input.state_root,
-                    scope: input.scope,
-                },
-                None,
-            )
-            .map_err(|message| OperationError::refused("content", message))?;
-            Some(target)
-        } else {
-            None
-        };
+        let target = None;
         let (snapshot, owned_matches) = host
             .observe(target.as_ref(), Some(ledger))
             .map_err(|message| OperationError::refused("observe", message))?;
@@ -402,9 +362,7 @@ pub fn prepare_operation<H: OperationHost>(
             execution_plan: execution,
             transaction_plan,
             selection: input.selection.clone(),
-            body: OperationBody::Uninstall {
-                target_plan: target.map(Box::new),
-            },
+            body: OperationBody::Uninstall,
         });
     }
     let install_directory = host
@@ -879,14 +837,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_uninstall_removes_by_ownership_without_planning() {
-        let build = fixture_build();
-        let ledger = fixture_ledger(&build);
+    #[rstest]
+    #[case(Target::WINDOWS_X64)]
+    #[case(Target::LINUX_X64)]
+    fn an_uninstall_removes_by_ownership_without_planning(#[case] target: Target) {
+        let mut build = fixture_build();
+        build.installer.target = target;
+        let mut ledger = fixture_ledger(&build);
+        ledger
+            .selected_components
+            .push(zup_core::ComponentId::new("retired-component").unwrap());
         let root = tempfile::tempdir().expect("temp dir");
         let installer = root.path().join("setup.exe");
         std::fs::write(&installer, b"installer").expect("write");
-        let host = StubHost::installing(fixture_target());
+        let mut host_target = fixture_target();
+        host_target.target = target;
+        let host = StubHost::installing(host_target);
         let prepared = prepare_operation(
             &input(
                 &build,

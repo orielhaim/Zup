@@ -159,7 +159,7 @@ const FRONTENDS: &[Frontend] = &[Frontend::Gui, Frontend::Console, Frontend::Hea
 const WINDOWS: TargetCapabilities = TargetCapabilities {
     frontends: FRONTENDS,
     scopes: ScopeSupport::Both,
-    services: ScopeSupport::Both,
+    services: ScopeSupport::Machine,
     menu: ScopeSupport::Both,
     desktop: ScopeSupport::Both,
     protocols: ScopeSupport::Both,

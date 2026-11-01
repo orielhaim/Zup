@@ -143,7 +143,6 @@ fn process_interruption_recovers_real_files() {
             installer: carrier,
             operation: zup_runtime::Operation::Apply,
             selection: Default::default(),
-            install_dir_override: None,
             generated: Default::default(),
         };
         let mut previous = None;

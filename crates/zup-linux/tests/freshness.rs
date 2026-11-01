@@ -62,7 +62,6 @@ fn backend(installer: &Path) -> LinuxRuntimeBackend {
             disable: Vec::new(),
             install_directory: None,
         },
-        install_dir_override: None,
         generated: Default::default(),
     }
 }

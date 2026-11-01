@@ -128,6 +128,10 @@ pub fn plan_lifecycle(
         )?,
         None => ExecutionPlan {
             binding: ledger.map(crate::DeploymentBinding::uninstall),
+            selected_components: ledger
+                .map(|ledger| ledger.selected_components.clone())
+                .unwrap_or_default(),
+            install_directory: ledger.and_then(|ledger| ledger.install_directory.clone()),
             ..ExecutionPlan::default()
         },
     };

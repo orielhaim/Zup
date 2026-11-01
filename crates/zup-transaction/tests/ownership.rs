@@ -60,7 +60,7 @@ fn file_changes_are_bound_to_committed_ownership(#[case] delta: FileOperationKin
     input.observed_transaction = Some(ledger.committed_transaction);
     input.files.push(work.clone());
     let plan = compile_transaction(&input).unwrap();
-    validate_ownership(&plan, Some(&ledger), &BTreeSet::new()).unwrap();
+    validate_ownership(&plan, SelectedScope::User, Some(&ledger), &BTreeSet::new()).unwrap();
     if delta == FileOperationKind::Create {
         ledger.resources.insert(work.key.clone(), owned_file(&work));
     } else if let OwnedResource::File { sha256, .. } = ledger.resources.get_mut(&work.key).unwrap()
@@ -68,7 +68,7 @@ fn file_changes_are_bound_to_committed_ownership(#[case] delta: FileOperationKin
         *sha256 = digest(b"different owner bytes");
     }
     assert!(matches!(
-        validate_ownership(&plan, Some(&ledger), &BTreeSet::new()),
+        validate_ownership(&plan, SelectedScope::User, Some(&ledger), &BTreeSet::new()),
         Err(OwnershipError::File(_))
     ));
 }
@@ -93,9 +93,9 @@ fn removal_cannot_forget_or_retarget_committed_resources() {
     );
     let retired = input.retired_keys.iter().cloned().collect();
     let plan = compile_transaction(&input).unwrap();
-    validate_ownership(&plan, Some(&ledger), &retired).unwrap();
+    validate_ownership(&plan, SelectedScope::User, Some(&ledger), &retired).unwrap();
     assert!(matches!(
-        validate_ownership(&plan, Some(&ledger), &BTreeSet::new()),
+        validate_ownership(&plan, SelectedScope::User, Some(&ledger), &BTreeSet::new()),
         Err(OwnershipError::Retired)
     ));
     let extra = file("extra", b"old");
@@ -103,13 +103,13 @@ fn removal_cannot_forget_or_retarget_committed_resources() {
         .resources
         .insert(extra.key.clone(), owned_file(&extra));
     assert!(matches!(
-        validate_ownership(&plan, Some(&ledger), &retired),
+        validate_ownership(&plan, SelectedScope::User, Some(&ledger), &retired),
         Err(OwnershipError::Retired)
     ));
     ledger.resources.remove(&extra.key);
     ledger.committed_transaction = "00000000-0000-7000-8000-000000000002".parse().unwrap();
     assert!(matches!(
-        validate_ownership(&plan, Some(&ledger), &retired),
+        validate_ownership(&plan, SelectedScope::User, Some(&ledger), &retired),
         Err(OwnershipError::Generation)
     ));
     ledger.committed_transaction = "00000000-0000-7000-8000-000000000001".parse().unwrap();
@@ -117,7 +117,7 @@ fn removal_cannot_forget_or_retarget_committed_resources() {
         *size += 1;
     }
     assert!(matches!(
-        validate_ownership(&plan, Some(&ledger), &retired),
+        validate_ownership(&plan, SelectedScope::User, Some(&ledger), &retired),
         Err(OwnershipError::File(_))
     ));
 }
@@ -313,5 +313,69 @@ fn malformed_ownership_cannot_change_resource_family_or_alias_an_identity() {
         &installed,
         &sample_app_id(),
         SelectedScope::User
+    ));
+}
+
+#[test]
+fn user_state_cannot_grant_system_authority_for_creation_or_cleanup() {
+    let mut work = file("protected", b"old");
+    work.privilege = Privilege::System;
+    let mut input = TransactionInput::new(target());
+    input.files.push(work.clone());
+    let plan = compile_transaction(&input).unwrap();
+    assert!(matches!(
+        validate_ownership(&plan, SelectedScope::User, None, &BTreeSet::new()),
+        Err(OwnershipError::Authority(_))
+    ));
+
+    let mut forged = ledger();
+    let mut owned = owned_file(&work);
+    if let OwnedResource::File { privilege, .. } = &mut owned {
+        *privilege = Privilege::System;
+    }
+    forged.resources.insert(work.key.clone(), owned);
+    assert!(!zup_transaction::validate_ledger_identity(
+        &forged,
+        &sample_app_id(),
+        SelectedScope::User
+    ));
+    let mut removal = removal_input();
+    removal.observed_transaction = Some(forged.committed_transaction);
+    removal.removals[0].key = work.key.clone();
+    removal.removals[0].destination = work.destination.clone();
+    removal.removals[0].sha256 = digest(b"old");
+    removal.removals[0].size = 3;
+    removal.removals[0].privilege = Privilege::System;
+    removal.retired_keys = vec![work.key.clone()];
+    let plan = compile_transaction(&removal).unwrap();
+    assert!(matches!(
+        validate_ownership(
+            &plan,
+            SelectedScope::User,
+            Some(&forged),
+            &BTreeSet::from([work.key])
+        ),
+        Err(OwnershipError::Authority(_))
+    ));
+}
+
+#[test]
+fn recovery_rejects_a_journal_that_changes_its_authority_domain() {
+    let mut work = file("protected", b"owned");
+    work.privilege = Privilege::System;
+    let mut input = TransactionInput::new(target());
+    input.files.push(work);
+    let mut record = zup_transaction::TransactionRecord::new(
+        zup_core::TransactionId::new_v7(),
+        sample_app_id(),
+        SelectedScope::Machine,
+        sample_version(),
+        compile_transaction(&input).unwrap(),
+    );
+    record.validate().unwrap();
+    record.scope = SelectedScope::User;
+    assert!(matches!(
+        record.validate(),
+        Err(zup_transaction::CorruptReason::InvalidPlan)
     ));
 }

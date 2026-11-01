@@ -272,6 +272,7 @@ impl TransactionPlan {
                     };
                     operation.validate()?;
                     if operation.key != *key
+                        || node.meta.privilege != Some(operation.privilege)
                         || operation.intent != *intent
                         || *intent != BackendOperationIntent::Apply
                         || node.meta.removal.is_some()
@@ -285,6 +286,7 @@ impl TransactionPlan {
                     };
                     operation.validate()?;
                     if operation.key != *key
+                        || node.meta.privilege != Some(operation.privilege)
                         || operation.intent != BackendOperationIntent::Remove
                         || !retired.contains(&key)
                         || node.meta.removal.is_some()

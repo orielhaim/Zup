@@ -297,9 +297,11 @@ pub fn launch_elevated_worker(
 pub fn launch_worker_for_test(
     executable: &Path,
     bootstrap: &str,
+    authorized_scope: zup_core::SelectedScope,
 ) -> Result<ProcessHandle, TransportError> {
     let child = std::process::Command::new(executable)
         .arg(bootstrap)
+        .arg(authorized_scope.to_string())
         .spawn()
         .map_err(TransportError::Launch)?;
     let pid = child.id();

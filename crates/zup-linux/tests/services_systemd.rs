@@ -359,7 +359,7 @@ impl RealWorld {
         .map_err(|error| format!("lifecycle: {error}"))?;
         let mut input = compile_machine_execution_plan(
             &execution,
-            plan,
+            (!execution.uninstall).then_some(plan),
             ServiceCompilation {
                 roots: &MachineRoots::production(),
                 systemd: &SystemdRoots::production(),

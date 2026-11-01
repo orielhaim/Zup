@@ -253,7 +253,7 @@ impl Fixture {
         let mut manager = self.manager.clone();
         let mut input = compile_machine_execution_plan(
             &execution,
-            plan,
+            (!execution.uninstall).then_some(plan),
             ServiceCompilation {
                 roots: &self.roots,
                 systemd: &self.systemd,
@@ -341,7 +341,7 @@ impl Fixture {
         let mut manager = self.manager.clone();
         let input = compile_machine_execution_plan(
             &execution,
-            plan,
+            (!execution.uninstall).then_some(plan),
             ServiceCompilation {
                 roots: &self.roots,
                 systemd: &self.systemd,
@@ -388,7 +388,7 @@ impl Fixture {
         let mut manager = self.manager.clone();
         let mut input = compile_machine_execution_plan(
             &execution,
-            plan,
+            (!execution.uninstall).then_some(plan),
             ServiceCompilation {
                 roots: &self.roots,
                 systemd: &self.systemd,
@@ -904,7 +904,7 @@ fn tampered_unit_bytes_refuse_at_apply() {
     let mut manager = fixture.manager.clone();
     let mut input = compile_machine_execution_plan(
         &execution,
-        &plan,
+        Some(&plan),
         zup_linux::ServiceCompilation {
             roots: &fixture.roots,
             systemd: &fixture.systemd,

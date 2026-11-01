@@ -68,10 +68,6 @@ impl OperationHost for LinuxOperationHost {
         .map_err(|error| error.to_string())
     }
 
-    fn resolve_target_for_uninstall(&self) -> bool {
-        true
-    }
-
     fn install_directory(
         &self,
         explicit: Option<&std::path::Path>,
@@ -99,28 +95,44 @@ impl OperationHost for LinuxOperationHost {
         target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
         ledger: Option<&InstallLedger>,
     ) -> Result<(Option<HostSnapshot>, BTreeMap<ResourceKey, bool>), String> {
-        match target {
-            Some(target) => {
-                let mut snapshot = crate::executor::snapshot_target(target);
-                if crate::input::requires_service_manager(target, ledger) {
-                    let systemd = self
-                        .machine
-                        .as_ref()
-                        .map(|machine| &machine.systemd)
-                        .ok_or_else(|| "services need machine scope".to_owned())?;
-                    let mut manager = crate::systemd::RealSystemd::connect()
-                        .map_err(|error| format!("systemd is unavailable: {error}"))?;
-                    snapshot.services =
-                        crate::input::snapshot_services(target, &mut manager, systemd)
-                            .map_err(|error| format!("service snapshot: {error}"))?;
-                }
-                Ok((
-                    Some(snapshot),
-                    crate::run::inspect_owned_matches_for(ledger),
-                ))
+        let mut snapshot = target.map(crate::executor::snapshot_target);
+        let mut owned_matches = crate::run::inspect_owned_matches_for(ledger);
+        if crate::input::requires_service_manager(target, ledger) {
+            let systemd = self
+                .machine
+                .as_ref()
+                .map(|machine| &machine.systemd)
+                .ok_or_else(|| "services need machine scope".to_owned())?;
+            let mut manager = crate::systemd::RealSystemd::connect()
+                .map_err(|error| format!("systemd is unavailable: {error}"))?;
+            if let (Some(target), Some(snapshot)) = (target, snapshot.as_mut()) {
+                snapshot.services = crate::input::snapshot_services(target, &mut manager, systemd)
+                    .map_err(|error| format!("service snapshot: {error}"))?;
             }
-            None => Ok((None, crate::run::inspect_owned_matches_for(ledger))),
+            if let Some(ledger) = ledger {
+                for (key, owned) in &ledger.resources {
+                    if let zup_plan::OwnedResource::Service {
+                        name, installed, ..
+                    } = owned
+                    {
+                        let path = crate::machine::authorize_systemd_unit(name, systemd)
+                            .map_err(|error| error.to_string())?;
+                        let observed = crate::service_ops::observe_unit(
+                            name,
+                            &path,
+                            ledger.target,
+                            &mut manager,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        owned_matches.insert(
+                            key.clone(),
+                            observed.configuration().as_ref() == Some(installed),
+                        );
+                    }
+                }
+            }
         }
+        Ok((snapshot, owned_matches))
     }
 
     fn compile(
@@ -132,8 +144,6 @@ impl OperationHost for LinuxOperationHost {
         execution
             .validate_generation(_ledger)
             .map_err(|error| error.to_string())?;
-        let target =
-            target.ok_or_else(|| "a Linux transaction compiles against its target".to_owned())?;
         match &self.machine {
             Some(machine)
                 if !execution.services.is_empty()

@@ -144,7 +144,7 @@ impl InstallLedgerStore {
         let ledger = self.load(app_id, scope)?;
         let retired_ledger_keys = retired_ledger_keys(plan)?;
         let retired =
-            zup_transaction::validate_ownership(plan, ledger.as_ref(), &retired_ledger_keys)
+            zup_transaction::validate_ownership(plan, scope, ledger.as_ref(), &retired_ledger_keys)
                 .map_err(|error| LedgerError::Ownership(error.to_string()))?;
         for node in &plan.nodes {
             match &node.kind {

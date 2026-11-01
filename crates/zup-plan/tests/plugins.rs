@@ -232,7 +232,9 @@ source = "plugins/one.wasm"
         "helper".to_owned(),
         PluginResourceProposal::new(all_resources()),
     )]);
-    let result = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap();
+    let mut request = request();
+    request.scope = SelectedScope::Machine;
+    let result = plan(&build, &request, Some(&mut executor), &NeverCancelled).unwrap();
 
     assert_eq!(result.plan.files.len(), 1);
     assert_eq!(result.plan.launchers.len(), 1);
@@ -241,8 +243,11 @@ source = "plugins/one.wasm"
     assert_eq!(result.plan.protocols.len(), 1);
     assert_eq!(result.plan.file_associations.len(), 1);
     assert_eq!(result.plan.services[0].privilege, Privilege::System);
-    assert_eq!(result.plan.launchers[0].privilege, Privilege::User);
-    assert_eq!(result.plan.file_associations[0].privilege, Privilege::User);
+    assert_eq!(result.plan.launchers[0].privilege, Privilege::System);
+    assert_eq!(
+        result.plan.file_associations[0].privilege,
+        Privilege::System
+    );
 }
 
 #[test]

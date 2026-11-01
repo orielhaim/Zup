@@ -924,7 +924,6 @@ fn machine_custom_state_root_refuses_before_elevation() {
         scope: SelectedScope::Machine,
         state_root: Some(foreign),
         action: Operation::Install,
-        install_dir_override: None,
         selection: Default::default(),
     });
     let error = outcome.expect_err("a custom machine state root refuses");

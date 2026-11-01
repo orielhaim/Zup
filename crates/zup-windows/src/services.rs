@@ -36,41 +36,15 @@ pub fn read_service(name: &str, target: &Target) -> Result<ObservedServiceState,
 }
 
 fn state(name: &str, target: &Target) -> Result<ServiceState, ServiceError> {
-    match crate::scm::query_service(name, target)? {
-        ObservedServiceState::InvalidService => {
-            Err(ServiceError::ChangedSincePlanning(name.into()))
-        }
-        ObservedServiceState::Absent => Ok(ServiceState::Absent),
-        ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => Ok(ServiceState::Registration {
-            display_name,
-            command,
-            start,
-        }),
-    }
+    crate::scm::query_service(name, target)?
+        .configuration()
+        .ok_or_else(|| ServiceError::ChangedSincePlanning(name.into()))
 }
 
 fn previous(op: &ServiceOperation) -> Result<ServiceState, ServiceError> {
-    Ok(match &op.previous {
-        ObservedServiceState::InvalidService => {
-            return Err(ServiceError::ChangedSincePlanning(op.name.clone()));
-        }
-        ObservedServiceState::Absent => ServiceState::Absent,
-        ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => ServiceState::Registration {
-            display_name: display_name.clone(),
-            command: command.clone(),
-            start: *start,
-        },
-    })
+    op.previous
+        .configuration()
+        .ok_or_else(|| ServiceError::ChangedSincePlanning(op.name.clone()))
 }
 
 fn installed(op: &ServiceOperation) -> ServiceState {

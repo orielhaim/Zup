@@ -19,9 +19,10 @@ Source templates, host observations, native effects, and durable journal operati
 - Selected components and resource identities are unique. Resolved file destinations cannot overlap each other, launchers, or the installation directory. Windows comparisons and generated resource keys use Windows path semantics on every build host. Path equality, ordering, and hashing agree while preserving display spelling.
 - Malformed observed resources remain distinct from absent resources. An unreadable service cannot authorize creation over an existing unit.
 - Every concrete path belongs to the deployment's target. Capability checks apply to selected desired resources, including plugin output.
-- Installation scope is a concrete selection. It does not substitute for resource privilege: for example, a Windows user installation can request a system service and require authorization for that resource.
+- Installation scope is a concrete selection. Resource privileges remain explicit and must match the ownership trust domain. System services require machine scope: a user-writable ledger cannot grant authority over system resources.
 - Planned file content, executable intent, and privilege must match the bound desired state. Changing the desired content after observation invalidates the binding.
 - The transaction carries the generation that was observed, rather than accepting a newer generation during lowering. An intervening installation change invalidates execution.
+- Uninstall derives removals from committed ownership on both platforms. It does not resolve current source declarations or execute plugins.
 - Forced repairs are explicit `RepairOwned` changes. Native lowering cannot independently turn drift into permission to overwrite a resource.
 - A matching pre-existing file does not become installer-owned merely because it appears in desired state. Ownership comes from committed mutation receipts.
 - Retirement and cleanup use committed ownership. Modified or foreign resources are preserved; interrupted transactions must settle before reconciliation and cleanup proceed.

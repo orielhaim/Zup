@@ -55,8 +55,9 @@ impl LinuxLedgerStore {
             .map_err(|error| ExecError::Ownership(error.to_string()))?;
         let ledger = self.load(app_id, scope)?;
         let retired_ledger = retired_ledger_keys(plan)?;
-        let retired = zup_transaction::validate_ownership(plan, ledger.as_ref(), &retired_ledger)
-            .map_err(|error| ExecError::Ownership(error.to_string()))?;
+        let retired =
+            zup_transaction::validate_ownership(plan, scope, ledger.as_ref(), &retired_ledger)
+                .map_err(|error| ExecError::Ownership(error.to_string()))?;
         for node in &plan.nodes {
             match &node.kind {
                 NodeKind::FileMutation { key, .. } => {

@@ -189,6 +189,18 @@ impl TransactionRecord {
             .validate()
             .map_err(|_| CorruptReason::InvalidPlan)?;
         for node in &self.plan.nodes {
+            if node
+                .meta
+                .privilege
+                .is_some_and(|privilege| privilege != self.scope.authorization())
+                || node
+                    .meta
+                    .removal
+                    .as_ref()
+                    .is_some_and(|removal| removal.scope != self.scope)
+            {
+                return Err(CorruptReason::InvalidPlan);
+            }
             let Some(state) = self.nodes.get(&node.id) else {
                 return Err(CorruptReason::NodeStateMismatch);
             };

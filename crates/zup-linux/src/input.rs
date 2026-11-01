@@ -18,10 +18,10 @@ pub fn snapshot_services(
 }
 
 pub fn requires_service_manager(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
     ledger: Option<&zup_plan::InstallLedger>,
 ) -> bool {
-    !target.services.is_empty() || ledger_has_services(ledger)
+    target.is_some_and(|target| !target.services.is_empty()) || ledger_has_services(ledger)
 }
 
 pub fn ledger_has_services(ledger: Option<&zup_plan::InstallLedger>) -> bool {
@@ -35,7 +35,7 @@ pub fn ledger_has_services(ledger: Option<&zup_plan::InstallLedger>) -> bool {
 
 pub fn compile_execution_plan(
     execution: &ExecutionPlan,
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
 ) -> Result<TransactionInput, PlanError> {
     let input = compile_files_only(execution, target)?;
     for (kind, count) in [
@@ -64,18 +64,18 @@ pub fn compile_execution_plan(
 
 fn compile_files_only(
     execution: &ExecutionPlan,
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
 ) -> Result<TransactionInput, PlanError> {
-    let binding = execution.validate_desired(Some(target))?;
+    let binding = execution.validate_desired(target)?;
     let mut input = TransactionInput::new(binding.target);
     input.observed_transaction = binding.observed_transaction;
     input.selected_components = execution.selected_components.clone();
-    input.install_directory = Some(target.install_directory.clone());
+    input.install_directory = execution.install_directory.clone();
     input.uninstall = execution.uninstall;
     input.preset = if execution.uninstall {
         None
     } else {
-        target.preset.clone()
+        target.and_then(|target| target.preset.clone())
     };
 
     let mut mime_directory: Option<String> = None;
@@ -189,7 +189,7 @@ pub struct ServiceCompilation<'a> {
 
 pub fn compile_machine_execution_plan(
     execution: &ExecutionPlan,
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
     compilation: ServiceCompilation<'_>,
 ) -> Result<TransactionInput, PlanError> {
     let ServiceCompilation {
@@ -197,7 +197,7 @@ pub fn compile_machine_execution_plan(
         systemd,
         manager,
     } = compilation;
-    if target.scope != zup_core::SelectedScope::Machine {
+    if execution.validate_desired(target)?.scope != zup_core::SelectedScope::Machine {
         return Err(PlanError::UnsupportedKind {
             kind: "a machine service plan in user scope",
         });
@@ -228,7 +228,7 @@ pub fn compile_machine_execution_plan(
     }
 
     let mut target_files = std::collections::BTreeMap::new();
-    for file in &target.files {
+    for file in target.into_iter().flat_map(|target| &target.files) {
         target_files.insert(file.destination.to_string(), file.executable);
     }
 
@@ -265,11 +265,16 @@ pub fn compile_machine_execution_plan(
 
         validate_service_binary(op, &target_files, roots, &unit)?;
 
-        let derived = crate::services::SystemdUnit::derive(&target_service_for(op, target)?)
-            .map_err(|error| PlanError::Service {
-                unit: unit.clone(),
-                reason: error.to_string(),
-            })?;
+        let derived = crate::services::SystemdUnit::derive(&target_service_for(
+            op,
+            target.ok_or(PlanError::UnsupportedKind {
+                kind: "service changes without desired state",
+            })?,
+        )?)
+        .map_err(|error| PlanError::Service {
+            unit: unit.clone(),
+            reason: error.to_string(),
+        })?;
         if derived.unit != unit {
             return Err(PlanError::Service {
                 unit,
@@ -588,7 +593,7 @@ mod tests {
         execution.binding = Some(zup_plan::DeploymentBinding::desired(plan, None));
         compile_machine_execution_plan(
             &execution,
-            plan,
+            Some(plan),
             ServiceCompilation {
                 roots,
                 systemd,
@@ -847,23 +852,27 @@ mod tests {
         without.services.clear();
 
         assert!(
-            !requires_service_manager(&without, None),
+            !requires_service_manager(Some(&without), None),
             "no desired services and no ledger needs no manager"
         );
         assert!(
-            !requires_service_manager(&without, ledger_with_services(false).as_ref()),
+            !requires_service_manager(Some(&without), ledger_with_services(false).as_ref()),
             "a file-only ledger needs no manager"
         );
         assert!(
-            requires_service_manager(&with, None),
+            requires_service_manager(Some(&with), None),
             "desired services need the manager"
         );
         assert!(
-            requires_service_manager(&without, ledger_with_services(true).as_ref()),
+            requires_service_manager(Some(&without), ledger_with_services(true).as_ref()),
             "previously owned services need the manager even when the desired state has none"
         );
         assert!(
-            requires_service_manager(&with, ledger_with_services(true).as_ref()),
+            requires_service_manager(None, ledger_with_services(true).as_ref()),
+            "uninstall observes owned services without a desired graph"
+        );
+        assert!(
+            requires_service_manager(Some(&with), ledger_with_services(true).as_ref()),
             "desired plus owned services need the manager"
         );
     }
@@ -875,7 +884,7 @@ mod tests {
         let mut desired = with.clone();
         desired.services.clear();
         assert!(
-            requires_service_manager(&desired, ledger_with_services(true).as_ref()),
+            requires_service_manager(Some(&desired), ledger_with_services(true).as_ref()),
             "the one-to-none transition needs the manager"
         );
 

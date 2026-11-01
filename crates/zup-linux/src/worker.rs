@@ -321,10 +321,10 @@ fn serve_inner(
     channel.send(Message::Prepared(PreparedOperation {
         plan_digest: prepared.plan_digest.clone(),
         operation: prepared.operation.clone(),
-        app_id: prepared.app_id.clone(),
-        app_version: prepared.app_version.clone(),
-        scope: prepared.scope.clone(),
-        target: prepared.target,
+        app_id: prepared.app_id.to_string(),
+        app_version: prepared.app_version.to_string(),
+        scope: SelectedScope::Machine.to_string(),
+        target: prepared.plan.target,
         file_count: prepared.file_count,
     }))?;
 
@@ -483,15 +483,12 @@ struct PreparedPlan {
     release: Option<zup_core::ReleaseIdentity>,
     plan_digest: String,
     operation: String,
-    app_id: String,
-    app_version: String,
-    scope: String,
-    target: zup_core::Target,
+    app_id: zup_core::AppId,
+    app_version: semver::Version,
     file_count: u32,
     carrier_path: PathBuf,
     carrier_pin: Option<FilePin>,
     plan: zup_transaction::TransactionPlan,
-    target_plan: zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     state_root: PathBuf,
     roots: MachineRoots,
     systemd: crate::machine::SystemdRoots,
@@ -501,7 +498,6 @@ struct PreparedPlan {
 }
 
 struct PreparedPayload {
-    installer: PathBuf,
     maintenance_sha256: zup_core::Sha256Digest,
     maintenance_size: u64,
     generated: BTreeMap<String, Vec<u8>>,
@@ -599,7 +595,6 @@ fn prepare_operation(
         carrier_pin,
         carrier,
     } = prepare_carrier(context, &intent)?;
-    let target = intent.target;
     let app_id = carrier.package().plan().installer.app.id.clone();
     let roots = context.roots.clone();
 
@@ -702,16 +697,23 @@ fn prepare_operation(
     };
     let prepared = zup_runtime::prepare_operation(&input, &host)
         .map_err(|error| IpcError::Policy(error.to_string()))?;
-    let target_plan = prepared
-        .target_plan()
-        .cloned()
-        .ok_or_else(|| IpcError::Policy("a machine transaction resolves its target".into()))?;
-    enforce_machine_policy(&target_plan, &roots)?;
-    if let Ok(host) = crate::lowering::to_host_path(&target_plan.install_directory) {
-        authorize_machine_install_directory(&host, &roots)
+    if let Some(target) = prepared.target_plan() {
+        enforce_machine_policy(target, &roots)?;
+        let host = crate::lowering::to_host_path(&target.install_directory)
             .map_err(|error| IpcError::Policy(error.to_string()))?;
         crate::fs::anchor_reachable(&host)
             .map_err(|error| IpcError::Policy(format!("install destination: {error}")))?;
+    } else if let Some(ledger) = &ledger {
+        for (key, resource) in &ledger.resources {
+            if let zup_plan::OwnedResource::File {
+                destination,
+                source_relative,
+                ..
+            } = resource
+            {
+                enforce_machine_file_policy(key, destination, source_relative, &roots)?;
+            }
+        }
     }
 
     let generated =
@@ -730,9 +732,9 @@ fn prepare_operation(
     }
     ledger_store
         .validate_plan(
-            &target_plan.app.id,
+            &app_id,
             SelectedScope::Machine,
-            &target_plan.app.version,
+            &build.installer.app.version,
             &plan,
         )
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
@@ -742,7 +744,7 @@ fn prepare_operation(
         && expected.to_lowercase() != plan_digest
     {
         let settled_after = ledger_store
-            .load(&target_plan.app.id, SelectedScope::Machine)
+            .load(&app_id, SelectedScope::Machine)
             .map_err(|error| IpcError::Transaction(error.to_string()))?
             .map(|ledger| ledger.committed_transaction);
         if settled_after != settled_before {
@@ -755,28 +757,35 @@ fn prepare_operation(
 
     let (maintenance_size, maintenance_sha256) = crate::run::hash_carrier(&carrier_path)
         .map_err(|error| IpcError::Transaction(format!("carrier bytes: {error}")))?;
-    let file_count = u32::try_from(target_plan.files.len())
-        .map_err(|_| IpcError::Policy("too many files".into()))?;
+    let file_count = u32::try_from(
+        plan.nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind,
+                    zup_transaction::NodeKind::FileMutation { .. }
+                        | zup_transaction::NodeKind::FileRemoval { .. }
+                )
+            })
+            .count(),
+    )
+    .map_err(|_| IpcError::Policy("too many files".into()))?;
     crate::machine::verify_machine_install_roots(&roots, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::Policy(error.to_string()))?;
     Ok(PreparedPlan {
         release: carrier.package().release_identity().cloned(),
         plan_digest,
         operation: intent.operation.clone(),
-        app_id: intent.app_id.clone(),
-        app_version: intent.app_version.clone(),
-        scope: intent.scope.clone(),
-        target,
+        app_id,
+        app_version: build.installer.app.version.clone(),
         file_count,
-        carrier_path: carrier_path.clone(),
+        carrier_path,
         carrier_pin,
         plan,
-        target_plan,
         state_root,
         roots: roots.clone(),
         systemd: context.systemd.clone(),
         payload: PreparedPayload {
-            installer: carrier_path,
             maintenance_sha256,
             maintenance_size,
             generated,
@@ -955,49 +964,12 @@ fn enforce_machine_policy(
     target: &zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     roots: &MachineRoots,
 ) -> Result<(), IpcError> {
-    let policy = |path: &zup_plan::TargetPath| {
-        let host = crate::lowering::to_host_path(path)
-            .map_err(|error| IpcError::Policy(format!("destination: {error}")))?;
-        authorize_machine_destination(&host, roots)
-            .map_err(|error| IpcError::Policy(error.to_string()))
-    };
     let install_host = crate::lowering::to_host_path(&target.install_directory)
         .map_err(|error| IpcError::Policy(format!("install directory: {error}")))?;
     authorize_machine_install_directory(&install_host, roots)
         .map_err(|error| IpcError::Policy(error.to_string()))?;
     for file in &target.files {
-        let destination = policy(&file.destination)?;
-        match &file.key {
-            ResourceKey::Maintenance { .. } => {
-                if destination != crate::machine::MachineDestination::MachineState {
-                    return Err(IpcError::Policy(
-                        "maintenance belongs to machine state".into(),
-                    ));
-                }
-            }
-            ResourceKey::File { .. } if is_preset_source(&file.source_relative) => {
-                if destination != crate::machine::MachineDestination::MachineState {
-                    return Err(IpcError::Policy(
-                        "preset content belongs to machine state".into(),
-                    ));
-                }
-            }
-            ResourceKey::File { .. } => {
-                if destination != crate::machine::MachineDestination::Programs
-                    && destination != crate::machine::MachineDestination::SharedData
-                {
-                    return Err(IpcError::Policy(
-                        "payload belongs to the program or variable-data tree".into(),
-                    ));
-                }
-            }
-            _ => {
-                return Err(IpcError::Policy(format!(
-                    "machine scope holds no {:?} resources",
-                    file.key
-                )));
-            }
-        }
+        enforce_machine_file_policy(&file.key, &file.destination, &file.source_relative, roots)?;
     }
 
     if target.scope == SelectedScope::Machine && !target.services.is_empty() {
@@ -1018,6 +990,50 @@ fn enforce_machine_policy(
                 false,
             )
             .map_err(|error| IpcError::Policy(format!("service binary: {error}")))?;
+        }
+    }
+    Ok(())
+}
+
+fn enforce_machine_file_policy(
+    key: &ResourceKey,
+    path: &zup_plan::TargetPath,
+    source: &zup_core::RelativePath,
+    roots: &MachineRoots,
+) -> Result<(), IpcError> {
+    let host = crate::lowering::to_host_path(path)
+        .map_err(|error| IpcError::Policy(format!("destination: {error}")))?;
+    let destination = authorize_machine_destination(&host, roots)
+        .map_err(|error| IpcError::Policy(error.to_string()))?;
+    match key {
+        ResourceKey::Maintenance { .. } => {
+            if destination != crate::machine::MachineDestination::MachineState {
+                return Err(IpcError::Policy(
+                    "maintenance belongs to machine state".into(),
+                ));
+            }
+        }
+        ResourceKey::File { .. } if is_preset_source(source) => {
+            if destination != crate::machine::MachineDestination::MachineState {
+                return Err(IpcError::Policy(
+                    "preset content belongs to machine state".into(),
+                ));
+            }
+        }
+        ResourceKey::File { .. } => {
+            if destination != crate::machine::MachineDestination::Programs
+                && destination != crate::machine::MachineDestination::SharedData
+            {
+                return Err(IpcError::Policy(
+                    "payload belongs to the program or variable-data tree".into(),
+                ));
+            }
+        }
+        _ => {
+            return Err(IpcError::Policy(format!(
+                "machine scope holds no {:?} resources",
+                key
+            )));
         }
     }
     Ok(())
@@ -1132,18 +1148,17 @@ fn execute_prepared(
     prepared: &PreparedPlan,
     fault: WorkerFault,
 ) -> Result<ExecutionVerdict, IpcError> {
-    let app_id = zup_core::AppId::new(&prepared.app_id)
-        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+    let app_id = &prepared.app_id;
     crate::integration::reap_generated(
         &prepared.state_root,
-        &app_id,
+        app_id,
         SelectedScope::Machine,
         &prepared._lock,
     )
     .map_err(|error| IpcError::Transaction(error.to_string()))?;
     crate::integration::stage_generated(
         &prepared.state_root,
-        &app_id,
+        app_id,
         SelectedScope::Machine,
         &prepared._lock,
         &prepared.payload.generated,
@@ -1151,7 +1166,7 @@ fn execute_prepared(
     .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let payload = crate::run::RunnerPayload::from_prepared(
         prepared.payload.package.clone(),
-        prepared.payload.installer.clone(),
+        prepared.carrier_path.clone(),
         prepared.payload.maintenance_sha256,
         prepared.payload.maintenance_size,
         prepared.payload.generated.clone(),
@@ -1195,9 +1210,9 @@ fn execute_prepared(
     let store = zup_transaction::FilesystemTransactionStore::private_at(&prepared.state_root);
     let open = zup_transaction::TransactionCoordinator::new(store)
         .begin(
-            prepared.target_plan.app.id.clone(),
+            prepared.app_id.clone(),
             SelectedScope::Machine,
-            prepared.target_plan.app.version.clone(),
+            prepared.app_version.clone(),
             prepared.plan.clone(),
         )
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
@@ -1270,7 +1285,7 @@ fn execute_prepared(
         if settled.outcome == zup_transaction::TransactionOutcome::RolledBack
             && let Err(error) = crate::integration::reap_generated(
                 &prepared.state_root,
-                &app_id,
+                app_id,
                 SelectedScope::Machine,
                 &prepared._lock,
             )
@@ -1303,7 +1318,7 @@ fn execute_prepared(
     }
     if let Err(error) = crate::integration::reap_generated(
         &prepared.state_root,
-        &app_id,
+        app_id,
         SelectedScope::Machine,
         &prepared._lock,
     ) {
