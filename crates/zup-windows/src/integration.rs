@@ -716,7 +716,9 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     previous,
                     installed,
                 )),
-                Ok(zup_plan::ObservedServiceState::InvalidService) | Err(_) => Ok(ReconcileResult::Ambiguous),
+                Ok(zup_plan::ObservedServiceState::InvalidService) | Err(_) => {
+                    Ok(ReconcileResult::Ambiguous)
+                }
             }
         }
         BackendReceipt::Protocol {
