@@ -77,6 +77,7 @@ fn plan_reports_the_resolved_installation_as_machine_output() {
         &manifest,
         r#"#:schema https://zup.dev/schema/zup.toml.json
 schema = 1
+frontend = "headless"
 [app]
 id = "com.example.plan"
 name = "Plan"
@@ -104,7 +105,7 @@ source = "configure.wasm"
         root.path().join("configure.wasm"),
     )
     .unwrap();
-    let plan = zup_with_toolchain(root.path())
+    let plan = zup()
         .args([
             "plan",
             "--manifest",

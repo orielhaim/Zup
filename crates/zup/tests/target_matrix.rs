@@ -364,6 +364,7 @@ user = "${{location.user_data}}/BackendBoundary"
 fn a_multi_target_project_refuses_to_plan_without_an_explicit_selection() {
     let (matrix, manifest) = write_matrix_project();
     let toolchain = toolchain_fixture::host_toolchain(matrix.path());
+    toolchain_fixture::preset(&[host_target().as_str()]).write(&toolchain);
     let ambiguous = zup()
         .env("ZUP_TOOLCHAIN", &toolchain)
         .args(["plan", "--manifest"])
