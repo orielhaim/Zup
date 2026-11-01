@@ -32,7 +32,7 @@ Developer planning and preview resolve desired state using build locations. They
 
 Native GUI and terminal planning use runtime preparation, host observation, and transaction compilation. Their previews describe changes against observed machine state. A preview is an explanation, not permission to reuse stale observations: execution prepares and validates its own transaction.
 
-Progress events carry an explicit `OperationPhase` through the engine, worker protocol, console, and GUI. Labels are presentation text; they are not parsed to determine phases or outcomes. Completion and failure remain typed, including successful operations that require a reboot.
+Progress events carry an explicit `OperationPhase` through the engine, worker protocol, console, and GUI. Labels are presentation text; they are not parsed to determine phases or outcomes. Completion and failure remain typed, including successful operations that require a reboot. Linux authorization uses pkexec’s documented exit statuses rather than parsing localized stderr.
 
 ## Recovery
 

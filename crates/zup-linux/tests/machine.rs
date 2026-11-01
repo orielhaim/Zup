@@ -1452,11 +1452,10 @@ fn machine_launcher_failures_surface_at_once() {
         ),
         (
             "denial",
-            Some(126),
+            Some(127),
             "Error executing command as another user: Not authorized",
             "authorization failed",
         ),
-        ("missing", Some(127), "command not found", "unavailable"),
         ("vanished", Some(0), "", "exited before connecting"),
     ];
     for (name, code, stderr, expect) in cases {
