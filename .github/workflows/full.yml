@@ -227,6 +227,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          mkdir -p target/nextest
           sudo env PATH="$PATH" RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" \
             ZUP_TEST_REAL_SYSTEMD=1 CARGO_INCREMENTAL=0 \
             cargo nextest run --profile systemd -p zup-linux --all-features --test services_systemd --no-fail-fast
