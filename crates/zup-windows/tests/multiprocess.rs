@@ -94,6 +94,10 @@ scope = "user"
 allow_directory_override = true
 [install.directory]
 user = "${{location.user_data}}/AcmeApp"
+[[files]]
+source = "**/*"
+destination = "${{install}}"
+allow_empty = true
 "#,
         target = target(),
         app_id = app_id(work_root),

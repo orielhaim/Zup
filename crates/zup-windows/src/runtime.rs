@@ -662,7 +662,12 @@ async fn run_elevated_bootstrap(
                             zup_protocol::WorkerFailure::Authentication => {
                                 SessionError::Protocol(failed.message)
                             }
-                            _ => SessionError::Prerequisite(failed.message),
+                            zup_protocol::WorkerFailure::Protocol => SessionError::Protocol(failed.message),
+                            zup_protocol::WorkerFailure::Cancelled => SessionError::Cancelled,
+                            zup_protocol::WorkerFailure::RecoveryRequired => SessionError::RecoveryRequired,
+                            zup_protocol::WorkerFailure::AuthorizationRequired => SessionError::AuthorizationRequired,
+                            zup_protocol::WorkerFailure::StalePlan | zup_protocol::WorkerFailure::Policy => SessionError::PlanInvalid(failed.message),
+                            zup_protocol::WorkerFailure::Transaction => SessionError::Prerequisite(failed.message),
                         });
                     }
                     zup_protocol::Message::Progress(progress) => {
@@ -1156,7 +1161,12 @@ async fn run_elevated_worker(
                                zup_protocol::WorkerFailure::Authentication => {
                                    SessionError::Protocol(failed.message)
                                }
-                               _ => SessionError::Transaction(failed.message),
+                               zup_protocol::WorkerFailure::Protocol => SessionError::Protocol(failed.message),
+                               zup_protocol::WorkerFailure::Cancelled => SessionError::Cancelled,
+                               zup_protocol::WorkerFailure::RecoveryRequired => SessionError::RecoveryRequired,
+                               zup_protocol::WorkerFailure::AuthorizationRequired => SessionError::AuthorizationRequired,
+                               zup_protocol::WorkerFailure::StalePlan | zup_protocol::WorkerFailure::Policy => SessionError::PlanInvalid(failed.message),
+                               zup_protocol::WorkerFailure::Transaction => SessionError::Transaction(failed.message),
                            });
                        }
                        _ => return Err(SessionError::Protocol("unexpected worker message".into())),

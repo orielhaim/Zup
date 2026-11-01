@@ -243,6 +243,7 @@ impl TransactionPlan {
                         || node.meta.file_precondition.is_none()
                         || node.meta.expected_sha256.is_none()
                         || node.meta.expected_size.is_none()
+                        || node.meta.executable.is_none()
                         || node.meta.privilege.is_none()
                     {
                         return Err(invalid("file metadata is incomplete"));
