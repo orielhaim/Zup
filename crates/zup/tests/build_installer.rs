@@ -22,8 +22,6 @@ use std::{
 };
 
 use tempfile::TempDir;
-use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
-use wit_parser::{ManglingAndAbi, Resolve};
 use zup_core::Frontend;
 
 #[path = "support/staged.rs"]
@@ -31,7 +29,6 @@ mod staged;
 #[path = "support/toolchain_fixture.rs"]
 mod toolchain_fixture;
 
-const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 const OTHER_TARGET: &str = if cfg!(target_arch = "aarch64") {
     "windows-x64"
@@ -314,7 +311,7 @@ fn a_build_compiles_and_embeds_a_declared_plugin() {
     fs::write(project.path().join("dist/app.exe"), b"payload").expect("a payload file");
     fs::write(
         project.path().join("plugins/helper.wasm"),
-        plugin_component(),
+        include_bytes!("../../../examples/plugins/configure/dist/configure.wasm"),
     )
     .expect("a plugin component");
     fs::write(
@@ -379,26 +376,4 @@ source = "plugins/helper.wasm"
         "the shipped plan names no build-time plugin source"
     );
     assert_eq!(package.plan().entries.len(), 1);
-}
-
-/// A minimal component, real enough that the build's ahead-of-time compiler
-/// accepts it.
-fn plugin_component() -> Vec<u8> {
-    let mut resolve = Resolve::default();
-    let package = resolve
-        .push_str("zup-plugin.wit", PLUGIN_WIT)
-        .expect("the plugin world parses");
-    let world = resolve
-        .select_world(&[package], Some("plugin"))
-        .expect("the plugin world is selectable");
-    let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
-    // `false` matches the encoder below, which leaves canonical names off.
-    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false)
-        .expect("the module carries component metadata");
-    ComponentEncoder::default()
-        .module(&module)
-        .expect("the module encodes")
-        .validate(true)
-        .encode()
-        .expect("the component encodes")
 }
