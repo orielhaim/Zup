@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 //! A file a plugin generates, tracked as an owned resource for the whole
 //! lifecycle.
 //!
@@ -236,7 +234,8 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
     assert_eq!(ledger.version.to_string(), "1.0.0");
     let key = ResourceKey::File {
         destination: generated.to_string_lossy().into_owned(),
-    };
+    }
+    .canonical_for(&ledger.target);
     let OwnedResource::File {
         source_relative,
         sha256,
