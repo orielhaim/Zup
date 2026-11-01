@@ -155,7 +155,7 @@ fn process_interruption_recovers_real_files() {
                 scope: record.scope,
                 transaction_plan: record.plan.clone(),
                 state_root: root.path().join("state"),
-                work_root: root.path().join("work"),
+
                 recovery_id: Some(record.transaction_id),
                 bootstrap: None,
                 release: None,

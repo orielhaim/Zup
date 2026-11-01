@@ -148,7 +148,7 @@ pub use integration::{
     notify_committed_path_change, reconcile_managed, reconcile_owned_removal, rollback_managed,
 };
 #[cfg(windows)]
-pub use ledger::{InstallLedgerStore, LedgerError, ReleaseRecord};
+pub use ledger::{InstallLedgerStore, LedgerError};
 pub use locations::CanonicalWindowsLocations;
 pub use lowering::{
     TargetPathLoweringError, TargetPathValidationError, to_host_path, validate_windows_target_path,

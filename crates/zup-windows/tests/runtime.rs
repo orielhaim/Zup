@@ -78,7 +78,7 @@ fn request(root: &TempDir, scope: SelectedScope) -> (RuntimeRequest, WindowsRunt
         scope,
         transaction_plan: plan,
         state_root,
-        work_root: root.path().join("work"),
+
         recovery_id: None,
         release: None,
         bootstrap: None,
@@ -186,7 +186,7 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
         scope: SelectedScope::User,
         transaction_plan: uninstall,
         state_root: state_root.clone(),
-        work_root: root.path().join("work"),
+
         recovery_id: None,
         release: None,
         bootstrap: None,
@@ -227,11 +227,7 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
         .unwrap()
         .unwrap();
     let reconciled = ledgers
-        .publish_committed(
-            &uninstall,
-            SelectedScope::User,
-            zup_windows::ReleaseRecord::Preserve,
-        )
+        .publish_committed(&uninstall, SelectedScope::User)
         .unwrap();
     assert_eq!(
         reconciled.committed_transaction,
@@ -283,7 +279,7 @@ async fn a_stale_uninstall_is_rejected_after_the_generation_changes() {
         scope: SelectedScope::User,
         transaction_plan: uninstall,
         state_root: state_root.clone(),
-        work_root: root.path().join("work"),
+
         recovery_id: None,
         release: None,
         bootstrap: None,
@@ -391,7 +387,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         scope: SelectedScope::User,
         transaction_plan: plan,
         state_root: state_root.clone(),
-        work_root: root.path().join("work"),
+
         recovery_id: None,
         release: None,
         bootstrap: None,
@@ -423,7 +419,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         scope: SelectedScope::User,
         transaction_plan: uninstall,
         state_root: state_root.clone(),
-        work_root: root.path().join("work"),
+
         recovery_id: None,
         release: None,
         bootstrap: None,
@@ -466,7 +462,7 @@ async fn machine_runtime_uses_authoritative_work_for_modify_and_uninstall() {
             "caller cannot choose machine state"
         );
         assert!(
-            !install.work_root.exists(),
+            !install.state_root.join("work").exists(),
             "caller cannot choose machine work"
         );
         let mut input = file_input(&root, SelectedScope::Machine);
@@ -577,7 +573,7 @@ async fn machine_runtime_uses_authoritative_work_for_modify_and_uninstall() {
                 .unwrap()
                 .is_none()
         );
-        assert!(!install.work_root.exists());
+        assert!(!install.state_root.join("work").exists());
         std::fs::write(root.path().join("payload/app.exe"), b"installed").unwrap();
     }
 }

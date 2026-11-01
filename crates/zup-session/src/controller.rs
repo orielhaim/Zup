@@ -291,7 +291,9 @@ fn apply_completion<H: SessionHost>(
                 Ok(())
             });
         if let Err(error) = refreshed {
-            control.state.fail(error, false);
+            control
+                .state
+                .fail(error, zup_presentation::ProcessOutcome::Failure);
             return;
         }
     }
@@ -402,7 +404,9 @@ where
             let context = match control.discovery.context(scope) {
                 Ok(context) => context,
                 Err(error) => {
-                    control.state.fail(error, false);
+                    control
+                        .state
+                        .fail(error, zup_presentation::ProcessOutcome::Failure);
                     return;
                 }
             };
@@ -476,9 +480,10 @@ where
             if let Some(path) = control.state.log_path()
                 && let Err(error) = control.host.open_log(path)
             {
-                control
-                    .state
-                    .fail(format!("open the session log: {error}"), false);
+                control.state.fail(
+                    format!("open the session log: {error}"),
+                    zup_presentation::ProcessOutcome::Failure,
+                );
             }
         }
         HostDecision::CopyDiagnostics => {
@@ -503,7 +508,9 @@ fn rebind<H: SessionHost + Clone + Send + Sync + 'static>(
     let context = match control.discovery.context(scope) {
         Ok(context) => context,
         Err(message) => {
-            control.state.fail(message, false);
+            control
+                .state
+                .fail(message, zup_presentation::ProcessOutcome::Failure);
             return;
         }
     };

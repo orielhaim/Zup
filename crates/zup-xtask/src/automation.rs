@@ -4,9 +4,10 @@ use zup_automation::{
     Application, Artifact, ArtifactInspectDetails, AutomationResult, BuildDetails, ByteCount,
     CheckDetails, Composition, Details, Diagnostic, DiagnosticSource, Digest, DoctorCheck,
     DoctorDetails, DoctorTarget, Identifier, InspectedContent, InspectedTrust, InspectedVariant,
-    LogLevel, PlanDetails, Publication, PublicationAsset, PublishDetails, PublishFailure,
-    PublishStageDetails, SignPrepareDetails, SignSubject, SignVerifyDetails, StagedPackage,
-    StreamEvent, StreamVersion, Target, ToolchainComponentStatus, ToolchainStatusDetails,
+    LogLevel, PlanDetails, PlanResource, Publication, PublicationAsset, PublishDetails,
+    PublishFailure, PublishStageDetails, SignPrepareDetails, SignSubject, SignVerifyDetails,
+    StagedPackage, StreamEvent, StreamVersion, Target, ToolchainComponentStatus,
+    ToolchainStatusDetails,
 };
 
 pub const SCHEMA_PATH: &str = "schema/automation-v1.schema.json";
@@ -205,11 +206,25 @@ fn plan() -> AutomationResult {
         .with_targets(vec![target()])
         .with_details(Details::Plan(PlanDetails {
             scope: "user".to_owned(),
-            install_directory: Some("${location.user_data}/Acme".to_owned()),
+            install_directory: Some(r"${location.user_data}/Acme".to_owned()),
             estimated_bytes: ByteCount::new(248_512_896),
-            change_count: 3,
+            change_count: 2,
+            resources: vec![
+                PlanResource::File {
+                    destination: r"${location.user_data}/Acme/app.exe".to_owned(),
+                    size: ByteCount::new(248_512_832),
+                    digest: Digest::sha256("a".repeat(64)),
+                    generated: false,
+                },
+                PlanResource::File {
+                    destination: r"${location.user_data}/Acme/configure.txt".to_owned(),
+                    size: ByteCount::new(64),
+                    digest: Digest::sha256("b".repeat(64)),
+                    generated: true,
+                },
+            ],
         }))
-        .with_summary("3 change(s) · 237.0 MiB under ${location.user_data}/Acme")
+        .with_summary("2 resource(s) · 237.0 MiB")
 }
 
 fn doctor() -> AutomationResult {

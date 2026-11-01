@@ -418,10 +418,10 @@ impl HostState {
         self.snapshot.repair_drift = resources;
     }
 
-    pub fn fail(&mut self, message: String, recovery_required: bool) {
-        let diagnostic = diagnostic_for(&message, recovery_required);
+    pub fn fail(&mut self, message: String, outcome: zup_presentation::ProcessOutcome) {
+        let diagnostic = zup_presentation::DiagnosticPresentation::for_outcome(outcome, &message);
         self.snapshot.diagnostic = Some(convert::diagnostic(&diagnostic));
-        self.snapshot.state = if recovery_required {
+        self.snapshot.state = if outcome == zup_presentation::ProcessOutcome::RecoveryRequired {
             InstallerState::RecoveryRequired
         } else {
             InstallerState::Failed
@@ -457,7 +457,8 @@ impl HostState {
                 self.advance(&format!("Installing {name}…"));
             }
             RuntimeEvent::RebootRequired { .. } => {
-                self.fail("Restart the machine, then run setup again.".into(), false);
+                self.snapshot.state = InstallerState::RebootRequired;
+                self.finish();
             }
             RuntimeEvent::PreflightStarted => self.advance("Checking for open applications…"),
             RuntimeEvent::ResourceBlocked { detail, .. } => {
@@ -477,25 +478,22 @@ impl HostState {
                 self.progress(phase, *completed, *total, action);
             }
             RuntimeEvent::RollingBack => self.advance("Restoring the previous state…"),
-            RuntimeEvent::Completed { outcome } => match outcome.as_str() {
-                "reboot_required" => {
-                    self.snapshot.state = InstallerState::Failed;
+            RuntimeEvent::Completed { outcome } => match outcome {
+                zup_runtime::CompletionOutcome::Committed => self.succeed(),
+                zup_runtime::CompletionOutcome::RebootRequired => {
+                    self.snapshot.state = InstallerState::RebootRequired;
                     self.finish();
                 }
-                "recovery_required" => {
-                    self.snapshot.state = InstallerState::RecoveryRequired;
-                    self.finish();
-                }
-                "cancelled" | "rolled_back" => {
+                zup_runtime::CompletionOutcome::Cancelled
+                | zup_runtime::CompletionOutcome::RolledBack => {
                     self.snapshot.state = self.resting_state();
                     self.snapshot.diagnostic = None;
                     self.snapshot.progress = None;
                     self.finish();
                 }
-                _ => self.succeed(),
             },
             RuntimeEvent::Failed { kind, message } => {
-                self.fail(message.clone(), kind == "recovery_required");
+                self.fail(message.clone(), (*kind).into());
             }
             RuntimeEvent::LogPath { path } => self.set_log_path(path.clone()),
             RuntimeEvent::StateChanged { state } => self.observe_state(*state),
@@ -510,7 +508,8 @@ impl HostState {
             S::InstallingPrerequisites => self.advance("Installing required components…"),
             S::WaitingForAuthorization => self.advance("Waiting for approval…"),
             S::RebootRequired => {
-                self.fail("Restart the machine, then run setup again.".into(), false);
+                self.snapshot.state = InstallerState::RebootRequired;
+                self.finish();
             }
             S::ConnectingWorker => self.advance("Starting…"),
             S::Executing => self.advance("Installing files…"),
@@ -536,25 +535,43 @@ impl HostState {
             InstallOutcome::RebootRequired {
                 prerequisite_id,
                 exit_code,
-            } => self.fail(
-                format!("Restart required by {prerequisite_id} ({exit_code})"),
-                false,
-            ),
+            } => {
+                self.snapshot.state = InstallerState::RebootRequired;
+                self.snapshot.diagnostic = Some(convert::diagnostic(
+                    &zup_presentation::DiagnosticPresentation::for_outcome(
+                        zup_presentation::ProcessOutcome::RebootRequired,
+                        &format!("Restart required by {prerequisite_id} ({exit_code})"),
+                    ),
+                ));
+                self.finish();
+            }
             InstallOutcome::RolledBack | InstallOutcome::Cancelled => {
                 self.snapshot.state = self.resting_state();
                 self.snapshot.progress = None;
                 self.snapshot.diagnostic = None;
                 self.finish();
             }
-            InstallOutcome::RecoveryRequired => self.fail("recovery required".into(), true),
+            InstallOutcome::RecoveryRequired => self.fail(
+                "recovery required".into(),
+                zup_presentation::ProcessOutcome::RecoveryRequired,
+            ),
             InstallOutcome::CommittedPendingReconciliation { detail, .. } => {
-                self.fail(detail.clone(), true);
+                self.fail(
+                    detail.clone(),
+                    zup_presentation::ProcessOutcome::RecoveryRequired,
+                );
             }
             InstallOutcome::AuthorizationRequired => {
-                self.fail("authorization required".into(), false);
+                self.fail(
+                    "authorization required".into(),
+                    zup_presentation::ProcessOutcome::AuthorizationRequired,
+                );
             }
             InstallOutcome::AuthorizationCancelled => {
-                self.fail("authorization cancelled".into(), false);
+                self.fail(
+                    "authorization cancelled".into(),
+                    zup_presentation::ProcessOutcome::AuthorizationRequired,
+                );
             }
             InstallOutcome::Busy { operation } => {
                 self.snapshot.diagnostic = Some(DiagnosticPresentation {
@@ -576,7 +593,7 @@ impl HostState {
                     self.finish();
                     return;
                 }
-                self.fail(message.clone(), false);
+                self.fail(message.clone(), zup_presentation::ProcessOutcome::Failure);
             }
         }
     }
@@ -648,22 +665,4 @@ fn operation_label(id: &str) -> String {
     } else {
         "Finishing…".into()
     }
-}
-
-fn diagnostic_for(
-    message: &str,
-    recovery_required: bool,
-) -> zup_presentation::DiagnosticPresentation {
-    if recovery_required {
-        return zup_presentation::DiagnosticPresentation {
-            kind: zup_presentation::DiagnosticKind::Recovery,
-            title: "The last change didn't finish".into(),
-            meaning: "Setup was interrupted while it was changing this computer, so the \
-                      installation is between two versions."
-                .into(),
-            recovery: "Let setup finish restoring it before you make other changes.".into(),
-            technical_details: Some(message.into()),
-        };
-    }
-    zup_presentation::DiagnosticPresentation::from_message(message, recovery_required)
 }

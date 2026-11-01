@@ -251,31 +251,16 @@ fn validate_linux_path(kind: &'static str, path: &TargetPath) -> Result<(), Path
 }
 
 fn refuse_unsupported(plan: &InstallPlan) -> Result<(), PlanError> {
-    let mut refused: Vec<String> = Vec::new();
-    let mut unsupported = |kind: &str, count: usize| {
-        if count > 0 {
-            refused.push(format!(
-                "{count} {kind} resource{} {} not supported on Linux in this phase",
-                if count == 1 { "" } else { "s" },
-                if count == 1 { "is" } else { "are" },
-            ));
-        }
-    };
-    if plan.scope != SelectedScope::Machine {
-        unsupported("service", plan.services.len());
-    }
-    unsupported("package-manager prerequisite", plan.prerequisites.len());
-    if plan.scope == SelectedScope::Machine {
-        unsupported("launcher", plan.launchers.len());
-        unsupported("PATH entry", plan.path_entries.len());
-        unsupported("URI protocol", plan.protocols.len());
-        unsupported("file association", plan.file_associations.len());
-    }
-    if refused.is_empty() {
+    let capabilities =
+        zup_platform::capabilities(&plan.target).ok_or_else(|| PlanError::UnsupportedTarget {
+            target: plan.target.to_string(),
+        })?;
+    let reasons = capabilities.planned_resource_errors(plan);
+    if reasons.is_empty() {
         Ok(())
     } else {
         Err(PlanError::Unsupported {
-            reasons: refused.join("; "),
+            reasons: reasons.join("; "),
         })
     }
 }

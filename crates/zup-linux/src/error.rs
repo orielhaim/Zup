@@ -224,6 +224,7 @@ pub enum ExecError {
 impl From<zup_runtime::OperationError> for ExecError {
     fn from(error: zup_runtime::OperationError) -> Self {
         match error {
+            zup_runtime::OperationError::Cancelled => Self::Cancelled,
             zup_runtime::OperationError::Downgrade {
                 installed,
                 requested,
@@ -312,18 +313,24 @@ pub enum IpcError {
 
 impl IpcError {
     #[cfg(target_os = "linux")]
-    pub(crate) fn kind(&self) -> &'static str {
+    pub(crate) fn kind(&self) -> zup_protocol::WorkerFailure {
         match self {
-            Self::WorkerAuth(_) => zup_protocol::failure::AUTHENTICATION,
+            Self::WorkerAuth(_) => zup_protocol::WorkerFailure::Authentication,
             Self::WorkerProtocol(_) | Self::PkexecProtocol(_) | Self::Framing(_) => {
-                zup_protocol::failure::PROTOCOL
+                zup_protocol::WorkerFailure::Protocol
             }
-            Self::Policy(_) => zup_protocol::failure::POLICY,
-            Self::Transaction(_) => zup_protocol::failure::TRANSACTION,
-            Self::Cancelled | Self::PkexecCancelled => zup_protocol::failure::CANCELLED,
-            Self::WorkerStalePlan => zup_protocol::failure::STALE_PLAN,
-            Self::WorkerBusy => zup_protocol::failure::INSTALLATION_BUSY,
-            _ => zup_protocol::failure::PROTOCOL,
+            Self::Policy(_) => zup_protocol::WorkerFailure::Policy,
+            Self::Transaction(_) => zup_protocol::WorkerFailure::Transaction,
+            Self::Cancelled | Self::PkexecCancelled => zup_protocol::WorkerFailure::Cancelled,
+            Self::WorkerStalePlan => zup_protocol::WorkerFailure::StalePlan,
+            Self::WorkerBusy => zup_protocol::WorkerFailure::InstallationBusy,
+            _ => zup_protocol::WorkerFailure::Protocol,
         }
+    }
+}
+
+impl From<zup_transaction::OwnershipError> for ExecError {
+    fn from(error: zup_transaction::OwnershipError) -> Self {
+        Self::Ownership(error.to_string())
     }
 }

@@ -35,7 +35,7 @@ fn request(root: &Path, plan: zup_transaction::TransactionPlan) -> RuntimeReques
         scope: SelectedScope::User,
         transaction_plan: plan,
         state_root: root.to_path_buf(),
-        work_root: root.join("work"),
+
         recovery_id: None,
         bootstrap: None,
         release: None,

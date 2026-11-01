@@ -61,7 +61,6 @@ pub struct RuntimeRequest {
     pub scope: SelectedScope,
     pub transaction_plan: TransactionPlan,
     pub state_root: PathBuf,
-    pub work_root: PathBuf,
     pub recovery_id: Option<TransactionId>,
     pub bootstrap: Option<BootstrapRequest>,
     pub release: Option<ReleaseIdentity>,
@@ -387,7 +386,7 @@ pub(crate) fn emit_terminal(
     match result {
         Ok(InstallOutcome::Committed) => {
             let _ = events.send(RuntimeEvent::Completed {
-                outcome: "committed".into(),
+                outcome: CompletionOutcome::Committed,
             });
         }
         Ok(InstallOutcome::RebootRequired {
@@ -399,13 +398,13 @@ pub(crate) fn emit_terminal(
                 exit_code: *exit_code,
             });
             let _ = events.send(RuntimeEvent::Completed {
-                outcome: "reboot_required".into(),
+                outcome: CompletionOutcome::RebootRequired,
             });
         }
         Ok(InstallOutcome::RolledBack) => {
             let _ = events.send(RuntimeEvent::RollingBack);
             let _ = events.send(RuntimeEvent::Completed {
-                outcome: "rolled_back".into(),
+                outcome: CompletionOutcome::RolledBack,
             });
         }
         Ok(InstallOutcome::Cancelled) => {
@@ -413,42 +412,42 @@ pub(crate) fn emit_terminal(
                 state: RuntimeState::Cancelled,
             });
             let _ = events.send(RuntimeEvent::Completed {
-                outcome: "cancelled".into(),
+                outcome: CompletionOutcome::Cancelled,
             });
         }
         Ok(InstallOutcome::RecoveryRequired) => {
             let _ = events.send(RuntimeEvent::Failed {
-                kind: "recovery_required".into(),
+                kind: FailureKind::RecoveryRequired,
                 message: "recovery required".into(),
             });
         }
         Ok(InstallOutcome::CommittedPendingReconciliation { detail, .. }) => {
             let _ = events.send(RuntimeEvent::Failed {
-                kind: "committed_pending_reconciliation".into(),
+                kind: FailureKind::CommittedPendingReconciliation,
                 message: detail.clone(),
             });
         }
         Ok(InstallOutcome::AuthorizationRequired) => {
             let _ = events.send(RuntimeEvent::Failed {
-                kind: "authorization_required".into(),
+                kind: FailureKind::AuthorizationRequired,
                 message: "authorization required".into(),
             });
         }
         Ok(InstallOutcome::AuthorizationCancelled) => {
             let _ = events.send(RuntimeEvent::Failed {
-                kind: "authorization_cancelled".into(),
+                kind: FailureKind::AuthorizationCancelled,
                 message: "authorization cancelled by user".into(),
             });
         }
         Ok(InstallOutcome::Busy { operation }) => {
             let _ = events.send(RuntimeEvent::Failed {
-                kind: "installation_busy".into(),
+                kind: FailureKind::InstallationBusy,
                 message: format!("{operation} is already running for this installation"),
             });
         }
         Ok(InstallOutcome::Failed(message)) => {
             let _ = events.send(RuntimeEvent::Failed {
-                kind: "transaction".into(),
+                kind: FailureKind::Transaction,
                 message: message.clone(),
             });
         }
@@ -457,24 +456,24 @@ pub(crate) fn emit_terminal(
                 state: RuntimeState::Cancelled,
             });
             let _ = events.send(RuntimeEvent::Completed {
-                outcome: "cancelled".into(),
+                outcome: CompletionOutcome::Cancelled,
             });
         }
         Err(SessionError::InstallationBusy) => {
             let _ = events.send(RuntimeEvent::Failed {
-                kind: "installation_busy".into(),
+                kind: FailureKind::InstallationBusy,
                 message: "another maintenance operation is running for this installation".into(),
             });
         }
         Err(error) => {
             let kind = match error {
-                SessionError::AuthorizationRequired => "authorization_required",
-                SessionError::AuthorizationCancelled => "authorization_cancelled",
-                SessionError::RecoveryRequired => "recovery_required",
-                _ => "session",
+                SessionError::AuthorizationRequired => FailureKind::AuthorizationRequired,
+                SessionError::AuthorizationCancelled => FailureKind::AuthorizationCancelled,
+                SessionError::RecoveryRequired => FailureKind::RecoveryRequired,
+                _ => FailureKind::Session,
             };
             let _ = events.send(RuntimeEvent::Failed {
-                kind: kind.into(),
+                kind,
                 message: error.to_string(),
             });
         }
@@ -482,6 +481,27 @@ pub(crate) fn emit_terminal(
 }
 
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionOutcome {
+    Committed,
+    RebootRequired,
+    RolledBack,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    RecoveryRequired,
+    CommittedPendingReconciliation,
+    AuthorizationRequired,
+    AuthorizationCancelled,
+    InstallationBusy,
+    Transaction,
+    Session,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -548,10 +568,10 @@ pub enum RuntimeEvent {
     },
     RollingBack,
     Completed {
-        outcome: String,
+        outcome: CompletionOutcome,
     },
     Failed {
-        kind: String,
+        kind: FailureKind,
         message: String,
     },
     LogPath {

@@ -1,15 +1,10 @@
-#[cfg(windows)]
 use std::path::Path;
 
 use zup_automation::{
     AutomationResult, CheckDetails, Composition, Details, Diagnostic, Identifier, LogLevel,
 };
-#[cfg(windows)]
 use zup_automation::{ByteCount, PlanDetails};
-#[cfg(windows)]
 use zup_core::SelectedScope;
-#[cfg(windows)]
-use zup_exec::LifecycleAction;
 
 use crate::cli::{CheckCommand, PlanCommand};
 use crate::failure::Reporter;
@@ -189,129 +184,146 @@ pub fn run_plan(
         &args.project.overrides(),
         true,
     )?;
-    let config = selected
-        .selected_targets
-        .first()
-        .expect("a single-target selection has one target");
-    if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
-        return Err(crate::failure::error_with_help(
-            "zup.plan.linux_target",
-            format!(
-                "`zup plan` previews a Windows installation and cannot plan Linux target \
-                 `{}`",
-                config.target
-            ),
-            "Build the Linux installer and run it to see what it does.",
-        ));
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (&reporter, &selected, config, &toolchain_root);
-        Err(crate::failure::error(
-            "zup.plan.unsupported_host",
-            "Windows lowering requires a Windows build host",
-        ))
-    }
-    #[cfg(windows)]
-    {
-        let loaded = project::materialize_project(
-            selected,
-            &crate::resolver(toolchain_root)?,
-            zup_build::Writes::None,
-        )?;
-        plan_windows(args, &reporter, &loaded)
-    }
+    let loaded = project::materialize_project(
+        selected,
+        &crate::resolver(toolchain_root)?,
+        zup_build::Writes::None,
+    )?;
+    plan_installation(args, &reporter, &loaded)
 }
 
-#[cfg(windows)]
-fn plan_windows(
+fn plan_installation(
     args: PlanCommand,
     reporter: &Reporter,
     loaded: &LoadedProject,
 ) -> miette::Result<AutomationResult> {
-    let config = loaded
-        .selected_targets
-        .first()
-        .expect("a single-target selection has one target");
+    let config = &loaded.selected_targets[0];
     let installer = &loaded.build.targets[0].installer;
     let scope = SelectedScope::from(args.scope);
-    let state_root = zup_windows::resolve_state_root(args.state_root, scope)
-        .map_err(|error| crate::failure::error("zup.plan.state_root", format!("{error}")))?;
-    let prior = zup_windows::InstallLedgerStore::new(&state_root)
-        .load(&installer.app.id, scope)
-        .map_err(|error| crate::failure::error("zup.plan.ledger", format!("ledger: {error}")))?;
     let mut request = zup_plan::PlanRequest::new(config.target, scope);
     request.install_directory = choose_directory(
         args.project
             .install_directory
             .first()
             .map(std::path::PathBuf::as_path),
-        prior.as_ref(),
         installer.install.allow_directory_override,
     )?
-    .map(|directory| {
-        if args.project.install_directory.is_empty() && prior.is_some() {
-            zup_plan::InstallDirectory::Installed(directory)
-        } else {
-            zup_plan::InstallDirectory::Override(directory)
+    .map(zup_plan::InstallDirectory::Override);
+    for (raw_ids, selection) in [
+        (&args.enable, &mut request.components.enable),
+        (&args.disable, &mut request.components.disable),
+    ] {
+        for raw in raw_ids {
+            selection.insert(zup_core::ComponentId::new(raw).map_err(|error| {
+                crate::failure::error("zup.plan.component", format!("component {raw}: {error}"))
+            })?);
         }
-    });
-    for raw in &args.enable {
-        let id = zup_core::ComponentId::new(raw).map_err(|error| {
-            crate::failure::error("zup.plan.component", format!("component {raw}: {error}"))
-        })?;
-        request.components.enable.insert(id);
     }
-    for raw in &args.disable {
-        let id = zup_core::ComponentId::new(raw).map_err(|error| {
-            crate::failure::error("zup.plan.component", format!("component {raw}: {error}"))
-        })?;
-        request.components.disable.insert(id);
+    let planned =
+        zup_plugin_build::plan_installation(&loaded.build, &request, &zup_plan::NeverCancelled)
+            .map_err(|error| crate::failure::error("zup.plan.refused", error.to_string()))?;
+    let target = match config.target.operating_system() {
+        zup_core::TargetOperatingSystem::Windows => zup_windows::resolve_target(
+            &planned.plan,
+            &zup_windows::WindowsTargetContext::for_build(scope),
+        )
+        .map_err(|error| crate::failure::error("zup.plan.target", error.to_string()))?,
+        zup_core::TargetOperatingSystem::Linux => zup_linux::resolve_target(
+            &planned.plan,
+            &zup_linux::LinuxInstallLocationResolver::for_build(),
+        )
+        .map_err(|error| crate::failure::error("zup.plan.target", error.to_string()))?,
+        _ => {
+            return Err(crate::failure::error(
+                "zup.plan.target",
+                "unsupported target",
+            ));
+        }
+    };
+    let summary = format!(
+        "Install {} {} into {}",
+        installer.app.name, installer.app.version, target.install_directory
+    );
+    reporter.log(LogLevel::Info, &summary);
+    use zup_automation::PlanResource;
+    let mut resources = Vec::new();
+    for file in &target.files {
+        reporter.log(
+            LogLevel::Info,
+            format!("  File {} ({} bytes)", file.destination, file.size),
+        );
+        resources.push(PlanResource::File {
+            destination: file.destination.to_string(),
+            size: ByteCount::new(file.size),
+            digest: zup_automation::Digest::sha256(file.sha256.to_hex()),
+            generated: !loaded.build.targets[0]
+                .files
+                .iter()
+                .any(|input| input.source_relative == file.source_relative),
+        });
     }
-    let install = zup_plan::plan(&loaded.build, &request)
-        .map_err(|error| crate::failure::error("zup.plan.refused", error.to_string()))?;
-    let target =
-        zup_windows::resolve_target(&install, &zup_windows::WindowsTargetContext::new(scope))
-            .map_err(|error| {
-                crate::failure::error("zup.plan.target", format!("target: {error}"))
-            })?;
-    let transaction = zup_windows::plan_target_lifecycle(
-        LifecycleAction::Install,
-        &installer.app.id,
-        scope,
-        Some(&target),
-        &state_root,
-    )
-    .map_err(|error| {
-        crate::failure::error("zup.plan.transaction", format!("transaction plan: {error}"))
-    })?;
-    let preview =
-        zup_presentation::PlanPreview::from_transaction_plan(&transaction, scope, Some(&target));
-    reporter.log(LogLevel::Info, preview.human());
-    let changes = preview
-        .groups
-        .iter()
-        .flat_map(|group| group.changes.iter())
-        .count();
+    for launcher in &target.launchers {
+        resources.push(PlanResource::Launcher {
+            name: launcher.name.to_string(),
+            location: format!("{:?}", launcher.location),
+            executable: launcher.target.to_string(),
+            arguments: launcher.arguments.clone(),
+            working_directory: launcher.working_directory.as_ref().map(ToString::to_string),
+        });
+    }
+    for entry in &target.path_entries {
+        resources.push(PlanResource::PathEntry {
+            value: entry.value.to_string(),
+        });
+    }
+    for service in &target.services {
+        resources.push(PlanResource::Service {
+            id: service.id.to_string(),
+            executable: service.command.executable.to_string(),
+            arguments: service.command.arguments.clone(),
+            start: format!("{:?}", service.start),
+        });
+    }
+    for protocol in &target.protocols {
+        resources.push(PlanResource::Protocol {
+            scheme: protocol.scheme.to_string(),
+            executable: protocol.command.executable.to_string(),
+            arguments: protocol.command.arguments.clone(),
+        });
+    }
+    for association in &target.file_associations {
+        resources.push(PlanResource::FileAssociation {
+            id: association.id.to_string(),
+            extension: association.extension.to_string(),
+            executable: association.command.executable.to_string(),
+            arguments: association.command.arguments.clone(),
+        });
+    }
+    for prerequisite in &target.prerequisites {
+        resources.push(PlanResource::Prerequisite {
+            id: prerequisite.id.to_string(),
+            name: prerequisite.name.to_string(),
+        });
+    }
+    reporter.log(
+        LogLevel::Info,
+        zup_presentation::PlanPreview::from_install_plan(&planned.plan).human(),
+    );
     Ok(AutomationResult::new(zup_automation::OPERATION_PLAN)
         .with_application(crate::automation::application(&installer.app))
         .with_targets(crate::automation::targets(&loaded.selected_targets))
         .with_details(Details::Plan(PlanDetails {
             scope: scope.to_string(),
             install_directory: Some(target.install_directory.to_string()),
-            estimated_bytes: ByteCount::new(preview.estimated_bytes),
-            change_count: changes,
+            estimated_bytes: ByteCount::new(target.summary.install_bytes),
+            change_count: resources.len(),
+            resources,
         }))
-        .with_summary(format!(
-            "Install {} {} into {}",
-            installer.app.name, installer.app.version, target.install_directory
-        )))
+        .with_summary(summary))
 }
 
-#[cfg(windows)]
 fn choose_directory(
     explicit: Option<&Path>,
-    prior: Option<&zup_exec::InstallLedger>,
     allowed: bool,
 ) -> miette::Result<Option<zup_core::Template>> {
     if let Some(path) = explicit {
@@ -322,10 +334,5 @@ fn choose_directory(
         }
         return project::install_directory_template(path).map(Some);
     }
-    if !allowed {
-        return Ok(None);
-    }
-    Ok(prior
-        .and_then(|ledger| ledger.install_directory.as_ref())
-        .and_then(|path| zup_core::Template::parse(&path.to_string()).ok()))
+    Ok(None)
 }

@@ -27,13 +27,6 @@ use crate::{
     payload_overlay_base_root, verify_payload_overlay,
 };
 
-fn record_release(request: &RuntimeRequest) -> crate::ReleaseRecord<'_> {
-    match &request.release {
-        Some(identity) => crate::ReleaseRecord::Identity(identity),
-        None => crate::ReleaseRecord::None,
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayPolicy {
     Cleanup,
@@ -593,9 +586,9 @@ async fn run_elevated_bootstrap(
                         if completed.transaction_id != request.plan.id.as_uuid() {
                             return Err(SessionError::Protocol("bootstrap completion identity mismatch".into()));
                         }
-                        return Ok(match completed.outcome.as_str() {
-                            "committed" => BootstrapOutcome::Ready,
-                            "reboot_required" => {
+                        return Ok(match completed.outcome {
+                            zup_protocol::WorkerOutcome::Committed => BootstrapOutcome::Ready,
+                            zup_protocol::WorkerOutcome::RebootRequired => {
                                 let exit_code = completed.exit_code.ok_or_else(|| {
                                     SessionError::Protocol("bootstrap completion omitted reboot code".into())
                                 })?;
@@ -633,7 +626,7 @@ async fn run_elevated_bootstrap(
                                     prerequisite_id,
                                 }
                             }
-                            "recovery_required" => BootstrapOutcome::RecoveryRequired,
+                            zup_protocol::WorkerOutcome::RecoveryRequired => BootstrapOutcome::RecoveryRequired,
                             _ => {
                                 return Err(SessionError::Protocol(
                                     "unknown bootstrap completion outcome".into(),
@@ -642,16 +635,16 @@ async fn run_elevated_bootstrap(
                         });
                     }
                     zup_protocol::Message::Failed(failed)
-                        if cancel_sent && failed.kind == zup_protocol::failure::CANCELLED =>
+                        if cancel_sent && failed.kind == zup_protocol::WorkerFailure::Cancelled =>
                     {
                         return Err(SessionError::Cancelled);
                     }
                     zup_protocol::Message::Failed(failed) => {
-                        return Err(match failed.kind.as_str() {
-                            zup_protocol::failure::INSTALLATION_BUSY => {
+                        return Err(match failed.kind {
+                            zup_protocol::WorkerFailure::InstallationBusy => {
                                 SessionError::InstallationBusy
                             }
-                            zup_protocol::failure::AUTHENTICATION => {
+                            zup_protocol::WorkerFailure::Authentication => {
                                 SessionError::Protocol(failed.message)
                             }
                             _ => SessionError::Prerequisite(failed.message),
@@ -1074,7 +1067,7 @@ async fn run_elevated_worker(
                         .as_ref()
                         .map(|path| path.display().to_string()),
                     state_root: request.state_root.display().to_string(),
-                    work_root: request.work_root.display().to_string(),
+
                     recovery_id: request.recovery_id.map(|id| id.as_uuid()),
                     recovery_intent,
                     release: request.release.clone(),
@@ -1115,39 +1108,32 @@ async fn run_elevated_worker(
                     }
                 }
                 zup_protocol::Message::Completed(completed) => {
-                    let outcome = match completed.outcome.as_str() {
-                        "committed" => InstallOutcome::Committed,
-                        "rolled_back" => InstallOutcome::RolledBack,
-                        "cancelled" => InstallOutcome::Cancelled,
-                        "recovery_required" => InstallOutcome::RecoveryRequired,
-                        "committed_pending_reconciliation" => {
+                    let outcome = match completed.outcome {
+                        zup_protocol::WorkerOutcome::Committed => InstallOutcome::Committed,
+                        zup_protocol::WorkerOutcome::RolledBack => InstallOutcome::RolledBack,
+                        zup_protocol::WorkerOutcome::Cancelled => InstallOutcome::Cancelled,
+                        zup_protocol::WorkerOutcome::RecoveryRequired => InstallOutcome::RecoveryRequired,
+                        zup_protocol::WorkerOutcome::CommittedPendingReconciliation => {
                             InstallOutcome::CommittedPendingReconciliation {
                                 transaction: Some(completed.transaction_id),
                                 detail: "the transaction committed and ledger reconciliation is still required"
                                     .into(),
                             }
                         }
-                        other => return Err(SessionError::Protocol(format!("unknown worker outcome {other}"))),
+                        other => return Err(SessionError::Protocol(format!("unexpected worker outcome {other:?}"))),
                     };
                     return Ok(outcome);
                 }
                 zup_protocol::Message::Failed(failed) => {
 
-                    return Err(match failed.kind.as_str() {
-                        zup_protocol::failure::INSTALLATION_BUSY => {
+                    return Err(match failed.kind {
+                        zup_protocol::WorkerFailure::InstallationBusy => {
                             SessionError::InstallationBusy
                         }
-                        zup_protocol::failure::AUTHENTICATION => {
+                        zup_protocol::WorkerFailure::Authentication => {
                             SessionError::Protocol(failed.message)
                         }
-                        kind if zup_protocol::FAILURE_KINDS.contains(&kind) => {
-                            SessionError::Transaction(failed.message)
-                        }
-                        other => {
-                            return Err(SessionError::Protocol(format!(
-                                "the worker reported an unknown failure kind `{other}`"
-                            )));
-                        }
+                        _ => SessionError::Transaction(failed.message),
                     });
                 }
                 _ => return Err(SessionError::Protocol("unexpected worker message".into())),
@@ -1342,11 +1328,7 @@ fn execute_local_blocking_with_events_inner(
         Ok(work) => work,
         Err(error) => return InstallOutcome::Failed(error.to_string()),
     };
-    let work_root = if machine.is_some() {
-        state_root.join("work")
-    } else {
-        request.work_root.clone()
-    };
+    let work_root = state_root.join("work");
     let lock_result = match &machine {
         Some(machine) => machine
             .try_lock(&lock_key)
@@ -1436,12 +1418,15 @@ fn execute_local_blocking_with_events_inner(
     ) {
         return InstallOutcome::Failed(e.to_string());
     }
-    let open = match coordinator.begin(
-        request.app_id.clone(),
-        request.scope,
-        request.app_version.clone(),
-        plan,
-    ) {
+    let open = match coordinator
+        .begin(
+            request.app_id.clone(),
+            request.scope,
+            request.app_version.clone(),
+            plan,
+        )
+        .and_then(|open| open.with_release(request.release.clone()))
+    {
         Ok(open) => open,
         Err(e) => return InstallOutcome::Failed(e.to_string()),
     };
@@ -1503,11 +1488,7 @@ fn execute_local_blocking_with_events_inner(
             record,
             outcome: TransactionOutcome::Committed,
         }) => {
-            match InstallLedgerStore::new(&state_root).publish_committed(
-                &record,
-                request.scope,
-                record_release(&request),
-            ) {
+            match InstallLedgerStore::new(&state_root).publish_committed(&record, request.scope) {
                 Ok(_) => {
                     crate::notify_committed_path_change(&record);
                     InstallOutcome::Committed

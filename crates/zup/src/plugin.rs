@@ -263,18 +263,32 @@ fn build_module(
     let output = command
         .output()
         .map_err(|error| miette::miette!("could not run cargo: {error}"))?;
+    let mut found = None;
+    let mut diagnostics = String::new();
+    for message in cargo_metadata::Message::parse_stream(output.stdout.as_slice()) {
+        match message.map_err(|error| miette::miette!("Cargo build messages: {error}"))? {
+            cargo_metadata::Message::CompilerArtifact(artifact)
+                if artifact.target.is_cdylib() && artifact.target.name == project.library =>
+            {
+                found = artifact
+                    .filenames
+                    .iter()
+                    .find(|path| path.extension() == Some("wasm"))
+                    .map(|path| path.as_std_path().to_path_buf());
+            }
+            cargo_metadata::Message::CompilerMessage(message) => {
+                if let Some(rendered) = message.message.rendered {
+                    diagnostics.push_str(&rendered);
+                }
+            }
+            _ => {}
+        }
+    }
     if !output.status.success() {
         return Err(miette::miette!(
-            "building the plugin for `{GUEST_TARGET}` failed:\n{}",
+            "building the plugin for `{GUEST_TARGET}` failed:\n{diagnostics}{}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
-    }
-
-    let mut found = None;
-    for line in output.stdout.split(|byte| *byte == b'\n') {
-        if let Some(path) = artifact_executable(line, &project.library) {
-            found = Some(PathBuf::from(path));
-        }
     }
     let path = found.ok_or_else(|| {
         miette::miette!(
@@ -283,25 +297,6 @@ fn build_module(
         )
     })?;
     std::fs::read(&path).map_err(|error| miette::miette!("{}: {error}", path.display()))
-}
-
-fn artifact_executable(line: &[u8], library: &str) -> Option<String> {
-    let message: serde_json::Value = serde_json::from_slice(line).ok()?;
-    if message["reason"] != "compiler-artifact" {
-        return None;
-    }
-    let target = &message["target"];
-    let is_a_library = target["kind"]
-        .as_array()
-        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "cdylib"));
-    if !is_a_library || target["name"] != library {
-        return None;
-    }
-    message["filenames"]
-        .as_array()
-        .and_then(|files| files.first())
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
 }
 
 #[cfg(test)]

@@ -34,8 +34,6 @@ pub struct UninstallArgs {
     pub app_id: Option<String>,
     #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
-    #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
-    pub work_root: Option<PathBuf>,
     #[arg(long, hide = true)]
     pub ui: bool,
 }
@@ -116,7 +114,6 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
             &app_id,
             scope,
             state_root.clone(),
-            args.work_root.clone(),
             build.as_ref().map(|build| build.installer.frontend),
         )?,
     };
@@ -156,7 +153,6 @@ fn prepare_from_ledger(
     app_id: &AppId,
     scope: SelectedScope,
     state_root: PathBuf,
-    work_root: Option<PathBuf>,
     frontend: Option<Frontend>,
 ) -> miette::Result<PreparedRuntime> {
     let ledger = zup_windows::InstallLedgerStore::new(&state_root)
@@ -172,7 +168,6 @@ fn prepare_from_ledger(
         frontend.unwrap_or(Frontend::Gui),
     )
     .map_err(|error| miette::miette!("uninstall plan: {error}"))?;
-    let work_root = work_root.unwrap_or_else(|| state_root.join("work"));
     // never reads a payload file, because every file it removes is named by the
     let payload_root =
         std::env::current_dir().map_err(|error| miette::miette!("working directory: {error}"))?;
@@ -183,7 +178,6 @@ fn prepare_from_ledger(
         scope,
         transaction_plan: execution,
         state_root: state_root.clone(),
-        work_root,
         recovery_id: None,
         release: None,
         bootstrap: None,
@@ -278,9 +272,6 @@ pub fn launch_runner(
     }
     if let Some(value) = &args.state_root {
         command.arg("--state-root").arg(value);
-    }
-    if let Some(value) = &args.work_root {
-        command.arg("--work-root").arg(value);
     }
     if args.non_interactive {
         command.arg("--non-interactive");
@@ -778,8 +769,6 @@ pub struct RecoveryArgs {
     pub state_root: Option<PathBuf>,
     #[arg(long, hide = true, value_hint = clap::ValueHint::DirPath)]
     pub payload_root: Option<PathBuf>,
-    #[arg(long, hide = true, value_hint = clap::ValueHint::DirPath)]
-    pub work_root: Option<PathBuf>,
 }
 
 pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Result<()> {
@@ -816,9 +805,6 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             scope,
             transaction_plan: plan,
             state_root,
-            work_root: args.work_root.unwrap_or_else(|| {
-                std::env::temp_dir().join(format!("zup-work-{}", args.transaction_id))
-            }),
             recovery_id: Some(id),
             release: None,
             bootstrap: None,
@@ -859,7 +845,6 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             "a file transaction needs the payload it staged; pass --payload-root"
         ));
     }
-    let work_root = args.work_root.unwrap_or_else(|| state_root.join("work"));
     let payload_root = args.payload_root.unwrap_or_else(|| {
         if bundle.is_some() {
             executable
@@ -891,7 +876,6 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
         scope: record.scope,
         transaction_plan: record.plan.clone(),
         state_root,
-        work_root,
         recovery_id: Some(id),
         bootstrap: None,
         release: None,

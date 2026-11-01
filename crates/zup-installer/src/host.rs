@@ -658,7 +658,6 @@ pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
             plain: cli.plain,
             state_root: cli.state_root,
             app_id: None,
-            work_root: None,
             ui: false,
         };
         return crate::maintenance::run_uninstall(

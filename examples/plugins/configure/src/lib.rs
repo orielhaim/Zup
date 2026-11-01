@@ -29,15 +29,7 @@ impl Plugin for Configure {
             },
         );
 
-        Ok(Plan::new()
-            .generated_file(GeneratedFile::text(
-                "${install}/configure.txt",
-                report,
-            ))
-            .launcher(Launcher::menu(
-                format!("{} Settings", context.app_name),
-                "${launcher}",
-            )))
+        Ok(Plan::new().generated_file(GeneratedFile::text("${install}/configure.txt", report)))
     }
 }
 

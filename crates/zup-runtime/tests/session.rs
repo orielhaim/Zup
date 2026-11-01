@@ -50,7 +50,7 @@ fn request() -> RuntimeRequest {
         ))
         .unwrap(),
         state_root: PathBuf::from("state"),
-        work_root: PathBuf::from("work"),
+
         recovery_id: None,
         bootstrap: None,
         release: None,

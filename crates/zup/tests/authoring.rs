@@ -70,7 +70,6 @@ fn init_creates_a_small_editor_ready_manifest() {
 }
 
 #[test]
-#[cfg(windows)]
 fn plan_reports_the_resolved_installation_as_machine_output() {
     let root = TempDir::new().unwrap();
     let manifest = root.path().join("zup.toml");
@@ -78,6 +77,7 @@ fn plan_reports_the_resolved_installation_as_machine_output() {
         &manifest,
         r#"#:schema https://zup.dev/schema/zup.toml.json
 schema = 1
+frontend = "headless"
 [app]
 id = "com.example.plan"
 name = "Plan"
@@ -91,18 +91,25 @@ source = { directory = "dist" }
 scope = "user"
 [install.directory]
 user = "${location.user_data}/Plan"
+[[plugins]]
+id = "configure"
+source = "configure.wasm"
 "#
         .replace("windows-x64", TARGET),
     )
     .unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();
-    let plan = zup_with_toolchain(root.path())
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/plugins/configure/dist/configure.wasm"),
+        root.path().join("configure.wasm"),
+    )
+    .unwrap();
+    let plan = zup()
         .args([
             "plan",
             "--manifest",
             manifest.to_str().unwrap(),
-            "--state-root",
-            root.path().join("state").to_str().unwrap(),
             "--format",
             "json",
         ])
@@ -116,7 +123,6 @@ user = "${location.user_data}/Plan"
     let value: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     assert_eq!(value["operation"], "plan");
     assert_eq!(value["application"]["name"], "Plan");
-    // The template is resolved, not echoed: a consumer reads this to install.
     assert!(
         !value["details"]["install_directory"]
             .as_str()
@@ -125,6 +131,15 @@ user = "${location.user_data}/Plan"
         "an unresolved template reached the machine output: {value}"
     );
     assert_eq!(value["details"]["scope"], "user");
+    let resources = value["details"]["resources"].as_array().unwrap();
+    assert!(resources.iter().any(|resource| {
+        resource["kind"] == "file"
+            && resource["generated"] == true
+            && resource["destination"]
+                .as_str()
+                .unwrap()
+                .ends_with("configure.txt")
+    }));
 }
 
 #[test]
@@ -194,4 +209,11 @@ component = "missing"
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unknown component `missing`"));
     assert!(stderr.contains("component = \"missing\""));
+}
+
+#[test]
+fn an_operation_requires_a_concrete_scope() {
+    let output = zup().args(["plan", "--scope", "either"]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("either"));
 }

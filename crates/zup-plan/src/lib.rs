@@ -10,7 +10,7 @@ mod resources;
 mod select;
 
 pub use error::{PlanError, SelectedScope};
-pub use plan::{plan, plan_with_plugins, plan_without_plugins};
+pub use plan::{plan, plan_with_plugins};
 pub use plan_types::{InstallPlan, PlanSummary};
 pub use plugins::{
     CancellationQuery, GeneratedFile, MAX_PLUGIN_ARGUMENT_BYTES, MAX_PLUGIN_ARGUMENTS,

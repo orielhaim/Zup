@@ -1,7 +1,7 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
-use crate::cli::{InitCommand, ScopeArg};
+use crate::cli::{InitCommand, ScopePolicyArg};
 use crate::project;
 
 pub fn run(args: InitCommand) -> miette::Result<()> {
@@ -16,9 +16,9 @@ pub fn run(args: InitCommand) -> miette::Result<()> {
     let answers = ask(args, &manifest_path, interactive)?;
 
     let scope_name = match answers.scope {
-        ScopeArg::Machine => "machine",
-        ScopeArg::Either => "either",
-        ScopeArg::User => "user",
+        ScopePolicyArg::Machine => "machine",
+        ScopePolicyArg::Either => "either",
+        ScopePolicyArg::User => "user",
     };
     let install_name = project::slug(&answers.name);
     let frontend = answers.frontend;
@@ -41,12 +41,12 @@ pub fn run(args: InitCommand) -> miette::Result<()> {
         project::toml_string(&answers.source),
         project::toml_string(scope_name),
     );
-    if answers.scope != ScopeArg::Machine {
+    if answers.scope != ScopePolicyArg::Machine {
         document.push_str(&format!(
             "user = \"${{location.user_data}}/{install_name}\"\n"
         ));
     }
-    if answers.scope != ScopeArg::User {
+    if answers.scope != ScopePolicyArg::User {
         document.push_str(&format!(
             "machine = \"${{location.programs}}/{install_name}\"\n"
         ));
@@ -76,7 +76,7 @@ struct Answers {
     version: String,
     source: String,
     main: String,
-    scope: ScopeArg,
+    scope: ScopePolicyArg,
     frontend: zup_core::Frontend,
 }
 
@@ -127,9 +127,9 @@ fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Re
                 .prompt()
                 .map_err(|error| miette::miette!("prompt: {error}"))?;
             scope = Some(match value {
-                "machine" => ScopeArg::Machine,
-                "either" => ScopeArg::Either,
-                _ => ScopeArg::User,
+                "machine" => ScopePolicyArg::Machine,
+                "either" => ScopePolicyArg::Either,
+                _ => ScopePolicyArg::User,
             });
         }
         if main.is_none() {
@@ -151,7 +151,7 @@ fn ask(args: InitCommand, manifest_path: &Path, interactive: bool) -> miette::Re
         version: args.version,
         source: source.unwrap_or_else(|| "dist".into()),
         main: main.unwrap_or_else(|| default_main().to_owned()),
-        scope: scope.unwrap_or(ScopeArg::User),
+        scope: scope.unwrap_or(ScopePolicyArg::User),
         frontend: args
             .frontend
             .map(Into::into)

@@ -5,12 +5,12 @@ mod messages;
 pub use messages::PrivilegedSession;
 pub use messages::{
     BACKEND_OPERATIONS_V1, Capabilities, Completed, ExecuteBootstrap, ExecuteOperation,
-    ExecuteTransaction, FAILURE_KINDS, FILE_TRANSACTIONS_V1, Failed, LIFECYCLE_V1, MAX_FRAME_BYTES,
+    ExecuteTransaction, FILE_TRANSACTIONS_V1, Failed, LIFECYCLE_V1, MAX_FRAME_BYTES,
     MAX_INTENT_COMPONENTS, MAX_INTENT_STRING_BYTES, MAX_PAYLOAD_OVERLAY_PATH_BYTES, MAX_PLAN_BYTES,
     MachineRecoveryIntent, Message, PREREQUISITE_BOOTSTRAP_V1, PRIVILEGED_OPERATIONS,
     PROTOCOL_VERSION, ParentHello, PrepareOperation, PreparedOperation, ProgressKind,
-    ProgressReport, SequenceTracker, TransactionStateChanged, WireEnvelope, WorkerHello,
-    decode_payload, encode_payload, failure, privileged_operation,
+    ProgressReport, SequenceTracker, TransactionStateChanged, WireEnvelope, WorkerFailure,
+    WorkerHello, WorkerOutcome, decode_payload, encode_payload, privileged_operation,
 };
 pub use zup_core::SessionId;
 

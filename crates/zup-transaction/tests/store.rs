@@ -470,3 +470,49 @@ fn a_journal_cannot_be_relocated_under_another_transaction_identity() {
         Err(StoreError::Corrupt(CorruptReason::IdentityMismatch))
     ));
 }
+
+#[rstest]
+#[case::foreign_destination(true)]
+#[case::foreign_content(false)]
+fn receipts_must_describe_the_planned_file(#[case] destination: bool) {
+    let (_root, store) = store();
+    let settled = zup_transaction::TransactionCoordinator::new(store)
+        .begin(
+            common::sample_app_id(),
+            zup_core::SelectedScope::User,
+            common::sample_version(),
+            sample_plan(),
+        )
+        .unwrap()
+        .execute(&mut common::fake::FakeExecutor::new())
+        .unwrap();
+    let mut record = settled.record;
+    let receipt = record
+        .nodes
+        .values_mut()
+        .find_map(|state| match state {
+            NodeState::Verified { receipt } | NodeState::Applied { receipt }
+                if matches!(
+                    **receipt,
+                    zup_transaction::OperationReceipt::CreateFile { .. }
+                ) =>
+            {
+                Some(receipt)
+            }
+            _ => None,
+        })
+        .unwrap();
+    if let zup_transaction::OperationReceipt::CreateFile {
+        destination: path,
+        installed_size,
+        ..
+    } = receipt.as_mut()
+    {
+        if destination {
+            *path = r"C:\foreign\owned-by-someone-else".into();
+        } else {
+            *installed_size += 1;
+        }
+    }
+    assert_eq!(record.validate(), Err(CorruptReason::InvalidReceipt));
+}

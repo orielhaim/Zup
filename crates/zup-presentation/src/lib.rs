@@ -159,20 +159,22 @@ impl PlanPreview {
                     technical_key: Some(format!("{:?}", file_association.key)),
                 });
         }
-        groups
-            .entry(ResourceCategory::AppsFeatures)
-            .or_default()
-            .push(PlannedChange {
-                category: ResourceCategory::AppsFeatures,
-                kind: ChangeKind::Create,
-                label: "Register in Apps & Features".into(),
-                location: None,
-                scope: Some(plan.scope),
-                requires_authorization: plan.summary.requires_authorization,
-                estimated_bytes: 0,
-                component: None,
-                technical_key: Some("uninstall_entry".into()),
-            });
+        if plan.target.operating_system() == zup_core::TargetOperatingSystem::Windows {
+            groups
+                .entry(ResourceCategory::AppsFeatures)
+                .or_default()
+                .push(PlannedChange {
+                    category: ResourceCategory::AppsFeatures,
+                    kind: ChangeKind::Create,
+                    label: "Register in Apps & Features".into(),
+                    location: None,
+                    scope: Some(plan.scope),
+                    requires_authorization: plan.summary.requires_authorization,
+                    estimated_bytes: 0,
+                    component: None,
+                    technical_key: Some("uninstall_entry".into()),
+                });
+        }
         Self {
             application: plan.app.name.to_string(),
             version: plan.app.version.to_string(),
@@ -446,7 +448,12 @@ pub struct DiagnosticPresentation {
 impl DiagnosticPresentation {
     pub fn for_outcome(outcome: ProcessOutcome, message: &str) -> Self {
         let (kind, title, meaning, recovery) = match outcome {
-            ProcessOutcome::RecoveryRequired => return Self::from_message(message, true),
+            ProcessOutcome::RecoveryRequired => (
+                DiagnosticKind::Recovery,
+                "The last change didn't finish",
+                "Setup must reconcile transaction state before making further changes.",
+                "Keep the installer and transaction state. Complete recovery before starting another operation.",
+            ),
             ProcessOutcome::InstallationBusy => (
                 DiagnosticKind::Blocked,
                 "Another operation is running",
@@ -471,19 +478,18 @@ impl DiagnosticPresentation {
                 "Setup refused content that did not pass verification.",
                 "Obtain the installer from the publisher and check the reported verification failure.",
             ),
-            ProcessOutcome::OwnershipConflict => {
-                let diagnostic = Self::from_message(message, false);
-                if diagnostic.kind == DiagnosticKind::Drift {
-                    return diagnostic;
-                }
-                (
-                    DiagnosticKind::Conflict,
-                    "An existing resource conflicts with this plan",
-                    "Setup will not replace resources it does not own.",
-                    "Resolve the ownership conflict or choose another installation location, then retry.",
-                )
-            }
-            _ => return Self::from_message(message, false),
+            ProcessOutcome::OwnershipConflict => (
+                DiagnosticKind::Conflict,
+                "An existing resource conflicts with this plan",
+                "Setup will not replace resources it does not own.",
+                "Resolve the ownership conflict or choose another installation location, then retry.",
+            ),
+            _ => (
+                DiagnosticKind::Unknown,
+                "Setup couldn't finish",
+                "Setup could not confirm that this operation completed.",
+                "Copy the details for the publisher before retrying.",
+            ),
         };
         Self {
             kind,
@@ -491,81 +497,6 @@ impl DiagnosticPresentation {
             meaning: meaning.into(),
             recovery: recovery.into(),
             technical_details: Some(message.into()),
-        }
-    }
-
-    pub fn from_message(message: &str, recovery_required: bool) -> Self {
-        let normalized = message.to_ascii_lowercase();
-        if normalized.contains("recovery") || recovery_required {
-            Self {
-                kind: DiagnosticKind::Recovery,
-                title: "The last change didn't finish".into(),
-                meaning: "Setup must reconcile transaction state before making further changes.".into(),
-                recovery: "Keep the installer and transaction state. Complete recovery before starting another operation.".into(),
-                technical_details: Some(message.into()),
-            }
-        } else if normalized.contains("running") || normalized.contains("blocked by") {
-            Self {
-                kind: DiagnosticKind::Blocked,
-                title: "An application is still open".into(),
-                meaning: "Files setup needs to change are in use.".into(),
-                recovery: "Close the application, then try again.".into(),
-                technical_details: Some(message.into()),
-            }
-        } else if normalized.contains("drift") || normalized.contains("modified outside") {
-            Self {
-                kind: DiagnosticKind::Drift,
-                title: "Some installed files were changed".into(),
-                meaning: "They no longer match the files setup installed.".into(),
-                recovery: "Repair restores the files setup manages. Files you changed on \
-                           purpose are left as they are."
-                    .into(),
-                technical_details: Some(message.into()),
-            }
-        } else if normalized.contains("permission")
-            || normalized.contains("access")
-            || normalized.contains("authorization")
-            || normalized.contains("privilege")
-            || normalized.contains("elevation")
-        {
-            Self {
-                kind: DiagnosticKind::Permission,
-                title: "Administrator approval is needed".into(),
-                meaning: "Part of this installation changes settings that are shared by \
-                          everyone on this computer."
-                    .into(),
-                recovery: "Try again and approve the native authorization prompt, or ask an administrator \
-                           to install it."
-                    .into(),
-                technical_details: Some(message.into()),
-            }
-        } else if normalized.contains("digest")
-            || normalized.contains("hash")
-            || normalized.contains("signature")
-            || normalized.contains("verif")
-            || normalized.contains("corrupt")
-        {
-            Self {
-                kind: DiagnosticKind::Verification,
-                title: "The download couldn't be verified".into(),
-                meaning:
-                    "A file did not match what the publisher released. Setup refused to use it."
-                        .into(),
-                recovery: "Check your connection and try again. If it keeps happening, \
-                           download the installer again from the publisher."
-                    .into(),
-                technical_details: Some(message.into()),
-            }
-        } else {
-            Self {
-                kind: DiagnosticKind::Unknown,
-                title: "Setup couldn't finish".into(),
-                meaning: "Setup could not confirm that this operation completed.".into(),
-                recovery: "Try again. If it happens again, copy the details for the \
-                           publisher."
-                    .into(),
-                technical_details: Some(message.into()),
-            }
         }
     }
 }
@@ -629,68 +560,6 @@ impl ProcessOutcome {
             Self::InstallationBusy => 8,
             Self::RebootRequired => 3010,
             Self::Failure => 1,
-        }
-    }
-
-    /// Classify an outcome from its message.
-    ///
-    /// A last resort, used where a typed value has already been flattened into a
-    /// `miette` report. Everywhere a typed outcome or a typed event kind is
-    /// available the caller uses that instead - this function reads English, and
-    /// reading English is how "another operation is running" becomes a failure
-    /// with code 1 and an alert at three in the morning.
-    pub fn from_message(message: &str) -> Self {
-        let normalized = message.to_ascii_lowercase();
-        if normalized.contains("cancelled")
-            || normalized.contains("canceled")
-            || normalized.contains("cancel was requested")
-        {
-            Self::Cancelled
-        } else if normalized.contains("authorization")
-            || normalized.contains("elevation")
-            || normalized.contains("privilege")
-            || normalized.contains("administrator")
-        {
-            Self::AuthorizationRequired
-        } else if normalized.contains("reboot")
-            || normalized.contains("restart required")
-            || normalized.contains("3010")
-        {
-            Self::RebootRequired
-        } else if normalized.contains("recovery") || normalized.contains("journal") {
-            Self::RecoveryRequired
-        } else if normalized.contains("busy")
-            || normalized.contains("already running")
-            || normalized.contains("another operation")
-        {
-            // Before the ownership and verification branches: a message about
-            // another operation in progress frequently mentions the very files
-            // that are locked, and classifying it as an ownership conflict would
-            // tell a user to repair an installation that is perfectly healthy.
-            Self::InstallationBusy
-        } else if normalized.contains("drift")
-            || normalized.contains("ownership")
-            || normalized.contains("occupied")
-            || normalized.contains("conflict")
-        {
-            Self::OwnershipConflict
-        } else if normalized.contains("verification")
-            || normalized.contains("signature")
-            || normalized.contains("trust")
-            || normalized.contains("tuf")
-            || normalized.contains("digest")
-            || normalized.contains("hash")
-            || normalized.contains("integrity")
-            || normalized.contains("quarantine")
-        {
-            Self::VerificationFailure
-        } else if normalized.contains("configuration")
-            || normalized.contains("invalid")
-            || normalized.contains("required option")
-        {
-            Self::Configuration
-        } else {
-            Self::Failure
         }
     }
 }
@@ -898,6 +767,50 @@ impl InstallerResult {
     }
 }
 
+impl From<zup_runtime::CompletionOutcome> for ProcessOutcome {
+    fn from(outcome: zup_runtime::CompletionOutcome) -> Self {
+        match outcome {
+            zup_runtime::CompletionOutcome::Committed => Self::Success,
+            zup_runtime::CompletionOutcome::RebootRequired => Self::RebootRequired,
+            zup_runtime::CompletionOutcome::Cancelled => Self::Cancelled,
+            zup_runtime::CompletionOutcome::RolledBack => Self::Failure,
+        }
+    }
+}
+
+impl From<zup_runtime::FailureKind> for ProcessOutcome {
+    fn from(kind: zup_runtime::FailureKind) -> Self {
+        match kind {
+            zup_runtime::FailureKind::InstallationBusy => Self::InstallationBusy,
+            zup_runtime::FailureKind::RecoveryRequired
+            | zup_runtime::FailureKind::CommittedPendingReconciliation => Self::RecoveryRequired,
+            zup_runtime::FailureKind::AuthorizationRequired
+            | zup_runtime::FailureKind::AuthorizationCancelled => Self::AuthorizationRequired,
+            zup_runtime::FailureKind::Transaction | zup_runtime::FailureKind::Session => {
+                Self::Failure
+            }
+        }
+    }
+}
+
+impl From<&zup_runtime::InstallOutcome> for ProcessOutcome {
+    fn from(outcome: &zup_runtime::InstallOutcome) -> Self {
+        use zup_runtime::InstallOutcome;
+        match outcome {
+            InstallOutcome::RebootRequired { .. } => Self::RebootRequired,
+            InstallOutcome::Committed => Self::Success,
+            InstallOutcome::Cancelled => Self::Cancelled,
+            InstallOutcome::RecoveryRequired
+            | InstallOutcome::CommittedPendingReconciliation { .. } => Self::RecoveryRequired,
+            InstallOutcome::AuthorizationRequired | InstallOutcome::AuthorizationCancelled => {
+                Self::AuthorizationRequired
+            }
+            InstallOutcome::Busy { .. } => Self::InstallationBusy,
+            InstallOutcome::RolledBack | InstallOutcome::Failed(_) => Self::Failure,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,7 +883,7 @@ mod tests {
     fn diagnostics_follow_typed_outcomes() {
         for message in ["blocked by running applications", "ownership drift"] {
             assert_eq!(
-                DiagnosticPresentation::from_message(message, true).kind,
+                DiagnosticPresentation::for_outcome(ProcessOutcome::RecoveryRequired, message).kind,
                 DiagnosticKind::Recovery
             );
         }
@@ -991,7 +904,11 @@ mod tests {
             DiagnosticKind::Conflict
         );
         assert_eq!(
-            DiagnosticPresentation::from_message("blocked by running applications", false).kind,
+            DiagnosticPresentation::for_outcome(
+                ProcessOutcome::InstallationBusy,
+                "blocked by running applications"
+            )
+            .kind,
             DiagnosticKind::Blocked
         );
     }
@@ -1004,14 +921,6 @@ mod tests {
         assert_eq!(ProcessOutcome::AuthorizationRequired.code(), 5);
         assert_eq!(ProcessOutcome::VerificationFailure.code(), 6);
         assert_eq!(ProcessOutcome::RecoveryRequired.code(), 7);
-        assert_eq!(
-            ProcessOutcome::from_message("verification failed"),
-            ProcessOutcome::VerificationFailure
-        );
-        assert_eq!(
-            ProcessOutcome::from_message("pinned artifact digest mismatch"),
-            ProcessOutcome::VerificationFailure
-        );
     }
 
     #[test]

@@ -53,6 +53,10 @@ impl<R> WindowsTargetContext<R> {
 
 #[derive(Debug, Error)]
 pub enum TargetResolveError {
+    #[error("unsupported resources: {0}")]
+    UnsupportedResources(String),
+    #[error("resolution scope must match the selected plan scope")]
+    ScopeMismatch,
     #[error(transparent)]
     Template(#[from] TemplateResolveError),
 
@@ -96,6 +100,18 @@ pub fn resolve_target<R: InstallLocationResolver>(
         return Err(TargetResolveError::UnsupportedTarget {
             target: plan.target.to_string(),
         });
+    }
+    if context.scope != plan.scope {
+        return Err(TargetResolveError::ScopeMismatch);
+    }
+    let capabilities = zup_platform::capabilities(&plan.target).ok_or_else(|| {
+        TargetResolveError::UnsupportedTarget {
+            target: plan.target.to_string(),
+        }
+    })?;
+    let reasons = capabilities.planned_resource_errors(plan);
+    if !reasons.is_empty() {
+        return Err(TargetResolveError::UnsupportedResources(reasons.join("; ")));
     }
     let scope = context.scope;
     let resolve = |template: &Template, kind: &'static str| {

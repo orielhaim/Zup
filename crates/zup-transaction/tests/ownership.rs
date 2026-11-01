@@ -162,3 +162,39 @@ fn reconciliation_publishes_the_durable_body_and_retries_failed_publication() {
         .is_err()
     );
 }
+
+#[test]
+fn unsettled_history_blocks_reconciliation_before_any_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let store = FilesystemTransactionStore::private_at(root.path());
+    let committed = TransactionCoordinator::new(store.clone())
+        .begin(
+            sample_app_id(),
+            SelectedScope::User,
+            sample_version(),
+            common::sample_plan(),
+        )
+        .unwrap()
+        .execute(&mut FakeExecutor::new())
+        .unwrap();
+    let pending = TransactionCoordinator::new(store.clone())
+        .begin(
+            sample_app_id(),
+            SelectedScope::User,
+            sample_version(),
+            common::sample_plan(),
+        )
+        .unwrap()
+        .preserve();
+    assert!(matches!(
+        zup_transaction::settled_records(&store, &sample_app_id(), SelectedScope::User, None),
+        Err(zup_transaction::ReconciliationError::RecoveryRequired(id)) if id == pending.transaction_id
+    ));
+    assert!(matches!(
+        store
+            .load(&committed.record.transaction_id)
+            .unwrap()
+            .reconciliation,
+        ReconciliationState::Pending { .. }
+    ));
+}

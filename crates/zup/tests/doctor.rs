@@ -7,13 +7,10 @@ use std::{
 
 use serde_json::Value;
 use tempfile::TempDir;
-use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
-use wit_parser::{ManglingAndAbi, Resolve};
 
 #[path = "support/toolchain_fixture.rs"]
 mod toolchain_fixture;
 
-const PLUGIN_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 
 /// A Linux ABI Zup parses but no backend builds.
@@ -225,18 +222,7 @@ fn directory_entries(root: &Path) -> BTreeSet<String> {
 }
 
 fn plugin_component() -> Vec<u8> {
-    let mut resolve = Resolve::default();
-    let package = resolve.push_str("zup-plugin.wit", PLUGIN_WIT).unwrap();
-    let world = resolve.select_world(&[package], Some("plugin")).unwrap();
-    let mut module = dummy_module(&resolve, world, ManglingAndAbi::Standard32);
-    // `false` matches the encoder below, which leaves canonical names off.
-    embed_component_metadata(&mut module, &resolve, world, StringEncoding::UTF8, false).unwrap();
-    ComponentEncoder::default()
-        .module(&module)
-        .unwrap()
-        .validate(true)
-        .encode()
-        .unwrap()
+    include_bytes!("../../../examples/plugins/configure/dist/configure.wasm").to_vec()
 }
 
 #[test]

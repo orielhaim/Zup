@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wasmtime::{Engine, Precompiled};
-use zup_bundle::{Package, PackageError, PluginArtifact};
+use zup_bundle::{
+    AcquiredPayloadSource, Package, PackageError, PayloadError, PluginArtifact, PortableBuildPlan,
+};
 use zup_core::{PluginId, Sha256Digest, Target};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, ContractError, EngineError, HOST_TARGET, MAX_AOT_BYTES, PLUGIN_API_VERSION,
@@ -16,6 +18,8 @@ pub enum LoadError {
     Package(#[from] PackageError),
     #[error(transparent)]
     Engine(#[from] EngineError),
+    #[error(transparent)]
+    Payload(#[from] PayloadError),
     #[error(transparent)]
     Contract(#[from] ContractError),
     #[error("expected target `{expected}` does not match the host compile target `{host}`")]
@@ -43,12 +47,11 @@ pub enum LoadError {
 }
 
 pub(crate) struct LoadedPlugin {
-    pub(crate) artifact: PluginArtifact,
+    pub(crate) bytes: Vec<u8>,
     pub(crate) component: Option<ValidatedComponent>,
 }
 
 pub(crate) struct LoadedBundle {
-    pub(crate) package: Package,
     pub(crate) engine: PluginEngine,
     pub(crate) target: Target,
     pub(crate) plugins: BTreeMap<PluginId, LoadedPlugin>,
@@ -58,12 +61,64 @@ pub(crate) fn load_bundle(
     package: Package,
     expected_target: &Target,
 ) -> Result<LoadedBundle, LoadError> {
-    if &package.plan().installer.target != expected_target {
+    check_target(package.plan(), expected_target)?;
+    load_sources(
+        &package.plan().installer,
+        &package.plan().plugins,
+        expected_target,
+        |artifact| Ok(package.plugin_aot(&artifact.plugin_id)?),
+    )
+}
+
+pub(crate) fn load_acquired(
+    plan: &PortableBuildPlan,
+    source: &AcquiredPayloadSource,
+    expected_target: &Target,
+) -> Result<LoadedBundle, LoadError> {
+    check_target(plan, expected_target)?;
+    load_sources(
+        &plan.installer,
+        &plan.plugins,
+        expected_target,
+        |artifact| Ok(source.read_blob(&artifact.blob)?),
+    )
+}
+
+pub(crate) fn load_compiled(
+    installer: &zup_core::Installer,
+    artifacts: &[zup_bundle::CompiledPluginArtifact],
+) -> Result<LoadedBundle, LoadError> {
+    let metadata = artifacts
+        .iter()
+        .map(|artifact| artifact.metadata().clone())
+        .collect::<Vec<_>>();
+    load_sources(installer, &metadata, &host_target(), |metadata| {
+        artifacts
+            .iter()
+            .find(|artifact| artifact.metadata().plugin_id == metadata.plugin_id)
+            .map(|artifact| artifact.bytes().to_vec())
+            .ok_or_else(|| LoadError::MissingArtifact {
+                plugin_id: metadata.plugin_id.clone(),
+            })
+    })
+}
+
+fn check_target(plan: &PortableBuildPlan, expected: &Target) -> Result<(), LoadError> {
+    if plan.installer.target != *expected {
         return Err(LoadError::TargetMismatch {
-            expected: *expected_target,
-            found: package.plan().installer.target,
+            expected: *expected,
+            found: plan.installer.target,
         });
     }
+    Ok(())
+}
+
+fn load_sources(
+    installer: &zup_core::Installer,
+    metadata: &[PluginArtifact],
+    expected_target: &Target,
+    mut read: impl FnMut(&PluginArtifact) -> Result<Vec<u8>, LoadError>,
+) -> Result<LoadedBundle, LoadError> {
     let host = host_target();
     if expected_target != &host {
         return Err(LoadError::HostTargetMismatch {
@@ -73,24 +128,23 @@ pub(crate) fn load_bundle(
     }
     let engine = PluginEngine::new(expected_target.rust_triple())?;
     let expected_fingerprint = Sha256Digest::from_bytes(*engine.fingerprint().as_bytes());
-    let artifacts = exact_artifacts(&package)?;
+    let artifacts = exact_artifacts(installer, metadata)?;
     let mut plugins = BTreeMap::new();
     for (plugin_id, artifact) in artifacts {
         verify_metadata(&plugin_id, artifact, expected_target, expected_fingerprint)?;
-        let bytes = package.plugin_aot(&plugin_id)?;
+        let bytes = read(artifact)?;
         verify_aot(&plugin_id, artifact, &bytes)?;
         plugins.insert(
             plugin_id,
             LoadedPlugin {
-                artifact: artifact.clone(),
+                bytes,
                 component: None,
             },
         );
     }
     Ok(LoadedBundle {
-        package,
         engine,
-        target: *expected_target,
+        target: installer.target,
         plugins,
     })
 }
@@ -107,10 +161,8 @@ impl LoadedBundle {
                 plugin_id: plugin_id.clone(),
             })?;
         if plugin.component.is_none() {
-            let bytes = self.package.plugin_aot(plugin_id)?;
-            verify_aot(plugin_id, &plugin.artifact, &bytes)?;
-            // SAFETY: the package authenticated these exact bytes; engine metadata was validated at load.
-            plugin.component = Some(unsafe { self.engine.validate_trusted_aot(&bytes)? });
+            // SAFETY: load_sources verified these bytes and their engine metadata against the authenticated plan.
+            plugin.component = Some(unsafe { self.engine.validate_trusted_aot(&plugin.bytes)? });
         }
         Ok(plugin.component.as_ref().expect("component loaded above"))
     }
@@ -140,9 +192,12 @@ fn host_target() -> Target {
     Target::parse(HOST_TARGET).expect("host target is a valid triple")
 }
 
-fn exact_artifacts(package: &Package) -> Result<BTreeMap<PluginId, &PluginArtifact>, LoadError> {
+fn exact_artifacts<'a>(
+    installer: &zup_core::Installer,
+    metadata: &'a [PluginArtifact],
+) -> Result<BTreeMap<PluginId, &'a PluginArtifact>, LoadError> {
     let mut expected = BTreeMap::<String, PluginId>::new();
-    for binding in &package.plan().installer.plugins {
+    for binding in &installer.plugins {
         let key = binding.id.as_str().to_ascii_lowercase();
         if let Some(previous) = expected.insert(key, binding.id.clone()) {
             return Err(LoadError::DuplicateInstallerPlugin {
@@ -152,7 +207,7 @@ fn exact_artifacts(package: &Package) -> Result<BTreeMap<PluginId, &PluginArtifa
     }
 
     let mut actual = BTreeMap::<String, &PluginArtifact>::new();
-    for artifact in package.plugin_artifacts() {
+    for artifact in metadata {
         let key = artifact.plugin_id.as_str().to_ascii_lowercase();
         if actual.insert(key.clone(), artifact).is_some() {
             return Err(LoadError::DuplicateArtifact {

@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use zup_presentation::ProcessOutcome;
 
-pub use crate::cli::{FrontendArg, OutputArg, ScopeArg};
+pub use crate::cli::{FrontendArg, OutputArg, ScopeArg, ScopePolicyArg};
 pub use crate::failure::Reporter;
 pub use crate::toolchain::{ToolchainResolver, ToolchainSource, missing_component_message};
 
@@ -32,9 +32,11 @@ pub const DEFAULT_MANIFEST: &str = "zup.toml";
 pub const ZUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn process_exit_code(error: &miette::Report) -> u8 {
-    ProcessOutcome::from_message(&error.to_string())
-        .code()
-        .clamp(1, 255) as u8
+    if error.downcast_ref::<crate::failure::Coded>().is_some() {
+        ProcessOutcome::Configuration.code() as u8
+    } else {
+        ProcessOutcome::Failure.code() as u8
+    }
 }
 
 pub fn run() -> miette::Result<()> {

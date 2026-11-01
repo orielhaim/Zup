@@ -109,6 +109,7 @@ pub struct PresetLaunch {
 }
 
 pub enum UpdatePreparation {
+    Cancelled,
     UpToDate { version: String },
     Available { version: String },
     Ready { build: Arc<TargetBuildPlan> },
@@ -307,24 +308,6 @@ pub fn is_terminal(event: &RuntimeEvent) -> bool {
     )
 }
 
-pub fn process_outcome(outcome: &InstallOutcome) -> zup_presentation::ProcessOutcome {
-    match outcome {
-        InstallOutcome::RebootRequired { .. } => zup_presentation::ProcessOutcome::RebootRequired,
-        InstallOutcome::Committed => zup_presentation::ProcessOutcome::Success,
-        InstallOutcome::Cancelled => zup_presentation::ProcessOutcome::Cancelled,
-        InstallOutcome::RecoveryRequired
-        | InstallOutcome::CommittedPendingReconciliation { .. } => {
-            zup_presentation::ProcessOutcome::RecoveryRequired
-        }
-        InstallOutcome::AuthorizationRequired | InstallOutcome::AuthorizationCancelled => {
-            zup_presentation::ProcessOutcome::AuthorizationRequired
-        }
-        InstallOutcome::Busy { .. } => zup_presentation::ProcessOutcome::InstallationBusy,
-        InstallOutcome::RolledBack => zup_presentation::ProcessOutcome::Failure,
-        InstallOutcome::Failed(message) => zup_presentation::ProcessOutcome::from_message(message),
-    }
-}
-
 pub fn state_name(state: zup_runtime::RuntimeState) -> &'static str {
     match state {
         zup_runtime::RuntimeState::Preparing => "preparing",
@@ -417,24 +400,11 @@ pub fn automation_events(event: &RuntimeEvent) -> Vec<zup_presentation::Installe
             state: "rolling_back".into(),
         }],
         RuntimeEvent::Completed { outcome } => {
-            let outcome = if outcome == "committed" {
-                zup_presentation::ProcessOutcome::Success
-            } else {
-                zup_presentation::ProcessOutcome::from_message(outcome)
-            };
+            let outcome = zup_presentation::ProcessOutcome::from(*outcome);
             vec![InstallerEvent::Completed { outcome }]
         }
         RuntimeEvent::Failed { kind, message } => {
-            let outcome = match kind.as_str() {
-                "installation_busy" => zup_presentation::ProcessOutcome::InstallationBusy,
-                "recovery_required" | "committed_pending_reconciliation" => {
-                    zup_presentation::ProcessOutcome::RecoveryRequired
-                }
-                "authorization_required" | "authorization_cancelled" => {
-                    zup_presentation::ProcessOutcome::AuthorizationRequired
-                }
-                _ => zup_presentation::ProcessOutcome::from_message(message),
-            };
+            let outcome = zup_presentation::ProcessOutcome::from(*kind);
             vec![InstallerEvent::Failed {
                 outcome,
                 code: outcome.code(),

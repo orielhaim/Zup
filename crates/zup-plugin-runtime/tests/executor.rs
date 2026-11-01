@@ -386,7 +386,7 @@ enum TamperStage {
 #[rstest]
 #[case::before_load(TamperStage::BeforeLoad)]
 #[case::before_invocation(TamperStage::BeforeInvocation)]
-fn tampered_aot_is_rejected_before_deserialization(#[case] stage: TamperStage) {
+fn aot_mutation_is_rejected_or_isolated_from_execution(#[case] stage: TamperStage) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("runtime.zupbundle");
     let mut bytes = BundleWriter::encode(
@@ -412,10 +412,13 @@ fn tampered_aot_is_rejected_before_deserialization(#[case] stage: TamperStage) {
         }
         Some(executor) => {
             let installer = installer();
-            let error = executor
+            let proposal = executor
                 .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
-                .unwrap_err();
-            assert!(matches!(error, zup_plan::PluginFailure::Internal { .. }));
+                .unwrap();
+            assert!(
+                proposal.resources.is_empty(),
+                "execution uses the verified snapshot"
+            );
         }
     }
 }
@@ -449,4 +452,54 @@ fn package_rejects_contract_metadata_mismatches_before_loading() {
     ] {
         assert_metadata_mutation_rejected(field, value);
     }
+}
+
+#[test]
+fn acquired_and_embedded_plugins_produce_the_same_resources() {
+    use zup_acquire::{
+        CachePolicy, CatalogEntry, ContentCache, ContentCatalog, ContentDescriptor, ContentKind,
+    };
+    let root = TempDir::new().unwrap();
+    let bytes = fixture("configure");
+    let package = build_package(&bytes, &host_target());
+    let metadata = &package.plan().plugins[0];
+    let cache = ContentCache::open(root.path().join("cache"), CachePolicy::Auto).unwrap();
+    let descriptor =
+        ContentDescriptor::stored(ContentKind::Payload, metadata.blob, bytes.len() as u64);
+    let mut writer = cache.writer(&descriptor).unwrap();
+    writer.write(&bytes).unwrap();
+    writer.commit().unwrap();
+    let catalog = ContentCatalog::new(vec![CatalogEntry::stored(
+        metadata.blob,
+        bytes.len() as u64,
+    )])
+    .unwrap();
+    let source = zup_bundle::AcquiredPayloadSource::new(cache, catalog, &package);
+    let mut embedded = WasmtimePluginExecutor::load(package.clone(), &host_target()).unwrap();
+    let mut acquired =
+        WasmtimePluginExecutor::load_acquired(package.plan(), &source, &host_target()).unwrap();
+    let installer = installer();
+    let context = context(&installer);
+    let expected = embedded
+        .plan(&installer.plugins[0], &context, &NeverCancelled)
+        .unwrap();
+    let actual = acquired
+        .plan(&installer.plugins[0], &context, &NeverCancelled)
+        .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn build_host_execution_preserves_the_requested_target_context() {
+    let bytes = empty_aot();
+    let mut installer = installer();
+    installer.target = other_target();
+    let mut executor =
+        WasmtimePluginExecutor::from_compiled(&installer, &[artifact(&bytes, &host_target())])
+            .unwrap();
+    assert_eq!(executor.target(), &installer.target);
+    let result = executor
+        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
+        .unwrap();
+    assert!(result.resources.is_empty());
 }

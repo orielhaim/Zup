@@ -4,14 +4,21 @@ mod coordinator;
 mod executor;
 mod id;
 mod input;
+mod ledger;
 mod lock;
+pub use ledger::{
+    LedgerProjectionError, ledger_path, project_committed_files, retire_resources,
+    retired_ledger_keys, valid_file_key, validate_ledger_identity,
+};
 mod ownership;
 pub use ownership::{OwnershipError, validate_ownership};
 mod plan;
 mod private;
 mod reconciliation;
 mod record;
-pub use reconciliation::{ReconciliationState, reconcile_committed};
+pub use reconciliation::{
+    ReconciliationError, ReconciliationState, reconcile_committed, settled_records,
+};
 mod storage;
 
 pub use coordinator::{

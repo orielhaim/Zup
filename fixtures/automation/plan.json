@@ -17,12 +17,34 @@
   "release_manifest": null,
   "publication": null,
   "diagnostics": [],
-  "summary": "3 change(s) · 237.0 MiB under ${location.user_data}/Acme",
+  "summary": "2 resource(s) · 237.0 MiB",
   "details": {
     "kind": "plan",
     "scope": "user",
     "install_directory": "${location.user_data}/Acme",
     "estimated_bytes": 248512896,
-    "change_count": 3
+    "change_count": 2,
+    "resources": [
+      {
+        "kind": "file",
+        "destination": "${location.user_data}/Acme/app.exe",
+        "size": 248512832,
+        "digest": {
+          "algorithm": "sha256",
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "generated": false
+      },
+      {
+        "kind": "file",
+        "destination": "${location.user_data}/Acme/configure.txt",
+        "size": 64,
+        "digest": {
+          "algorithm": "sha256",
+          "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "generated": true
+      }
+    ]
   }
 }

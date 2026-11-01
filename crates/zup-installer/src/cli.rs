@@ -146,8 +146,6 @@ pub struct LifecycleArgs {
     #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
     #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
-    pub work_root: Option<PathBuf>,
-    #[arg(long, hide = true, value_hint = ValueHint::DirPath)]
     pub source: Option<PathBuf>,
     #[arg(long, hide = true)]
     pub ui: bool,

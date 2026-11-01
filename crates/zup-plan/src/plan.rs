@@ -36,13 +36,6 @@ pub fn plan(build: &BuildPlan, request: &PlanRequest) -> Result<InstallPlan, Pla
     Ok(prepared.plan)
 }
 
-pub fn plan_without_plugins(
-    build: &BuildPlan,
-    request: &PlanRequest,
-) -> Result<InstallPlan, PlanError> {
-    Ok(prepare_plan(requested_target(build, request)?, request)?.plan)
-}
-
 fn requested_target<'a>(
     build: &'a BuildPlan,
     request: &PlanRequest,
@@ -70,6 +63,9 @@ where
             expected: prepared.plan.target,
             found: *executor.target(),
         });
+    }
+    if prepared.active_plugins.is_empty() && cancellation.is_cancelled() {
+        return Err(PlanError::Cancelled);
     }
     if prepared.active_plugins.is_empty() {
         return Ok(PlannedInstallation {
@@ -102,6 +98,11 @@ where
                 plugin_id: binding.id.clone(),
                 failure,
             })?;
+        if cancellation.is_cancelled() {
+            return Err(PlanError::PluginCancelled {
+                plugin_id: binding.id.clone(),
+            });
+        }
         merge_plugin_proposal(
             &mut prepared.plan,
             &mut generated_files,

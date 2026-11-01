@@ -59,6 +59,7 @@ pub struct OperationSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationError {
+    Cancelled,
     Downgrade {
         installed: semver::Version,
         requested: semver::Version,
@@ -81,6 +82,7 @@ impl OperationError {
 impl std::fmt::Display for OperationError {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Cancelled => out.write_str("planning cancelled"),
             Self::Downgrade {
                 installed,
                 requested,
@@ -279,6 +281,9 @@ pub fn prepare_operation<H: OperationHost>(
     input: &OperationInput,
     host: &H,
 ) -> Result<PreparedOperation, OperationError> {
+    if input.cancellation.is_cancelled() {
+        return Err(OperationError::Cancelled);
+    }
     input
         .build
         .installer
@@ -339,7 +344,13 @@ pub fn prepare_operation<H: OperationHost>(
             )?;
             let planned = host
                 .plan_build(input.build, &plan_request, input.cancellation)
-                .map_err(|message| OperationError::refused("plan", message))?;
+                .map_err(|message| {
+                    if input.cancellation.is_cancelled() {
+                        OperationError::Cancelled
+                    } else {
+                        OperationError::refused("plan", message)
+                    }
+                })?;
             let mut target = host
                 .resolve_target(&planned.plan)
                 .map_err(|message| OperationError::refused("target", message))?;
@@ -402,7 +413,13 @@ pub fn prepare_operation<H: OperationHost>(
     )?;
     let planned = host
         .plan_build(input.build, &plan_request, input.cancellation)
-        .map_err(|message| OperationError::refused("plan", message))?;
+        .map_err(|message| {
+            if input.cancellation.is_cancelled() {
+                OperationError::Cancelled
+            } else {
+                OperationError::refused("plan", message)
+            }
+        })?;
     let mut target = host
         .resolve_target(&planned.plan)
         .map_err(|message| OperationError::refused("target", message))?;
@@ -626,7 +643,7 @@ pub fn runtime_request(
         scope,
         transaction_plan: prepared.transaction_plan.clone(),
         state_root: state_root.clone(),
-        work_root: state_root.join("work"),
+
         recovery_id: options.recovery_id,
         bootstrap: options.bootstrap,
         release: options.release,
@@ -926,5 +943,24 @@ mod tests {
         .expect_err("the stub plans nothing");
         assert!(error.to_string().contains("plan"), "{error}");
         assert_eq!(host.plan_calls.get(), 1);
+    }
+    #[test]
+    fn cancellation_before_planning_never_calls_the_host() {
+        let build = fixture_build();
+        let root = tempfile::tempdir().unwrap();
+        let host = StubHost::installing(fixture_target());
+        let mut request = input(
+            &build,
+            Path::new("unused"),
+            root.path(),
+            Operation::Install,
+            None,
+        );
+        request.cancellation = &|| true;
+        assert!(matches!(
+            prepare_operation(&request, &host),
+            Err(OperationError::Cancelled)
+        ));
+        assert_eq!(host.plan_calls.get(), 0);
     }
 }

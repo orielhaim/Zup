@@ -33,6 +33,25 @@ impl WasmtimePluginExecutor {
         })
     }
 
+    pub fn from_compiled(
+        installer: &zup_core::Installer,
+        artifacts: &[zup_bundle::CompiledPluginArtifact],
+    ) -> Result<Self, LoadError> {
+        Ok(Self {
+            loaded: crate::loader::load_compiled(installer, artifacts)?,
+        })
+    }
+
+    pub fn load_acquired(
+        plan: &zup_bundle::PortableBuildPlan,
+        source: &zup_bundle::AcquiredPayloadSource,
+        expected_target: &Target,
+    ) -> Result<Self, LoadError> {
+        Ok(Self {
+            loaded: crate::loader::load_acquired(plan, source, expected_target)?,
+        })
+    }
+
     pub fn target(&self) -> &Target {
         &self.loaded.target
     }

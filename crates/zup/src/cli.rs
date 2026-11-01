@@ -295,7 +295,7 @@ pub struct InitCommand {
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub source: Option<String>,
     #[arg(long, value_enum)]
-    pub scope: Option<ScopeArg>,
+    pub scope: Option<ScopePolicyArg>,
     #[arg(long, value_enum)]
     pub frontend: Option<FrontendArg>,
     #[arg(long)]
@@ -321,8 +321,6 @@ pub struct PlanCommand {
     pub project: ProjectSelection,
     #[arg(long, value_enum, default_value = "user")]
     pub scope: ScopeArg,
-    #[arg(long, value_hint = ValueHint::DirPath)]
-    pub state_root: Option<PathBuf>,
     #[arg(long = "enable", value_name = "ID")]
     pub enable: Vec<String>,
     #[arg(long = "disable", value_name = "ID")]
@@ -605,10 +603,16 @@ impl From<OutputArg> for OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ScopeArg {
+pub enum ScopePolicyArg {
     User,
     Machine,
     Either,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ScopeArg {
+    User,
+    Machine,
 }
 
 impl From<ScopeArg> for zup_core::SelectedScope {
@@ -616,7 +620,6 @@ impl From<ScopeArg> for zup_core::SelectedScope {
         match value {
             ScopeArg::User => Self::User,
             ScopeArg::Machine => Self::Machine,
-            ScopeArg::Either => Self::User,
         }
     }
 }

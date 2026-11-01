@@ -200,6 +200,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
     let second = window(b"the second preset", b"<svg id='two'/>");
     let mut previous = install_plan(state_root.path(), SelectedScope::User, &first);
     let mut ledger = InstallLedger::new(app_id(), target(), SelectedScope::User);
+    ledger.committed_transaction = zup_transaction::TransactionId::new_v7().to_string();
     ledger.version = version();
     ledger.preset = Some(first.clone());
     for (path, digest) in content_files(state_root.path(), SelectedScope::User, &first) {
@@ -273,6 +274,7 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
     let ui = window(b"a preset executable", b"<svg/>");
     let mut ledger = InstallLedger::new(app_id(), target(), SelectedScope::User);
+    ledger.committed_transaction = zup_transaction::TransactionId::new_v7().to_string();
     ledger.version = version();
     ledger.preset = Some(ui.clone());
     for (path, digest) in content_files(state_root.path(), SelectedScope::User, &ui) {

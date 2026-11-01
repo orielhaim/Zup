@@ -16,32 +16,19 @@ pub const BACKEND_OPERATIONS_V1: &str = "backend-operations-v1";
 pub const LIFECYCLE_V1: &str = "owned-lifecycle-v1";
 pub const PREREQUISITE_BOOTSTRAP_V1: &str = "prerequisite-bootstrap-v1";
 
-/// error and never a default - a newer worker talking to an older parent has to be
-pub mod failure {
-    pub const INSTALLATION_BUSY: &str = "installation_busy";
-    pub const AUTHENTICATION: &str = "authentication";
-    pub const PROTOCOL: &str = "protocol";
-    pub const TRANSACTION: &str = "transaction";
-    pub const CANCELLED: &str = "cancelled";
-    pub const RECOVERY_REQUIRED: &str = "recovery_required";
-    pub const AUTHORIZATION_REQUIRED: &str = "authorization_required";
-    /// session - never by reusing the old authorization.
-    pub const STALE_PLAN: &str = "stale_plan";
-    /// a policy refusal is never retryable against the same worker.
-    pub const POLICY: &str = "policy";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerFailure {
+    InstallationBusy,
+    Authentication,
+    Protocol,
+    Transaction,
+    Cancelled,
+    RecoveryRequired,
+    AuthorizationRequired,
+    StalePlan,
+    Policy,
 }
-
-pub const FAILURE_KINDS: &[&str] = &[
-    failure::INSTALLATION_BUSY,
-    failure::AUTHENTICATION,
-    failure::PROTOCOL,
-    failure::TRANSACTION,
-    failure::CANCELLED,
-    failure::RECOVERY_REQUIRED,
-    failure::AUTHORIZATION_REQUIRED,
-    failure::POLICY,
-    failure::STALE_PLAN,
-];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireEnvelope {
@@ -111,7 +98,6 @@ pub struct ExecuteTransaction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_overlay_base_root: Option<String>,
     pub state_root: String,
-    pub work_root: String,
     pub recovery_id: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_intent: Option<MachineRecoveryIntent>,
@@ -314,11 +300,22 @@ pub struct TransactionStateChanged {
     pub phase: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerOutcome {
+    Committed,
+    RolledBack,
+    Cancelled,
+    RecoveryRequired,
+    CommittedPendingReconciliation,
+    RebootRequired,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Completed {
     pub detail: Option<String>,
     pub transaction_id: Uuid,
-    pub outcome: String,
+    pub outcome: WorkerOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prerequisite_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,7 +324,7 @@ pub struct Completed {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failed {
-    pub kind: String,
+    pub kind: WorkerFailure,
     pub message: String,
 }
 

@@ -104,7 +104,7 @@ pub fn serve_worker_isolated(
     expected_client_pid: u32,
     session: SessionId,
     worker_exe: &Path,
-) -> Result<String, crate::error::IpcError> {
+) -> Result<zup_protocol::WorkerOutcome, crate::error::IpcError> {
     crate::worker::serve_session(
         stream,
         crate::worker::WorkerContext {

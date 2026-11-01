@@ -41,3 +41,14 @@ fn sequence_monotonic() {
         Err(WireError::SequenceRegression { .. })
     ));
 }
+
+#[test]
+fn unknown_completion_and_failure_values_are_protocol_errors() {
+    for message in [
+        serde_json::json!({"type": "completed", "transaction_id": "01900000-0000-7000-8000-000000000001", "outcome": "future_success"}),
+        serde_json::json!({"type": "failed", "kind": "future_retry", "message": "success, reboot, cancelled"}),
+    ] {
+        let envelope = serde_json::json!({"version": PROTOCOL_VERSION, "session_id": SessionId::new_v7(), "sequence": 1, "message": message});
+        assert!(decode_payload(&serde_json::to_vec(&envelope).unwrap()).is_err());
+    }
+}

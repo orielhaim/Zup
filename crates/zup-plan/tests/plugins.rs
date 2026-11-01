@@ -780,3 +780,20 @@ fn machine_scope_plugin_resources_are_system_authorized() {
             .all(|r| system(&r.privilege))
     );
 }
+
+#[test]
+fn cancellation_during_plugin_output_never_publishes_a_plan() {
+    let build = build(&with(
+        "[[plugins]]\nid = 'helper'\nsource = 'plugins/one.wasm'",
+    ));
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let cancellation = || calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2;
+    let error = plan_with_plugins(
+        &build,
+        &request(),
+        &mut FakeExecutor::default(),
+        &cancellation,
+    )
+    .unwrap_err();
+    assert!(matches!(error, PlanError::PluginCancelled { .. }));
+}
