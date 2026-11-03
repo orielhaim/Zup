@@ -11781,6 +11781,7 @@ dependencies = [
  "clap_complete",
  "inquire",
  "miette",
+ "portable-pty",
  "rstest",
  "semver",
  "serde",

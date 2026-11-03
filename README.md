@@ -47,10 +47,10 @@ cargo run -p zup -- --version
 Create a project:
 
 ```bash
-zup init --name Acme --app-id com.acme.desktop
+zup init
 ```
 
-Zup creates a `zup.toml` describing the installer:
+For an Acme project targeting Windows x64, Zup creates a `zup.toml` like this:
 
 ```toml
 schema = 1
@@ -59,10 +59,8 @@ schema = 1
 id = "com.acme.desktop"
 name = "Acme"
 version = "0.1.0"
-main = "acme.exe"
 
-[build.targets.default]
-target = "x86_64-pc-windows-msvc"
+[build.targets.windows-x64]
 source = { directory = "dist" }
 
 [install]

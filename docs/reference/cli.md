@@ -21,7 +21,19 @@ Common project selection flags include `--manifest` and repeatable `--target`.
 
 `zup plan --target <profile> --scope user|machine` runs source plugins in the build-host sandbox with the selected target in their context. Build validation uses the same planner. Preview paths use canonical target locations. The command does not inspect an installed ledger or accept `--state-root`; the generated installer computes the actual lifecycle changes against the destination machine under its installation lock.
 
-`zup init --scope` selects the allowed policy and accepts `user`, `machine`, or `either`. An operation selects one concrete scope and never accepts `either`.
+`zup init` prompts for application name, application ID, target platforms, and source
+directory. The target picker supports multiple Windows and Linux architectures.
+`zup init -y` or `--yes` generates a manifest using defaults without prompting.
+`--name`, `--app-id`, `--target`, and `--source` override those defaults. Repeat
+`--target` or separate targets with commas. `--force` is required to replace an
+existing manifest.
+
+`zup init --scope` selects the allowed policy and accepts `user`, `machine`, or
+`either`, with `user` as the default. `--frontend` defaults to `gui`, and
+`--version` defaults to `0.1.0`. `--main` names an existing file relative to the
+source directory. Without it, init sets `main` only when one compatible executable
+is found. An installer operation selects one concrete scope and never accepts
+`either`.
 
 ## Preset authoring
 

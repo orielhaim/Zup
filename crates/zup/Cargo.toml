@@ -54,6 +54,7 @@ zup-linux.workspace = true
 zup-windows.workspace = true
 
 [dev-dependencies]
+portable-pty = "0.9"
 rstest.workspace = true
 tempfile.workspace = true
 zstd.workspace = true

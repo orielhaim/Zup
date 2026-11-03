@@ -294,6 +294,9 @@ pub struct InitCommand {
     pub version: String,
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub source: Option<String>,
+    /// Target platforms. Repeat the flag or separate targets with commas.
+    #[arg(long = "target", value_delimiter = ',')]
+    pub targets: Vec<zup_core::Target>,
     #[arg(long, value_enum)]
     pub scope: Option<ScopePolicyArg>,
     #[arg(long, value_enum)]
@@ -302,9 +305,9 @@ pub struct InitCommand {
     pub main: Option<String>,
     #[arg(long)]
     pub force: bool,
-    /// Never ask a question.
-    #[arg(long)]
-    pub non_interactive: bool,
+    /// Use defaults for any values not supplied on the command line.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Args)]
