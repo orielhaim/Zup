@@ -142,6 +142,8 @@ wasmtime = { version = "50.0", default-features = false, features = [
   "runtime",
   "std",
 ] }
+wit-component = { version = "0.263", features = ["dummy-module"] }
+wit-parser = "0.263"
 
 opener = "0.9"
 
