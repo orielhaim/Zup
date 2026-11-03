@@ -45,7 +45,7 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
     let staged = staging_directory(root, profile, &version);
     std::fs::create_dir_all(&staged).map_err(|error| format!("{}: {error}", staged.display()))?;
     let host = zup_core::Target::host().map_err(|error| error.to_string())?;
-    if zup_platform::capabilities(&host).is_none() {
+    if zup_plan::capabilities(&host).is_none() {
         return Err(format!("unsupported toolchain host `{host}`"));
     }
 
@@ -150,7 +150,7 @@ fn build_cross_linux(
     profile: &str,
     target: &zup_core::Target,
 ) -> Result<Vec<PathBuf>, String> {
-    if zup_platform::capabilities(target).is_none() {
+    if zup_plan::capabilities(target).is_none() {
         return Err(format!("unsupported Linux toolchain target `{target}`"));
     }
     let version = version()?;

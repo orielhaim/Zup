@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use directories::{BaseDirs, UserDirs};
 use zup_core::{InstallLocation, SelectedScope, Target};
-use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
+use zup_plan::{InstallLocationError, InstallLocationResolver, TargetPath};
 
 use crate::bindings::{
     CoTaskMemFree, FOLDERID_CommonStartMenu, FOLDERID_ProgramData, FOLDERID_ProgramFiles,

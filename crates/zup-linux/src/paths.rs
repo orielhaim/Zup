@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{FileType, lstat};
 use zup_core::SelectedScope;
-use zup_platform::SourceFilePolicy;
+use zup_core::SourceFilePolicy;
 
 use crate::error::PathError;
 

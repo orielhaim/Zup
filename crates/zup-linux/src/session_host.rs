@@ -97,15 +97,12 @@ impl SessionHost for LinuxSessionHost {
         _context: &zup_session::OperationContext,
         prepared: &PreparedOperation,
     ) -> Result<Arc<dyn RuntimeBackend>, String> {
-        let _target = prepared
-            .target_plan()
-            .ok_or_else(|| "a Linux transaction resolves its target".to_owned())?;
         let generated = crate::operation_host::generated_content(prepared)?;
         Ok(Arc::new(crate::backend::LinuxRuntimeBackend {
             installer: self.installer.clone(),
             operation: prepared.operation,
             selection: prepared.selection.clone(),
-            install_dir_override: prepared.selection.install_directory.clone(),
+
             generated,
         }))
     }

@@ -4,11 +4,11 @@ use std::path::Path;
 
 use thiserror::Error;
 use zup_core::{AppId, Frontend, Privilege, ResourceKey, SelectedScope, hash_reader};
-use zup_exec::{
-    InstallLedger, LauncherState, LifecycleAction, ObservedLauncherState, ObservedServiceState,
-    OwnedResource, ServiceState, plan_lifecycle,
+use zup_plan::{
+    DesiredState, InstallLedger, LauncherState, LifecycleAction, ObservedLauncherState,
+    ObservedServiceState, OwnedResource, ServiceState, plan_lifecycle,
 };
-use zup_platform::TargetPlan;
+
 use zup_transaction::{TransactionPlan, compile_transaction};
 
 use crate::inspect::{InspectError, inspect_target};
@@ -27,7 +27,7 @@ pub enum WindowsPlanError {
     #[error(transparent)]
     Ledger(#[from] LedgerError),
     #[error(transparent)]
-    Plan(#[from] zup_exec::LifecycleError),
+    Plan(#[from] zup_plan::LifecycleError),
     #[error(transparent)]
     Payload(#[from] crate::transaction_payload::TransactionPayloadError),
     #[error("owned resource inspection failed: {0}")]
@@ -42,7 +42,7 @@ pub fn plan_target_lifecycle(
     action: LifecycleAction,
     app_id: &AppId,
     scope: SelectedScope,
-    target: Option<&TargetPlan>,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
     state_root: &Path,
 ) -> Result<TransactionPlan, WindowsPlanError> {
     plan_target_lifecycle_with_frontend(action, app_id, scope, target, state_root, Frontend::Gui)
@@ -52,7 +52,7 @@ pub fn plan_target_lifecycle_with_frontend(
     action: LifecycleAction,
     app_id: &AppId,
     scope: SelectedScope,
-    target: Option<&TargetPlan>,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
     state_root: &Path,
     frontend: Frontend,
 ) -> Result<TransactionPlan, WindowsPlanError> {
@@ -81,9 +81,9 @@ pub fn plan_target_lifecycle_with_frontend(
 }
 
 pub(crate) fn observe_target(
-    target: Option<&TargetPlan>,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
     ledger: Option<&InstallLedger>,
-) -> Result<(Option<zup_exec::HostSnapshot>, BTreeMap<ResourceKey, bool>), WindowsPlanError> {
+) -> Result<(Option<zup_plan::HostSnapshot>, BTreeMap<ResourceKey, bool>), WindowsPlanError> {
     let snapshot = target.map(inspect_target).transpose()?;
     let matches = ledger
         .map(inspect_owned_matches)
@@ -94,8 +94,8 @@ pub(crate) fn observe_target(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn transaction_input(
-    execution: &zup_exec::ExecutionPlan,
-    target: Option<&TargetPlan>,
+    execution: &zup_plan::ExecutionPlan,
+    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
     ledger: Option<&InstallLedger>,
     scope: SelectedScope,
     state_root: &Path,
@@ -125,13 +125,15 @@ pub(crate) fn transaction_input(
     let (owned, owned_privilege) = owned.map_or((None, Privilege::User), |(state, privilege)| {
         (Some(state), privilege)
     });
-    let desired = target.and_then(|target| {
-        target
-            .files
-            .iter()
-            .find(|file| matches!(file.key, ResourceKey::Maintenance { .. }))
-            .map(|_| apps_state(target, scope, state_root, frontend))
-    });
+    let desired = target
+        .and_then(|target| {
+            target
+                .files
+                .iter()
+                .find(|file| matches!(file.key, ResourceKey::Maintenance { .. }))
+                .map(|_| apps_state(target, scope, state_root, frontend))
+        })
+        .transpose()?;
 
     let maintenance_privilege = target
         .and_then(|target| {
@@ -156,11 +158,11 @@ pub(crate) fn transaction_input(
 }
 
 fn apps_state(
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     scope: SelectedScope,
     state_root: &Path,
     frontend: Frontend,
-) -> AppsFeaturesState {
+) -> Result<AppsFeaturesState, WindowsPlanError> {
     let maintenance = target
         .files
         .iter()
@@ -192,7 +194,8 @@ fn apps_state(
         crate::cmdline::format_command_line(&maintenance_path, &arguments)
     };
     let estimated_kb = target
-        .summary
+        .summary()
+        .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?
         .install_bytes
         .div_ceil(1024)
         .min(u32::MAX as u64) as u32;
@@ -239,7 +242,7 @@ fn apps_state(
         "EstimatedSize".into(),
         AppsFeaturesValue::Dword(estimated_kb),
     );
-    AppsFeaturesState { values }
+    Ok(AppsFeaturesState { values })
 }
 
 fn inspect_owned_matches(
@@ -302,6 +305,7 @@ fn inspect_owned_matches(
                 match crate::scm::query_service(name, &ledger.target)
                     .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?
                 {
+                    ObservedServiceState::InvalidService => false,
                     ObservedServiceState::Absent => *installed == ServiceState::Absent,
                     ObservedServiceState::Service {
                         display_name,

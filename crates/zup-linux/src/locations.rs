@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::error::PathError;
 use zup_core::{InstallLocation, SelectedScope, Target};
-use zup_platform::{InstallLocationError, InstallLocationResolver, TargetPath};
+use zup_plan::{InstallLocationError, InstallLocationResolver, TargetPath};
 
 pub const MACHINE_PROGRAMS_ROOT: &str = "/opt";
 

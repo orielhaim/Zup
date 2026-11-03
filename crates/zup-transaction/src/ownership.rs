@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
 use thiserror::Error;
-use zup_core::ResourceKey;
-use zup_exec::{InstallLedger, OwnedResource};
+use zup_core::{ResourceKey, SelectedScope};
+use zup_plan::{InstallLedger, OwnedResource};
 
-use crate::{FileDelta, FilePrecondition, NodeKind, OperationId, TransactionPlan};
+use crate::{NodeKind, OperationId, TransactionPlan};
+use zup_plan::{FileOperationKind, FilePrecondition};
 
 #[derive(Debug, Error)]
 pub enum OwnershipError {
@@ -12,6 +13,8 @@ pub enum OwnershipError {
     Target,
     #[error("installation generation")]
     Generation,
+    #[error("resource authority exceeds installation scope: {0}")]
+    Authority(OperationId),
     #[error("retired resources")]
     Retired,
     #[error("{0}")]
@@ -22,15 +25,16 @@ pub enum OwnershipError {
 /// Requires structural validation and native key normalization; backend effects stay caller-owned.
 pub fn validate_ownership<'a>(
     plan: &'a TransactionPlan,
+    scope: SelectedScope,
     ledger: Option<&InstallLedger>,
     retired_ledger_keys: &BTreeSet<ResourceKey>,
 ) -> Result<BTreeSet<&'a ResourceKey>, OwnershipError> {
-    if ledger.is_some_and(|ledger| ledger.target != plan.target) {
+    if ledger.is_some_and(|ledger| ledger.target != plan.target || ledger.scope != scope) {
         return Err(OwnershipError::Target);
     }
     match (
-        ledger.map(|ledger| ledger.committed_transaction.as_str()),
-        plan.observed_transaction.as_deref(),
+        ledger.map(|ledger| ledger.committed_transaction),
+        plan.observed_transaction,
     ) {
         (None, None) => {}
         (Some(current), Some(observed)) if current == observed => {}
@@ -48,21 +52,36 @@ pub fn validate_ownership<'a>(
         return Err(OwnershipError::Retired);
     }
     for node in &plan.nodes {
+        if node
+            .meta
+            .privilege
+            .is_some_and(|privilege| privilege != scope.authorization())
+            || node
+                .meta
+                .removal
+                .as_ref()
+                .is_some_and(|removal| removal.scope != scope)
+        {
+            return Err(OwnershipError::Authority(node.id.clone()));
+        }
         let valid = match &node.kind {
             NodeKind::FileMutation { key, delta } => {
                 let owned = ledger.and_then(|ledger| ledger.resources.get(key));
                 node.meta.source_relative.is_some()
                     && match (delta, owned) {
-                        (FileDelta::Create, None) => {
+                        (FileOperationKind::Create, None) => {
                             matches!(node.meta.file_precondition, Some(FilePrecondition::Absent))
                         }
-                        (FileDelta::Replace, Some(OwnedResource::File { sha256, size, .. })) => {
+                        (
+                            FileOperationKind::Replace,
+                            Some(OwnedResource::File { sha256, size, .. }),
+                        ) => {
                             matches!(node.meta.file_precondition,
                                 Some(FilePrecondition::Exact { size: found_size, sha256: found_hash })
                                 if found_size == *size && found_hash == *sha256)
                         }
                         (
-                            FileDelta::RestoreOwned,
+                            FileOperationKind::RestoreOwned,
                             Some(OwnedResource::File { sha256, size, .. }),
                         ) => {
                             matches!(node.meta.file_precondition, Some(FilePrecondition::Absent))
@@ -70,7 +89,7 @@ pub fn validate_ownership<'a>(
                                 && node.meta.expected_size == Some(*size)
                         }
                         (
-                            FileDelta::RepairOwned,
+                            FileOperationKind::RepairOwned,
                             Some(OwnedResource::File { sha256, size, .. }),
                         ) => {
                             matches!(

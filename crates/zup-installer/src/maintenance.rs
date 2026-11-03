@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Subcommand, ValueHint};
 use zup_acquire::CachePolicy;
 use zup_core::{AppId, Frontend, SelectedScope};
-use zup_exec::LifecycleAction;
+use zup_plan::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{ExecutionPolicy, RuntimeRequest};
 use zup_transaction::{NodeKind, TransactionId, TransactionStore};
@@ -172,6 +172,7 @@ fn prepare_from_ledger(
     let payload_root =
         std::env::current_dir().map_err(|error| miette::miette!("working directory: {error}"))?;
     let request = RuntimeRequest {
+        intent: None,
         target: ledger.target,
         app_id: app_id.clone(),
         app_version: ledger.version,
@@ -648,7 +649,7 @@ fn committed_installation(
     context: RuntimeContext,
     installer: &zup_core::Installer,
     args: &UpdateArgs,
-) -> miette::Result<(SelectedScope, PathBuf, zup_exec::InstallLedger)> {
+) -> miette::Result<(SelectedScope, PathBuf, zup_plan::InstallLedger)> {
     let scope = crate::terminal::choose_scope(
         installer,
         args.scope.map(Into::into),
@@ -799,6 +800,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
         ))
         .map_err(|error| miette::miette!("transaction: {error}"))?;
         let request = RuntimeRequest {
+            intent: None,
             target: build.installer.target,
             app_id: build.installer.app.id.clone(),
             app_version: build.installer.app.version.clone(),
@@ -819,7 +821,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
         let prepared = PreparedRuntime {
             request,
             backend: std::sync::Arc::new(backend),
-            action: LifecycleAction::Repair { force_files: false },
+            action: LifecycleAction::Repair { force: false },
         };
         return if OutputFormat::from(args.output) == OutputFormat::Human {
             execute::execute(prepared)
@@ -827,7 +829,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             execute::execute_frontend(
                 prepared,
                 OutputFormat::from(args.output),
-                LifecycleAction::Repair { force_files: false },
+                LifecycleAction::Repair { force: false },
             )
             .map_err(Into::into)
         };
@@ -870,6 +872,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     )
     .map_err(|error| miette::miette!("payload recovery: {error}"))?;
     let request = RuntimeRequest {
+        intent: None,
         target,
         app_id: record.app_id.clone(),
         app_version: record.app_version,
@@ -883,7 +886,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     let prepared = PreparedRuntime {
         request,
         backend: std::sync::Arc::new(backend),
-        action: LifecycleAction::Repair { force_files: false },
+        action: LifecycleAction::Repair { force: false },
     };
     if OutputFormat::from(args.output) == OutputFormat::Human {
         execute::execute(prepared)
@@ -891,7 +894,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
         execute::execute_frontend(
             prepared,
             OutputFormat::from(args.output),
-            LifecycleAction::Repair { force_files: false },
+            LifecycleAction::Repair { force: false },
         )
         .map_err(Into::into)
     }

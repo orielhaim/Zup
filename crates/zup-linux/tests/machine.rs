@@ -149,7 +149,7 @@ fn machine_full_lifecycle() {
     commit(
         &roots,
         &upgrade,
-        Operation::Repair { force_files: false },
+        Operation::Repair { force: false },
         None,
         "missing files come back without force: {outcome:?}",
     );
@@ -162,12 +162,7 @@ fn machine_full_lifecycle() {
         b"damaged",
     )
     .expect("damage");
-    let outcome = run_machine_isolated(
-        &upgrade,
-        &roots,
-        Operation::Repair { force_files: false },
-        None,
-    );
+    let outcome = run_machine_isolated(&upgrade, &roots, Operation::Repair { force: false }, None);
     assert!(
         outcome.is_err(),
         "damage without force refuses: {outcome:?}"
@@ -175,7 +170,7 @@ fn machine_full_lifecycle() {
     commit(
         &roots,
         &upgrade,
-        Operation::Repair { force_files: true },
+        Operation::Repair { force: true },
         None,
         "force repair restores damage: {outcome:?}",
     );
@@ -191,7 +186,7 @@ fn machine_full_lifecycle() {
     commit(
         &roots,
         &maintenance,
-        Operation::Repair { force_files: false },
+        Operation::Repair { force: false },
         None,
         "repair works from trusted maintenance: {outcome:?}",
     );
@@ -929,7 +924,6 @@ fn machine_custom_state_root_refuses_before_elevation() {
         scope: SelectedScope::Machine,
         state_root: Some(foreign),
         action: Operation::Install,
-        install_dir_override: None,
         selection: Default::default(),
     });
     let error = outcome.expect_err("a custom machine state root refuses");
@@ -1191,7 +1185,7 @@ fn install_intent(state: &Path, expected: Option<String>) -> PrepareOperation {
     PrepareOperation {
         recovery_id: None,
         operation: privileged_operation::INSTALL.to_owned(),
-        force_files: false,
+        force: false,
         install_dir_override: None,
         selected_components: Vec::new(),
         disabled_components: Vec::new(),
@@ -1457,11 +1451,10 @@ fn machine_launcher_failures_surface_at_once() {
         ),
         (
             "denial",
-            Some(126),
+            Some(127),
             "Error executing command as another user: Not authorized",
             "authorization failed",
         ),
-        ("missing", Some(127), "command not found", "unavailable"),
         ("vanished", Some(0), "", "exited before connecting"),
     ];
     for (name, code, stderr, expect) in cases {

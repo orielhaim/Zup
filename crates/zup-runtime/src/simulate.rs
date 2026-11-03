@@ -47,6 +47,7 @@ pub fn run_simulated(
 
 #[derive(Clone, Copy)]
 struct Stage {
+    phase: zup_core::OperationPhase,
     label: &'static str,
     weight: u64,
     duration: Duration,
@@ -123,6 +124,7 @@ impl Simulation {
         }
         self.shown = Some((percent, self.index));
         Step::Event(RuntimeEvent::Progress {
+            phase: stage.phase,
             completed,
             total: self.total_weight,
             action: stage.label.to_owned(),
@@ -131,36 +133,102 @@ impl Simulation {
 }
 
 fn stages(job: &SimulatedJob) -> Vec<Stage> {
-    let mut stages = vec![stage("Preparing…", 4, 450, 1200)];
+    let mut stages = vec![stage(
+        zup_core::OperationPhase::Prepare,
+        "Preparing…",
+        4,
+        450,
+        1200,
+    )];
     match job.lifecycle {
         SimulatedLifecycle::Uninstall => {
             let files = file_span(job.file_bytes);
-            stages.push(stage("Removing files…", 48, files.0, files.1));
+            stages.push(stage(
+                zup_core::OperationPhase::Files,
+                "Removing files…",
+                48,
+                files.0,
+                files.1,
+            ));
             if job.system_changes {
-                stages.push(stage("Removing system changes…", 14, 500, 1500));
+                stages.push(stage(
+                    zup_core::OperationPhase::System,
+                    "Removing system changes…",
+                    14,
+                    500,
+                    1500,
+                ));
             }
         }
         SimulatedLifecycle::Repair => {
-            stages.push(stage("Verifying installed files…", 12, 500, 1400));
+            stages.push(stage(
+                zup_core::OperationPhase::Verify,
+                "Verifying installed files…",
+                12,
+                500,
+                1400,
+            ));
             let files = file_span(job.file_bytes);
-            stages.push(stage("Installing files…", 40, files.0, files.1));
+            stages.push(stage(
+                zup_core::OperationPhase::Files,
+                "Installing files…",
+                40,
+                files.0,
+                files.1,
+            ));
             if job.system_changes {
-                stages.push(stage("Registering system changes…", 12, 450, 1300));
+                stages.push(stage(
+                    zup_core::OperationPhase::System,
+                    "Registering system changes…",
+                    12,
+                    450,
+                    1300,
+                ));
             }
         }
         SimulatedLifecycle::Install | SimulatedLifecycle::Upgrade | SimulatedLifecycle::Modify => {
             if job.download_bytes > 0 {
-                stages.push(stage("Downloading required components…", 22, 1100, 3200));
+                stages.push(stage(
+                    zup_core::OperationPhase::Download,
+                    "Downloading required components…",
+                    22,
+                    1100,
+                    3200,
+                ));
             }
-            stages.push(stage("Verifying the package…", 8, 350, 1100));
+            stages.push(stage(
+                zup_core::OperationPhase::Verify,
+                "Verifying the package…",
+                8,
+                350,
+                1100,
+            ));
             let files = file_span(job.file_bytes);
-            stages.push(stage("Installing files…", 46, files.0, files.1));
+            stages.push(stage(
+                zup_core::OperationPhase::Files,
+                "Installing files…",
+                46,
+                files.0,
+                files.1,
+            ));
             if job.system_changes {
-                stages.push(stage("Registering system changes…", 14, 500, 1600));
+                stages.push(stage(
+                    zup_core::OperationPhase::System,
+                    "Registering system changes…",
+                    14,
+                    500,
+                    1600,
+                ));
             }
         }
     }
-    stages.push(stage("Finishing…", 5, 300, 800));
+    stages.push(stage(
+        zup_core::OperationPhase::Finish,
+        "Finishing…",
+        5,
+        300,
+        800,
+    ));
     stages
 }
 
@@ -169,8 +237,15 @@ fn file_span(bytes: u64) -> (u64, u64) {
     (700 * scale, 1600 * scale)
 }
 
-fn stage(label: &'static str, weight: u64, min_ms: u64, max_ms: u64) -> Stage {
+fn stage(
+    phase: zup_core::OperationPhase,
+    label: &'static str,
+    weight: u64,
+    min_ms: u64,
+    max_ms: u64,
+) -> Stage {
     Stage {
+        phase,
         label,
         weight,
         duration: Duration::from_millis((min_ms + max_ms) / 2),

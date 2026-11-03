@@ -60,7 +60,7 @@ pub use capabilities::{
 pub use carrier::Carrier;
 pub use error::{ExecError, IpcError, PathError, PlanError};
 #[cfg(target_os = "linux")]
-pub use executor::{FileIntent, FileWork, LinuxFileExecutor, ServiceSupport, snapshot_target};
+pub use executor::{FileIntent, FileOperation, LinuxFileExecutor, ServiceSupport, snapshot_target};
 #[cfg(target_os = "linux")]
 pub use fs::{
     ChildStat, EXECUTABLE_PAYLOAD_MODE, EntryKind, MACHINE_INSTALL_DIRECTORY_MODE, OwnedDirectory,
@@ -112,8 +112,8 @@ pub use service_ops::{
     validate_executable, validate_executable_live,
 };
 pub use services::{
-    DesiredService, MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, SYSTEMD_UNIT_DIR, UNIT_PREFIX,
-    WANTED_BY, parse_manager_version,
+    MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, SYSTEMD_UNIT_DIR, SystemdUnit, UNIT_PREFIX, WANTED_BY,
+    parse_manager_version,
 };
 #[cfg(target_os = "linux")]
 pub use session_host::LinuxSessionHost;

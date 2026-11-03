@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use zup_exec::LifecycleAction;
+use zup_plan::LifecycleAction;
 use zup_preset_host::{HostDecision, HostState, Selection};
 use zup_preset_protocol::{Action, UpdateState};
 use zup_runtime::{CancellationHandle, OperationControl, OperationHost, RuntimeEvent};
@@ -349,8 +349,9 @@ where
     let reports = control.reports.clone();
     let host = control.host.clone();
     let discovery = control.discovery.clone();
+    let executable = control.executable.clone();
     let _ = spawn("setup-plan", move || {
-        let plan = preview(&host, &discovery, &selection);
+        let plan = preview(&host, &executable, &discovery, &selection);
         let _ = reports.send(Report::Plan(generation, plan));
     });
 }
@@ -596,16 +597,37 @@ fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Result<(), String>
 
 fn preview<H: SessionHost>(
     host: &H,
+    executable: &Path,
     discovery: &SessionDiscovery,
     selection: &Selection,
 ) -> Result<zup_presentation::PlanPreview, String> {
     let context = discovery.context(selection.scope)?;
-    let (plan, _, target) = target_plan(host, discovery, &context, selection)?;
-    let mut preview = zup_presentation::PlanPreview::from_install_plan(&plan);
-    preview.install_directory = target.install_directory.to_string();
-    preview.estimated_bytes = target.summary.install_bytes;
-    preview.requires_authorization = target.summary.requires_authorization;
-    Ok(preview)
+    let bound = host.bind(&context)?;
+    let (enable, disable) = crate::host::selection_of(discovery.installer(), selection);
+    let prepared = zup_runtime::prepare_operation(
+        &zup_runtime::OperationInput {
+            build: &discovery.build,
+            installer: executable,
+            scope: selection.scope,
+            operation: zup_runtime::Operation::Apply,
+            selection: zup_runtime::OperationSelection {
+                enable,
+                disable,
+                install_directory: selection.install_directory.as_deref().map(PathBuf::from),
+            },
+            prior: context.ledger.as_ref(),
+            state_root: &context.state_root,
+            cancellation: &zup_plan::NeverCancelled,
+        },
+        &bound,
+    )
+    .map_err(|error| error.to_string())?;
+    zup_presentation::PlanPreview::from_transaction_plan(
+        &prepared.transaction_plan,
+        selection.scope,
+        prepared.target_plan(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn launch_target<H: SessionHost>(
@@ -636,9 +658,9 @@ fn target_plan<H: SessionHost>(
     selection: &Selection,
 ) -> Result<
     (
-        zup_plan::InstallPlan,
+        zup_plan::DesiredState,
         zup_core::Installer,
-        zup_platform::TargetPlan,
+        zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     ),
     String,
 > {

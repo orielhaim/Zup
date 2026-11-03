@@ -16,7 +16,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 zup-core.workspace = true
 zup-plan.workspace = true
-zup-platform.workspace = true
 zup-plugin-build.workspace = true
 zup-linux.workspace = true
 zup-windows.workspace = true

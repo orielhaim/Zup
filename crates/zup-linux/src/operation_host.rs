@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 
 use zup_core::{ResourceKey, SelectedScope, Template};
-use zup_exec::{HostSnapshot, InstallLedger, LifecycleAction};
-use zup_plan::InstallPlan;
-use zup_platform::TargetPlan;
+use zup_plan::{DesiredState, HostSnapshot, InstallLedger};
+
 use zup_runtime::{ContentAccess, OperationHost, OperationInput, attach_maintenance_copy};
 use zup_transaction::TransactionInput;
 
@@ -23,43 +22,37 @@ impl OperationHost for LinuxOperationHost {
         build: &zup_core::TargetBuildPlan,
         request: &zup_plan::PlanRequest,
         cancellation: &dyn zup_plan::CancellationQuery,
-    ) -> Result<zup_plan::PlannedInstallation, String> {
+    ) -> Result<zup_plan::PlannedInstallation, zup_runtime::OperationError> {
         let planning = zup_core::BuildPlan {
             targets: vec![build.clone()],
         };
         if build.installer.plugins.is_empty() {
-            return zup_plan::plan(&planning, request)
-                .map(|plan| zup_plan::PlannedInstallation {
-                    plan,
-                    generated_files: Vec::new(),
-                })
-                .map_err(|error| error.to_string());
+            return zup_plan::plan(&planning, request, None, cancellation)
+                .map_err(zup_runtime::OperationError::from);
         }
-        let carrier =
-            crate::carrier::Carrier::open(&self.installer).map_err(|error| error.to_string())?;
+        let carrier = crate::carrier::Carrier::open(&self.installer)
+            .map_err(|error| zup_runtime::OperationError::refused("plugin", error))?;
         let mut executor = zup_plugin_runtime::WasmtimePluginExecutor::load(
             carrier.into_package(),
             &build.installer.target,
         )
-        .map_err(|error| error.to_string())?;
-        zup_plan::plan_with_plugins(&planning, request, &mut executor, cancellation)
-            .map_err(|error| error.to_string())
+        .map_err(|error| zup_runtime::OperationError::refused("plugin", error))?;
+        zup_plan::plan(&planning, request, Some(&mut executor), cancellation)
+            .map_err(zup_runtime::OperationError::from)
     }
 
-    fn check_capabilities(&self, input: &OperationInput) -> Result<(), String> {
+    fn validate_context(&self, input: &OperationInput) -> Result<(), String> {
         if input.scope == SelectedScope::User {
             crate::run::refuse_redirected_hierarchy(input.state_root)
                 .map_err(|error| error.to_string())?;
         }
-        let errors = crate::capabilities::operation_capability_errors(input.build, input.scope);
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("\n"))
-        }
+        Ok(())
     }
 
-    fn resolve_target(&self, install: &InstallPlan) -> Result<TargetPlan, String> {
+    fn resolve_target(
+        &self,
+        install: &DesiredState,
+    ) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String> {
         match &self.machine {
             Some(machine) => crate::resolve::resolve_target(
                 install,
@@ -73,10 +66,6 @@ impl OperationHost for LinuxOperationHost {
             ),
         }
         .map_err(|error| error.to_string())
-    }
-
-    fn resolve_target_for_uninstall(&self) -> bool {
-        true
     }
 
     fn install_directory(
@@ -103,47 +92,63 @@ impl OperationHost for LinuxOperationHost {
 
     fn observe(
         &self,
-        target: Option<&TargetPlan>,
+        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
         ledger: Option<&InstallLedger>,
     ) -> Result<(Option<HostSnapshot>, BTreeMap<ResourceKey, bool>), String> {
-        match target {
-            Some(target) => {
-                let mut snapshot = crate::executor::snapshot_target(target);
-                if crate::input::requires_service_manager(target, ledger) {
-                    let systemd = self
-                        .machine
-                        .as_ref()
-                        .map(|machine| &machine.systemd)
-                        .ok_or_else(|| "services need machine scope".to_owned())?;
-                    let mut manager = crate::systemd::RealSystemd::connect()
-                        .map_err(|error| format!("systemd is unavailable: {error}"))?;
-                    snapshot.services =
-                        crate::input::snapshot_services(target, &mut manager, systemd)
-                            .map_err(|error| format!("service snapshot: {error}"))?;
-                }
-                Ok((
-                    Some(snapshot),
-                    crate::run::inspect_owned_matches_for(ledger),
-                ))
+        let mut snapshot = target.map(crate::executor::snapshot_target);
+        let mut owned_matches = crate::run::inspect_owned_matches_for(ledger);
+        if crate::input::requires_service_manager(target, ledger) {
+            let systemd = self
+                .machine
+                .as_ref()
+                .map(|machine| &machine.systemd)
+                .ok_or_else(|| "services need machine scope".to_owned())?;
+            let mut manager = crate::systemd::RealSystemd::connect()
+                .map_err(|error| format!("systemd is unavailable: {error}"))?;
+            if let (Some(target), Some(snapshot)) = (target, snapshot.as_mut()) {
+                snapshot.services = crate::input::snapshot_services(target, &mut manager, systemd)
+                    .map_err(|error| format!("service snapshot: {error}"))?;
             }
-            None => Ok((None, crate::run::inspect_owned_matches_for(ledger))),
+            if let Some(ledger) = ledger {
+                for (key, owned) in &ledger.resources {
+                    if let zup_plan::OwnedResource::Service {
+                        name, installed, ..
+                    } = owned
+                    {
+                        let path = crate::machine::authorize_systemd_unit(name, systemd)
+                            .map_err(|error| error.to_string())?;
+                        let observed = crate::service_ops::observe_unit(
+                            name,
+                            &path,
+                            ledger.target,
+                            &mut manager,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        owned_matches.insert(
+                            key.clone(),
+                            observed.configuration().as_ref() == Some(installed),
+                        );
+                    }
+                }
+            }
         }
+        Ok((snapshot, owned_matches))
     }
 
     fn compile(
         &self,
-        action: LifecycleAction,
-        execution: &zup_exec::ExecutionPlan,
-        target: Option<&TargetPlan>,
+        execution: &zup_plan::ExecutionPlan,
+        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
         _ledger: Option<&InstallLedger>,
     ) -> Result<TransactionInput, String> {
-        let target =
-            target.ok_or_else(|| "a Linux transaction compiles against its target".to_owned())?;
+        execution
+            .validate_generation(_ledger)
+            .map_err(|error| error.to_string())?;
         match &self.machine {
             Some(machine)
                 if !execution.services.is_empty()
                     || execution.removals.iter().any(|removal| {
-                        matches!(removal.owned, zup_exec::OwnedResource::Service { .. })
+                        matches!(removal.owned, zup_plan::OwnedResource::Service { .. })
                     }) =>
             {
                 let mut manager = crate::systemd::RealSystemd::connect()
@@ -155,25 +160,17 @@ impl OperationHost for LinuxOperationHost {
                         roots: &machine.roots,
                         systemd: &machine.systemd,
                         manager: &mut manager,
-                        force_services: matches!(
-                            action,
-                            LifecycleAction::Repair { force_files: true }
-                        ),
                     },
                 )
             }
             _ => crate::input::compile_execution_plan(execution, target),
         }
         .map_err(|error| error.to_string())
-        .map(|mut input| {
-            input.observed_transaction = _ledger.map(|ledger| ledger.committed_transaction.clone());
-            input
-        })
     }
 
     fn attach_content(
         &self,
-        target: &mut TargetPlan,
+        target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         content: &ContentAccess,
         preset: Option<&zup_core::PresetRuntime>,
     ) -> Result<(), String> {
@@ -256,7 +253,7 @@ impl OperationHost for LinuxOperationHost {
 }
 
 fn attach_ui_runtime(
-    target: &mut TargetPlan,
+    target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     scope: SelectedScope,
     preset: &zup_core::PresetRuntime,
     executable_digest: zup_core::Sha256Digest,
@@ -269,10 +266,10 @@ fn attach_ui_runtime(
     )>,
 ) -> Result<(), String> {
     for (path, digest, size, source, executable) in files {
-        let destination = zup_platform::TargetPath::new(target.target, path.to_string_lossy())
+        let destination = zup_plan::TargetPath::new(target.target, path.to_string_lossy())
             .map_err(|error| format!("preset runtime destination: {error}"))?;
         let text = destination.to_string();
-        target.files.push(zup_platform::TargetFile {
+        target.files.push(zup_plan::DesiredFile {
             key: zup_core::ResourceKey::File { destination: text },
             source_relative: source,
             destination,
@@ -281,9 +278,6 @@ fn attach_ui_runtime(
             privilege: scope.authorization(),
             executable,
         });
-        target.summary.file_count += 1;
-        target.summary.resource_count += 1;
-        target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
     }
     target.preset = Some(zup_core::InstalledPreset {
         preset: preset.clone(),

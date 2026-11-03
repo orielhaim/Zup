@@ -56,6 +56,7 @@ pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
         }
         let cli = cli::parse();
         let output = cli.output_format();
+        let graphical = frontend == zup_core::Frontend::Gui && cli.may_show_error_dialog();
         let context = RuntimeContext::new(frontend).with_output(output);
         let result = cli::dispatch(cli, context);
         if let Err(error) = &result
@@ -63,6 +64,13 @@ pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
             && error.downcast_ref::<terminal::ReportedFailure>().is_none()
         {
             emit_failure(output, error);
+            if graphical {
+                run::show_error(&error.to_string());
+            } else if frontend == zup_core::Frontend::Gui
+                && output == zup_presentation::OutputFormat::Human
+            {
+                eprintln!("{error}");
+            }
         }
         result
     }

@@ -9,10 +9,11 @@ use faults::{Boundary, InterruptedExecutor, InterruptedStore};
 use zup_bundle::DirectoryPayloadSource;
 use zup_core::{AppId, Privilege, RelativePath, ResourceKey, SelectedScope, Target, hash_reader};
 use zup_linux::{LinuxFileExecutor, LinuxLedgerStore};
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_transaction::{
-    FileDelta, FilePrecondition, FileWork, FilesystemTransactionStore, TransactionCoordinator,
-    TransactionInput, TransactionOutcome, TransactionStore, compile_transaction,
+    FilesystemTransactionStore, TransactionCoordinator, TransactionInput, TransactionOutcome,
+    TransactionStore, compile_transaction,
 };
 
 const PAYLOAD: &[u8] = b"verified application content";
@@ -73,7 +74,7 @@ fn interrupted_child() {
     let destination =
         TargetPath::new(target, root.join("installed/tool").to_string_lossy()).unwrap();
     let mut input = TransactionInput::new(target);
-    input.files.push(FileWork {
+    input.files.push(FileOperation {
         key: ResourceKey::File {
             destination: destination.to_string(),
         },
@@ -83,8 +84,10 @@ fn interrupted_child() {
         expected_sha256: hash_reader(PAYLOAD).unwrap().1,
         expected_size: PAYLOAD.len() as u64,
         privilege: Privilege::User,
-        delta: FileDelta::Create,
+        kind: FileOperationKind::Create,
         executable: false,
+
+        conflict: None,
     });
     let store = InterruptedStore {
         inner: FilesystemTransactionStore::private_at(root.join("state")),
@@ -140,7 +143,6 @@ fn process_interruption_recovers_real_files() {
             installer: carrier,
             operation: zup_runtime::Operation::Apply,
             selection: Default::default(),
-            install_dir_override: None,
             generated: Default::default(),
         };
         let mut previous = None;
@@ -149,6 +151,7 @@ fn process_interruption_recovers_real_files() {
             let operation =
                 zup_runtime::OperationControl::new(zup_runtime::ExecutionPolicy::NonInteractive);
             let request = zup_runtime::RuntimeRequest {
+                intent: None,
                 target: record.target,
                 app_id: record.app_id.clone(),
                 app_version: record.app_version.clone(),

@@ -420,7 +420,7 @@ mod tests {
                 machine_readable: true,
                 verb: crate::Verb::Repair,
                 enable: vec!["documentation".into()],
-                force_files: true,
+                force: true,
                 ..Default::default()
             },
             zup_core::SelectedScope::User,
@@ -451,7 +451,7 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--enable", "documentation"])
         );
-        assert!(arguments.contains(&"--force-files".to_owned()));
+        assert!(arguments.contains(&"--force".to_owned()));
         assert!(!arguments.contains(&"--ui".to_owned()));
     }
 

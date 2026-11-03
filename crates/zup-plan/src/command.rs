@@ -9,13 +9,13 @@ use crate::target_path::TargetPath;
 /// Canonical engine representation for services, launchers, protocols, and
 /// file-association open commands - never a raw command line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommandSpec {
-    pub executable: TargetPath,
+pub struct CommandSpec<P = TargetPath> {
+    pub executable: P,
     pub arguments: Vec<String>,
 }
 
-impl CommandSpec {
-    pub fn new(executable: TargetPath, arguments: Vec<String>) -> Self {
+impl<P> CommandSpec<P> {
+    pub fn new(executable: P, arguments: Vec<String>) -> Self {
         Self {
             executable,
             arguments,

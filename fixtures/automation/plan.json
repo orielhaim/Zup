@@ -20,6 +20,7 @@
   "summary": "2 resource(s) · 237.0 MiB",
   "details": {
     "kind": "plan",
+    "machine_state_observed": false,
     "scope": "user",
     "install_directory": "${location.user_data}/Acme",
     "estimated_bytes": 248512896,

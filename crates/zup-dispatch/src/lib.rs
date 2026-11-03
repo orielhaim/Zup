@@ -100,7 +100,7 @@ pub struct Options {
     pub scope: Option<zup_core::SelectedScope>,
     pub non_interactive: bool,
     pub yes: bool,
-    pub force_files: bool,
+    pub force: bool,
     pub plain: bool,
     pub output: Option<String>,
     pub enable: Vec<String>,
@@ -310,8 +310,8 @@ fn staged_arguments(
                 arguments.push("--install-directory".to_owned());
                 arguments.push(directory.display().to_string());
             }
-            if options.verb == Verb::Repair && options.force_files {
-                arguments.push("--force-files".to_owned());
+            if options.verb == Verb::Repair && options.force {
+                arguments.push("--force".to_owned());
             }
         }
         Verb::Update | Verb::Uninstall => {}
@@ -554,7 +554,7 @@ pub fn options_from(
             "--non-interactive" => flag(&mut options.non_interactive),
             "--yes" => flag(&mut options.yes),
             "--plain" => flag(&mut options.plain),
-            "--force-files" => flag(&mut options.force_files),
+            "--force" => flag(&mut options.force),
             "--enable" | "--component" => match value() {
                 Some(id) => options.enable.push(id),
                 None => error = Some(format!("{name} needs a component id")),
@@ -630,7 +630,7 @@ mod tests {
                 "repair",
                 "--scope",
                 "machine",
-                "--force-files",
+                "--force",
                 "--yes",
                 "--enable",
                 "core",
@@ -643,7 +643,7 @@ mod tests {
         .expect("a verb with flags parses");
         assert_eq!(options.verb, Verb::Repair);
         assert_eq!(options.scope, Some(zup_core::SelectedScope::Machine));
-        assert!(options.force_files);
+        assert!(options.force);
         assert!(options.yes);
         assert_eq!(options.enable, vec!["core".to_owned()]);
         assert_eq!(options.disable, vec!["extras".to_owned()]);

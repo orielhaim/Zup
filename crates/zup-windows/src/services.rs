@@ -4,7 +4,7 @@ use windows_service::service::{
 };
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use zup_core::{Privilege, Target};
-use zup_exec::{ObservedServiceState, ServiceOperation, ServiceOperationKind, ServiceState};
+use zup_plan::{IntegrationChangeKind, ObservedServiceState, ServiceOperation, ServiceState};
 
 use crate::lowering::host_path;
 
@@ -36,35 +36,15 @@ pub fn read_service(name: &str, target: &Target) -> Result<ObservedServiceState,
 }
 
 fn state(name: &str, target: &Target) -> Result<ServiceState, ServiceError> {
-    match crate::scm::query_service(name, target)? {
-        ObservedServiceState::Absent => Ok(ServiceState::Absent),
-        ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => Ok(ServiceState::Registration {
-            display_name,
-            command,
-            start,
-        }),
-    }
+    crate::scm::query_service(name, target)?
+        .configuration()
+        .ok_or_else(|| ServiceError::ChangedSincePlanning(name.into()))
 }
 
-fn previous(op: &ServiceOperation) -> ServiceState {
-    match &op.previous {
-        ObservedServiceState::Absent => ServiceState::Absent,
-        ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => ServiceState::Registration {
-            display_name: display_name.clone(),
-            command: command.clone(),
-            start: *start,
-        },
-    }
+fn previous(op: &ServiceOperation) -> Result<ServiceState, ServiceError> {
+    op.previous
+        .configuration()
+        .ok_or_else(|| ServiceError::ChangedSincePlanning(op.name.clone()))
 }
 
 fn installed(op: &ServiceOperation) -> ServiceState {
@@ -166,16 +146,17 @@ fn write(name: &str, value: &ServiceState) -> Result<(), ServiceError> {
 pub fn apply(op: &ServiceOperation) -> Result<BackendReceipt, ServiceError> {
     if !matches!(
         op.kind,
-        ServiceOperationKind::Create
-            | ServiceOperationKind::UpdateOwned
-            | ServiceOperationKind::RestoreOwned
+        IntegrationChangeKind::Create
+            | IntegrationChangeKind::UpdateOwned
+            | IntegrationChangeKind::RestoreOwned
+            | IntegrationChangeKind::RepairOwned
     ) {
         return Err(ServiceError::NotExecutable {
             name: op.name.clone(),
             reason: "service is not executable".to_owned(),
         });
     }
-    let previous = previous(op);
+    let previous = previous(op)?;
     if state(&op.name, op.command.executable.target())? != previous {
         return Err(ServiceError::ChangedSincePlanning(op.name.clone()));
     }
@@ -208,7 +189,7 @@ pub fn reconcile(op: &ServiceOperation) -> Result<NativeReconcileResult, Service
         Ok(state) => state,
         Err(_) => return Ok(NativeReconcileResult::Ambiguous),
     };
-    let previous = previous(op);
+    let previous = previous(op)?;
     let installed = installed(op);
     Ok(classify_reconcile(
         &op.name,
@@ -245,7 +226,7 @@ mod tests {
     use super::*;
     use crate::transaction_payload::NativeReconcileResult;
     use zup_core::{Privilege, ResourceKey, ServiceId, ServiceStart, Target};
-    use zup_platform::{CommandSpec, TargetPath};
+    use zup_plan::{CommandSpec, TargetPath};
 
     struct Cleanup(String);
     impl Drop for Cleanup {
@@ -316,7 +297,7 @@ mod tests {
             TargetPath::new(target_triple, r"C:\Program Files\Zup Test\service.exe").unwrap();
         let mut op = ServiceOperation {
             key: ResourceKey::Service { id },
-            kind: ServiceOperationKind::Create,
+            kind: IntegrationChangeKind::Create,
             id: name.clone(),
             name: name.clone(),
             display_name: "Zup Test 世界".into(),
@@ -336,7 +317,7 @@ mod tests {
             reconcile(&op).unwrap(),
             NativeReconcileResult::AppliedWithReceipt(_)
         ));
-        op.kind = ServiceOperationKind::UpdateOwned;
+        op.kind = IntegrationChangeKind::UpdateOwned;
         op.previous = crate::scm::query_service(&name, &target_triple).unwrap();
         op.start = ServiceStart::Manual;
         let second = apply(&op).unwrap();

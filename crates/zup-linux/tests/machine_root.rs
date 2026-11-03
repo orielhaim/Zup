@@ -265,7 +265,7 @@ fn root_refuses_user_writable_maintenance() {
     let outcome = run_machine_isolated(
         &maintenance,
         &roots,
-        Operation::Repair { force_files: true },
+        Operation::Repair { force: true },
         None,
     );
     assert!(
@@ -280,7 +280,7 @@ fn root_refuses_user_writable_maintenance() {
     commit(
         &roots,
         &maintenance,
-        Operation::Repair { force_files: false },
+        Operation::Repair { force: false },
         None,
         "trusted maintenance serves again: {outcome:?}",
     );
@@ -307,12 +307,7 @@ fn root_refuses_user_writable_ledger() {
     let mut permissions = std::fs::metadata(&ledger).expect("stat").permissions();
     permissions.set_mode(0o666);
     std::fs::set_permissions(&ledger, permissions).expect("chmod");
-    let outcome = run_machine_isolated(
-        &installer,
-        &roots,
-        Operation::Repair { force_files: true },
-        None,
-    );
+    let outcome = run_machine_isolated(&installer, &roots, Operation::Repair { force: true }, None);
     assert!(
         outcome.is_err(),
         "a user-writable ledger is refused: {outcome:?}"
@@ -332,7 +327,6 @@ fn root_public_run_dispatches_machine_scope() {
         scope: SelectedScope::Machine,
         state_root: None,
         action,
-        install_dir_override: None,
         selection: Default::default(),
     };
     let tool = PathBuf::from("/opt/tool/tool");

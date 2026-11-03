@@ -5,13 +5,12 @@ use tracing::{info, info_span};
 use windows_registry::Key;
 use zup_core::hash_reader;
 use zup_core::{SelectedScope, Target};
-use zup_exec::{
-    HostSnapshot, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
+use zup_plan::{
+    DesiredState, HostSnapshot, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
     ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedLauncherState,
     ObservedPathEntry, ObservedProtocol, ObservedProtocolState, ObservedService,
-    ObservedServiceState, SearchPath,
+    ObservedServiceState, SearchPath, TargetPath,
 };
-use zup_platform::{TargetPath, TargetPlan};
 
 use crate::cmdline;
 use crate::lowering::host_path;
@@ -46,7 +45,9 @@ pub enum InspectError {
     ServiceQueryFailed { name: String, reason: String },
 }
 
-pub fn inspect_target(target: &TargetPlan) -> Result<HostSnapshot, InspectError> {
+pub fn inspect_target(
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+) -> Result<HostSnapshot, InspectError> {
     inspect_target_with(target, &InspectReads::production())
 }
 
@@ -82,7 +83,7 @@ impl InspectReads {
 }
 
 pub fn inspect_target_with(
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     reads: &InspectReads,
 ) -> Result<HostSnapshot, InspectError> {
     let _span = info_span!("inspect_target").entered();
@@ -115,7 +116,9 @@ pub fn inspect_target_with(
     })
 }
 
-pub fn inspect_files(target: &TargetPlan) -> Result<Vec<ObservedFile>, InspectError> {
+pub fn inspect_files(
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+) -> Result<Vec<ObservedFile>, InspectError> {
     let mut files = Vec::with_capacity(target.files.len());
     let mut bytes_inspected = 0u64;
 
@@ -188,7 +191,7 @@ fn observe_file(
 }
 
 fn inspect_launchers(
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     read_shortcut: fn(
         &TargetPath,
     ) -> Result<ObservedLauncherState, crate::shortcuts::ShortcutError>,
@@ -210,7 +213,9 @@ fn inspect_launchers(
     Ok(out)
 }
 
-fn inspect_path_entries(target: &TargetPlan) -> Result<Vec<ObservedPathEntry>, InspectError> {
+fn inspect_path_entries(
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+) -> Result<Vec<ObservedPathEntry>, InspectError> {
     let mut cache: Vec<(SelectedScope, SearchPath)> = Vec::new();
     let mut out = Vec::with_capacity(target.path_entries.len());
 
@@ -241,7 +246,7 @@ fn inspect_path_entries(target: &TargetPlan) -> Result<Vec<ObservedPathEntry>, I
 }
 
 fn inspect_services(
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     read_service: fn(&str, &Target) -> Result<ObservedServiceState, crate::services::ServiceError>,
 ) -> Result<Vec<ObservedService>, InspectError> {
     let mut out = Vec::with_capacity(target.services.len());
@@ -262,7 +267,7 @@ fn inspect_services(
 }
 
 fn inspect_protocols(
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     reads: &InspectReads,
 ) -> Result<Vec<ObservedProtocol>, InspectError> {
     let mut out = Vec::with_capacity(target.protocols.len());
@@ -300,7 +305,7 @@ fn inspect_protocols(
 }
 
 fn inspect_file_associations(
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     reads: &InspectReads,
 ) -> Result<Vec<ObservedFileAssociation>, InspectError> {
     let mut out = Vec::with_capacity(target.file_associations.len());

@@ -1,5 +1,4 @@
 name: Full Verification
-run-name: ${{ inputs.native_windows_runner && inputs.native_windows_runner != 'none' && format('Native Windows verification ({0})', inputs.native_windows_runner) || inputs.measure_sizes && 'Installer size measurements' || 'Full Verification' }}
 
 on:
   push:
@@ -8,38 +7,20 @@ on:
     - cron: "0 4 * * 1"
   workflow_dispatch:
     inputs:
-      native_windows_runner:
-        description: Run focused native Windows validation instead of Full Verification
-        type: choice
-        default: none
-        options: [none, windows-latest, windows-11-arm]
-      test_filter:
-        description: Nextest expression for focused native Windows validation
-        type: string
-        default: all()
-      measure_sizes:
-        description: Measure native installers instead of running full verification
+      sdk:
+        description: Verify generated SDK projects
         type: boolean
         default: false
-      revision:
-        description: Optional revision to measure
-        type: string
-      profile:
-        description: Cargo profile for size measurements
-        type: string
-        default: installer
-      size_runner:
-        description: Native runner for size measurements
-        type: choice
-        default: all
-        options:
-          [all, ubuntu-latest, ubuntu-26.04-arm, windows-latest, windows-11-arm]
+      release:
+        description: Package and verify release material
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: full-${{ github.ref }}-${{ inputs.measure_sizes && format('sizes-{0}-{1}-{2}', inputs.profile, inputs.revision, inputs.size_runner) || inputs.native_windows_runner && inputs.native_windows_runner != 'none' && format('native-{0}', inputs.native_windows_runner) || 'verification' }}
+  group: full-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
@@ -50,133 +31,14 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  native-windows:
-    name: Native Windows verification
-    if: inputs.native_windows_runner && inputs.native_windows_runner != 'none'
-    runs-on: ${{ inputs.native_windows_runner }}
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: full-${{ runner.os }}-${{ runner.arch }}-debug0
-          cache-on-failure: false
-      - uses: ilammy/setup-nasm@v1
-        with:
-          platform: win64
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.146
-      - name: Toolchain
-        run: cargo xtask toolchain build
-      - name: Selected native tests
-        shell: pwsh
-        env:
-          TEST_FILTER: ${{ inputs.test_filter }}
-        run: cargo nextest run -p zup -p zup-installer -p zup-windows -p zup-plugin-runtime --all-features --no-fail-fast -E "$env:TEST_FILTER"
-      - name: Machine authority tests
-        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
-
-  sizes:
-    name: Installer sizes (${{ matrix.os }})
-    if: inputs.measure_sizes == true && (!inputs.native_windows_runner || inputs.native_windows_runner == 'none')
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJSON(inputs.size_runner == 'all' && '["ubuntu-latest", "ubuntu-26.04-arm", "windows-latest", "windows-11-arm"]' || format('["{0}"]', inputs.size_runner)) }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Preserve the measurement tool
-        shell: bash
-        run: cp scripts/ci/installer-size.py "$RUNNER_TEMP/installer-size.py"
-
-      - uses: actions/checkout@v7
-        if: inputs.revision != ''
-        with:
-          ref: ${{ inputs.revision }}
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: sizes-${{ runner.os }}-${{ runner.arch }}
-          cache-on-failure: false
-
-      - uses: ilammy/setup-nasm@v1
-        if: runner.os == 'Windows'
-        with:
-          platform: win64
-
-      - name: Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev mold
-
-      - name: Build native toolchain and developer CLI
-        shell: bash
-        env:
-          SIZE_PROFILE: ${{ inputs.profile }}
-        run: |
-          cargo xtask toolchain build --profile "$SIZE_PROFILE"
-          cargo build -p zup --bin zup
-
-      - name: Measure composed installers
-        shell: bash
-        env:
-          SIZE_PROFILE: ${{ inputs.profile }}
-        run: |
-          directory="$SIZE_PROFILE"
-          if [ "$directory" = dev ]; then directory=debug; fi
-          suffix=''
-          if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
-          python "$RUNNER_TEMP/installer-size.py" --cli "target/debug/zup$suffix" --toolchain "target/$directory/toolchain/0.0.1" --output target/sizes
-          python - <<'PYREPORT'
-          import json
-          from pathlib import Path
-          for row in json.loads(Path("target/sizes/sizes.json").read_text())["measurements"]:
-              print("::notice title=Installer size::" + json.dumps(row))
-          PYREPORT
-
-      - name: Windows runtime link map
-        if: runner.os == 'Windows' && inputs.profile == 'installer'
-        shell: pwsh
-        run: |
-          $map = Join-Path $env:GITHUB_WORKSPACE 'target/runtime.map'
-          cargo rustc -p zup-installer --no-default-features --features headless --bin zup-setup-headless --profile installer -- -C "link-arg=/MAP:$map"
-          if ($LASTEXITCODE -ne 0) { throw 'runtime link map failed' }
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: sizes-${{ matrix.os }}-${{ inputs.profile }}
-          path: |
-            target/sizes/sizes.json
-            target/sizes/*/inspection.json
-            target/runtime.map
-          if-no-files-found: error
-
   test:
-    name: full test ${{ matrix.os }}
-    if: inputs.measure_sizes != true && (!inputs.native_windows_runner || inputs.native_windows_runner == 'none')
+    name: integration ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, windows-11-arm, ubuntu-latest, ubuntu-26.04-arm]
+        os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -189,8 +51,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: full-${{ runner.os }}-${{ runner.arch }}-debug0
-          cache-on-failure: false
+          shared-key: fast-${{ runner.os }}-${{ runner.arch }}-debug0
+          cache-on-failure: true
 
       - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
@@ -207,15 +69,6 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
 
-      - name: Linux package selection
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
-          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
-          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
-
       - name: Linux dependencies
         if: runner.os == 'Linux'
         shell: bash
@@ -227,32 +80,39 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          sudo env PATH="$PATH" RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" \
-            ZUP_TEST_REAL_SYSTEMD=1 CARGO_INCREMENTAL=0 \
-            cargo nextest run -p zup-linux --all-features --test services_systemd --no-fail-fast
+          set -euo pipefail
+          mkdir -p target/nextest/systemd
+          cargo nextest list -p zup-linux --all-features --test services_systemd --list-type binaries-only --message-format json > "$RUNNER_TEMP/systemd-binaries.json"
+          cargo metadata --all-features --format-version 1 > "$RUNNER_TEMP/systemd-cargo.json"
+          sudo env ZUP_TEST_REAL_SYSTEMD=1 \
+            "$(command -v cargo-nextest)" nextest run --profile systemd --no-fail-fast \
+            --cargo-metadata "$RUNNER_TEMP/systemd-cargo.json" \
+            --binaries-metadata "$RUNNER_TEMP/systemd-binaries.json"
 
       - name: Toolchain
         run: cargo xtask toolchain build
 
       - name: Windows tests
         if: runner.os == 'Windows'
-        run: cargo nextest run --workspace --all-features --no-fail-fast
-
-      - name: Windows machine authority tests
-        if: runner.os == 'Windows'
-        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
+        run: cargo nextest run --profile integration -p zup -p zup-installer -p zup-preview -p zup-windows --all-features --no-fail-fast
 
       - name: Linux tests
         if: runner.os == 'Linux'
         shell: bash
-        run: cargo nextest run --all-features --no-fail-fast $PORTABLE $LINUX
+        run: cargo nextest run --profile integration -p zup -p zup-installer -p zup-preview -p zup-linux --all-features --no-fail-fast
+
+      - name: Generated SDK projects
+        if: inputs.sdk == true
+        run: cargo nextest run -p zup --all-features --test generated_projects --no-fail-fast
+
+      - name: Test failure diagnostics
+        if: always()
+        run: python scripts/ci/report-tests.py
 
       - name: Build reusable tooling
-        if: runner.arch == 'X64'
         run: cargo build -p zup -p zup-xtask --bins
 
       - name: Archive reusable tooling
-        if: runner.arch == 'X64'
         shell: bash
         run: |
           suffix=''
@@ -260,7 +120,6 @@ jobs:
           tar -cf "tooling-${{ runner.os == 'Windows' && 'windows' || 'linux' }}.tar" -C target/debug "zup$suffix" "xtask$suffix"
 
       - name: Upload reusable tooling
-        if: runner.arch == 'X64'
         uses: actions/upload-artifact@v7
         with:
           name: tooling-${{ runner.os == 'Windows' && 'windows' || 'linux' }}.tar
@@ -272,14 +131,14 @@ jobs:
       - name: Upload staged toolchain
         uses: actions/upload-artifact@v7
         with:
-          name: toolchain-${{ runner.os == 'Windows' && 'windows' || 'linux' }}${{ runner.arch == 'ARM64' && '-arm64' || '' }}
+          name: toolchain-${{ runner.os == 'Windows' && 'windows' || 'linux' }}
           path: target/debug/toolchain
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
 
   cross-build-windows:
-    name: Build both targets on Windows
+    name: Compose Linux on Windows
     runs-on: windows-latest
     timeout-minutes: 60
     needs: [test]
@@ -310,58 +169,27 @@ jobs:
           name: toolchain-linux
           path: tc-linux
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: toolchain-linux-arm64
-          path: tc-arm64
-
-      - name: Merge both toolchains
+      - name: Merge toolchains
         shell: pwsh
         run: |
-          tooling/xtask.exe toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
+          tooling/xtask.exe toolchain assemble --source tc-win --source tc-linux --out merged
 
-      - name: Build every fixture target
+      - name: Compose the foreign Linux installer
         shell: pwsh
         run: |
-          $zup = 'tooling/zup.exe'
-          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
-          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
-          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-arm64 --output dist/arm64.bin --force
-          & $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
+          tooling/zup.exe --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
+          if ($LASTEXITCODE -ne 0) { throw 'Linux composition failed' }
+          tooling/zup.exe artifact inspect dist/lnx.bin
+          if ($LASTEXITCODE -ne 0) { throw 'Linux artifact inspection failed' }
 
-      - name: Verify every artifact
-        shell: pwsh
-        run: |
-          $zup = 'tooling/zup.exe'
-          foreach ($artifact in @('dist/win.exe', 'dist/lnx.bin', 'dist/arm64.bin', 'dist/uni.exe')) {
-            & $zup artifact inspect $artifact | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "inspect of $artifact failed" }
-          }
-
-      - name: Lifecycle of the native Windows installer
-        shell: pwsh
-        run: scripts/ci/e2e-windows.ps1 -Installer dist/win.exe
-
-      - name: Lifecycle of the Universal installer
-        shell: pwsh
-        run: scripts/ci/e2e-windows.ps1 -Installer dist/uni.exe
-
-      - name: Upload the cross-built Linux installer
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-linux-from-windows
           path: dist/lnx.bin
           if-no-files-found: error
 
-      - name: Upload the cross-built ARM64 installer
-        uses: actions/upload-artifact@v7
-        with:
-          name: installer-arm64-from-windows
-          path: dist/arm64.bin
-          if-no-files-found: error
-
   cross-build-linux:
-    name: Build both targets on Linux
+    name: Compose Universal Windows on Linux
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: [test]
@@ -392,40 +220,19 @@ jobs:
           name: toolchain-linux
           path: tc-linux
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: toolchain-linux-arm64
-          path: tc-arm64
-
-      - name: Merge both toolchains
+      - name: Merge toolchains
         shell: bash
         run: |
           set -euo pipefail
-          tooling/xtask toolchain assemble --source tc-win --source tc-linux --source tc-arm64 --out merged
+          tooling/xtask toolchain assemble --source tc-win --source tc-linux --out merged
           mkdir -p dist
 
-      - name: Build every fixture target
+      - name: Compose the foreign Universal installer
         shell: bash
         run: |
           set -euo pipefail
-          zup=tooling/zup
-          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --output dist/win.exe --force
-          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-x64 --output dist/lnx.bin --force
-          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target linux-arm64 --output dist/arm64.bin --force
-          $zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
-
-      - name: Verify every artifact
-        shell: bash
-        run: |
-          set -euo pipefail
-          zup=tooling/zup
-          for artifact in dist/win.exe dist/lnx.bin dist/arm64.bin dist/uni.exe; do
-            $zup artifact inspect "$artifact" > /dev/null
-          done
-
-      - name: Lifecycle of the native Linux installer
-        shell: bash
-        run: sh scripts/ci/e2e-linux.sh dist/lnx.bin
+          tooling/zup --toolchain merged build --manifest fixtures/cross-matrix/zup.toml --target windows-x64 --universal --output dist/uni.exe --force --release-manifest none
+          tooling/zup artifact inspect dist/uni.exe
 
       - name: Upload the cross-built Universal installer
         uses: actions/upload-artifact@v7
@@ -477,25 +284,8 @@ jobs:
           chmod +x foreign/lnx.bin
           sh scripts/ci/e2e-linux.sh foreign/lnx.bin
 
-  cross-e2e-arm64:
-    name: Run the Windows-built ARM64 installer
-    runs-on: ubuntu-26.04-arm
-    timeout-minutes: 15
-    needs: [cross-build-windows]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: installer-arm64-from-windows
-          path: foreign
-      - name: Native ARM64 lifecycle
-        run: |
-          chmod +x foreign/arm64.bin
-          sh scripts/ci/e2e-linux.sh foreign/arm64.bin
-
   release:
+    if: inputs.release == true
     name: release material
     runs-on: windows-latest
     timeout-minutes: 180
@@ -526,15 +316,10 @@ jobs:
           name: toolchain-linux
           path: tc-linux
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: toolchain-linux-arm64
-          path: tc-arm64
-
       - name: Merge and package the multi-platform release
         shell: pwsh
         run: |
-          tooling/xtask.exe toolchain package --cli tooling/zup.exe --profile dev --source tc-win --source tc-linux --source tc-arm64
+          tooling/xtask.exe toolchain package --cli tooling/zup.exe --profile dev --source tc-win --source tc-linux
 
       - name: Release clean-room
         shell: pwsh

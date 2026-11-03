@@ -109,7 +109,7 @@ pub use bootstrap_fs::{WindowsBootstrapFileSystem, windows_bootstrap_file_system
 #[cfg(windows)]
 pub use bootstrap_plan::{BootstrapPlanError, peer_user_state_root};
 pub use bundle_packager::{
-    AutoPayloadSource, BundleError, EmbeddedBundle, EmbeddedPayloadSource, OverlayPayloadSource,
+    AutoPayloadSource, BundleError, EmbeddedBundle, EmbeddedPayloadSource,
     build_plan_only_executable, build_self_contained_executable, embed_bundle_file,
     is_executable_image, plan_only_runtime_bytes, read_frontend, sidecar_package_path,
     validate_embedded_bundle_target, validate_frontend,
@@ -152,7 +152,6 @@ pub use ledger::{InstallLedgerStore, LedgerError};
 pub use locations::CanonicalWindowsLocations;
 pub use lowering::{
     TargetPathLoweringError, TargetPathValidationError, to_host_path, validate_windows_target_path,
-    windows_target_path_identity,
 };
 #[cfg(windows)]
 pub use machine_authority::MachineRoot;

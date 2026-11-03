@@ -1,6 +1,6 @@
 use crate::error::PlanError;
 use zup_core::{ServiceId, ServiceStart};
-use zup_platform::{CommandSpec, TargetService};
+use zup_plan::{CommandSpec, DesiredService};
 
 pub const MINIMUM_SYSTEMD_VERSION: u32 = 240;
 
@@ -27,7 +27,7 @@ pub const SYSTEMD_UNIT_DIR: &str = "/usr/local/lib/systemd/system";
 const MAX_UNIT_LEN: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DesiredService {
+pub struct SystemdUnit {
     pub unit: String,
 
     pub source_path: String,
@@ -45,8 +45,8 @@ pub struct DesiredService {
     pub display_name: String,
 }
 
-impl DesiredService {
-    pub fn derive(service: &TargetService) -> Result<Self, PlanError> {
+impl SystemdUnit {
+    pub fn derive(service: &DesiredService<zup_plan::TargetPath>) -> Result<Self, PlanError> {
         let unit = unit_name(&service.id)?;
         let display_name = service
             .display_name
@@ -125,7 +125,10 @@ fn is_valid_unit_name(unit: &str) -> bool {
         && !stem.contains('\0')
 }
 
-pub fn render_unit(service: &TargetService, display_name: &str) -> Result<Vec<u8>, PlanError> {
+pub fn render_unit(
+    service: &DesiredService<zup_plan::TargetPath>,
+    display_name: &str,
+) -> Result<Vec<u8>, PlanError> {
     let id = service.id.to_string();
     let refused = |reason: String| PlanError::ServiceRefused {
         id: id.clone(),
@@ -330,9 +333,14 @@ pub fn parse_unit(bytes: &[u8]) -> Result<(String, Vec<String>), String> {
 mod tests {
     use super::*;
 
-    fn service(id: &str, executable: &str, args: Vec<&str>, start: ServiceStart) -> TargetService {
+    fn service(
+        id: &str,
+        executable: &str,
+        args: Vec<&str>,
+        start: ServiceStart,
+    ) -> DesiredService<zup_plan::TargetPath> {
         let target = zup_core::Target::parse("linux-x64").unwrap();
-        TargetService {
+        DesiredService {
             key: zup_core::ResourceKey::Service {
                 id: ServiceId::new(id).unwrap(),
             },
@@ -340,7 +348,7 @@ mod tests {
             name: zup_core::NonEmptyString::new("Tool").unwrap(),
             display_name: None,
             command: CommandSpec::new(
-                zup_platform::TargetPath::new(target, executable).unwrap(),
+                zup_plan::TargetPath::new(target, executable).unwrap(),
                 args.into_iter().map(|a| a.to_owned()).collect(),
             ),
             start,
@@ -381,21 +389,21 @@ mod tests {
         let mut second = first.clone();
         second.display_name = Some(zup_core::NonEmptyString::new("New Name").unwrap());
         assert_eq!(
-            DesiredService::derive(&first).unwrap().unit,
-            DesiredService::derive(&second).unwrap().unit
+            SystemdUnit::derive(&first).unwrap().unit,
+            SystemdUnit::derive(&second).unwrap().unit
         );
     }
 
     #[test]
     fn rendering_is_deterministic_and_minimal() {
-        let desired = DesiredService::derive(&service(
+        let desired = SystemdUnit::derive(&service(
             "tool",
             "/opt/acme/tool",
             vec!["--serve"],
             ServiceStart::Automatic,
         ))
         .unwrap();
-        let again = DesiredService::derive(&service(
+        let again = SystemdUnit::derive(&service(
             "tool",
             "/opt/acme/tool",
             vec!["--serve"],
@@ -432,7 +440,7 @@ mod tests {
             "a;b|c&d",
             "世界",
         ];
-        let desired = DesiredService::derive(&service(
+        let desired = SystemdUnit::derive(&service(
             "tool",
             "/opt/acme/tool",
             args.clone(),

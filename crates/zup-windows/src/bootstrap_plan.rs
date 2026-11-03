@@ -6,7 +6,7 @@ use zup_bootstrap::{
     BootstrapStateStore, BoundBootstrapPlan, Quarantine,
 };
 use zup_core::SelectedScope;
-use zup_plan::InstallPlan;
+use zup_plan::DesiredState;
 use zup_runtime::BootstrapRequest;
 
 use crate::bundle_packager::EmbeddedBundle;
@@ -45,7 +45,7 @@ pub fn peer_user_state_root() -> Result<PathBuf, BootstrapPlanError> {
 }
 
 pub fn prepare(
-    install: &InstallPlan,
+    install: &DesiredState,
     state_root: &Path,
     scope: SelectedScope,
     bundle: Option<&EmbeddedBundle>,

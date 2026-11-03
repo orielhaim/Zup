@@ -1,18 +1,19 @@
 #![cfg(windows)]
+use zup_plan::RemovalKind;
 
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use zup_bundle::DirectoryPayloadSource;
 use zup_core::{RelativePath, Sha256Digest, Target, hash_reader};
+use zup_plan::{FileOperationKind, FilePrecondition};
 use zup_transaction::{
-    FileDelta, FilePrecondition, InstallationLock, LockScope, OperationId, TransactionInput,
-    compile_transaction,
+    InstallationLock, LockScope, OperationId, TransactionInput, compile_transaction,
 };
 use zup_windows::{NullProgress, WindowsFileExecutor, apply_node, reconcile_node, to_host_path};
 
-fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
-    zup_platform::TargetPath::new(
+fn target_path(path: impl AsRef<Path>) -> zup_plan::TargetPath {
+    zup_plan::TargetPath::new(
         Target::parse("windows-x64").unwrap(),
         path.as_ref().to_string_lossy(),
     )
@@ -22,7 +23,7 @@ fn target_path(path: impl AsRef<Path>) -> zup_platform::TargetPath {
 #[test]
 fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
     use zup_core::{Privilege, ResourceKey, SelectedScope};
-    use zup_transaction::{FileRemoval, FileRemovalKind, NodeKind, ReconcileResult};
+    use zup_transaction::{FileRemoval, NodeKind, ReconcileResult};
 
     let (dir, _payload, target_root, source) = setup();
     let destination = target_path(target_root.join("owned.bin"));
@@ -35,7 +36,7 @@ fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
     input.retired_keys.push(key.clone());
     input.removals.push(FileRemoval {
         key: key.clone(),
-        kind: FileRemovalKind::RemoveOwned,
+        kind: RemovalKind::RemoveOwned,
         scope: SelectedScope::User,
         privilege: Privilege::User,
         destination: destination.clone(),
@@ -86,9 +87,9 @@ fn owned_file_removal_reconciles_and_rolls_back_without_touching_drift() {
 fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
     use zup_core::{AppId, Privilege, ResourceKey, SelectedScope};
     use zup_transaction::{
-        FileRemoval, FileRemovalKind, FilesystemTransactionStore, NodeKind, NodeState,
-        OperationExecutor, ReconcileResult, TransactionId, TransactionOutcome, TransactionPhase,
-        TransactionRecord, TransactionStore, recover,
+        FileRemoval, FilesystemTransactionStore, NodeKind, NodeState, OperationExecutor,
+        ReconcileResult, TransactionId, TransactionOutcome, TransactionPhase, TransactionRecord,
+        TransactionStore, recover,
     };
 
     struct RemovalExecutor(WindowsFileExecutor<DirectoryPayloadSource>);
@@ -145,7 +146,7 @@ fn coordinator_recovers_crash_after_owned_file_removal_before_receipt() {
     input.retired_keys.push(key.clone());
     input.removals.push(FileRemoval {
         key,
-        kind: FileRemovalKind::RemoveOwned,
+        kind: RemovalKind::RemoveOwned,
         scope: SelectedScope::User,
         privilege: Privilege::User,
         destination: destination.clone(),
@@ -305,7 +306,7 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
     let stage = stage_node(&dest);
     exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"hello"), 5);
     apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
-    let create = mutation_node("create", FileDelta::Create, &dest);
+    let create = mutation_node("create", FileOperationKind::Create, &dest);
     exec.note_file(&create.id, FilePrecondition::Absent, digest(b"hello"), 5);
     match apply_node(&mut exec, &create, &rel, &dest).expect("create") {
         zup_windows::OperationReceipt::CreateFile(r) => {
@@ -330,7 +331,7 @@ fn a_file_mutation_produces_a_receipt_that_names_what_it_replaced() {
     let stage = stage_node(&dest);
     exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"new!"), 4);
     apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
-    let replace = mutation_node("replace", FileDelta::Replace, &dest);
+    let replace = mutation_node("replace", FileOperationKind::Replace, &dest);
     exec.note_file(
         &replace.id,
         FilePrecondition::Exact {
@@ -371,7 +372,7 @@ fn replacement_rollback_is_repeatable_while_backup_deletion_is_blocked() {
     let stage = stage_node(&destination);
     executor.note_file(&stage.id, FilePrecondition::Absent, digest(b"new!"), 4);
     apply_node(&mut executor, &stage, &relative, &destination).unwrap();
-    let replace = mutation_node("replace", FileDelta::Replace, &destination);
+    let replace = mutation_node("replace", FileOperationKind::Replace, &destination);
     executor.note_file(
         &replace.id,
         FilePrecondition::Exact {
@@ -417,14 +418,18 @@ fn stage_node(dest: &Path) -> zup_transaction::TransactionNode {
     }
 }
 
-fn mutation_node(verb: &str, delta: FileDelta, dest: &Path) -> zup_transaction::TransactionNode {
+fn mutation_node(
+    verb: &str,
+    kind: FileOperationKind,
+    dest: &Path,
+) -> zup_transaction::TransactionNode {
     let key = zup_core::ResourceKey::File {
         destination: dest.display().to_string(),
     };
     zup_transaction::TransactionNode {
         id: OperationId::resource(verb, &key),
         phase: zup_transaction::Phase::FileMutation,
-        kind: zup_transaction::NodeKind::FileMutation { key, delta },
+        kind: zup_transaction::NodeKind::FileMutation { key, delta: kind },
         declaration_order: 2,
         meta: zup_transaction::NodeMeta::default(),
     }
@@ -434,12 +439,12 @@ fn mutation_node(verb: &str, delta: FileDelta, dest: &Path) -> zup_transaction::
 fn a_target_that_changed_after_the_plan_is_refused_and_left_alone() {
     for (delta, on_disk, expected) in [
         (
-            FileDelta::Create,
+            FileOperationKind::Create,
             b"foreign".as_slice(),
             b"foreign".as_slice(),
         ),
         (
-            FileDelta::Replace,
+            FileOperationKind::Replace,
             b"CHANGED".as_slice(),
             b"CHANGED".as_slice(),
         ),
@@ -534,7 +539,7 @@ fn verification_follows_every_part_of_a_receipt() {
     let staged_path = PathBuf::from(staged_path);
     verify_installed_file(&stage_receipt).expect("staged payload matches");
 
-    let create = mutation_node("create", FileDelta::Create, &dest);
+    let create = mutation_node("create", FileOperationKind::Create, &dest);
     exec.note_file(&create.id, FilePrecondition::Absent, digest(b"hello"), 5);
     let created = zup_windows::transaction_receipt(
         apply_node(&mut exec, &create, &rel, &dest).expect("create"),
@@ -570,7 +575,7 @@ fn verification_follows_every_part_of_a_receipt() {
     let stage = stage_node(&dest);
     exec.note_file(&stage.id, FilePrecondition::Absent, digest(b"new!"), 4);
     apply_node(&mut exec, &stage, &rel, &dest).expect("stage");
-    let replace = mutation_node("replace", FileDelta::Replace, &dest);
+    let replace = mutation_node("replace", FileOperationKind::Replace, &dest);
     exec.note_file(
         &replace.id,
         FilePrecondition::Exact {
@@ -605,7 +610,7 @@ fn verification_follows_every_part_of_a_receipt() {
 #[test]
 fn removal_verification_requires_absent_destination_and_intact_backup() {
     use zup_core::{Privilege, ResourceKey, SelectedScope};
-    use zup_transaction::{FileRemoval, FileRemovalKind, NodeKind};
+    use zup_transaction::{FileRemoval, NodeKind};
     use zup_windows::verify_installed_file;
 
     let (dir, _payload, target_root, source) = setup();
@@ -619,7 +624,7 @@ fn removal_verification_requires_absent_destination_and_intact_backup() {
     input.retired_keys.push(key.clone());
     input.removals.push(FileRemoval {
         key: key.clone(),
-        kind: FileRemovalKind::RemoveOwned,
+        kind: RemovalKind::RemoveOwned,
         scope: SelectedScope::User,
         privilege: Privilege::User,
         destination: destination.clone(),

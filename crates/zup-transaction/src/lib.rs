@@ -17,7 +17,8 @@ mod private;
 mod reconciliation;
 mod record;
 pub use reconciliation::{
-    ReconciliationError, ReconciliationState, reconcile_committed, settled_records,
+    LedgerPublication, PublicationError, ReconciliationError, ReconciliationState,
+    ledger_publication, reconcile_committed, retired_records, settled_records,
 };
 mod storage;
 
@@ -28,9 +29,8 @@ pub use coordinator::{
 pub use executor::{CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult};
 pub use id::{OperationId, TransactionId};
 pub use input::{
-    BackendOperation, BackendOperationIntent, FileDelta, FilePrecondition, FileRemoval,
-    FileRemovalKind, FileWork, MAX_BACKEND_DEPENDENCIES, MAX_BACKEND_PAYLOAD_BYTES,
-    TransactionInput, TransactionInputError, TransactionResource,
+    BackendOperation, BackendOperationIntent, FileRemoval, MAX_BACKEND_DEPENDENCIES,
+    MAX_BACKEND_PAYLOAD_BYTES, TransactionInput, TransactionInputError, TransactionResource,
 };
 pub use lock::{InstallationLock, LockError, LockScope};
 pub use plan::{

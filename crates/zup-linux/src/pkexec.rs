@@ -158,14 +158,8 @@ impl WorkerChild for FakeWorkerChild {
 pub fn map_launch(outcome: &LaunchOutcome) -> Result<(), IpcError> {
     match outcome.code {
         Some(0) => Ok(()),
-        Some(126) => {
-            if outcome.stderr.to_lowercase().contains("dismissed") {
-                Err(IpcError::PkexecCancelled)
-            } else {
-                Err(IpcError::AuthorizationFailed(outcome.stderr.clone()))
-            }
-        }
-        Some(127) => Err(IpcError::PkexecUnavailable(outcome.stderr.clone())),
+        Some(126) => Err(IpcError::PkexecCancelled),
+        Some(127) => Err(IpcError::AuthorizationFailed(outcome.stderr.clone())),
         Some(code) => Err(IpcError::PkexecWorkerFailed(format!(
             "exit {code}: {}",
             outcome.stderr.trim()
@@ -215,12 +209,14 @@ mod tests {
         assert!(map_launch(&outcome).is_ok());
     }
 
-    #[test]
-    fn dismissal_maps_to_cancelled() {
+    #[rstest::rstest]
+    #[case("")]
+    #[case("Authentication dialog dismissed")]
+    #[case("Authentifizierung abgebrochen")]
+    fn dismissal_uses_the_status_independently_of_locale(#[case] stderr: &str) {
         let outcome = LaunchOutcome {
             code: Some(126),
-            stderr: "Error executing command as another user: User dismissed authentication dialog"
-                .into(),
+            stderr: stderr.into(),
         };
         assert!(matches!(
             map_launch(&outcome),
@@ -231,24 +227,12 @@ mod tests {
     #[test]
     fn denial_maps_to_authorization_failed_not_cancelled() {
         let outcome = LaunchOutcome {
-            code: Some(126),
+            code: Some(127),
             stderr: "Error executing command as another user: Not authorized".into(),
         };
         assert!(matches!(
             map_launch(&outcome),
             Err(IpcError::AuthorizationFailed(_))
-        ));
-    }
-
-    #[test]
-    fn missing_mechanism_maps_to_unavailable() {
-        let outcome = LaunchOutcome {
-            code: Some(127),
-            stderr: "command not found".into(),
-        };
-        assert!(matches!(
-            map_launch(&outcome),
-            Err(IpcError::PkexecUnavailable(_))
         ));
     }
 
@@ -293,7 +277,7 @@ mod tests {
         let denied = FakePkexec {
             pid: 4243,
             outcome: LaunchOutcome {
-                code: Some(126),
+                code: Some(127),
                 stderr: "Not authorized".into(),
             },
         };

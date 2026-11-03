@@ -461,3 +461,48 @@ impl std::fmt::Display for SessionId {
         write!(f, "{}", self.0)
     }
 }
+
+impl ResourceKey {
+    pub fn canonical_for(&self, target: &crate::Target) -> Self {
+        if target.operating_system() != crate::TargetOperatingSystem::Windows {
+            return self.clone();
+        }
+        let path = |value: &str| target.path_identity(value);
+        match self {
+            Self::File { destination } => Self::File {
+                destination: path(destination),
+            },
+            Self::Maintenance {
+                app_id,
+                version,
+                destination,
+            } => Self::Maintenance {
+                app_id: app_id.clone(),
+                version: version.clone(),
+                destination: path(destination),
+            },
+            Self::Launcher { location, name } => Self::Launcher {
+                location: *location,
+                name: name.to_lowercase(),
+            },
+            Self::PathEntry { value } => Self::PathEntry { value: path(value) },
+            Self::Service { id } => Self::Service {
+                id: ServiceId::new(id.as_str().to_lowercase())
+                    .expect("case folding preserves service IDs"),
+            },
+            Self::Protocol { scheme } => Self::Protocol {
+                scheme: ProtocolScheme::new(scheme.as_str().to_lowercase())
+                    .expect("case folding preserves schemes"),
+            },
+            Self::FileAssociation { id } => Self::FileAssociation {
+                id: FileAssociationId::new(id.as_str().to_lowercase())
+                    .expect("case folding preserves association IDs"),
+            },
+            Self::FileAssociationExtension { extension } => Self::FileAssociationExtension {
+                extension: FileExtension::new(extension.as_str().to_lowercase())
+                    .expect("case folding preserves extensions"),
+            },
+            Self::Backend { .. } => self.clone(),
+        }
+    }
+}

@@ -43,9 +43,7 @@ pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
         Some(Commands::Modify(args)) => lifecycle::run(context, lifecycle::Verb::Modify, args),
         Some(Commands::Repair(args)) => lifecycle::run(
             context,
-            lifecycle::Verb::Repair {
-                force_files: args.force_files,
-            },
+            lifecycle::Verb::Repair { force: args.force },
             args.install,
         ),
         Some(Commands::Update(args)) => crate::maintenance::run_update(context, args),
@@ -168,7 +166,7 @@ pub struct RepairArgs {
     #[command(flatten)]
     pub install: LifecycleArgs,
     #[arg(long)]
-    pub force_files: bool,
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -188,6 +186,27 @@ pub(crate) struct UninstallRunnerArgs {
 }
 
 impl Cli {
+    pub(crate) fn may_show_error_dialog(&self) -> bool {
+        if self.output_format() != OutputFormat::Human {
+            return false;
+        }
+        match &self.command {
+            None => true,
+            Some(Commands::Install(args) | Commands::Modify(args) | Commands::Upgrade(args)) => {
+                args.ui
+            }
+            Some(Commands::Repair(args)) => args.install.ui,
+            Some(Commands::Uninstall(args)) => args.ui,
+            Some(Commands::UninstallRunner(args)) => args.uninstall.ui,
+            Some(
+                Commands::Update(_)
+                | Commands::Worker { .. }
+                | Commands::TerminalRunner(_)
+                | Commands::Recover(_),
+            ) => false,
+        }
+    }
+
     pub(crate) fn output_format(&self) -> OutputFormat {
         match &self.command {
             Some(Commands::Install(args))

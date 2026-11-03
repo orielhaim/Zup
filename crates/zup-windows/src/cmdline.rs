@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use zup_core::Target;
-use zup_platform::{CommandSpec, TargetPath};
+use zup_plan::{CommandSpec, TargetPath};
 
 pub fn format_command_line(executable: &Path, arguments: &[String]) -> String {
     let mut line = String::new();

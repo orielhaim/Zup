@@ -107,7 +107,7 @@ pub fn print_usage() {
     println!("  --source <dir>           a local release tree to read before the network");
     println!("  --non-interactive, --yes never ask a question");
     println!("  --plain                  line prompts without terminal effects");
-    println!("  --force-files            repair files even when nothing drifted");
+    println!("  --force            repair files even when nothing drifted");
     println!("  --enable <id>, --disable <id>");
     println!("                           components to include or skip");
     println!("  --install-directory <dir>");

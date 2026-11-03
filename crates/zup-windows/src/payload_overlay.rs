@@ -8,7 +8,7 @@ use thiserror::Error;
 use zup_core::{
     AppId, ComponentId, PLUGIN_PAYLOAD_ROOT, RelativePath, SelectedScope, Sha256Digest, hash_reader,
 };
-use zup_plan::{GeneratedFile, InstallPlan};
+use zup_plan::{DesiredState, GeneratedFile};
 use zup_transaction::{NodeKind, TransactionPlan};
 
 use crate::durable::{DurableError, write_durable};
@@ -149,7 +149,7 @@ impl PayloadOverlayIdentity {
         )
     }
 
-    pub fn from_install_plan(plan: &InstallPlan) -> Result<Self, PayloadOverlayError> {
+    pub fn from_desired_state(plan: &DesiredState) -> Result<Self, PayloadOverlayError> {
         Self::from_parts(
             plan.app.id.clone(),
             plan.app.version.clone(),
@@ -292,10 +292,10 @@ impl PayloadOverlayIdentity {
 
 pub fn materialize_payload_overlay(
     overlay_base_root: &Path,
-    plan: &InstallPlan,
+    plan: &DesiredState,
     generated_files: &[GeneratedFile],
 ) -> Result<Option<PathBuf>, PayloadOverlayError> {
-    let identity = PayloadOverlayIdentity::from_install_plan(plan)?;
+    let identity = PayloadOverlayIdentity::from_desired_state(plan)?;
     let Some(overlay_root) = identity.path_under(overlay_base_root) else {
         if generated_files.is_empty() {
             return Ok(None);
@@ -783,11 +783,10 @@ fn io_error(path: &Path, source: std::io::Error) -> PayloadOverlayError {
 mod tests {
     use super::*;
     use zup_core::{App, NonEmptyString, ResourceKey, Target, Template};
-    use zup_plan::{PlanSummary, PlannedFile};
-    use zup_platform::TargetPath;
-    use zup_transaction::{
-        FileDelta, FilePrecondition, FileWork, TransactionInput, compile_transaction,
-    };
+    use zup_plan::DesiredFile;
+    use zup_plan::TargetPath;
+    use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
+    use zup_transaction::{TransactionInput, compile_transaction};
 
     fn generated_source() -> RelativePath {
         RelativePath::new("__zup_plugins__/generated.bin").unwrap()
@@ -804,9 +803,9 @@ mod tests {
         }
     }
 
-    fn install_plan() -> InstallPlan {
+    fn install_plan() -> DesiredState {
         let generated = generated_file();
-        InstallPlan {
+        DesiredState {
             app: App {
                 id: AppId::new("com.example.overlay").unwrap(),
                 name: NonEmptyString::new("Overlay").unwrap(),
@@ -820,7 +819,7 @@ mod tests {
             install_directory: Template::parse("${location.user_data}/Overlay").unwrap(),
             selected_components: vec![ComponentId::new("core").unwrap()],
             prerequisites: Vec::new(),
-            files: vec![PlannedFile {
+            files: vec![DesiredFile {
                 key: ResourceKey::File {
                     destination: generated.destination.to_string(),
                 },
@@ -836,26 +835,19 @@ mod tests {
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: PlanSummary {
-                file_count: 1,
-                install_bytes: generated.size,
-                selected_component_count: 1,
-                resource_count: 0,
-                requires_authorization: false,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
+            preset: None,
         }
     }
 
     #[test]
     fn identity_path_covers_the_app_version() {
         let state_root = Path::new(r"C:\state");
-        let first = PayloadOverlayIdentity::from_install_plan(&install_plan()).unwrap();
+        let first = PayloadOverlayIdentity::from_desired_state(&install_plan()).unwrap();
 
         let mut changed = install_plan();
         changed.app.version = Version::parse("1.2.4").unwrap();
-        let changed = PayloadOverlayIdentity::from_install_plan(&changed).unwrap();
+        let changed = PayloadOverlayIdentity::from_desired_state(&changed).unwrap();
         assert_ne!(first.path_under(state_root), changed.path_under(state_root));
     }
 
@@ -864,7 +856,7 @@ mod tests {
         let install = install_plan();
         let mut input = TransactionInput::new(install.target);
         input.selected_components = install.selected_components.clone();
-        input.files.push(FileWork {
+        input.files.push(FileOperation {
             key: install.files[0].key.clone(),
             source_relative: install.files[0].source_relative.clone(),
             destination: TargetPath::new(
@@ -878,11 +870,12 @@ mod tests {
 
             privilege: install.files[0].privilege,
             executable: install.files[0].executable,
-            delta: FileDelta::Create,
+            kind: FileOperationKind::Create,
+            conflict: None,
         });
         let transaction = compile_transaction(&input).unwrap();
         let state_root = Path::new("state");
-        let from_install = PayloadOverlayIdentity::from_install_plan(&install).unwrap();
+        let from_install = PayloadOverlayIdentity::from_desired_state(&install).unwrap();
         let from_transaction = PayloadOverlayIdentity::from_transaction(
             install.app.id.clone(),
             install.app.version.clone(),
@@ -917,7 +910,7 @@ mod tests {
         assert!(matches!(error, PayloadOverlayError::DuplicateSource { .. }));
 
         let state_root = root.path().join("state-not-a-file");
-        let identity = PayloadOverlayIdentity::from_install_plan(&plan).unwrap();
+        let identity = PayloadOverlayIdentity::from_desired_state(&plan).unwrap();
         let generated = generated_file();
         let target = resolve_overlay_path(
             &identity.path_under(&state_root).unwrap(),

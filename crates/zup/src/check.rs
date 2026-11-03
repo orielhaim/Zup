@@ -25,16 +25,6 @@ pub fn run_check(
     let mut variants = Vec::with_capacity(loaded.selected_targets.len());
     let mut files = 0usize;
     for (config, plan) in loaded.selected_targets.iter().zip(&loaded.build.targets) {
-        // broken plugin as valid, which is the one thing a check must never do.
-        if !plan.installer.plugins.is_empty() {
-            zup_plugin_build::compile_plugins(plan).map_err(|error| {
-                crate::failure::error_with_help(
-                    "zup.check.plugin_compile_failed",
-                    format!("plugin check for `{}`: {error}", config.profile),
-                    "Fix the plugin source, or remove it from the profile.",
-                )
-            })?;
-        }
         reporter.log(
             LogLevel::Info,
             format!(
@@ -106,8 +96,8 @@ fn composition(
         .collect::<Vec<_>>()
         .join(", ");
     if borrowed.iter().any(|variant| {
-        !zup_platform::capabilities(variant.target())
-            .is_some_and(|caps| caps.artifacts == zup_platform::ArtifactSupport::Universal)
+        !zup_plan::capabilities(variant.target())
+            .is_some_and(|caps| caps.artifacts == zup_plan::ArtifactSupport::Universal)
     }) {
         let linux = loaded
             .selected_targets
@@ -241,7 +231,7 @@ fn plan_installation(
         }
     };
     let summary = format!(
-        "Install {} {} into {}",
+        "Simulated deployment of {} {} into {} (machine state not inspected)",
         installer.app.name, installer.app.version, target.install_directory
     );
     reporter.log(LogLevel::Info, &summary);
@@ -307,15 +297,23 @@ fn plan_installation(
     }
     reporter.log(
         LogLevel::Info,
-        zup_presentation::PlanPreview::from_install_plan(&planned.plan).human(),
+        zup_presentation::PlanPreview::from_desired_state(&target)
+            .map_err(|error| crate::failure::error("zup.plan.contract", error.to_string()))?
+            .human(),
     );
     Ok(AutomationResult::new(zup_automation::OPERATION_PLAN)
         .with_application(crate::automation::application(&installer.app))
         .with_targets(crate::automation::targets(&loaded.selected_targets))
         .with_details(Details::Plan(PlanDetails {
+            machine_state_observed: false,
             scope: scope.to_string(),
             install_directory: Some(target.install_directory.to_string()),
-            estimated_bytes: ByteCount::new(target.summary.install_bytes),
+            estimated_bytes: ByteCount::new(
+                target
+                    .summary()
+                    .map_err(|error| crate::failure::error("zup.plan.contract", error.to_string()))?
+                    .install_bytes,
+            ),
             change_count: resources.len(),
             resources,
         }))

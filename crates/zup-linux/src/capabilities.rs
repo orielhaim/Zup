@@ -10,7 +10,7 @@ fn is_linux_target(target: &Target) -> bool {
 }
 
 pub fn is_supported_linux_target(target: &Target) -> bool {
-    is_linux_target(target) && zup_platform::capabilities(target).is_some()
+    is_linux_target(target) && zup_plan::capabilities(target).is_some()
 }
 
 pub fn linux_selection_errors(target: &Target, frontend: Frontend) -> Vec<String> {
@@ -36,7 +36,7 @@ fn linux_target_errors(target: &Target) -> Vec<String> {
 }
 
 fn linux_frontend_errors(target: &Target, frontend: Frontend) -> Vec<String> {
-    if zup_platform::capabilities(target).is_some_and(|caps| caps.frontends.contains(&frontend)) {
+    if zup_plan::capabilities(target).is_some_and(|caps| caps.frontends.contains(&frontend)) {
         return Vec::new();
     }
     vec![format!(
@@ -84,7 +84,7 @@ fn resource_errors(
     plan: &TargetBuildPlan,
 ) -> Vec<String> {
     let mut errors = Vec::new();
-    if let Some(capabilities) = zup_platform::capabilities(&installer.target) {
+    if let Some(capabilities) = zup_plan::capabilities(&installer.target) {
         for &scope in scopes {
             errors.extend(capabilities.resource_errors(installer, scope));
         }

@@ -9,9 +9,9 @@ use crate::shortcut_name::is_reserved_device_stem;
 #[cfg(windows)]
 use zup_core::Target;
 use zup_core::TargetOperatingSystem;
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
 #[cfg(windows)]
-use zup_platform::TargetPathError;
+use zup_plan::TargetPathError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetPathValidationError {
@@ -44,10 +44,6 @@ pub fn validate_windows_target_path(path: &TargetPath) -> Result<(), TargetPathV
         }
     }
     Ok(())
-}
-
-pub fn windows_target_path_identity(path: &TargetPath) -> String {
-    path.as_str().to_lowercase()
 }
 
 pub fn to_host_path(path: &TargetPath) -> Result<PathBuf, TargetPathLoweringError> {
@@ -171,8 +167,8 @@ mod tests {
     fn identity_ignores_case_and_separator_spelling() {
         let target = Target::parse("windows-x64").unwrap();
         assert_eq!(
-            windows_target_path_identity(&target_path(r"C:\Apps\Acme")),
-            windows_target_path_identity(&TargetPath::new(target, r"c:/apps/acme").unwrap()),
+            target_path(r"C:\Apps\Acme").identity(),
+            TargetPath::new(target, r"c:/apps/acme").unwrap().identity(),
         );
     }
 

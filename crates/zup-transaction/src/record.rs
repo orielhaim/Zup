@@ -189,6 +189,18 @@ impl TransactionRecord {
             .validate()
             .map_err(|_| CorruptReason::InvalidPlan)?;
         for node in &self.plan.nodes {
+            if node
+                .meta
+                .privilege
+                .is_some_and(|privilege| privilege != self.scope.authorization())
+                || node
+                    .meta
+                    .removal
+                    .as_ref()
+                    .is_some_and(|removal| removal.scope != self.scope)
+            {
+                return Err(CorruptReason::InvalidPlan);
+            }
             let Some(state) = self.nodes.get(&node.id) else {
                 return Err(CorruptReason::NodeStateMismatch);
             };
@@ -288,11 +300,11 @@ fn receipt_matches_node(
         ..
     } = receipt
     {
-        let Ok(destination) = zup_platform::TargetPath::new(target, destination) else {
+        let Ok(destination) = zup_plan::TargetPath::new(target, destination) else {
             return false;
         };
         if created_directories.iter().any(|directory| {
-            !zup_platform::TargetPath::new(target, directory).is_ok_and(|directory| {
+            !zup_plan::TargetPath::new(target, directory).is_ok_and(|directory| {
                 directory.parent().is_some()
                     && directory != destination
                     && destination.starts_with(&directory)
@@ -334,7 +346,7 @@ fn receipt_matches_node(
             destination_matches(key, destination)
                 && expected_content(*new_size, new_sha256)
                 && node.meta.executable.unwrap_or(false) == *executable
-                && matches!(node.meta.file_precondition, Some(crate::FilePrecondition::Exact { size, sha256 })
+                && matches!(node.meta.file_precondition, Some(zup_plan::FilePrecondition::Exact { size, sha256 })
                     if size == *previous_size && previous_sha256.parse::<zup_core::Sha256Digest>().ok() == Some(sha256))
         }
         (
@@ -360,14 +372,16 @@ fn receipt_matches_node(
         (NodeKind::StageFile { .. }, OperationReceipt::StageFile { .. }) => true,
         (
             NodeKind::FileMutation {
-                delta: crate::input::FileDelta::Create | crate::input::FileDelta::RestoreOwned,
+                delta:
+                    zup_plan::FileOperationKind::Create | zup_plan::FileOperationKind::RestoreOwned,
                 ..
             },
             OperationReceipt::CreateFile { .. },
         ) => true,
         (
             NodeKind::FileMutation {
-                delta: crate::input::FileDelta::Replace | crate::input::FileDelta::RepairOwned,
+                delta:
+                    zup_plan::FileOperationKind::Replace | zup_plan::FileOperationKind::RepairOwned,
                 ..
             },
             OperationReceipt::ReplaceFile { .. },

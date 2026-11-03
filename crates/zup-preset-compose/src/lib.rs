@@ -58,7 +58,7 @@ pub fn resolve(
     installer: &Installer,
     target: &Target,
     shipped: &dyn Fn() -> Result<PathBuf, String>,
-    policy: &dyn zup_platform::SourceFilePolicy,
+    policy: &dyn zup_core::SourceFilePolicy,
 ) -> Result<Resolved, PresetProblem> {
     let package = package_for(ui, project_root, shipped)?;
     let settings =
@@ -201,7 +201,7 @@ pub fn select(
 pub fn prepare(
     project_root: &Path,
     selected: &Selected,
-    policy: &dyn zup_platform::SourceFilePolicy,
+    policy: &dyn zup_core::SourceFilePolicy,
 ) -> Result<Prepared, PresetProblem> {
     let mut assets = Vec::with_capacity(selected.asset_settings.len());
     let mut declared = Vec::with_capacity(selected.asset_settings.len());

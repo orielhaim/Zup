@@ -148,6 +148,10 @@ jobs:
         shell: bash
         run: cargo nextest run --all-features --no-fail-fast --profile fast $PORTABLE $LINUX
 
+      - name: Test failure diagnostics
+        if: always()
+        run: python scripts/ci/report-tests.py
+
       - name: Windows doc tests
         if: runner.os == 'Windows'
         run: cargo test --workspace --all-features --doc

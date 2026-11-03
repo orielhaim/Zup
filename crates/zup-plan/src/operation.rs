@@ -1,25 +1,13 @@
-//! Execution operations, conflicts, and summary.
+//! Typed resource changes and mutation preconditions.
 
 use crate::observe::{
     ObservedExtensionState, ObservedFileAssociationState, ObservedLauncherState,
     ObservedProtocolState, ObservedServiceState,
 };
+use crate::{CommandSpec, TargetPath};
 use serde::{Deserialize, Serialize};
+use zup_core::SelectedScope;
 use zup_core::{Privilege, ProtocolScheme, RelativePath, ResourceKey, ServiceStart, Sha256Digest};
-use zup_platform::{CommandSpec, SelectedScope, TargetPath};
-
-/// High-level comparison result for one desired resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Delta {
-    Create,
-    /// Files only: overwrite a differing regular file.
-    Replace,
-    RestoreOwned,
-    RepairOwned,
-    NoOp,
-    Conflict,
-}
 
 /// File payload decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,8 +33,9 @@ pub enum FilePrecondition {
 /// Launcher decision (no Replace until ownership is proven).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LauncherOperationKind {
+pub enum IntegrationChangeKind {
     Create,
+    RepairOwned,
     UpdateOwned,
     RestoreOwned,
     NoOp,
@@ -62,42 +51,6 @@ pub enum PathOperationKind {
     Present,
     UpdateOwned,
     RestoreOwned,
-    Conflict,
-    Drift,
-}
-
-/// Service decision (no reconfigure until ownership is proven).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServiceOperationKind {
-    Create,
-    UpdateOwned,
-    RestoreOwned,
-    NoOp,
-    Conflict,
-    Drift,
-}
-
-/// Protocol registration decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProtocolOperationKind {
-    Create,
-    UpdateOwned,
-    RestoreOwned,
-    NoOp,
-    Conflict,
-    Drift,
-}
-
-/// File-association decision (association and extension considered together).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileAssociationOperationKind {
-    Create,
-    UpdateOwned,
-    RestoreOwned,
-    NoOp,
     Conflict,
     Drift,
 }
@@ -159,7 +112,7 @@ pub struct FileOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LauncherOperation {
     pub key: ResourceKey,
-    pub kind: LauncherOperationKind,
+    pub kind: IntegrationChangeKind,
     pub launcher_path: TargetPath,
     pub target: TargetPath,
     pub arguments: Vec<String>,
@@ -192,7 +145,7 @@ pub struct PathOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceOperation {
     pub key: ResourceKey,
-    pub kind: ServiceOperationKind,
+    pub kind: IntegrationChangeKind,
     pub id: String,
     pub name: String,
     pub display_name: String,
@@ -207,7 +160,7 @@ pub struct ServiceOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolOperation {
     pub key: ResourceKey,
-    pub kind: ProtocolOperationKind,
+    pub kind: IntegrationChangeKind,
     pub scheme: ProtocolScheme,
     pub command: CommandSpec,
     pub previous: ObservedProtocolState,
@@ -220,9 +173,9 @@ pub struct ProtocolOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileAssociationOperation {
     pub key: ResourceKey,
-    pub kind: FileAssociationOperationKind,
-    pub association_kind: FileAssociationOperationKind,
-    pub extension_kind: FileAssociationOperationKind,
+    pub kind: IntegrationChangeKind,
+    pub association_kind: IntegrationChangeKind,
+    pub extension_kind: IntegrationChangeKind,
     pub extension: String,
     pub id: String,
     pub description: Option<String>,
@@ -234,56 +187,12 @@ pub struct FileAssociationOperation {
     pub conflict: Option<Conflict>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManagedOperation {
-    Launcher(LauncherOperation),
-    Path(PathOperation),
-    Service(ServiceOperation),
-    Protocol(ProtocolOperation),
-    FileAssociation(FileAssociationOperation),
-    Extension(FileAssociationOperation),
-}
-
-/// Derived execution summary with checked counts and byte totals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct ExecutionSummary {
-    pub files_create: usize,
-    pub files_replace: usize,
-    pub files_unchanged: usize,
-    pub files_conflict: usize,
-
-    pub launchers_create: usize,
-    pub launchers_unchanged: usize,
-    pub launchers_conflict: usize,
-
-    pub path_entries_add: usize,
-    pub path_entries_present: usize,
-    pub path_entries_conflict: usize,
-
-    pub services_create: usize,
-    pub services_unchanged: usize,
-    pub services_conflict: usize,
-
-    pub protocols_create: usize,
-    pub protocols_unchanged: usize,
-    pub protocols_conflict: usize,
-
-    pub file_associations_create: usize,
-    pub file_associations_unchanged: usize,
-    pub file_associations_conflict: usize,
-
-    pub write_bytes: u64,
-    pub total_desired_bytes: u64,
-    /// True when at least one planned operation needs system authorization.
-    pub requires_authorization: bool,
-}
-
-/// Full v1 file-and-resource delta between desired and observed state.
+/// Resource changes between validated desired and observed state.
 ///
 /// Deterministic linear decisions - no execution DAG yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExecutionPlan {
+    pub binding: Option<crate::DeploymentBinding>,
     pub selected_components: Vec<zup_core::ComponentId>,
     #[serde(default)]
     pub install_directory: Option<TargetPath>,
@@ -295,7 +204,6 @@ pub struct ExecutionPlan {
     pub services: Vec<ServiceOperation>,
     pub protocols: Vec<ProtocolOperation>,
     pub file_associations: Vec<FileAssociationOperation>,
-    pub summary: ExecutionSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

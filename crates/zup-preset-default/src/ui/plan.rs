@@ -14,8 +14,8 @@ use zup_sdk::preset::gpui_kit::{
 };
 use zup_sdk::preset::prelude::format_bytes;
 use zup_sdk::preset::presentation::{
-    ChangeGroup, ChangeKind, PlanStatus, PlannedChange, RequirementPresentation, RequirementStatus,
-    ResourceCategory,
+    ChangeGroup, ChangeKind, PlanBasis, PlanStatus, PlannedChange, RequirementPresentation,
+    RequirementStatus, ResourceCategory,
 };
 
 use crate::model;
@@ -125,32 +125,35 @@ impl RenderOnce for PlanDetails {
                 )
             })
             .child(ContextLine::new(self.context.clone()))
+            .when(plan.basis != PlanBasis::ObservedMachine, |this| {
+                this.child(caption("Machine state has not been inspected.", cx))
+            })
             .when(!plan.requirements.is_empty(), |this| {
                 this.child(requirements(&plan.requirements, cx))
             })
             .child(
-                Section::new("Changes to this computer")
-                    .when(unchanged > 0, |section| {
-                        section.trailing(caption(format!("{unchanged} unchanged"), cx))
-                    })
-                    .when(changing.is_empty(), |section| {
-                        section.child(muted("Nothing here would change.", cx))
-                    })
-                    .child(
-                        v_flex()
-                            .gap(space::XS)
-                            .children(changing.into_iter().map(|group| {
-                                let category = group.category;
-                                let toggle = self.on_toggle.clone();
-                                Group {
-                                    group: group.clone(),
-                                    open: self.expanded.contains(&category),
-                                    on_toggle: Rc::new(move |window, cx| {
-                                        toggle(category, window, cx)
-                                    }),
-                                }
-                            })),
-                    ),
+                Section::new(match plan.basis {
+                    PlanBasis::ObservedMachine => "Changes to this computer",
+                    PlanBasis::DesiredState => "Desired deployment",
+                    PlanBasis::Simulation => "Simulated changes",
+                })
+                .when(unchanged > 0, |section| {
+                    section.trailing(caption(format!("{unchanged} unchanged"), cx))
+                })
+                .when(changing.is_empty(), |section| {
+                    section.child(muted("Nothing here would change.", cx))
+                })
+                .child(v_flex().gap(space::XS).children(
+                    changing.into_iter().map(|group| {
+                        let category = group.category;
+                        let toggle = self.on_toggle.clone();
+                        Group {
+                            group: group.clone(),
+                            open: self.expanded.contains(&category),
+                            on_toggle: Rc::new(move |window, cx| toggle(category, window, cx)),
+                        }
+                    }),
+                )),
             )
             .into_any_element()
     }

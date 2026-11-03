@@ -28,7 +28,7 @@ pub use error::WireError;
 pub use identifiers::{ComponentId, ComponentIdError, InstallScope};
 pub use presentation::{
     ChangeGroup, ChangeKind, DiagnosticKind, DiagnosticPresentation, InstallationHealth,
-    OperationPhase, PlanPreview, PlanStatus, PlannedChange, ProgressPresentation,
+    OperationPhase, PlanBasis, PlanPreview, PlanStatus, PlannedChange, ProgressPresentation,
     RequirementPresentation, RequirementStatus, ResourceCategory, UpdatePresentation, UpdateState,
     format_bytes,
 };

@@ -36,10 +36,8 @@ zup-compose.workspace = true
 zup-core.workspace = true
 zup-binary.workspace = true
 zup-distribute-github.workspace = true
-zup-exec.workspace = true
 zup-manifest.workspace = true
 zup-pe.workspace = true
-zup-platform.workspace = true
 zup-plan.workspace = true
 zup-plugin-build.workspace = true
 zup-plugin-contract.workspace = true
@@ -56,12 +54,9 @@ zup-linux.workspace = true
 zup-windows.workspace = true
 
 [dev-dependencies]
-zup-plugin-abi = { workspace = true }
 rstest.workspace = true
 tempfile.workspace = true
 zstd.workspace = true
 wat = "1"
 windows-registry.workspace = true
-wit-component = { version = "0.262", features = ["dummy-module"] }
-wit-parser = "0.262"
 zup-xtask.workspace = true

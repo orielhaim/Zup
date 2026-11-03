@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use windows_link::link;
 use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE, Type};
 use zup_core::{ResourceKey, SelectedScope, Target};
-use zup_exec::{
+use zup_plan::{
     ExtensionState, FileAssociationState, LauncherState, OwnedResource, ProtocolState, ServiceState,
 };
 use zup_transaction::{OperationReceipt, ReconcileResult, TransactionNode};
@@ -510,12 +510,12 @@ fn expect<T: PartialEq + std::fmt::Debug>(
     }
 }
 
-fn observed_launcher(
-    observed: zup_exec::ObservedLauncherState,
+pub(crate) fn observed_launcher(
+    observed: zup_plan::ObservedLauncherState,
 ) -> Result<LauncherState, IntegrationError> {
     Ok(match observed {
-        zup_exec::ObservedLauncherState::Absent => LauncherState::Absent,
-        zup_exec::ObservedLauncherState::Launcher {
+        zup_plan::ObservedLauncherState::Absent => LauncherState::Absent,
+        zup_plan::ObservedLauncherState::Launcher {
             target,
             arguments,
             working_directory,
@@ -524,29 +524,19 @@ fn observed_launcher(
             arguments,
             working_directory,
         },
-        zup_exec::ObservedLauncherState::InvalidLauncher
-        | zup_exec::ObservedLauncherState::NonFile => {
+        zup_plan::ObservedLauncherState::InvalidLauncher
+        | zup_plan::ObservedLauncherState::NonFile => {
             return Err(IntegrationError::Drift("launcher is unreadable".into()));
         }
     })
 }
 
-fn observed_service(
-    observed: zup_exec::ObservedServiceState,
+pub(crate) fn observed_service(
+    observed: zup_plan::ObservedServiceState,
 ) -> Result<ServiceState, IntegrationError> {
-    Ok(match observed {
-        zup_exec::ObservedServiceState::Absent => ServiceState::Absent,
-        zup_exec::ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => ServiceState::Registration {
-            display_name,
-            command,
-            start,
-        },
-    })
+    observed
+        .configuration()
+        .ok_or_else(|| IntegrationError::Drift("service is malformed".into()))
 }
 
 fn rollback_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
@@ -644,10 +634,10 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
             installed,
             ..
         } => match crate::shortcuts::read_shortcut(launcher_path) {
-            Ok(zup_exec::ObservedLauncherState::Absent) => {
+            Ok(zup_plan::ObservedLauncherState::Absent) => {
                 Ok(compare_removal(&LauncherState::Absent, previous, installed))
             }
-            Ok(zup_exec::ObservedLauncherState::Launcher {
+            Ok(zup_plan::ObservedLauncherState::Launcher {
                 target,
                 arguments,
                 working_directory,
@@ -696,10 +686,10 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                 return Ok(ReconcileResult::Ambiguous);
             };
             match crate::scm::query_service(name, target) {
-                Ok(zup_exec::ObservedServiceState::Absent) => {
+                Ok(zup_plan::ObservedServiceState::Absent) => {
                     Ok(compare_removal(&ServiceState::Absent, previous, installed))
                 }
-                Ok(zup_exec::ObservedServiceState::Service {
+                Ok(zup_plan::ObservedServiceState::Service {
                     display_name,
                     command,
                     start,
@@ -713,7 +703,9 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     previous,
                     installed,
                 )),
-                Err(_) => Ok(ReconcileResult::Ambiguous),
+                Ok(zup_plan::ObservedServiceState::InvalidService) | Err(_) => {
+                    Ok(ReconcileResult::Ambiguous)
+                }
             }
         }
         BackendReceipt::Protocol {
@@ -947,7 +939,7 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
 
 fn apply_path(
     key: &ResourceKey,
-    op: &zup_exec::PathOperation,
+    op: &zup_plan::PathOperation,
 ) -> Result<OperationReceipt, IntegrationError> {
     let target = op.value.target();
     let registry_key = environment_key(op.scope, true)?
@@ -1076,7 +1068,7 @@ fn restore_removed_path(
 
 fn apply_protocol(
     key: &ResourceKey,
-    op: &zup_exec::ProtocolOperation,
+    op: &zup_plan::ProtocolOperation,
 ) -> Result<OperationReceipt, IntegrationError> {
     let previous = protocol_from_observed(&op.previous)?;
     if read_protocol(op.scope, op.scheme.as_str(), op.command.executable.target())? != previous {
@@ -1100,7 +1092,7 @@ fn apply_protocol(
 
 fn apply_progid(
     key: &ResourceKey,
-    op: &zup_exec::FileAssociationOperation,
+    op: &zup_plan::FileAssociationOperation,
 ) -> Result<OperationReceipt, IntegrationError> {
     let previous = file_association_from_observed(&op.previous_association)?;
     if read_progid(op.scope, &op.id, op.command.executable.target())? != previous {
@@ -1128,7 +1120,7 @@ fn apply_progid(
 
 fn apply_extension(
     key: &ResourceKey,
-    op: &zup_exec::FileAssociationOperation,
+    op: &zup_plan::FileAssociationOperation,
 ) -> Result<OperationReceipt, IntegrationError> {
     let previous = extension_from_observed(&op.previous_extension)?;
     if read_extension(op.scope, &op.extension)? != previous {
@@ -1544,12 +1536,12 @@ fn write_extension(
     }
 }
 
-fn protocol_from_observed(
-    value: &zup_exec::ObservedProtocolState,
+pub(crate) fn protocol_from_observed(
+    value: &zup_plan::ObservedProtocolState,
 ) -> Result<ProtocolState, IntegrationError> {
     match value {
-        zup_exec::ObservedProtocolState::Absent => Ok(ProtocolState::Absent),
-        zup_exec::ObservedProtocolState::Registration {
+        zup_plan::ObservedProtocolState::Absent => Ok(ProtocolState::Absent),
+        zup_plan::ObservedProtocolState::Registration {
             command,
             url_protocol_marker: true,
         } => Ok(ProtocolState::Registration {
@@ -1561,12 +1553,12 @@ fn protocol_from_observed(
     }
 }
 
-fn file_association_from_observed(
-    value: &zup_exec::ObservedFileAssociationState,
+pub(crate) fn file_association_from_observed(
+    value: &zup_plan::ObservedFileAssociationState,
 ) -> Result<FileAssociationState, IntegrationError> {
     match value {
-        zup_exec::ObservedFileAssociationState::Absent => Ok(FileAssociationState::Absent),
-        zup_exec::ObservedFileAssociationState::Registration {
+        zup_plan::ObservedFileAssociationState::Absent => Ok(FileAssociationState::Absent),
+        zup_plan::ObservedFileAssociationState::Registration {
             description,
             command,
         } => Ok(FileAssociationState::Registration {
@@ -1579,12 +1571,12 @@ fn file_association_from_observed(
     }
 }
 
-fn extension_from_observed(
-    value: &zup_exec::ObservedExtensionState,
+pub(crate) fn extension_from_observed(
+    value: &zup_plan::ObservedExtensionState,
 ) -> Result<ExtensionState, IntegrationError> {
     match value {
-        zup_exec::ObservedExtensionState::Absent => Ok(ExtensionState::Absent),
-        zup_exec::ObservedExtensionState::Mapped { association_id } => Ok(ExtensionState::Mapped {
+        zup_plan::ObservedExtensionState::Absent => Ok(ExtensionState::Absent),
+        zup_plan::ObservedExtensionState::Mapped { association_id } => Ok(ExtensionState::Mapped {
             association_id: association_id.clone(),
         }),
         _ => Err(IntegrationError::Drift(
@@ -1593,7 +1585,7 @@ fn extension_from_observed(
     }
 }
 
-fn format_spec(command: &zup_platform::CommandSpec) -> String {
+fn format_spec(command: &zup_plan::CommandSpec) -> String {
     format_command_line(&host_path(&command.executable), &command.arguments)
 }
 

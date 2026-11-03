@@ -96,3 +96,11 @@ impl std::fmt::Display for SelectedScope {
         })
     }
 }
+
+mod document;
+mod source_policy;
+pub use document::{DocumentError, publish, publish_new};
+pub use source_policy::{PortableSourceFilePolicy, SourceFilePolicy};
+
+mod phase;
+pub use phase::OperationPhase;

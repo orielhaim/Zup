@@ -324,8 +324,8 @@ fn build_artifacts(
     reporter: &Reporter,
 ) -> miette::Result<BuildOutcome> {
     if let Some(config) = loaded.selected_targets.iter().find(|config| {
-        !zup_platform::capabilities(&config.target)
-            .is_some_and(|caps| caps.artifacts == zup_platform::ArtifactSupport::Universal)
+        !zup_plan::capabilities(&config.target)
+            .is_some_and(|caps| caps.artifacts == zup_plan::ArtifactSupport::Universal)
     }) {
         return Err(crate::failure::error_with_help(
             "zup.build.linux_composed_artifact",
@@ -722,7 +722,7 @@ fn finish(
             format!("release description: {error}"),
         )
     })?;
-    zup_platform::publish(&path, &bytes).map_err(|error| {
+    zup_core::publish(&path, &bytes).map_err(|error| {
         crate::failure::error(
             "zup.build.release_unwritable",
             format!("release description: {error}"),
@@ -732,7 +732,7 @@ fn finish(
     let plan = signing_plan(&release, &root, args.signing_subject.as_deref())?;
     let pending = plan.pre_compose().count() + plan.post_compose().count();
     let plan_path = path.with_file_name(zup_signing::SIGNING_PLAN_NAME);
-    zup_platform::publish(
+    zup_core::publish(
         &plan_path,
         &plan.encode().map_err(|error| {
             crate::failure::error(

@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 //! A file a plugin generates, tracked as an owned resource for the whole
 //! lifecycle.
 //!
@@ -19,7 +17,7 @@ use std::{fs, path::Path, thread, time::Duration};
 
 use zup_bundle::{CompiledPluginArtifact, PluginArtifact};
 use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest, hash_reader};
-use zup_exec::OwnedResource;
+use zup_plan::OwnedResource;
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
     wit_package_digest,
@@ -236,7 +234,8 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
     assert_eq!(ledger.version.to_string(), "1.0.0");
     let key = ResourceKey::File {
         destination: generated.to_string_lossy().into_owned(),
-    };
+    }
+    .canonical_for(&ledger.target);
     let OwnedResource::File {
         source_relative,
         sha256,
@@ -282,7 +281,7 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
     succeed(&maintenance_v2, &state, "repair", &[]);
     assert_eq!(fs::read_to_string(&generated).unwrap(), want);
     fs::write(&generated, b"corrupt").expect("the generated file is writable");
-    succeed(&maintenance_v2, &state, "repair", &["--force-files"]);
+    succeed(&maintenance_v2, &state, "repair", &["--force"]);
     assert_eq!(fs::read_to_string(&generated).unwrap(), want);
 
     succeed(&maintenance_v2, &state, "uninstall", &[]);

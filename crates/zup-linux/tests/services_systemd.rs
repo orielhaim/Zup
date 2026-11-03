@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use zup_bundle::DirectoryPayloadSource;
 use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, Target};
 use zup_linux::{
-    DesiredService, LinuxFileExecutor, LinuxLedgerStore, MachineRoots, RealSystemd,
-    ServiceCompilation, ServiceSupport, SystemdManager as _, SystemdRoots,
-    compile_machine_execution_plan, probe_systemd, snapshot_services, snapshot_target,
+    LinuxFileExecutor, LinuxLedgerStore, MachineRoots, RealSystemd, ServiceCompilation,
+    ServiceSupport, SystemdManager as _, SystemdRoots, SystemdUnit, compile_machine_execution_plan,
+    probe_systemd, snapshot_services, snapshot_target,
 };
-use zup_platform::{CommandSpec, TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
+use zup_plan::{CommandSpec, DesiredFile, DesiredState, TargetPath};
 use zup_transaction::{
     FilesystemTransactionStore, TransactionCoordinator, TransactionOutcome, compile_transaction,
 };
@@ -59,22 +59,22 @@ fn rendered_units_verify() {
         ServiceStart::Disabled,
     ] {
         let target = zup_core::Target::host().expect("a supported Linux host");
-        let executable = zup_platform::TargetPath::new(target, binary).expect("a path");
-        let service = zup_platform::TargetService {
+        let executable = zup_plan::TargetPath::new(target, binary).expect("a path");
+        let service = zup_plan::DesiredService {
             key: zup_core::ResourceKey::Service {
                 id: zup_core::ServiceId::new("verify").expect("an id"),
             },
             id: zup_core::ServiceId::new("verify").expect("an id"),
             name: zup_core::NonEmptyString::new("Verify").expect("a name"),
             display_name: None,
-            command: zup_platform::CommandSpec::new(
+            command: zup_plan::CommandSpec::new(
                 executable,
                 vec!["--serve".to_owned(), "$HOME".to_owned(), "%u".to_owned()],
             ),
             start,
             privilege: zup_core::Privilege::System,
         };
-        let desired = zup_linux::DesiredService::derive(&service).expect("a service derives");
+        let desired = zup_linux::SystemdUnit::derive(&service).expect("a service derives");
         let dir = tempfile::tempdir().expect("a directory");
         let path = dir.path().join(&desired.unit);
         std::fs::write(&path, &desired.bytes).expect("a unit writes");
@@ -106,7 +106,7 @@ fn real_systemd_service_lifecycle() {
     world.foreign.push(mask.clone());
     assert!(
         world
-            .drive(&plan, zup_exec::LifecycleAction::Install, false)
+            .drive(&plan, zup_plan::LifecycleAction::Install)
             .is_err()
     );
     assert_eq!(
@@ -198,13 +198,17 @@ impl RealWorld {
         zup_core::Target::host().expect("a supported Linux host")
     }
 
-    fn plan(&self, version: &str, start: ServiceStart) -> TargetPlan {
+    fn plan(
+        &self,
+        version: &str,
+        start: ServiceStart,
+    ) -> DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
         let binary = TargetPath::new(Self::target(), &*self.program.join("svc").to_string_lossy())
             .expect("a path");
         let destination = binary.clone();
         let bytes = std::fs::read(self.payload.join("tool")).expect("payload bytes");
         let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).expect("bytes hash");
-        let service = zup_platform::TargetService {
+        let service = zup_plan::DesiredService {
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new(format!("zup-test-{}", self.tag)).expect("an id"),
             },
@@ -215,7 +219,7 @@ impl RealWorld {
             start,
             privilege: Privilege::System,
         };
-        TargetPlan {
+        DesiredState {
             app: zup_core::App {
                 id: AppId::new("com.example.zup-test").expect("an id"),
                 name: zup_core::NonEmptyString::new("Zup Test").expect("a name"),
@@ -230,7 +234,7 @@ impl RealWorld {
                 .expect("a path"),
             selected_components: Vec::new(),
             prerequisites: Vec::new(),
-            files: vec![TargetFile {
+            files: vec![DesiredFile {
                 key: ResourceKey::File {
                     destination: destination.to_string(),
                 },
@@ -246,21 +250,13 @@ impl RealWorld {
             services: vec![service],
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: TargetPlanSummary {
-                file_count: 1,
-                install_bytes: size,
-                resource_count: 1,
-                requires_authorization: true,
-                selected_component_count: 0,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
             preset: None,
         }
     }
 
-    fn resolve_unit(&mut self, plan: &TargetPlan) {
-        let desired = DesiredService::derive(&plan.services[0]).expect("a service derives");
+    fn resolve_unit(&mut self, plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>) {
+        let desired = SystemdUnit::derive(&plan.services[0]).expect("a service derives");
         self.unit = desired.unit;
         self.source = std::path::Path::new("/usr/local/lib/systemd/system").join(&self.unit);
     }
@@ -269,7 +265,7 @@ impl RealWorld {
         LinuxLedgerStore::new(&self.state)
     }
 
-    fn load_ledger(&self) -> Option<zup_exec::InstallLedger> {
+    fn load_ledger(&self) -> Option<zup_plan::InstallLedger> {
         self.ledgers()
             .load(
                 &AppId::new("com.example.zup-test").expect("an id"),
@@ -278,7 +274,11 @@ impl RealWorld {
             .expect("a ledger reads")
     }
 
-    fn snapshot(&self, plan: &TargetPlan, manager: &mut RealSystemd) -> zup_exec::HostSnapshot {
+    fn snapshot(
+        &self,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        manager: &mut RealSystemd,
+    ) -> zup_plan::HostSnapshot {
         let mut snapshot = snapshot_target(plan);
         snapshot.services =
             snapshot_services(plan, manager, &SystemdRoots::production()).expect("a snapshot");
@@ -286,8 +286,8 @@ impl RealWorld {
     }
 
     fn owned_matches(
-        ledger: Option<&zup_exec::InstallLedger>,
-        snapshot: &zup_exec::HostSnapshot,
+        ledger: Option<&zup_plan::InstallLedger>,
+        snapshot: &zup_plan::HostSnapshot,
     ) -> BTreeMap<ResourceKey, bool> {
         let mut matches = BTreeMap::new();
         let Some(ledger) = ledger else {
@@ -295,7 +295,7 @@ impl RealWorld {
         };
         for (key, owned) in &ledger.resources {
             let found = match owned {
-                zup_exec::OwnedResource::File {
+                zup_plan::OwnedResource::File {
                     destination,
                     sha256,
                     size,
@@ -307,18 +307,18 @@ impl RealWorld {
                         })
                     })
                     .unwrap_or(false),
-                zup_exec::OwnedResource::Service { installed, .. } => {
+                zup_plan::OwnedResource::Service { installed, .. } => {
                     snapshot.services.iter().any(|observed| {
                         observed.key == *key
                             && match (&observed.state, installed) {
                                 (
-                                    zup_exec::ObservedServiceState::Service {
+                                    zup_plan::ObservedServiceState::Service {
                                         display_name,
                                         command,
                                         start,
                                         ..
                                     },
-                                    zup_exec::ServiceState::Registration {
+                                    zup_plan::ServiceState::Registration {
                                         display_name: wanted_display,
                                         command: wanted_command,
                                         start: wanted_start,
@@ -341,18 +341,17 @@ impl RealWorld {
 
     fn drive(
         &mut self,
-        plan: &TargetPlan,
-        action: zup_exec::LifecycleAction,
-        force: bool,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        action: zup_plan::LifecycleAction,
     ) -> Result<TransactionOutcome, String> {
         let ledgers = self.ledgers();
         let ledger = self.load_ledger();
         let mut manager = RealSystemd::connect().map_err(|error| format!("connect: {error}"))?;
         let snapshot = self.snapshot(plan, &mut manager);
         let owned_matches = Self::owned_matches(ledger.as_ref(), &snapshot);
-        let execution = zup_exec::plan_lifecycle(
+        let execution = zup_plan::plan_lifecycle(
             action,
-            (action != zup_exec::LifecycleAction::Uninstall).then_some(plan),
+            (action != zup_plan::LifecycleAction::Uninstall).then_some(plan),
             Some(&snapshot),
             ledger.as_ref(),
             &owned_matches,
@@ -360,18 +359,15 @@ impl RealWorld {
         .map_err(|error| format!("lifecycle: {error}"))?;
         let mut input = compile_machine_execution_plan(
             &execution,
-            plan,
+            (!execution.uninstall).then_some(plan),
             ServiceCompilation {
                 roots: &MachineRoots::production(),
                 systemd: &SystemdRoots::production(),
                 manager: &mut manager,
-                force_services: force,
             },
         )
         .map_err(|error| format!("input: {error}"))?;
-        input.observed_transaction = ledger
-            .as_ref()
-            .map(|ledger| ledger.committed_transaction.clone());
+        input.observed_transaction = ledger.as_ref().map(|ledger| ledger.committed_transaction);
         let compiled =
             compile_transaction(&input).map_err(|error| format!("transaction: {error}"))?;
         ledgers
@@ -421,7 +417,7 @@ impl RealWorld {
         let plan = self.plan(version, start);
         self.resolve_unit(&plan);
         let outcome = self
-            .drive(&plan, zup_exec::LifecycleAction::Install, false)
+            .drive(&plan, zup_plan::LifecycleAction::Install)
             .expect("install plans and executes");
         assert_eq!(outcome, TransactionOutcome::Committed);
     }
@@ -430,7 +426,7 @@ impl RealWorld {
         let plan = self.plan(version, start);
         self.resolve_unit(&plan);
         let outcome = self
-            .drive(&plan, zup_exec::LifecycleAction::Upgrade, false)
+            .drive(&plan, zup_plan::LifecycleAction::Upgrade)
             .unwrap_or_else(|error| panic!("upgrade {version} ({start:?}): {error}"));
         assert_eq!(outcome, TransactionOutcome::Committed);
     }
@@ -442,13 +438,13 @@ impl RealWorld {
     ) -> Result<TransactionOutcome, String> {
         let plan = self.plan(version, start);
         self.resolve_unit(&plan);
-        self.drive(&plan, zup_exec::LifecycleAction::Upgrade, false)
+        self.drive(&plan, zup_plan::LifecycleAction::Upgrade)
     }
 
     fn uninstall(&mut self) {
         let plan = self.plan("4.0.0", ServiceStart::Automatic);
         let outcome = self
-            .drive(&plan, zup_exec::LifecycleAction::Uninstall, false)
+            .drive(&plan, zup_plan::LifecycleAction::Uninstall)
             .expect("uninstall plans and executes");
         assert_eq!(outcome, TransactionOutcome::Committed);
     }

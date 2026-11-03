@@ -75,10 +75,7 @@ pub(crate) fn plan_expected(
         })?;
     let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
     let ledger = ledger_store.load(&build.installer.app.id, SelectedScope::Machine)?;
-    let mut selection = request.selection.clone();
-    if selection.install_directory.is_none() {
-        selection.install_directory = request.install_dir_override.clone();
-    }
+    let selection = request.selection.clone();
     let host = crate::operation_host::LinuxOperationHost {
         installer: request.installer.clone(),
         machine: Some(crate::operation_host::MachineHost {
@@ -107,12 +104,13 @@ pub(crate) fn plan_expected(
     let intent = PrepareOperation {
         recovery_id: None,
         operation: request.action.name().to_owned(),
-        force_files: matches!(
+        force: matches!(
             request.action,
-            zup_runtime::Operation::Repair { force_files } if force_files
+            zup_runtime::Operation::Repair { force } if force
         ),
         install_dir_override: request
-            .install_dir_override
+            .selection
+            .install_directory
             .as_ref()
             .map(|directory| directory.display().to_string()),
         selected_components: request.selection.enable.clone(),
@@ -437,6 +435,7 @@ fn emit_progress(
     let event = match report.kind {
         ProgressKind::OperationProgress => match (report.completed, report.total) {
             (Some(completed), Some(total)) => zup_runtime::RuntimeEvent::Progress {
+                phase: report.phase,
                 completed,
                 total,
                 action: report.detail.clone(),
@@ -668,7 +667,7 @@ pub(crate) fn recover_machine(
     let intent = PrepareOperation {
         recovery_id: Some(id),
         operation: zup_protocol::privileged_operation::RECOVER.into(),
-        force_files: false,
+        force: false,
         install_dir_override: None,
         selected_components: Vec::new(),
         disabled_components: Vec::new(),

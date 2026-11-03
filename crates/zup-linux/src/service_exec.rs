@@ -1,6 +1,7 @@
 use zup_core::{Privilege, ResourceKey, ServiceStart};
-use zup_exec::{ObservedServiceState, OwnedResource, ServiceOperation};
-use zup_platform::{CommandSpec, TargetService};
+use zup_plan::{
+    CommandSpec, DesiredService, ObservedServiceState, OwnedResource, ServiceOperation,
+};
 
 use crate::error::ExecError;
 use crate::fs::{EntryKind, OwnedDirectory};
@@ -47,7 +48,7 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
             unit: unit.clone(),
             reason: format!("service display name: {error}"),
         })?;
-    let synthetic = TargetService {
+    let synthetic = DesiredService {
         key: op.key.clone(),
         id,
         name,
@@ -87,7 +88,7 @@ fn render_registration(
         unit: unit.to_owned(),
         reason: format!("service display name: {error}"),
     })?;
-    let synthetic = TargetService {
+    let synthetic = DesiredService {
         key: key.clone(),
         id: id.clone(),
         name: name.clone(),
@@ -735,7 +736,7 @@ pub fn apply_remove(
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
-    let zup_exec::ServiceState::Registration {
+    let zup_plan::ServiceState::Registration {
         display_name,
         command,
         start,
@@ -831,7 +832,7 @@ pub fn rollback_remove(
             "a service removal names a service key",
         ));
     };
-    let zup_exec::ServiceState::Registration {
+    let zup_plan::ServiceState::Registration {
         display_name,
         command,
         start,
@@ -1024,7 +1025,7 @@ pub fn reconcile_remove(
         }
         None => {
             let OwnedResource::Service {
-                installed: zup_exec::ServiceState::Registration { start, .. },
+                installed: zup_plan::ServiceState::Registration { start, .. },
                 ..
             } = owned
             else {
@@ -1136,14 +1137,14 @@ mod tests {
 
     fn operation_at(
         id: &str,
-        executable: &zup_platform::TargetPath,
+        executable: &zup_plan::TargetPath,
         start: ServiceStart,
     ) -> ServiceOperation {
         ServiceOperation {
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new(id).unwrap(),
             },
-            kind: zup_exec::ServiceOperationKind::Create,
+            kind: zup_plan::IntegrationChangeKind::Create,
             id: id.to_owned(),
             name: "Tool".to_owned(),
             display_name: "Tool".to_owned(),
@@ -1155,7 +1156,7 @@ mod tests {
         }
     }
 
-    fn isolated_binary(dir: &tempfile::TempDir) -> (zup_platform::TargetPath, PathBuf) {
+    fn isolated_binary(dir: &tempfile::TempDir) -> (zup_plan::TargetPath, PathBuf) {
         let target = zup_core::Target::parse("linux-x64").unwrap();
         let host = dir.path().join("opt").join("acme").join("tool");
         std::fs::create_dir_all(host.parent().unwrap()).unwrap();
@@ -1163,7 +1164,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
         let text = host.to_string_lossy().into_owned();
-        (zup_platform::TargetPath::new(target, &text).unwrap(), host)
+        (zup_plan::TargetPath::new(target, &text).unwrap(), host)
     }
 
     #[test]

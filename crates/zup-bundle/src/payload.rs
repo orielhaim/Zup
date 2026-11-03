@@ -53,9 +53,10 @@ pub trait PayloadSource {
 /// Selects a standalone package for file paths and a directory for developer
 /// workflows. Package files are fully verified when the source is opened.
 pub enum AutoPayloadSource {
+    Acquired(std::sync::Arc<crate::AcquiredPayloadSource>),
     Directory(DirectoryPayloadSource),
     Package(super::PackagePayloadSource),
-    Overlay(OverlayPayloadSource),
+    Overlay(OverlayPayloadSource<Self>),
 }
 
 impl AutoPayloadSource {
@@ -89,35 +90,27 @@ impl PayloadSource for AutoPayloadSource {
         expected_sha256: &Sha256Digest,
         expected_size: u64,
     ) -> Result<PayloadReader, PayloadError> {
+        if is_plugin_payload_path(path) && !matches!(self, Self::Overlay(_)) {
+            return Err(PayloadError::NotFound {
+                path: path.to_string(),
+            });
+        }
         match self {
+            Self::Acquired(source) => source.open(path, expected_sha256, expected_size),
             Self::Overlay(source) => source.open(path, expected_sha256, expected_size),
-            Self::Directory(source) => {
-                if is_plugin_payload_path(path) {
-                    return Err(PayloadError::NotFound {
-                        path: path.to_string(),
-                    });
-                }
-                source.open(path, expected_sha256, expected_size)
-            }
-            Self::Package(source) => {
-                if is_plugin_payload_path(path) {
-                    return Err(PayloadError::NotFound {
-                        path: path.to_string(),
-                    });
-                }
-                source.open(path, expected_sha256, expected_size)
-            }
+            Self::Directory(source) => source.open(path, expected_sha256, expected_size),
+            Self::Package(source) => source.open(path, expected_sha256, expected_size),
         }
     }
 }
 
-pub struct OverlayPayloadSource {
-    base: Box<AutoPayloadSource>,
+pub struct OverlayPayloadSource<P> {
+    base: Box<P>,
     overlay: Option<DirectoryPayloadSource>,
 }
 
-impl OverlayPayloadSource {
-    pub fn new(base: AutoPayloadSource, overlay: Option<PathBuf>) -> Self {
+impl<P> OverlayPayloadSource<P> {
+    pub fn new(base: P, overlay: Option<PathBuf>) -> Self {
         Self {
             base: Box::new(base),
             overlay: overlay.map(DirectoryPayloadSource::new),
@@ -125,7 +118,7 @@ impl OverlayPayloadSource {
     }
 }
 
-impl PayloadSource for OverlayPayloadSource {
+impl<P: PayloadSource> PayloadSource for OverlayPayloadSource<P> {
     fn open(
         &self,
         path: &RelativePath,
@@ -151,7 +144,7 @@ impl PayloadSource for OverlayPayloadSource {
     }
 }
 
-fn is_plugin_payload_path(path: &RelativePath) -> bool {
+pub fn is_plugin_payload_path(path: &RelativePath) -> bool {
     path.components()
         .next()
         .is_some_and(|component| component == PLUGIN_PAYLOAD_ROOT)

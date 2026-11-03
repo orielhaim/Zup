@@ -149,7 +149,7 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
 
     std::fs::remove_file(install.join("keep.dat")).expect("delete");
     std::fs::write(install.join("unrelated.txt"), b"not owned").expect("an unrelated file");
-    let outcome = run_installer(&v1, &user.state, Operation::Repair { force_files: false });
+    let outcome = run_installer(&v1, &user.state, Operation::Repair { force: false });
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "a repair commits: {outcome:?}"
@@ -165,8 +165,7 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         installer: v1.clone(),
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
-        action: Operation::Repair { force_files: false },
-        install_dir_override: None,
+        action: Operation::Repair { force: false },
         selection: Default::default(),
     });
     assert!(
@@ -179,7 +178,7 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
         "the refusal leaves the bytes alone"
     );
 
-    let outcome = run_installer(&v1, &user.state, Operation::Repair { force_files: true });
+    let outcome = run_installer(&v1, &user.state, Operation::Repair { force: true });
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "a forced repair commits: {outcome:?}"
@@ -202,10 +201,35 @@ fn repair_restores_owned_files_and_ignores_the_rest() {
 }
 
 #[test]
-fn uninstall_removes_what_zup_owns_and_nothing_else() {
+fn uninstall_uses_ownership_after_source_components_are_removed() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let v1 = compose_fixture(scratch.path(), "v1", "1.0.0", &v1_files());
+    let bytes = zup_linux::test_support::package_bytes(scratch.path(), "1.0.0", &v1_files());
+    let package = zup_bundle::Package::from_bytes(bytes).unwrap();
+    let mut build = package.build_plan().unwrap().targets.remove(0);
+    let component = zup_core::ComponentId::new("retired").unwrap();
+    build.installer.components.push(zup_core::Component {
+        id: component.clone(),
+        name: zup_core::NonEmptyString::new("Retired").unwrap(),
+        description: None,
+        required: true,
+        default: true,
+        requires: vec![],
+        group: None,
+    });
+    for file in &mut build.files {
+        file.source = scratch
+            .path()
+            .join("payload")
+            .join(file.source_relative.as_str());
+        file.component = Some(component.clone());
+    }
+    let v1 = scratch.path().join("v1");
+    zup_linux::test_support::compose_installer(
+        std::path::Path::new(zup_linux::test_support::inert_template()),
+        &v1,
+        &zup_bundle::BundleWriter::encode(&build, &[]).unwrap(),
+    );
     assert!(matches!(
         run_installer(&v1, &user.state, Operation::Apply),
         LinuxOutcome::Committed { .. }
@@ -213,7 +237,8 @@ fn uninstall_removes_what_zup_owns_and_nothing_else() {
     let install = user.programs().join("tool");
     std::fs::write(install.join("unrelated.txt"), b"not owned").expect("an unrelated file");
 
-    let outcome = run_installer(&v1, &user.state, Operation::Uninstall);
+    let v2 = compose_fixture(scratch.path(), "v2", "2.0.0", &v2_files());
+    let outcome = run_installer(&v2, &user.state, Operation::Uninstall);
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),
         "an uninstall commits: {outcome:?}"
@@ -275,7 +300,6 @@ fn a_tampered_package_is_refused_before_mutation() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: Operation::Apply,
-        install_dir_override: None,
         selection: Default::default(),
     });
     assert!(
@@ -304,7 +328,6 @@ fn a_truncated_installer_is_refused_without_panicking() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: Operation::Apply,
-        install_dir_override: None,
         selection: Default::default(),
     });
     assert!(
@@ -342,7 +365,7 @@ fn repair_runs_from_the_maintenance_copy_without_the_download() {
     let outcome = run_installer(
         &maintenance,
         &user.state,
-        Operation::Repair { force_files: false },
+        Operation::Repair { force: false },
     );
     assert!(
         matches!(outcome, LinuxOutcome::Committed { .. }),

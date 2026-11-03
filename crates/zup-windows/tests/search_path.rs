@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 
 use zup_core::{Privilege, ResourceKey, SelectedScope, Target};
-use zup_exec::{
-    HostSnapshot, InstallLedger, LifecycleAction, ObservedPathEntry, PathOperationKind,
+use zup_plan::{
+    HostSnapshot, InstallLedger, LifecycleAction, ObservedPathEntry, PathOperationKind, TargetPath,
     plan_execution, plan_lifecycle,
 };
-use zup_platform::TargetPath;
+
 use zup_windows::VALUE_TYPE_EXPAND;
 
 fn windows() -> Target {
@@ -18,8 +18,11 @@ fn tpath(value: &str) -> TargetPath {
     TargetPath::new(windows(), value).unwrap()
 }
 
-fn target_with_path_entry(scope: SelectedScope, privilege: Privilege) -> zup_platform::TargetPlan {
-    zup_platform::TargetPlan {
+fn target_with_path_entry(
+    scope: SelectedScope,
+    privilege: Privilege,
+) -> zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
+    zup_plan::DesiredState {
         app: zup_core::App {
             id: zup_core::AppId::new("com.acme.acme").unwrap(),
             name: zup_core::NonEmptyString::new("Acme").unwrap(),
@@ -35,7 +38,7 @@ fn target_with_path_entry(scope: SelectedScope, privilege: Privilege) -> zup_pla
         prerequisites: vec![],
         files: vec![],
         launchers: vec![],
-        path_entries: vec![zup_platform::TargetPathEntry {
+        path_entries: vec![zup_plan::DesiredPathEntry {
             key: ResourceKey::PathEntry {
                 value: r"C:\PF\Acme\bin".into(),
             },
@@ -46,20 +49,15 @@ fn target_with_path_entry(scope: SelectedScope, privilege: Privilege) -> zup_pla
         services: vec![],
         protocols: vec![],
         file_associations: vec![],
-        summary: zup_platform::TargetPlanSummary {
-            file_count: 0,
-            install_bytes: 0,
-            resource_count: 1,
-            requires_authorization: privilege == Privilege::System,
-            selected_component_count: 0,
-            prerequisite_count: 0,
-            download_bytes: 0,
-        },
+
         preset: None,
     }
 }
 
-fn snapshot_for(target: &zup_platform::TargetPlan, stored: &[&str]) -> HostSnapshot {
+fn snapshot_for(
+    target: &zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    stored: &[&str],
+) -> HostSnapshot {
     HostSnapshot {
         path_entries: vec![ObservedPathEntry {
             key: target.path_entries[0].key.clone(),
@@ -71,12 +69,20 @@ fn snapshot_for(target: &zup_platform::TargetPlan, stored: &[&str]) -> HostSnaps
     }
 }
 
-fn ledger_owning(target: &zup_platform::TargetPlan, privilege: Privilege) -> InstallLedger {
-    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target, target.scope);
+fn ledger_owning(
+    target: &zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    privilege: Privilege,
+) -> InstallLedger {
+    let mut ledger = InstallLedger::new(
+        target.app.id.clone(),
+        target.target,
+        target.scope,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.version = "1.0.0".parse().unwrap();
     ledger.resources.insert(
         target.path_entries[0].key.clone(),
-        zup_exec::OwnedResource::PathEntry {
+        zup_plan::OwnedResource::PathEntry {
             value: target.path_entries[0].value.clone(),
             value_type: VALUE_TYPE_EXPAND.into(),
             privilege,
@@ -113,10 +119,8 @@ fn a_removed_owned_entry_is_drift_not_an_add() {
     assert!(plan.path_entries[0].previously_owned);
     assert!(matches!(
         plan.path_entries[0].conflict,
-        Some(zup_exec::Conflict::PathEntryConflict { .. })
+        Some(zup_plan::Conflict::PathEntryConflict { .. })
     ));
-    assert_eq!(plan.summary.path_entries_conflict, 1);
-    assert_eq!(plan.summary.path_entries_add, 0);
 }
 
 #[test]
@@ -125,7 +129,7 @@ fn repair_restores_a_removed_owned_entry() {
     let ledger = ledger_owning(&target, Privilege::System);
     let owned_matches = BTreeMap::from([(target.path_entries[0].key.clone(), true)]);
     let plan = plan_lifecycle(
-        LifecycleAction::Repair { force_files: false },
+        LifecycleAction::Repair { force: false },
         Some(&target),
         Some(&snapshot_for(&target, &[])),
         Some(&ledger),
@@ -155,5 +159,4 @@ fn uninstall_removes_a_search_path_entry_with_its_recorded_authority() {
 
     assert_eq!(removal.scope, SelectedScope::User);
     assert_eq!(removal.privilege, Privilege::System);
-    assert!(plan.summary.requires_authorization);
 }

@@ -5,19 +5,16 @@ use tracing::{info, info_span};
 use zup_core::{
     InstallLocation, LauncherLocation, ResourceKey, SelectedScope, TargetOperatingSystem, Template,
 };
-use zup_plan::InstallPlan;
-use zup_platform::{
-    CommandSpec, InstallLocationResolver, TargetFileAssociation, TargetLauncher, TargetPath,
-    TargetPathEntry, TargetPlan, TargetPlanSummary, TargetProtocol, TargetService,
-    TemplateResolveError, lower_target_plan_files, resolve_template_path,
+use zup_plan::{
+    CommandSpec, DesiredFileAssociation, DesiredLauncher, DesiredPathEntry, DesiredProtocol,
+    DesiredService, DesiredState, InstallLocationResolver, TargetPath, TemplateResolveError,
+    resolve_files, resolve_template_path,
 };
 
 #[cfg(windows)]
 use crate::host_dirs::WindowsInstallLocationResolver;
 use crate::locations::CanonicalWindowsLocations;
-use crate::lowering::{
-    TargetPathValidationError, validate_windows_target_path, windows_target_path_identity,
-};
+use crate::lowering::{TargetPathValidationError, validate_windows_target_path};
 use crate::shortcut_name::validate_shortcut_filename;
 
 #[derive(Debug, Clone, Copy)]
@@ -53,15 +50,15 @@ impl<R> WindowsTargetContext<R> {
 
 #[derive(Debug, Error)]
 pub enum TargetResolveError {
-    #[error("unsupported resources: {0}")]
-    UnsupportedResources(String),
+    #[error(transparent)]
+    Contract(#[from] zup_plan::ContractError),
     #[error("resolution scope must match the selected plan scope")]
     ScopeMismatch,
     #[error(transparent)]
     Template(#[from] TemplateResolveError),
 
     #[error(transparent)]
-    TargetPath(#[from] zup_platform::TargetPathError),
+    TargetPath(#[from] zup_plan::TargetPathError),
 
     #[error("invalid Windows target path for {kind} `{path}` (component `{component}`): {reason}")]
     InvalidTargetPath {
@@ -92,9 +89,9 @@ pub enum TargetResolveError {
 }
 
 pub fn resolve_target<R: InstallLocationResolver>(
-    plan: &InstallPlan,
+    plan: &DesiredState,
     context: &WindowsTargetContext<R>,
-) -> Result<TargetPlan, TargetResolveError> {
+) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, TargetResolveError> {
     let _span = info_span!("resolve_target", scope = %context.scope).entered();
     if plan.target.operating_system() != TargetOperatingSystem::Windows {
         return Err(TargetResolveError::UnsupportedTarget {
@@ -104,15 +101,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
     if context.scope != plan.scope {
         return Err(TargetResolveError::ScopeMismatch);
     }
-    let capabilities = zup_platform::capabilities(&plan.target).ok_or_else(|| {
-        TargetResolveError::UnsupportedTarget {
-            target: plan.target.to_string(),
-        }
-    })?;
-    let reasons = capabilities.planned_resource_errors(plan);
-    if !reasons.is_empty() {
-        return Err(TargetResolveError::UnsupportedResources(reasons.join("; ")));
-    }
+    plan.validate()?;
     let scope = context.scope;
     let resolve = |template: &Template, kind: &'static str| {
         let path = resolve_template_path(template, &plan.target, &context.locations, scope)?;
@@ -122,19 +111,8 @@ pub fn resolve_target<R: InstallLocationResolver>(
     let mut collisions = TargetCollisionIndex::default();
 
     let install_directory = resolve(&plan.install_directory, "install directory")?;
-    collisions.register_owned(
-        &install_directory,
-        "install directory",
-        OwnedPathKind::Directory,
-    )?;
 
-    let lowered = lower_target_plan_files(plan, resolve).map_err(|error| match error {
-        zup_platform::TargetPlanFilesError::Resolve(error) => error,
-        zup_platform::TargetPlanFilesError::SizeOverflow => TargetResolveError::SizeOverflow,
-    })?;
-    for file in lowered.files() {
-        collisions.register_owned(&file.destination, "file destination", OwnedPathKind::File)?;
-    }
+    let files = resolve_files(plan, resolve)?;
 
     let mut launchers = Vec::with_capacity(plan.launchers.len());
     for launcher in &plan.launchers {
@@ -159,7 +137,6 @@ pub fn resolve_target<R: InstallLocationResolver>(
         };
         let launcher_path = base.join(format!("{}.lnk", launcher.name))?;
         validate_target_path("launcher link path", &launcher_path)?;
-        collisions.register_owned(&launcher_path, "launcher link path", OwnedPathKind::File)?;
 
         let target = resolve(&launcher.target, "launcher target")?;
         let working_directory = launcher
@@ -167,7 +144,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
             .as_ref()
             .map(|directory| resolve(directory, "launcher working directory"))
             .transpose()?;
-        launchers.push(TargetLauncher {
+        launchers.push(DesiredLauncher {
             key: ResourceKey::Launcher {
                 location: launcher.location,
                 name: launcher.name.to_string(),
@@ -186,7 +163,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
     for entry in &plan.path_entries {
         let value = resolve(&entry.value, "PATH entry")?;
         collisions.register_path_entry(&value)?;
-        path_entries.push(TargetPathEntry {
+        path_entries.push(DesiredPathEntry {
             key: ResourceKey::PathEntry {
                 value: value.to_string(),
             },
@@ -199,16 +176,22 @@ pub fn resolve_target<R: InstallLocationResolver>(
 
     let mut services = Vec::with_capacity(plan.services.len());
     for service in &plan.services {
-        let binary = resolve(&service.binary, "service binary")?;
-        collisions.register_service(service.id.as_str())?;
-        services.push(TargetService {
+        let binary = resolve(&service.command.executable, "service binary")?;
+        collisions.register_service(service.id.as_str(), service.name.as_str())?;
+        services.push(DesiredService {
             key: ResourceKey::Service {
                 id: service.id.clone(),
             },
             id: service.id.clone(),
-            name: service.name.clone(),
-            display_name: service.display_name.clone(),
-            command: CommandSpec::new(binary, service.arguments.clone()),
+            name: zup_core::NonEmptyString::new(service.name.as_str().to_lowercase())
+                .expect("service name is nonempty"),
+            display_name: Some(
+                service
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| service.name.clone()),
+            ),
+            command: CommandSpec::new(binary, service.command.arguments.clone()),
             start: service.start,
             privilege: service.privilege,
         });
@@ -216,14 +199,14 @@ pub fn resolve_target<R: InstallLocationResolver>(
 
     let mut protocols = Vec::with_capacity(plan.protocols.len());
     for protocol in &plan.protocols {
-        let executable = resolve(&protocol.executable, "protocol executable")?;
+        let executable = resolve(&protocol.command.executable, "protocol executable")?;
         collisions.register_protocol(protocol.scheme.as_str())?;
-        protocols.push(TargetProtocol {
+        protocols.push(DesiredProtocol {
             key: ResourceKey::Protocol {
                 scheme: protocol.scheme.clone(),
             },
             scheme: protocol.scheme.clone(),
-            command: CommandSpec::new(executable, protocol.args.clone()),
+            command: CommandSpec::new(executable, protocol.command.arguments.clone()),
 
             scope: protocol.scope,
             privilege: protocol.privilege,
@@ -232,12 +215,15 @@ pub fn resolve_target<R: InstallLocationResolver>(
 
     let mut file_associations = Vec::with_capacity(plan.file_associations.len());
     for file_association in &plan.file_associations {
-        let executable = resolve(&file_association.executable, "file association executable")?;
+        let executable = resolve(
+            &file_association.command.executable,
+            "file association executable",
+        )?;
         collisions.register_file_association(
             file_association.id.as_str(),
             &file_association.extension.to_string(),
         )?;
-        file_associations.push(TargetFileAssociation {
+        file_associations.push(DesiredFileAssociation {
             key: ResourceKey::FileAssociation {
                 id: file_association.id.clone(),
             },
@@ -251,29 +237,14 @@ pub fn resolve_target<R: InstallLocationResolver>(
         });
     }
 
-    let resource_count = launchers.len()
-        + path_entries.len()
-        + services.len()
-        + protocols.len()
-        + file_associations.len();
-    let summary = TargetPlanSummary {
-        file_count: lowered.files().len(),
-        install_bytes: lowered.install_bytes(),
-        resource_count,
-        requires_authorization: plan.summary.requires_authorization,
-        selected_component_count: plan.selected_components.len(),
-        prerequisite_count: plan.prerequisites.len(),
-        download_bytes: lowered.download_bytes(),
-    };
-
     info!(
-        target_files = lowered.files().len(),
+        target_files = files.len(),
         launchers = launchers.len(),
         "target resolution complete"
     );
 
-    let (prerequisites, files) = lowered.into_parts();
-    Ok(TargetPlan {
+    let prerequisites = plan.prerequisites.clone();
+    let mut resolved = DesiredState {
         app: plan.app.clone(),
         target: plan.target,
         scope: plan.scope,
@@ -288,8 +259,10 @@ pub fn resolve_target<R: InstallLocationResolver>(
         services,
         protocols,
         file_associations,
-        summary,
-    })
+    };
+    resolved.canonicalize_keys();
+    resolved.validate_resolved()?;
+    Ok(resolved)
 }
 
 fn validate_target_path(kind: &str, path: &TargetPath) -> Result<(), TargetResolveError> {
@@ -314,77 +287,34 @@ fn validate_target_path(kind: &str, path: &TargetPath) -> Result<(), TargetResol
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum OwnedPathKind {
-    Directory,
-    File,
-}
-
-#[derive(Debug)]
-struct OwnedPath {
-    path: TargetPath,
-    kind: OwnedPathKind,
-}
-
 #[derive(Debug, Default)]
 struct TargetCollisionIndex {
-    owned_paths: BTreeMap<String, OwnedPath>,
     path_entries: BTreeMap<String, String>,
     services: BTreeMap<String, String>,
+    service_names: BTreeMap<String, String>,
     protocols: BTreeMap<String, String>,
     file_association_ids: BTreeMap<String, String>,
     file_association_extensions: BTreeMap<String, String>,
 }
 
 impl TargetCollisionIndex {
-    fn register_owned(
-        &mut self,
-        path: &TargetPath,
-        kind: &str,
-        path_kind: OwnedPathKind,
-    ) -> Result<(), TargetResolveError> {
-        let identity = windows_target_path_identity(path);
-        if let Some(existing) = self.owned_paths.get(&identity) {
-            return Err(TargetResolveError::TargetCollision {
-                kind: kind.to_owned(),
-                first: existing.path.to_string(),
-                second: path.to_string(),
-                identity,
-            });
-        }
-
-        for existing in self.owned_paths.values() {
-            if hierarchy_conflict(path, path_kind, existing) {
-                return Err(TargetResolveError::TargetCollision {
-                    kind: kind.to_owned(),
-                    first: existing.path.to_string(),
-                    second: path.to_string(),
-                    identity: windows_target_path_identity(&existing.path),
-                });
-            }
-        }
-
-        self.owned_paths.insert(
-            identity,
-            OwnedPath {
-                path: path.clone(),
-                kind: path_kind,
-            },
-        );
-        Ok(())
-    }
-
     fn register_path_entry(&mut self, path: &TargetPath) -> Result<(), TargetResolveError> {
         insert_identity(
             &mut self.path_entries,
-            &windows_target_path_identity(path),
+            &path.identity(),
             &path.to_string(),
             "PATH entry",
         )
     }
 
-    fn register_service(&mut self, id: &str) -> Result<(), TargetResolveError> {
-        insert_identity(&mut self.services, &id.to_lowercase(), id, "service id")
+    fn register_service(&mut self, id: &str, name: &str) -> Result<(), TargetResolveError> {
+        insert_identity(&mut self.services, &id.to_lowercase(), id, "service id")?;
+        insert_identity(
+            &mut self.service_names,
+            &name.to_lowercase(),
+            name,
+            "service name",
+        )
     }
 
     fn register_protocol(&mut self, scheme: &str) -> Result<(), TargetResolveError> {
@@ -432,16 +362,4 @@ fn insert_identity(
     }
     identities.insert(identity.to_owned(), value.to_owned());
     Ok(())
-}
-
-fn hierarchy_conflict(path: &TargetPath, kind: OwnedPathKind, existing: &OwnedPath) -> bool {
-    match (
-        matches!(kind, OwnedPathKind::Directory),
-        matches!(existing.kind, OwnedPathKind::Directory),
-    ) {
-        (true, false) => path.starts_with(&existing.path),
-        (false, true) => existing.path.starts_with(path),
-        (false, false) => path.starts_with(&existing.path) || existing.path.starts_with(path),
-        (true, true) => false,
-    }
 }

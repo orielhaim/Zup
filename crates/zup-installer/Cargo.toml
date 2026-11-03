@@ -45,7 +45,6 @@ required-features = ["gui"]
 cliclack = { workspace = true, optional = true }
 console = { workspace = true, optional = true }
 indicatif = { workspace = true, optional = true }
-zup-exec.workspace = true
 zup-plan.workspace = true
 zup-runtime.workspace = true
 zup-session.workspace = true
@@ -79,7 +78,6 @@ zup-acquire.workspace = true
 zup-artifact.workspace = true
 zup-bootstrap.workspace = true
 zup-bundle.workspace = true
-zup-platform.workspace = true
 zup-plugin-runtime.workspace = true
 zup-transaction.workspace = true
 zup-preset-host.workspace = true

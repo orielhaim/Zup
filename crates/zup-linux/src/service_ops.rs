@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use zup_core::{BackendResourceId, ResourceKey, ServiceStart};
-use zup_exec::{ObservedService, ObservedServiceState, OwnedResource, ServiceOperation};
-use zup_platform::TargetPlan;
+use zup_plan::{
+    DesiredState, ObservedService, ObservedServiceState, OwnedResource, ServiceOperation,
+};
 
 use crate::error::ExecError;
 use crate::fs::{EntryKind, OwnedDirectory};
@@ -151,7 +152,7 @@ pub fn require_exec_baseline(manager: &mut dyn SystemdManager) -> Result<u32, Ex
 }
 
 pub fn snapshot_services(
-    target: &TargetPlan,
+    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     manager: &mut dyn SystemdManager,
     systemd: &SystemdRoots,
 ) -> Result<Vec<ObservedService>, ExecError> {
@@ -171,7 +172,7 @@ pub fn snapshot_services(
     Ok(out)
 }
 
-fn observe_unit(
+pub(crate) fn observe_unit(
     unit: &str,
     path: &Path,
     target: zup_core::Target,
@@ -183,10 +184,10 @@ fn observe_unit(
     };
 
     let Ok((display_name, argv)) = parse_unit(&bytes) else {
-        return Ok(ObservedServiceState::Absent);
+        return Ok(ObservedServiceState::InvalidService);
     };
     if argv.is_empty() {
-        return Ok(ObservedServiceState::Absent);
+        return Ok(ObservedServiceState::InvalidService);
     }
     let state_text = manager
         .unit_file_state(unit)
@@ -195,13 +196,13 @@ fn observe_unit(
             reason: format!("unit-file state is unknown: {error}"),
         })?;
     let Some(start) = policy_for_state(&state_text) else {
-        return Ok(ObservedServiceState::Absent);
+        return Ok(ObservedServiceState::InvalidService);
     };
     let executable = argv[0].clone();
-    let target = zup_platform::TargetPath::new(target, &executable);
+    let target = zup_plan::TargetPath::new(target, &executable);
     let command = match target {
-        Ok(executable) => zup_platform::CommandSpec::new(executable, argv[1..].to_vec()),
-        Err(_) => return Ok(ObservedServiceState::Absent),
+        Ok(executable) => zup_plan::CommandSpec::new(executable, argv[1..].to_vec()),
+        Err(_) => return Ok(ObservedServiceState::InvalidService),
     };
     Ok(ObservedServiceState::Service {
         display_name,
@@ -308,10 +309,11 @@ pub fn check_collisions(
     let owns_mask = service.is_some_and(|service| {
         matches!(
             service.kind,
-            zup_exec::ServiceOperationKind::UpdateOwned
-                | zup_exec::ServiceOperationKind::RestoreOwned
-                | zup_exec::ServiceOperationKind::NoOp
-                | zup_exec::ServiceOperationKind::Drift
+            zup_plan::IntegrationChangeKind::UpdateOwned
+                | zup_plan::IntegrationChangeKind::RestoreOwned
+                | zup_plan::IntegrationChangeKind::RepairOwned
+                | zup_plan::IntegrationChangeKind::NoOp
+                | zup_plan::IntegrationChangeKind::Drift
         ) && matches!(
             service.previous,
             ObservedServiceState::Service {
@@ -390,7 +392,7 @@ pub fn refuse_source_symlink(unit: &str, canonical: &Path) -> Result<(), ExecErr
 }
 
 pub fn validate_executable(
-    command: &zup_platform::CommandSpec,
+    command: &zup_plan::CommandSpec,
     target_files: &BTreeMap<String, bool>,
     roots: &MachineRoots,
     expected_uid: u32,
@@ -437,7 +439,7 @@ pub fn validate_executable(
 }
 
 pub fn validate_executable_live(
-    command: &zup_platform::CommandSpec,
+    command: &zup_plan::CommandSpec,
     roots: &MachineRoots,
     expected_uid: u32,
 ) -> Result<PathBuf, ExecError> {
@@ -537,10 +539,10 @@ mod tests {
         (base, roots, systemd)
     }
 
-    fn command_for(executable: &str) -> zup_platform::CommandSpec {
+    fn command_for(executable: &str) -> zup_plan::CommandSpec {
         let target = zup_core::Target::parse("linux-x64").expect("a target");
-        zup_platform::CommandSpec::new(
-            zup_platform::TargetPath::new(target, executable).expect("a path"),
+        zup_plan::CommandSpec::new(
+            zup_plan::TargetPath::new(target, executable).expect("a path"),
             Vec::new(),
         )
     }

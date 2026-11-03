@@ -529,7 +529,7 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
                 .args([
                     "recover",
                     "--transaction",
-                    transaction,
+                    &transaction.to_string(),
                     "--scope",
                     "user",
                     "--output",
@@ -553,7 +553,7 @@ fn authenticated_updates_preserve_choices_and_support_offline_maintenance() {
         std::fs::remove_dir_all(&repository).unwrap();
         std::fs::write(fixture.root.path().join("application/core.txt"), b"drifted").unwrap();
         for args in [
-            vec!["repair", "--force-files"],
+            vec!["repair", "--force"],
             vec!["modify", "--disable", "docs"],
             vec!["uninstall"],
         ] {

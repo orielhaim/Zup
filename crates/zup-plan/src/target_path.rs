@@ -50,7 +50,7 @@ pub enum TargetPathError {
 /// accepts either separator, and any other target compares byte for byte.
 ///
 /// [`equivalent`]: TargetPath::equivalent
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct TargetPath {
     target: Target,
     /// Canonical spelling: the target's own separators, no redundant or
@@ -150,8 +150,12 @@ impl TargetPath {
 
     /// True when both paths name the same location under the target's own
     /// spelling rules.
+    pub fn identity(&self) -> String {
+        self.target.path_identity(self.as_str())
+    }
+
     pub fn equivalent(&self, other: &Self) -> bool {
-        self.target == other.target && components_match(&self.lexical, &other.lexical, &self.target)
+        self == other
     }
 
     /// True when this path is `other` or sits below it.
@@ -343,23 +347,9 @@ fn folds_case(target: &Target) -> bool {
 
 fn same_component(left: &str, right: &str, folds_case: bool) -> bool {
     if folds_case {
-        left.eq_ignore_ascii_case(right)
+        left.to_lowercase() == right.to_lowercase()
     } else {
         left == right
-    }
-}
-
-fn components_match(left: &Utf8TypedPathBuf, right: &Utf8TypedPathBuf, target: &Target) -> bool {
-    let folds_case = folds_case(target);
-    let mut left = left.to_path().components();
-    let mut right = right.to_path().components();
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return true,
-            (Some(left), Some(right))
-                if same_component(left.as_str(), right.as_str(), folds_case) => {}
-            _ => return false,
-        }
     }
 }
 
@@ -395,5 +385,30 @@ impl<'de> Deserialize<'de> for TargetPath {
         }
         let raw = Raw::deserialize(deserializer)?;
         Self::new(raw.target, raw.path).map_err(serde::de::Error::custom)
+    }
+}
+
+impl PartialEq for TargetPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target && self.identity() == other.identity()
+    }
+}
+impl Eq for TargetPath {}
+impl PartialOrd for TargetPath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TargetPath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.target
+            .cmp(&other.target)
+            .then_with(|| self.identity().cmp(&other.identity()))
+    }
+}
+impl std::hash::Hash for TargetPath {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.target.hash(state);
+        self.identity().hash(state);
     }
 }

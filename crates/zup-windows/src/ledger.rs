@@ -4,11 +4,11 @@ use zup_transaction::valid_file_key;
 
 use thiserror::Error;
 use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest};
-use zup_exec::{InstallLedger, OwnedResource};
-use zup_platform::TargetPath;
+use zup_plan::{InstallLedger, OwnedResource, TargetPath};
+
 use zup_transaction::{
     BackendOperationIntent, FilesystemTransactionStore, NodeKind, OperationReceipt,
-    TransactionPhase, TransactionPlan, TransactionRecord, TransactionStore, maintenance_directory,
+    TransactionPhase, TransactionPlan, TransactionRecord, maintenance_directory,
     maintenance_root as transaction_maintenance_root,
 };
 
@@ -97,6 +97,8 @@ impl InstallLedgerStore {
         })?;
         for record in records {
             match record.phase {
+                TransactionPhase::Committed
+                    if record.reconciliation == zup_transaction::ReconciliationState::Complete => {}
                 TransactionPhase::Committed => {
                     self.publish_committed(&record, scope)?;
                 }
@@ -142,7 +144,7 @@ impl InstallLedgerStore {
         let ledger = self.load(app_id, scope)?;
         let retired_ledger_keys = retired_ledger_keys(plan)?;
         let retired =
-            zup_transaction::validate_ownership(plan, ledger.as_ref(), &retired_ledger_keys)
+            zup_transaction::validate_ownership(plan, scope, ledger.as_ref(), &retired_ledger_keys)
                 .map_err(|error| LedgerError::Ownership(error.to_string()))?;
         for node in &plan.nodes {
             match &node.kind {
@@ -165,6 +167,7 @@ impl InstallLedgerStore {
                         node,
                         ledger.as_ref(),
                         scope,
+                        app_id,
                     ) {
                         return Err(LedgerError::Ownership(reason));
                     }
@@ -191,6 +194,7 @@ impl InstallLedgerStore {
                         node,
                         ledger.as_ref(),
                         scope,
+                        app_id,
                     ) {
                         return Err(LedgerError::Ownership(reason));
                     }
@@ -345,29 +349,25 @@ impl InstallLedgerStore {
             return Err(LedgerError::Uncommitted);
         }
         let previous = self.load(&record.app_id, scope)?;
-        if previous
-            .as_ref()
-            .is_some_and(|ledger| ledger.target != record.target)
+        match zup_transaction::ledger_publication(record, previous.as_ref())
+            .map_err(|error| LedgerError::Ownership(error.to_string()))?
         {
-            return Err(LedgerError::Ownership("target identity".into()));
-        }
-        let installed_transaction = previous
-            .as_ref()
-            .map(|ledger| ledger.committed_transaction.parse::<uuid::Uuid>())
-            .transpose()
-            .map_err(|_| LedgerError::Invalid)?;
-        if installed_transaction.is_some_and(|id| id > record.transaction_id.as_uuid()) {
-            cleanup_committed_files(record, &self.root)?;
-            self.cleanup_work(record)?;
-            return Ok(previous.expect("newer installation exists"));
-        }
-        if previous
-            .as_ref()
-            .is_some_and(|ledger| ledger.committed_transaction == record.transaction_id.to_string())
-        {
-            cleanup_committed_files(record, &self.root)?;
-            self.cleanup_work(record)?;
-            return Ok(previous.expect("checked above"));
+            zup_transaction::LedgerPublication::Settled => {
+                return Ok(previous.unwrap_or_else(|| {
+                    InstallLedger::new(
+                        record.app_id.clone(),
+                        record.target,
+                        scope,
+                        record.transaction_id,
+                    )
+                }));
+            }
+            zup_transaction::LedgerPublication::Current => {
+                cleanup_committed_files(record, &self.root)?;
+                self.cleanup_work(record)?;
+                return Ok(previous.expect("published generation has a ledger"));
+            }
+            zup_transaction::LedgerPublication::Advance => {}
         }
         if record.plan.uninstall {
             let retired_ledger_keys = retired_ledger_keys(&record.plan)?;
@@ -409,10 +409,17 @@ impl InstallLedgerStore {
                 record.app_id.clone(),
                 record.target,
                 scope,
+                record.transaction_id,
             ));
         }
-        let mut ledger = previous
-            .unwrap_or_else(|| InstallLedger::new(record.app_id.clone(), record.target, scope));
+        let mut ledger = previous.unwrap_or_else(|| {
+            InstallLedger::new(
+                record.app_id.clone(),
+                record.target,
+                scope,
+                record.transaction_id,
+            )
+        });
         if ledger.target != record.target {
             return Err(LedgerError::Ownership("target identity".into()));
         }
@@ -440,7 +447,7 @@ impl InstallLedgerStore {
             }
         }
         zup_transaction::retire_resources(&mut ledger, &retired_ledger_keys(&record.plan)?);
-        ledger.committed_transaction = record.transaction_id.to_string();
+        ledger.committed_transaction = record.transaction_id;
         let path = self.path_for(&record.app_id, scope);
         let bytes = serde_json::to_vec_pretty(&ledger)?;
         if scope == SelectedScope::User {
@@ -650,26 +657,9 @@ fn cleanup_application_state(
     } else {
         FilesystemTransactionStore::private_at(root)
     };
-    let ids = store.list_ids().map_err(|error| LedgerError::Io {
-        path: transactions.clone(),
-        source: std::io::Error::other(error),
-    })?;
-    for id in ids {
-        let record = store.load(&id).map_err(|_| LedgerError::Invalid)?;
-        if record.app_id != uninstall.app_id
-            || record.scope != uninstall.scope
-            || record.transaction_id.as_uuid() >= uninstall.transaction_id.as_uuid()
-        {
-            continue;
-        }
-        if !matches!(
-            record.phase,
-            TransactionPhase::Committed | TransactionPhase::RolledBack
-        ) {
-            return Err(LedgerError::RecoveryRequired(
-                record.transaction_id.to_string(),
-            ));
-        }
+    let records = zup_transaction::retired_records(&store, uninstall)
+        .map_err(|error| LedgerError::Ownership(error.to_string()))?;
+    for record in records {
         let work_directory = root.join("work").join(record.transaction_id.to_string());
         match std::fs::remove_dir_all(&work_directory) {
             Ok(()) => {}
@@ -977,7 +967,8 @@ mod tests {
 
     #[test]
     fn cleanup_requires_transaction_owned_paths_even_when_bytes_match() {
-        use zup_transaction::{FileDelta, FilePrecondition, FileWork, NodeState, TransactionInput};
+        use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
+        use zup_transaction::{NodeState, TransactionInput};
         let root = tempfile::tempdir().unwrap();
         let target = zup_core::Target::WINDOWS_X64;
         let destination = target_path_from_host(&root.path().join("app.bin"), &target).unwrap();
@@ -987,7 +978,7 @@ mod tests {
         let old = zup_core::hash_bytes(b"old");
         let new = zup_core::hash_bytes(b"new");
         let mut input = TransactionInput::new(target);
-        input.files.push(FileWork {
+        input.files.push(FileOperation {
             key: key.clone(),
             source_relative: zup_core::RelativePath::new("app.bin").unwrap(),
             destination: destination.clone(),
@@ -998,8 +989,10 @@ mod tests {
             expected_sha256: new,
             expected_size: 3,
             privilege: zup_core::Privilege::User,
-            delta: FileDelta::Replace,
+            kind: FileOperationKind::Replace,
             executable: false,
+
+            conflict: None,
         });
         let mut record = TransactionRecord::new(
             zup_transaction::TransactionId::new_v7(),

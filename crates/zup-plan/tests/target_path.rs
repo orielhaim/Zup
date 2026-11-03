@@ -6,7 +6,7 @@
 
 use rstest::rstest;
 use zup_core::{Target, TargetOperatingSystem};
-use zup_platform::{TargetPath, TargetPathError};
+use zup_plan::{TargetPath, TargetPathError};
 
 fn windows() -> Target {
     Target::parse("windows-x64").unwrap()
@@ -343,4 +343,20 @@ fn a_serialized_target_path_without_its_target_is_refused() {
             .is_err(),
         "a Unix path is not absolute on a Windows target"
     );
+}
+
+#[test]
+fn windows_path_identity_agrees_for_equality_ordering_and_hashing() {
+    let first = TargetPath::new(Target::WINDOWS_X64, r"C:\Apps\Tool").unwrap();
+    let second = TargetPath::new(Target::WINDOWS_X64, "c:/apps/tool").unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+        std::collections::BTreeSet::from([first.clone(), second.clone()]).len(),
+        1
+    );
+    assert_eq!(
+        std::collections::HashSet::from([first.clone(), second]).len(),
+        1
+    );
+    assert_eq!(first.as_str(), r"C:\Apps\Tool");
 }

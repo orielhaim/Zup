@@ -7,12 +7,13 @@ use zup_core::{
     App, AppId, NonEmptyString, Privilege, RelativePath, ResourceKey, SelectedScope, Target,
     hash_reader,
 };
-use zup_exec::LifecycleAction;
-use zup_platform::{TargetFile, TargetPath, TargetPlan, TargetPlanSummary};
+use zup_plan::{DesiredFile, DesiredState, LifecycleAction, TargetPath};
+
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_runtime::{ExecutionPolicy, InstallOutcome, RuntimeRequest, SessionError};
 use zup_transaction::{
-    FileDelta, FilePrecondition, FileWork, FilesystemTransactionStore, ReconciliationState,
-    TransactionInput, TransactionStore, compile_transaction,
+    FilesystemTransactionStore, ReconciliationState, TransactionInput, TransactionStore,
+    compile_transaction,
 };
 use zup_windows::{InstallLedgerStore, PayloadOverlayIdentity, WindowsRuntimeBackend};
 
@@ -36,7 +37,7 @@ fn file_input(root: &TempDir, scope: SelectedScope) -> TransactionInput {
     let destination = root.path().join("install").join("app.exe");
     let source = RelativePath::new("app.exe").unwrap();
     let mut input = TransactionInput::new(target());
-    input.files.push(FileWork {
+    input.files.push(FileOperation {
         key: ResourceKey::File {
             destination: destination.to_string_lossy().into_owned(),
         },
@@ -50,8 +51,10 @@ fn file_input(root: &TempDir, scope: SelectedScope) -> TransactionInput {
         } else {
             Privilege::User
         },
-        delta: FileDelta::Create,
+        kind: FileOperationKind::Create,
         executable: false,
+
+        conflict: None,
     });
     input
 }
@@ -72,6 +75,7 @@ fn request(root: &TempDir, scope: SelectedScope) -> (RuntimeRequest, WindowsRunt
     std::fs::write(payload_root.join("app.exe"), b"installed").unwrap();
     let plan = compile_transaction(&file_input(root, scope)).unwrap();
     let request = RuntimeRequest {
+        intent: None,
         target: target(),
         app_id: AppId::new("com.zup.windows-runtime").unwrap(),
         app_version: "1.0.0".parse().unwrap(),
@@ -103,7 +107,7 @@ async fn local_backend_commits_files_and_publishes_ledger() {
         .unwrap();
     assert_eq!(ledger.version.to_string(), "1.0.0");
     let journal = FilesystemTransactionStore::private_at(&request.state_root)
-        .load(&ledger.committed_transaction.parse().unwrap())
+        .load(&ledger.committed_transaction)
         .unwrap();
     assert_eq!(journal.reconciliation, ReconciliationState::Complete);
 }
@@ -180,6 +184,7 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
     )
     .unwrap();
     let request = RuntimeRequest {
+        intent: None,
         target: target(),
         app_id,
         app_version,
@@ -266,13 +271,14 @@ async fn a_stale_uninstall_is_rejected_after_the_generation_changes() {
     .unwrap();
     let store = InstallLedgerStore::new(&state_root);
     let mut ledger = store.load(&app_id, SelectedScope::User).unwrap().unwrap();
-    ledger.committed_transaction = "ffffffff-ffff-ffff-ffff-ffffffffffff".into();
+    ledger.committed_transaction = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse().unwrap();
     std::fs::write(
         store.path_for(&app_id, SelectedScope::User),
         serde_json::to_vec(&ledger).unwrap(),
     )
     .unwrap();
     let request = RuntimeRequest {
+        intent: None,
         target: target(),
         app_id,
         app_version,
@@ -320,7 +326,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     let version = semver::Version::parse("1.0.0").unwrap();
     let target_triple = target();
     let maintenance_target = TargetPath::new(target_triple, maintenance.to_string_lossy()).unwrap();
-    let target_plan = TargetPlan {
+    let target_plan = DesiredState {
         app: App {
             id: app_id.clone(),
             name: NonEmptyString::new("Apps Round Trip").unwrap(),
@@ -334,7 +340,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         install_directory: target_path(&install_directory),
         selected_components: Vec::new(),
         prerequisites: Vec::new(),
-        files: vec![TargetFile {
+        files: vec![DesiredFile {
             key: ResourceKey::Maintenance {
                 app_id: app_id.as_str().to_owned(),
                 version: version.to_string(),
@@ -353,15 +359,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         services: Vec::new(),
         protocols: Vec::new(),
         file_associations: Vec::new(),
-        summary: TargetPlanSummary {
-            file_count: 1,
-            install_bytes: 11,
-            resource_count: 1,
-            requires_authorization: false,
-            selected_component_count: 0,
-            prerequisite_count: 0,
-            download_bytes: 11,
-        },
+
         preset: None,
     };
     let plan = zup_windows::plan_target_lifecycle(
@@ -381,6 +379,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     let backend =
         zup_windows::WindowsRuntimeBackend::from_path(payload_root.clone(), None).unwrap();
     let request = RuntimeRequest {
+        intent: None,
         target: target_triple,
         app_id: app_id.clone(),
         app_version: version.clone(),
@@ -413,6 +412,7 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     )
     .unwrap();
     let request = RuntimeRequest {
+        intent: None,
         target: target_triple,
         app_id,
         app_version: version,
@@ -480,7 +480,7 @@ async fn machine_runtime_uses_authoritative_work_for_modify_and_uninstall() {
         };
         file.expected_sha256 = digest(b"modified");
         file.expected_size = 8;
-        file.delta = FileDelta::Replace;
+        file.kind = FileOperationKind::Replace;
         std::fs::write(root.path().join("payload/app.exe"), b"modified").unwrap();
         let mut modify = install.clone();
         modify.app_version = "2.0.0".parse().unwrap();
@@ -548,7 +548,7 @@ async fn machine_runtime_uses_authoritative_work_for_modify_and_uninstall() {
             !machine
                 .path()
                 .join("work")
-                .join(&committed.committed_transaction)
+                .join(committed.committed_transaction.to_string())
                 .exists()
         );
         let mut uninstall = modify;

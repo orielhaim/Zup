@@ -83,8 +83,6 @@ zup-acquire = { path = "crates/zup-acquire" }
 zup-acquire-http = { path = "crates/zup-acquire-http" }
 zup-artifact = { path = "crates/zup-artifact" }
 zup-plan = { path = "crates/zup-plan" }
-zup-platform = { path = "crates/zup-platform" }
-zup-exec = { path = "crates/zup-exec" }
 zup-transaction = { path = "crates/zup-transaction" }
 zup-bundle = { path = "crates/zup-bundle" }
 zup-publish = { path = "crates/zup-publish" }

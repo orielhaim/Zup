@@ -2,30 +2,42 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::DesiredState;
 use thiserror::Error;
-use zup_core::{Privilege, ResourceKey};
-use zup_platform::TargetPlan;
+use zup_core::ResourceKey;
 
 use crate::{
-    ExecutionPlan, ExecutionPlanError, ExtensionState, FileAssociationOperationKind,
-    FileAssociationState, FileOperationKind, FilePrecondition, HostSnapshot, InstallLedger,
-    LauncherOperationKind, LauncherState, ObservedExtensionState, ObservedFileAssociationState,
-    ObservedFileState, ObservedLauncherState, ObservedProtocolState, ObservedServiceState,
-    OwnedResource, PathOperationKind, ProtocolOperationKind, ProtocolState, RemovalKind,
-    RemovalOperation, ServiceOperationKind, ServiceState, plan_execution,
+    ExecutionPlan, ExecutionPlanError, ExtensionState, FileAssociationState, FileOperationKind,
+    FilePrecondition, HostSnapshot, InstallLedger, IntegrationChangeKind, LauncherState,
+    ObservedExtensionState, ObservedFileAssociationState, ObservedFileState, ObservedLauncherState,
+    ObservedProtocolState, ObservedServiceState, OwnedResource, PathOperationKind, ProtocolState,
+    RemovalKind, RemovalOperation, ServiceState, plan_execution,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum LifecycleAction {
     Install,
     Upgrade,
     Modify,
-    Repair { force_files: bool },
+    Repair { force: bool },
     Uninstall,
+}
+
+/// Unprivileged choices that an execution authority independently plans.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentIntent {
+    pub action: LifecycleAction,
+    pub enable: Vec<String>,
+    pub disable: Vec<String>,
+    pub install_directory: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Error)]
 pub enum LifecycleError {
+    #[error("retired resource aliases desired state: {0:?}")]
+    AliasedResource(ResourceKey),
     #[error("a committed installation is required")]
     NotInstalled,
     #[error("installation already exists")]
@@ -55,7 +67,7 @@ pub enum LifecycleError {
 /// Executors repeat every ownership check immediately before mutation.
 pub fn plan_lifecycle(
     action: LifecycleAction,
-    target: Option<&TargetPlan>,
+    target: Option<&DesiredState<crate::TargetPath, crate::TargetPath>>,
     snapshot: Option<&HostSnapshot>,
     ledger: Option<&InstallLedger>,
     owned_matches: &BTreeMap<ResourceKey, bool>,
@@ -114,15 +126,22 @@ pub fn plan_lifecycle(
             snapshot.ok_or(LifecycleError::MissingTarget)?,
             ledger,
         )?,
-        None => ExecutionPlan::default(),
+        None => ExecutionPlan {
+            binding: ledger.map(crate::DeploymentBinding::uninstall),
+            selected_components: ledger
+                .map(|ledger| ledger.selected_components.clone())
+                .unwrap_or_default(),
+            install_directory: ledger.and_then(|ledger| ledger.install_directory.clone()),
+            ..ExecutionPlan::default()
+        },
     };
-    if let LifecycleAction::Repair { force_files } = action {
+    if let LifecycleAction::Repair { force } = action {
         repair_owned(
             &mut execution,
             desired.unwrap(),
             snapshot.unwrap(),
             ledger.unwrap(),
-            force_files,
+            force,
         )?;
     }
     let desired_keys = desired.map_or_else(BTreeSet::new, target_keys);
@@ -132,6 +151,32 @@ pub fn plan_lifecycle(
         for (key, owned) in &ledger.resources {
             if desired_keys.contains(key) || matches!(owned, OwnedResource::Backend { .. }) {
                 continue;
+            }
+            if let Some(target) = desired {
+                let alias = desired_keys.iter().any(|desired| {
+                    desired.canonical_for(&target.target) == key.canonical_for(&target.target)
+                }) || match owned {
+                    OwnedResource::File { destination, .. } => target
+                        .files
+                        .iter()
+                        .any(|file| destination.equivalent(&file.destination)),
+                    OwnedResource::Launcher { launcher_path, .. } => target
+                        .launchers
+                        .iter()
+                        .any(|launcher| launcher_path.equivalent(&launcher.launcher_path)),
+                    OwnedResource::Service { name, .. }
+                        if target.target.operating_system()
+                            == zup_core::TargetOperatingSystem::Windows =>
+                    {
+                        target.services.iter().any(|service| {
+                            service.name.as_str().to_lowercase() == name.to_lowercase()
+                        })
+                    }
+                    _ => false,
+                };
+                if alias {
+                    return Err(LifecycleError::AliasedResource(key.clone()));
+                }
             }
             let matches = *owned_matches
                 .get(key)
@@ -153,21 +198,13 @@ pub fn plan_lifecycle(
     }
     if action == LifecycleAction::Uninstall {
         execution.uninstall = true;
-        execution.summary.requires_authorization = execution
-            .removals
-            .iter()
-            .any(|removal| removal.privilege == Privilege::System)
-            || ledger.is_some_and(|ledger| {
-                ledger
-                    .resources
-                    .values()
-                    .any(|owned| owned.privilege() == Privilege::System)
-            });
     }
     Ok(execution)
 }
 
-fn target_keys(target: &TargetPlan) -> BTreeSet<ResourceKey> {
+fn target_keys(
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+) -> BTreeSet<ResourceKey> {
     let mut keys = BTreeSet::new();
     keys.extend(target.files.iter().map(|item| item.key.clone()));
     keys.extend(target.launchers.iter().map(|item| item.key.clone()));
@@ -185,12 +222,18 @@ fn target_keys(target: &TargetPlan) -> BTreeSet<ResourceKey> {
 
 fn repair_owned(
     execution: &mut ExecutionPlan,
-    target: &TargetPlan,
+    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
     snapshot: &HostSnapshot,
     ledger: &InstallLedger,
-    force_files: bool,
+    force: bool,
 ) -> Result<(), LifecycleError> {
-    for (op, observed) in execution.files.iter_mut().zip(&snapshot.files) {
+    let observations: BTreeMap<_, _> = snapshot
+        .files
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for op in execution.files.iter_mut() {
+        let observed = observations[&op.key];
         let owned = ledger.resources.get(&op.key);
         match (owned, op.kind, &observed.state) {
             (
@@ -202,7 +245,7 @@ fn repair_owned(
                 }),
                 FileOperationKind::Drift,
                 ObservedFileState::Absent,
-            ) if destination == &op.destination
+            ) if destination.equivalent(&op.destination)
                 && *sha256 == op.expected_sha256
                 && *size == op.expected_size =>
             {
@@ -222,8 +265,8 @@ fn repair_owned(
                     size: found_size,
                     sha256: found_hash,
                 },
-            ) if force_files
-                && destination == &op.destination
+            ) if force
+                && destination.equivalent(&op.destination)
                 && *sha256 == op.expected_sha256
                 && *size == op.expected_size =>
             {
@@ -242,15 +285,29 @@ fn repair_owned(
             _ => {}
         }
     }
-    for (op, observed) in execution.launchers.iter_mut().zip(&snapshot.launchers) {
-        if op.kind == LauncherOperationKind::Drift
+    let observations: BTreeMap<_, _> = snapshot
+        .launchers
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for op in execution.launchers.iter_mut() {
+        let observed = observations[&op.key];
+        if force
+            && op.kind == IntegrationChangeKind::Drift
+            && matches!(observed.state, ObservedLauncherState::Launcher { .. })
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Launcher { installed: LauncherState::Launcher { target, arguments, working_directory }, .. }) if target == &op.target && arguments == &op.arguments && working_directory == &op.working_directory)
+        {
+            op.kind = IntegrationChangeKind::RepairOwned;
+            op.conflict = None;
+        }
+        if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedLauncherState::Absent)
             && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Launcher { installed: LauncherState::Launcher { target, arguments, working_directory }, .. }) if target == &op.target && arguments == &op.arguments && working_directory == &op.working_directory)
         {
-            op.kind = LauncherOperationKind::RestoreOwned;
+            op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;
-        } else if op.kind == LauncherOperationKind::UpdateOwned
-            || (op.kind == LauncherOperationKind::Create && !ledger.resources.contains_key(&op.key))
+        } else if op.kind == IntegrationChangeKind::UpdateOwned
+            || (op.kind == IntegrationChangeKind::Create && !ledger.resources.contains_key(&op.key))
         {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
@@ -267,49 +324,98 @@ fn repair_owned(
             });
         }
     }
-    for (op, observed) in execution.services.iter_mut().zip(&snapshot.services) {
-        if op.kind == ServiceOperationKind::Drift
+    let observations: BTreeMap<_, _> = snapshot
+        .services
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for op in execution.services.iter_mut() {
+        let observed = observations[&op.key];
+        if force
+            && op.kind == IntegrationChangeKind::Drift
+            && matches!(
+                observed.state,
+                ObservedServiceState::Service { .. } | ObservedServiceState::InvalidService
+            )
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed: ServiceState::Registration { display_name, command, start }, .. }) if display_name == &op.display_name && command == &op.command && start == &op.start)
+        {
+            op.kind = IntegrationChangeKind::RepairOwned;
+            op.conflict = None;
+        }
+        if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedServiceState::Absent)
             && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed: ServiceState::Registration { display_name, command, start }, .. }) if display_name == &op.display_name && command == &op.command && start == &op.start)
         {
-            op.kind = ServiceOperationKind::RestoreOwned;
+            op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;
-        } else if op.kind == ServiceOperationKind::UpdateOwned
-            || (op.kind == ServiceOperationKind::Create && !ledger.resources.contains_key(&op.key))
+        } else if op.kind == IntegrationChangeKind::UpdateOwned
+            || (op.kind == IntegrationChangeKind::Create && !ledger.resources.contains_key(&op.key))
         {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
             });
         }
     }
-    for (op, observed) in execution.protocols.iter_mut().zip(&snapshot.protocols) {
-        if op.kind == ProtocolOperationKind::Drift
+    let observations: BTreeMap<_, _> = snapshot
+        .protocols
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for op in execution.protocols.iter_mut() {
+        let observed = observations[&op.key];
+        if force
+            && op.kind == IntegrationChangeKind::Drift
+            && matches!(
+                observed.state,
+                ObservedProtocolState::Registration {
+                    url_protocol_marker: true,
+                    ..
+                }
+            )
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Protocol { installed: ProtocolState::Registration { command }, .. }) if command == &op.command)
+        {
+            op.kind = IntegrationChangeKind::RepairOwned;
+            op.conflict = None;
+        }
+        if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedProtocolState::Absent)
             && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Protocol { installed: ProtocolState::Registration { command }, .. }) if command == &op.command)
         {
-            op.kind = ProtocolOperationKind::RestoreOwned;
+            op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;
-        } else if op.kind == ProtocolOperationKind::UpdateOwned
-            || (op.kind == ProtocolOperationKind::Create && !ledger.resources.contains_key(&op.key))
+        } else if op.kind == IntegrationChangeKind::UpdateOwned
+            || (op.kind == IntegrationChangeKind::Create && !ledger.resources.contains_key(&op.key))
         {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
             });
         }
     }
-    for (op, observed) in execution
+    let observations: BTreeMap<_, _> = snapshot
         .file_associations
-        .iter_mut()
-        .zip(&snapshot.file_associations)
-    {
-        if op.association_kind == FileAssociationOperationKind::Drift
+        .iter()
+        .map(|observed| (&observed.key, observed))
+        .collect();
+    for op in execution.file_associations.iter_mut() {
+        let observed = observations[&op.key];
+        if force
+            && op.association_kind == IntegrationChangeKind::Drift
+            && matches!(
+                observed.association_state,
+                ObservedFileAssociationState::Registration { .. }
+            )
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::FileAssociation { installed: FileAssociationState::Registration { description, command }, .. }) if description == &op.description && command == &op.command)
+        {
+            op.association_kind = IntegrationChangeKind::RepairOwned;
+        }
+        if op.association_kind == IntegrationChangeKind::Drift
             && matches!(
                 observed.association_state,
                 ObservedFileAssociationState::Absent
             )
             && matches!(ledger.resources.get(&op.key), Some(OwnedResource::FileAssociation { installed: FileAssociationState::Registration { description, command }, .. }) if description == &op.description && command == &op.command)
         {
-            op.association_kind = FileAssociationOperationKind::RestoreOwned;
+            op.association_kind = IntegrationChangeKind::RestoreOwned;
         }
         let extension_key = ResourceKey::FileAssociationExtension {
             extension: target
@@ -320,18 +426,28 @@ fn repair_owned(
                 .extension
                 .clone(),
         };
-        if op.extension_kind == FileAssociationOperationKind::Drift
+        if force
+            && op.extension_kind == IntegrationChangeKind::Drift
+            && matches!(
+                observed.extension_state,
+                ObservedExtensionState::Mapped { .. }
+            )
+            && matches!(ledger.resources.get(&extension_key), Some(OwnedResource::Extension { installed: ExtensionState::Mapped { association_id }, .. }) if association_id == &op.id)
+        {
+            op.extension_kind = IntegrationChangeKind::RepairOwned;
+        }
+        if op.extension_kind == IntegrationChangeKind::Drift
             && matches!(observed.extension_state, ObservedExtensionState::Absent)
             && matches!(ledger.resources.get(&extension_key), Some(OwnedResource::Extension { installed: ExtensionState::Mapped { association_id }, .. }) if association_id == &op.id)
         {
-            op.extension_kind = FileAssociationOperationKind::RestoreOwned;
+            op.extension_kind = IntegrationChangeKind::RestoreOwned;
         }
         if matches!(
             op.association_kind,
-            FileAssociationOperationKind::Create | FileAssociationOperationKind::UpdateOwned
+            IntegrationChangeKind::Create | IntegrationChangeKind::UpdateOwned
         ) || matches!(
             op.extension_kind,
-            FileAssociationOperationKind::Create | FileAssociationOperationKind::UpdateOwned
+            IntegrationChangeKind::Create | IntegrationChangeKind::UpdateOwned
         ) {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
@@ -339,18 +455,28 @@ fn repair_owned(
         }
         if (matches!(
             op.association_kind,
-            FileAssociationOperationKind::RestoreOwned
+            IntegrationChangeKind::RestoreOwned | IntegrationChangeKind::RepairOwned
         ) || matches!(
             op.extension_kind,
-            FileAssociationOperationKind::RestoreOwned
+            IntegrationChangeKind::RestoreOwned | IntegrationChangeKind::RepairOwned
         )) && matches!(
             op.association_kind,
-            FileAssociationOperationKind::NoOp | FileAssociationOperationKind::RestoreOwned
+            IntegrationChangeKind::NoOp
+                | IntegrationChangeKind::RestoreOwned
+                | IntegrationChangeKind::RepairOwned
         ) && matches!(
             op.extension_kind,
-            FileAssociationOperationKind::NoOp | FileAssociationOperationKind::RestoreOwned
+            IntegrationChangeKind::NoOp
+                | IntegrationChangeKind::RestoreOwned
+                | IntegrationChangeKind::RepairOwned
         ) {
-            op.kind = FileAssociationOperationKind::RestoreOwned;
+            op.kind = if op.association_kind == IntegrationChangeKind::RepairOwned
+                || op.extension_kind == IntegrationChangeKind::RepairOwned
+            {
+                IntegrationChangeKind::RepairOwned
+            } else {
+                IntegrationChangeKind::RestoreOwned
+            };
             op.conflict = None;
         }
     }

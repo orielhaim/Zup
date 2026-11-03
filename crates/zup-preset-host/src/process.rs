@@ -87,7 +87,14 @@ impl PresetProcess {
     }
 
     pub fn is_running(&mut self) -> bool {
-        self.child.try_wait().ok().flatten().is_none()
+        #[cfg(windows)]
+        {
+            process_is_running(self.child.as_ref())
+        }
+        #[cfg(not(windows))]
+        {
+            self.child.try_wait().ok().flatten().is_none()
+        }
     }
 }
 
@@ -163,6 +170,20 @@ pub fn launch(
     };
     process.greet()?;
     Ok(process)
+}
+
+#[cfg(windows)]
+#[expect(unsafe_code, reason = "query a borrowed Windows process handle")]
+fn process_is_running(child: &dyn ChildWrapper) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::WaitForSingleObject;
+
+    let Some(handle) = child.process_handle() else {
+        return false;
+    };
+    // JobObject::try_wait consumes notifications that its later wait needs.
+    unsafe { WaitForSingleObject(HANDLE(handle.as_raw_handle()), 0) == WAIT_TIMEOUT }
 }
 
 fn manage(command: &mut CommandWrap) {

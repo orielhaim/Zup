@@ -445,3 +445,13 @@ impl JsonSchema for Target {
         })
     }
 }
+
+impl Target {
+    pub fn path_identity(&self, value: &str) -> String {
+        if self.operating_system() == TargetOperatingSystem::Windows {
+            value.replace('/', "\\").to_lowercase()
+        } else {
+            value.to_owned()
+        }
+    }
+}

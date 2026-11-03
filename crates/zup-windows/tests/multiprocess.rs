@@ -5,13 +5,12 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use zup_core::{Privilege, RelativePath, ResourceKey, Target, hash_reader};
-use zup_platform::TargetPath;
+use zup_plan::TargetPath;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_protocol::{
     ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello, SessionId, WireEnvelope,
 };
-use zup_transaction::{
-    FileDelta, FilePrecondition, FileWork, TransactionInput, TransactionPlan, compile_transaction,
-};
+use zup_transaction::{TransactionInput, TransactionPlan, compile_transaction};
 use zup_windows::launch_worker_for_test;
 use zup_windows::{
     PipeServer, UserSid, WorkerBootstrap, format_bootstrap, frame_server,
@@ -32,7 +31,7 @@ fn target_path(path: &Path) -> TargetPath {
 
 fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> TransactionInput {
     let mut input = TransactionInput::new(target());
-    input.files.push(FileWork {
+    input.files.push(FileOperation {
         key: ResourceKey::File {
             destination: destination.to_string_lossy().into_owned(),
         },
@@ -42,14 +41,18 @@ fn file_input(destination: &Path, source: &RelativePath, bytes: &[u8]) -> Transa
         expected_sha256: digest(bytes),
         expected_size: bytes.len() as u64,
         privilege: Privilege::User,
-        delta: FileDelta::Create,
+        kind: FileOperationKind::Create,
         executable: false,
+
+        conflict: None,
     });
     input
 }
 
 struct Worker {
-    plan: TransactionPlan,
+    plan: Option<TransactionPlan>,
+    authority: zup_core::SelectedScope,
+    install_directory: PathBuf,
     version: String,
     payload_root: PathBuf,
     state_root: PathBuf,
@@ -59,14 +62,28 @@ struct Worker {
     payload_overlay_root: Option<PathBuf>,
 }
 
-fn worker_with_bundle(work_root: &Path, version: &str) -> PathBuf {
+fn app_id(work_root: &Path) -> zup_core::AppId {
+    zup_core::AppId::new(format!(
+        "com.zup.worker-{}",
+        &digest(work_root.to_string_lossy().as_bytes()).to_hex()[..16]
+    ))
+    .unwrap()
+}
+
+fn worker_with_bundle(work_root: &Path, version: &str, payload_root: &Path) -> PathBuf {
     std::fs::create_dir_all(work_root.join("dist")).unwrap();
+    for entry in std::fs::read_dir(payload_root).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), work_root.join("dist").join(entry.file_name())).unwrap();
+        }
+    }
     let manifest = format!(
         r#"
 schema = 1
 frontend = "console"
 [app]
-id = "com.acme.app"
+id = "{app_id}"
 name = "Acme App"
 version = "{version}"
 [build]
@@ -75,10 +92,16 @@ target = "{target}"
 source = {{ directory = "dist" }}
 [install]
 scope = "user"
+allow_directory_override = true
 [install.directory]
 user = "${{location.user_data}}/AcmeApp"
+[[files]]
+source = "**/*"
+destination = "${{install}}"
+allow_empty = true
 "#,
         target = target(),
+        app_id = app_id(work_root),
     );
     let parsed = zup_manifest::parse(&manifest).unwrap();
     let installer = zup_manifest::parse_and_compile(&manifest, "default").unwrap();
@@ -116,9 +139,13 @@ user = "${{location.user_data}}/AcmeApp"
     worker
 }
 
-async fn execute_with_test_worker(worker: &Worker) -> zup_protocol::WorkerOutcome {
+async fn execute_with_test_worker(
+    worker: &Worker,
+) -> Result<zup_protocol::WorkerOutcome, zup_protocol::WorkerFailure> {
     let Worker {
         plan,
+        authority,
+        install_directory,
         version,
         payload_root,
         state_root,
@@ -127,7 +154,45 @@ async fn execute_with_test_worker(worker: &Worker) -> zup_protocol::WorkerOutcom
         release,
         payload_overlay_root,
     } = worker;
-    let plan = plan.clone();
+    let zup_bin = worker_with_bundle(work_root, &worker.version, payload_root);
+    let bundle = zup_windows::EmbeddedBundle::open(&zup_bin).unwrap();
+    let intent = zup_plan::DeploymentIntent {
+        action: zup_plan::LifecycleAction::Install,
+        enable: vec![],
+        disable: vec![],
+        install_directory: Some(install_directory.clone()),
+    };
+    let plan = plan.clone().unwrap_or_else(|| {
+        let build = bundle.build_plan().unwrap();
+        let host = zup_windows::WindowsOperationHost {
+            app_id: app_id(work_root),
+            scope: zup_core::SelectedScope::User,
+            frontend: zup_core::Frontend::Console,
+            state_root: state_root.clone(),
+            content: zup_windows::WindowsContent::Embedded(&bundle),
+            acquire_prerequisites: false,
+        };
+        zup_runtime::prepare_operation(
+            &zup_runtime::OperationInput {
+                build: &build.targets[0],
+                installer: &zup_bin,
+                scope: zup_core::SelectedScope::User,
+                operation: zup_runtime::Operation::Install,
+                selection: zup_runtime::OperationSelection {
+                    enable: vec![],
+                    disable: vec![],
+                    install_directory: Some(install_directory.clone()),
+                },
+                prior: None,
+                state_root,
+                cancellation: &zup_plan::NeverCancelled,
+            },
+            &host,
+        )
+        .unwrap()
+        .transaction_plan
+    });
+    let supplied_plan = worker.plan.is_some();
     let recovery_id = *recovery_id;
     let payload_root = payload_root.as_path();
     let state_root = state_root.as_path();
@@ -156,9 +221,8 @@ async fn execute_with_test_worker(worker: &Worker) -> zup_protocol::WorkerOutcom
         target: plan.target,
         expected_plan_hash: plan_hash.clone(),
     };
-    let zup_bin = worker_with_bundle(work_root, &worker.version);
-    let worker =
-        launch_worker_for_test(&zup_bin, &format_bootstrap(&bootstrap)).expect("spawn worker");
+    let worker = launch_worker_for_test(&zup_bin, &format_bootstrap(&bootstrap), *authority)
+        .expect("spawn worker");
     tokio::time::timeout(Duration::from_secs(5), server.connect())
         .await
         .expect("worker connect timeout")
@@ -202,13 +266,21 @@ async fn execute_with_test_worker(worker: &Worker) -> zup_protocol::WorkerOutcom
             session_id,
             sequence: 2,
             message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
+                content: None,
+                intent: Some(intent),
                 target: plan.target,
                 plan_json,
                 plan_hash,
-                app_id: "com.acme.app".into(),
+                app_id: app_id(work_root).to_string(),
                 app_version: version.into(),
                 scope: "user".into(),
-                payload_root: payload_root.display().to_string(),
+                payload_root: if supplied_plan {
+                    payload_root
+                } else {
+                    &zup_bin
+                }
+                .display()
+                .to_string(),
                 payload_overlay_root: payload_overlay_root.map(|path| path.display().to_string()),
                 payload_overlay_base_root: payload_overlay_root.map(|_| {
                     payload_overlay_base_root(state_root, zup_core::SelectedScope::User)
@@ -230,17 +302,20 @@ async fn execute_with_test_worker(worker: &Worker) -> zup_protocol::WorkerOutcom
             .expect("worker response timeout")
             .expect("worker response");
         match message.message {
-            Message::Completed(completed) => return completed.outcome,
-            Message::Failed(failed) => {
-                panic!("worker failed: {:?}: {}", failed.kind, failed.message)
-            }
+            Message::Completed(completed) => return Ok(completed.outcome),
+            Message::Failed(failed) => return Err(failed.kind),
             _ => {}
         }
     }
 }
 
+#[rstest::rstest]
+#[case(zup_core::SelectedScope::User)]
+#[case(zup_core::SelectedScope::Machine)]
 #[tokio::test]
-async fn multi_process_named_pipe_handshake_and_execute() {
+async fn a_worker_executes_only_within_its_authority_domain(
+    #[case] authority: zup_core::SelectedScope,
+) {
     let dir = TempDir::new().unwrap();
     let payload_root = dir.path().join("payload");
     let target_root = dir.path().join("target");
@@ -250,32 +325,37 @@ async fn multi_process_named_pipe_handshake_and_execute() {
         std::fs::create_dir_all(path).unwrap();
     }
     std::fs::write(payload_root.join("App.exe"), b"hello-app").unwrap();
+    let registration = app_id(&work_root);
     let destination = target_root.join("App.exe");
-    let plan = compile_transaction(&file_input(
-        &destination,
-        &RelativePath::new("App.exe").unwrap(),
-        b"hello-app",
-    ))
-    .unwrap();
-    assert_eq!(
-        execute_with_test_worker(&Worker {
-            plan,
-            version: "1.0.0".to_owned(),
-            payload_root,
-            state_root,
-            work_root,
-            recovery_id: None,
-            release: None,
-            payload_overlay_root: None,
-        })
-        .await,
-        zup_protocol::WorkerOutcome::Committed
-    );
-    assert_eq!(std::fs::read(destination).unwrap(), b"hello-app");
+    let outcome = execute_with_test_worker(&Worker {
+        plan: None,
+        authority,
+        install_directory: target_root,
+        version: "1.0.0".to_owned(),
+        payload_root,
+        state_root,
+        work_root,
+        recovery_id: None,
+        release: None,
+        payload_overlay_root: None,
+    })
+    .await;
+    if authority == zup_core::SelectedScope::Machine {
+        assert_eq!(outcome, Err(zup_protocol::WorkerFailure::Authentication));
+        assert!(!destination.exists());
+    } else {
+        assert_eq!(outcome, Ok(zup_protocol::WorkerOutcome::Committed));
+        assert_eq!(std::fs::read(destination).unwrap(), b"hello-app");
+        windows_registry::CURRENT_USER
+            .remove_tree(format!(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{registration}"
+            ))
+            .unwrap();
+    }
 }
 
 #[tokio::test]
-async fn authenticated_worker_consumes_generated_overlay() {
+async fn authenticated_worker_rejects_an_overlay_not_declared_by_its_content() {
     let root = TempDir::new().unwrap();
     let payload_root = root.path().join("payload");
     let state_root = root.path().join("state");
@@ -289,7 +369,7 @@ async fn authenticated_worker_consumes_generated_overlay() {
     let destination = target_root.join("generated.bin");
     let plan = compile_transaction(&file_input(&destination, &source, bytes)).unwrap();
     let identity = zup_windows::PayloadOverlayIdentity::from_transaction(
-        zup_core::AppId::new("com.acme.app").unwrap(),
+        app_id(&work_root),
         "1.0.0".parse().unwrap(),
         zup_core::SelectedScope::User,
         &plan,
@@ -303,7 +383,9 @@ async fn authenticated_worker_consumes_generated_overlay() {
     std::fs::write(&overlay_file, bytes).unwrap();
     assert_eq!(
         execute_with_test_worker(&Worker {
-            plan,
+            plan: Some(plan),
+            authority: zup_core::SelectedScope::User,
+            install_directory: target_root,
             version: "1.0.0".to_owned(),
             payload_root,
             state_root,
@@ -313,7 +395,7 @@ async fn authenticated_worker_consumes_generated_overlay() {
             payload_overlay_root: Some(overlay.clone()),
         })
         .await,
-        zup_protocol::WorkerOutcome::Committed
+        Err(zup_protocol::WorkerFailure::StalePlan)
     );
-    assert_eq!(std::fs::read(destination).unwrap(), bytes);
+    assert!(!destination.exists());
 }

@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use zup_core::{LauncherLocation, ResourceKey, SelectedScope, Target};
-use zup_plan::InstallPlan;
-use zup_platform::TargetPath;
+use zup_plan::{DesiredState, TargetPath};
 
 use crate::error::PlanError;
 #[cfg(target_os = "linux")]
@@ -39,12 +38,12 @@ pub struct IntegrationOutput {
 }
 
 #[cfg(target_os = "linux")]
-pub fn lower_integration(plan: &InstallPlan) -> Result<IntegrationOutput, PlanError> {
+pub fn lower_integration(plan: &DesiredState) -> Result<IntegrationOutput, PlanError> {
     lower_integration_with(plan, &user_data_home()?)
 }
 
 pub fn lower_integration_with(
-    plan: &InstallPlan,
+    plan: &DesiredState,
     data_home: &std::path::Path,
 ) -> Result<IntegrationOutput, PlanError> {
     refuse_unsupported(plan)?;
@@ -72,7 +71,7 @@ pub fn lower_integration_with(
 }
 
 pub fn lower_integration_in(
-    plan: &InstallPlan,
+    plan: &DesiredState,
     data_home: &std::path::Path,
 ) -> Result<IntegrationOutput, PlanError> {
     let data_home = data_home.to_path_buf();
@@ -138,7 +137,7 @@ pub fn lower_integration_in(
         let mut arguments = Vec::new();
         let mut executable: Option<String> = None;
         for protocol in &plan.protocols {
-            let target = resolve_install_template(&plan.target, &protocol.executable)?;
+            let target = resolve_install_template(&plan.target, &protocol.command.executable)?;
             let text = host_text(&target)?;
             if executable.as_ref().is_some_and(|first| *first != text) {
                 return Err(PlanError::IntegrationUnsupported(
@@ -196,7 +195,7 @@ pub fn lower_integration_in(
         let mut sorted: Vec<_> = plan.file_associations.iter().collect();
         sorted.sort_by_key(|a| a.extension.to_string());
         for association in sorted {
-            let target = resolve_install_template(&plan.target, &association.executable)?;
+            let target = resolve_install_template(&plan.target, &association.command.executable)?;
             let text = host_text(&target)?;
             if executable.as_ref().is_some_and(|first| *first != text) {
                 return Err(PlanError::IntegrationUnsupported(
@@ -259,7 +258,7 @@ pub fn lower_integration_in(
 
 #[cfg(target_os = "linux")]
 pub fn generated_map(
-    plan: &InstallPlan,
+    plan: &DesiredState,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, PlanError> {
     let output = lower_integration(plan)?;
     Ok(output
@@ -567,15 +566,16 @@ fn retained_objects(
     Ok(retained)
 }
 
-fn protocol_args(protocol: &zup_plan::PlannedProtocol) -> Result<Vec<ExecArgument>, PlanError> {
-    if zup_core::uri_placeholder_count(&protocol.args) != 1 {
+fn protocol_args(protocol: &zup_plan::DesiredProtocol) -> Result<Vec<ExecArgument>, PlanError> {
+    if zup_core::uri_placeholder_count(&protocol.command.arguments) != 1 {
         return Err(PlanError::IntegrationUnsupported(format!(
             "protocol handler arguments must carry exactly one `%1` URI placeholder (found {}): Linux delivers the URI through `%u` and any other shape cannot be represented faithfully",
-            zup_core::uri_placeholder_count(&protocol.args)
+            zup_core::uri_placeholder_count(&protocol.command.arguments)
         )));
     }
     Ok(protocol
-        .args
+        .command
+        .arguments
         .iter()
         .map(|argument| {
             if argument == "%1" {
@@ -587,7 +587,7 @@ fn protocol_args(protocol: &zup_plan::PlannedProtocol) -> Result<Vec<ExecArgumen
         .collect())
 }
 
-fn refuse_unsupported(plan: &InstallPlan) -> Result<(), PlanError> {
+fn refuse_unsupported(plan: &DesiredState) -> Result<(), PlanError> {
     if plan
         .launchers
         .iter()
@@ -655,7 +655,7 @@ fn resolve_install_template(
     target: &Target,
     template: &zup_core::Template,
 ) -> Result<TargetPath, PlanError> {
-    use zup_platform::resolve_template_path;
+    use zup_plan::resolve_template_path;
     let path = resolve_template_path(
         template,
         target,

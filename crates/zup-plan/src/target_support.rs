@@ -98,7 +98,7 @@ impl TargetCapabilities {
         errors
     }
 
-    pub fn planned_resource_errors(&self, plan: &zup_plan::InstallPlan) -> Vec<String> {
+    pub fn planned_resource_errors<P, L>(&self, plan: &crate::DesiredState<P, L>) -> Vec<String> {
         let menu = plan
             .launchers
             .iter()

@@ -107,7 +107,6 @@ fn a_windows_package_in_a_linux_runtime_is_refused() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: Operation::Apply,
-        install_dir_override: None,
         selection: Default::default(),
     }) {
         Err(ExecError::Carrier(ComposeError::Target(_) | ComposeError::FormatMismatch { .. })) => {}
@@ -136,7 +135,6 @@ fn a_redirected_state_hierarchy_is_refused() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: Operation::Apply,
-        install_dir_override: None,
         selection: Default::default(),
     }) {
         Err(ExecError::Path(PathError::Refused { .. })) => {}
@@ -170,7 +168,6 @@ fn a_redirected_install_destination_is_refused() {
         scope: SelectedScope::User,
         state_root: Some(user.state.clone()),
         action: Operation::Apply,
-        install_dir_override: None,
         selection: Default::default(),
     }) {
         Err(ExecError::Path(PathError::Refused { .. })) => {}

@@ -17,7 +17,7 @@ use crate::pattern::FilePattern;
 use crate::plugins::{resolve_plugins, validate_plugin_declaration_count};
 use zup_assets::IconCache;
 use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
-use zup_platform::{PortableSourceFilePolicy, SourceFilePolicy};
+use zup_core::{PortableSourceFilePolicy, SourceFilePolicy};
 
 pub fn materialize<S>(
     manifest_path: &Path,

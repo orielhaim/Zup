@@ -31,10 +31,7 @@ use zup_preview::{
 const PRESET: &str = r##"
 use std::path::PathBuf;
 use zup_preset_ipc::Bootstrap;
-use zup_preset_protocol::{
-    Session, SessionProgress, Handshake, Action, Capabilities, Configuration, Message,
-    SessionId,
-};
+use zup_preset_protocol::{Session,SessionProgress,Handshake,Action,Capabilities,Configuration,Message,SessionId};
 
 /// Beside this executable, which the runtime staged into a directory of its own.
 fn report_path() -> PathBuf {
@@ -1174,6 +1171,7 @@ fn zup_runtime_events() -> Vec<zup_runtime::RuntimeEvent> {
             id: "application".into(),
         },
         zup_runtime::RuntimeEvent::Progress {
+            phase: zup_core::OperationPhase::Files,
             completed: 2_048,
             total: 4_096,
             action: "Writing application files".into(),

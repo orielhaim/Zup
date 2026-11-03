@@ -9,11 +9,11 @@ use thiserror::Error;
 use zup_binary::{BinaryFormat, Executable, ProgramKind};
 use zup_bundle::{
     AutoPayloadSource as PortableAutoPayloadSource, BundleWriter, CompiledPluginArtifact,
-    DirectoryPayloadSource, Package, PackageError, PackagePayloadSource, PayloadError,
-    PayloadReader, PayloadSource,
+    OverlayPayloadSource, Package, PackageError, PackagePayloadSource, PayloadError, PayloadReader,
+    PayloadSource, is_plugin_payload_path,
 };
 use zup_core::TargetBuildPlan;
-use zup_core::{Frontend, PLUGIN_PAYLOAD_ROOT, RelativePath, Sha256Digest, Target, hash_reader};
+use zup_core::{Frontend, RelativePath, Sha256Digest, Target, hash_reader};
 use zup_pe::{PeError, RESOURCE_ID_INDEX};
 
 #[derive(Debug, Error)]
@@ -283,7 +283,7 @@ impl PayloadSource for EmbeddedPayloadSource {
 pub enum AutoPayloadSource {
     Portable(PortableAutoPayloadSource),
     Embedded(EmbeddedPayloadSource),
-    Overlay(OverlayPayloadSource),
+    Overlay(OverlayPayloadSource<Self>),
 }
 
 impl AutoPayloadSource {
@@ -364,74 +364,17 @@ impl PayloadSource for AutoPayloadSource {
         expected_sha256: &Sha256Digest,
         expected_size: u64,
     ) -> Result<PayloadReader, PayloadError> {
+        if is_plugin_payload_path(path) && !matches!(self, Self::Overlay(_)) {
+            return Err(PayloadError::NotFound {
+                path: path.to_string(),
+            });
+        }
         match self {
             Self::Overlay(source) => source.open(path, expected_sha256, expected_size),
-            Self::Portable(source) => {
-                if is_plugin_path(path) {
-                    Err(PayloadError::NotFound {
-                        path: path.to_string(),
-                    })
-                } else {
-                    source.open(path, expected_sha256, expected_size)
-                }
-            }
-            Self::Embedded(source) => {
-                if is_plugin_path(path) {
-                    Err(PayloadError::NotFound {
-                        path: path.to_string(),
-                    })
-                } else {
-                    source.open(path, expected_sha256, expected_size)
-                }
-            }
+            Self::Portable(source) => source.open(path, expected_sha256, expected_size),
+            Self::Embedded(source) => source.open(path, expected_sha256, expected_size),
         }
     }
-}
-
-pub struct OverlayPayloadSource {
-    base: Box<AutoPayloadSource>,
-    overlay: Option<DirectoryPayloadSource>,
-}
-
-impl OverlayPayloadSource {
-    pub fn new(base: AutoPayloadSource, overlay: Option<PathBuf>) -> Self {
-        Self {
-            base: Box::new(base),
-            overlay: overlay.map(DirectoryPayloadSource::new),
-        }
-    }
-}
-
-impl PayloadSource for OverlayPayloadSource {
-    fn open(
-        &self,
-        path: &RelativePath,
-        expected_sha256: &Sha256Digest,
-        expected_size: u64,
-    ) -> Result<PayloadReader, PayloadError> {
-        if is_plugin_path(path) {
-            return match &self.overlay {
-                Some(overlay) => overlay.open(path, expected_sha256, expected_size),
-                None => Err(PayloadError::NotFound {
-                    path: path.to_string(),
-                }),
-            };
-        }
-        if let Some(overlay) = &self.overlay {
-            match overlay.open(path, expected_sha256, expected_size) {
-                Ok(reader) => return Ok(reader),
-                Err(PayloadError::NotFound { .. }) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        self.base.open(path, expected_sha256, expected_size)
-    }
-}
-
-fn is_plugin_path(path: &RelativePath) -> bool {
-    path.components()
-        .next()
-        .is_some_and(|component| component == PLUGIN_PAYLOAD_ROOT)
 }
 
 pub fn build_self_contained_executable(

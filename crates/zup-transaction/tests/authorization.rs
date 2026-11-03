@@ -8,17 +8,15 @@
 mod common;
 
 use zup_core::{BackendResourceId, Privilege, RelativePath, ResourceKey};
-use zup_transaction::FileRemovalKind;
-use zup_transaction::{
-    BackendOperation, FileDelta, FilePrecondition, FileWork, NodeKind, TransactionInput,
-    compile_transaction,
-};
+use zup_plan::RemovalKind;
+use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
+use zup_transaction::{BackendOperation, NodeKind, TransactionInput, compile_transaction};
 
 use common::{digest, target, tpath};
 
-fn file_work(name: &str, privilege: Privilege) -> FileWork {
+fn file_work(name: &str, privilege: Privilege) -> FileOperation {
     let contents = b"payload";
-    FileWork {
+    FileOperation {
         key: ResourceKey::File {
             destination: format!(r"C:\PF\Acme\{name}"),
         },
@@ -29,7 +27,9 @@ fn file_work(name: &str, privilege: Privilege) -> FileWork {
         expected_size: contents.len() as u64,
         privilege,
         executable: false,
-        delta: FileDelta::Create,
+        kind: FileOperationKind::Create,
+
+        conflict: None,
     }
 }
 
@@ -95,7 +95,7 @@ fn removal_authorization_comes_from_the_removal_not_the_scope() {
     input.retired_keys.push(key.clone());
     input.removals.push(zup_transaction::FileRemoval {
         key,
-        kind: FileRemovalKind::RemoveOwned,
+        kind: RemovalKind::RemoveOwned,
         scope: zup_core::SelectedScope::User,
         privilege: Privilege::System,
         destination: tpath(r"C:\PF\Acme\host-wide.exe"),

@@ -4,15 +4,14 @@ use zup_core::{
     LauncherLocation, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
     ServiceId, ServiceStart, Sha256Digest, Target, hash_reader,
 };
-use zup_exec::{
-    Conflict, FileAssociationOperationKind, FileOperationKind, HostSnapshot, LauncherOperationKind,
-    ObservedExtensionState, ObservedFile, ObservedFileAssociation, ObservedFileAssociationState,
-    ObservedFileState, ObservedLauncher, ObservedLauncherState, ObservedPathEntry,
-    ObservedProtocol, ObservedProtocolState, ObservedService, ObservedServiceState,
-    PathOperationKind, ProtocolOperationKind, SearchPath, ServiceOperationKind, plan_execution,
+use zup_plan::{
+    CommandSpec, Conflict, FileOperationKind, HostSnapshot, InstallLedger, IntegrationChangeKind,
+    LauncherState, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
+    ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedLauncherState,
+    ObservedPathEntry, ObservedProtocol, ObservedProtocolState, ObservedService,
+    ObservedServiceState, OwnedResource, PathOperationKind, ProtocolState, SearchPath,
+    ServiceState, TargetPath, plan_execution,
 };
-use zup_exec::{InstallLedger, LauncherState, OwnedResource, ProtocolState, ServiceState};
-use zup_platform::{CommandSpec, TargetPath};
 
 fn digest(bytes: &[u8]) -> Sha256Digest {
     hash_reader(bytes).unwrap().1
@@ -26,8 +25,8 @@ fn cmd(path: &str, args: &[&str]) -> CommandSpec {
     CommandSpec::new(tpath(path), args.iter().map(|s| (*s).to_owned()).collect())
 }
 
-fn sample_target() -> zup_platform::TargetPlan {
-    zup_platform::TargetPlan {
+fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
+    zup_plan::DesiredState {
         app: zup_core::App {
             id: zup_core::AppId::new("com.acme.acme").unwrap(),
             name: zup_core::NonEmptyString::new("Acme").unwrap(),
@@ -41,7 +40,7 @@ fn sample_target() -> zup_platform::TargetPlan {
         install_directory: tpath(r"C:\PF\Acme"),
         selected_components: vec![],
         prerequisites: vec![],
-        files: vec![zup_platform::TargetFile {
+        files: vec![zup_plan::DesiredFile {
             key: ResourceKey::File {
                 destination: r"C:\PF\Acme\Acme.exe".into(),
             },
@@ -52,7 +51,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             privilege: Privilege::System,
             executable: false,
         }],
-        launchers: vec![zup_platform::TargetLauncher {
+        launchers: vec![zup_plan::DesiredLauncher {
             key: ResourceKey::Launcher {
                 location: LauncherLocation::Menu,
                 name: "Acme".into(),
@@ -67,7 +66,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             working_directory: Some(tpath(r"C:\PF\Acme")),
             privilege: Privilege::System,
         }],
-        path_entries: vec![zup_platform::TargetPathEntry {
+        path_entries: vec![zup_plan::DesiredPathEntry {
             key: ResourceKey::PathEntry {
                 value: r"C:\PF\Acme\bin".into(),
             },
@@ -75,7 +74,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             scope: SelectedScope::Machine,
             privilege: Privilege::System,
         }],
-        services: vec![zup_platform::TargetService {
+        services: vec![zup_plan::DesiredService {
             key: ResourceKey::Service {
                 id: ServiceId::new("acme-agent").unwrap(),
             },
@@ -86,7 +85,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             start: ServiceStart::Automatic,
             privilege: Privilege::System,
         }],
-        protocols: vec![zup_platform::TargetProtocol {
+        protocols: vec![zup_plan::DesiredProtocol {
             key: ResourceKey::Protocol {
                 scheme: ProtocolScheme::new("acme").unwrap(),
             },
@@ -95,7 +94,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             scope: SelectedScope::Machine,
             privilege: Privilege::System,
         }],
-        file_associations: vec![zup_platform::TargetFileAssociation {
+        file_associations: vec![zup_plan::DesiredFileAssociation {
             key: ResourceKey::FileAssociation {
                 id: zup_core::FileAssociationId::new("Acme.Document").unwrap(),
             },
@@ -106,15 +105,7 @@ fn sample_target() -> zup_platform::TargetPlan {
             scope: SelectedScope::Machine,
             privilege: Privilege::System,
         }],
-        summary: zup_platform::TargetPlanSummary {
-            file_count: 1,
-            install_bytes: 4,
-            resource_count: 5,
-            requires_authorization: true,
-            selected_component_count: 2,
-            prerequisite_count: 0,
-            download_bytes: 0,
-        },
+
         preset: None,
     }
 }
@@ -209,11 +200,15 @@ fn launcher_and_service_ownership_decisions() {
         runtime_state: None,
     };
     let foreign = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(foreign.launchers[0].kind, LauncherOperationKind::Conflict);
-    assert_eq!(foreign.services[0].kind, ServiceOperationKind::Conflict);
+    assert_eq!(foreign.launchers[0].kind, IntegrationChangeKind::Conflict);
+    assert_eq!(foreign.services[0].kind, IntegrationChangeKind::Conflict);
 
-    let mut ledger =
-        InstallLedger::new(target.app.id.clone(), target.target, SelectedScope::Machine);
+    let mut ledger = InstallLedger::new(
+        target.app.id.clone(),
+        target.target,
+        SelectedScope::Machine,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.resources.insert(
         target.launchers[0].key.clone(),
         OwnedResource::Launcher {
@@ -233,13 +228,13 @@ fn launcher_and_service_ownership_decisions() {
         },
     );
     let owned = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(owned.launchers[0].kind, LauncherOperationKind::UpdateOwned);
-    assert_eq!(owned.services[0].kind, ServiceOperationKind::UpdateOwned);
+    assert_eq!(owned.launchers[0].kind, IntegrationChangeKind::UpdateOwned);
+    assert_eq!(owned.services[0].kind, IntegrationChangeKind::UpdateOwned);
     snapshot.launchers[0].state = ObservedLauncherState::Absent;
     snapshot.services[0].state = ObservedServiceState::Absent;
     let drift = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(drift.launchers[0].kind, LauncherOperationKind::Drift);
-    assert_eq!(drift.services[0].kind, ServiceOperationKind::Drift);
+    assert_eq!(drift.launchers[0].kind, IntegrationChangeKind::Drift);
+    assert_eq!(drift.services[0].kind, IntegrationChangeKind::Drift);
 
     target.launchers[0].arguments = vec!["--old".into()];
     target.services[0].display_name = Some(zup_core::NonEmptyString::new("Old Agent").unwrap());
@@ -256,8 +251,8 @@ fn launcher_and_service_ownership_decisions() {
         runtime_state: None,
     };
     let exact = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(exact.launchers[0].kind, LauncherOperationKind::NoOp);
-    assert_eq!(exact.services[0].kind, ServiceOperationKind::NoOp);
+    assert_eq!(exact.launchers[0].kind, IntegrationChangeKind::NoOp);
+    assert_eq!(exact.services[0].kind, IntegrationChangeKind::NoOp);
 }
 
 #[test]
@@ -268,20 +263,17 @@ fn e2e_fake_machine_mixed_deltas() {
 
     assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
-    assert_eq!(plan.launchers[0].kind, LauncherOperationKind::Create);
-    assert_eq!(plan.services[0].kind, ServiceOperationKind::NoOp);
-    assert_eq!(plan.protocols[0].kind, ProtocolOperationKind::Create);
-    assert_eq!(
-        plan.file_associations[0].kind,
-        FileAssociationOperationKind::NoOp
-    );
+    assert_eq!(plan.launchers[0].kind, IntegrationChangeKind::Create);
+    assert_eq!(plan.services[0].kind, IntegrationChangeKind::NoOp);
+    assert_eq!(plan.protocols[0].kind, IntegrationChangeKind::Create);
+    assert_eq!(plan.file_associations[0].kind, IntegrationChangeKind::NoOp);
 
-    assert_eq!(plan.summary.files_unchanged, 1);
-    assert_eq!(plan.summary.path_entries_add, 1);
-    assert_eq!(plan.summary.launchers_create, 1);
-    assert_eq!(plan.summary.services_unchanged, 1);
-    assert_eq!(plan.summary.protocols_create, 1);
-    assert_eq!(plan.summary.file_associations_unchanged, 1);
+    assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
+    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
+    assert_eq!(plan.launchers[0].kind, IntegrationChangeKind::Create);
+    assert_eq!(plan.services[0].kind, IntegrationChangeKind::NoOp);
+    assert_eq!(plan.protocols[0].kind, IntegrationChangeKind::Create);
+    assert_eq!(plan.file_associations[0].kind, IntegrationChangeKind::NoOp);
 }
 
 #[test]
@@ -296,8 +288,12 @@ fn files_replace_non_file_conflict() {
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.files[0].kind, FileOperationKind::Conflict);
 
-    let mut ledger =
-        InstallLedger::new(target.app.id.clone(), target.target, SelectedScope::Machine);
+    let mut ledger = InstallLedger::new(
+        target.app.id.clone(),
+        target.target,
+        SelectedScope::Machine,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.resources.insert(
         target.files[0].key.clone(),
         OwnedResource::File {
@@ -338,15 +334,15 @@ fn file_association_parts_are_planned_independently() {
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(
         plan.file_associations[0].kind,
-        FileAssociationOperationKind::Create
+        IntegrationChangeKind::Create
     );
     assert_eq!(
         plan.file_associations[0].association_kind,
-        FileAssociationOperationKind::NoOp
+        IntegrationChangeKind::NoOp
     );
     assert_eq!(
         plan.file_associations[0].extension_kind,
-        FileAssociationOperationKind::Create
+        IntegrationChangeKind::Create
     );
 
     // Extension exact, association missing.
@@ -357,15 +353,15 @@ fn file_association_parts_are_planned_independently() {
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(
         plan.file_associations[0].kind,
-        FileAssociationOperationKind::Create
+        IntegrationChangeKind::Create
     );
     assert_eq!(
         plan.file_associations[0].association_kind,
-        FileAssociationOperationKind::Create
+        IntegrationChangeKind::Create
     );
     assert_eq!(
         plan.file_associations[0].extension_kind,
-        FileAssociationOperationKind::NoOp
+        IntegrationChangeKind::NoOp
     );
 
     // Both absent → Create
@@ -374,7 +370,7 @@ fn file_association_parts_are_planned_independently() {
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(
         plan.file_associations[0].kind,
-        FileAssociationOperationKind::Create
+        IntegrationChangeKind::Create
     );
 }
 
@@ -389,9 +385,14 @@ fn protocol_upgrade_requires_previous_owned_state() {
     };
     target.protocols[0].command = cmd(r"C:\PF\Acme\new.exe", &["%1"]);
     let foreign = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(foreign.protocols[0].kind, ProtocolOperationKind::Conflict);
+    assert_eq!(foreign.protocols[0].kind, IntegrationChangeKind::Conflict);
 
-    let mut ledger = InstallLedger::new(target.app.id.clone(), target.target, target.scope);
+    let mut ledger = InstallLedger::new(
+        target.app.id.clone(),
+        target.target,
+        target.scope,
+        zup_core::TransactionId::new_v7(),
+    );
     ledger.resources.insert(
         target.protocols[0].key.clone(),
         OwnedResource::Protocol {
@@ -403,7 +404,7 @@ fn protocol_upgrade_requires_previous_owned_state() {
     let upgrade = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
     assert_eq!(
         upgrade.protocols[0].kind,
-        ProtocolOperationKind::UpdateOwned
+        IntegrationChangeKind::UpdateOwned
     );
 
     snapshot.protocols[0].state = ObservedProtocolState::Registration {
@@ -411,7 +412,7 @@ fn protocol_upgrade_requires_previous_owned_state() {
         url_protocol_marker: true,
     };
     let drift = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
-    assert_eq!(drift.protocols[0].kind, ProtocolOperationKind::Drift);
+    assert_eq!(drift.protocols[0].kind, IntegrationChangeKind::Drift);
 }
 
 #[test]
@@ -422,11 +423,12 @@ fn ledger_target_mismatch_is_rejected() {
         target.app.id.clone(),
         Target::parse("arm64-pc-windows-msvc").unwrap(),
         target.scope,
+        zup_core::TransactionId::new_v7(),
     );
     let error = plan_execution(&target, &snapshot, Some(&ledger)).unwrap_err();
     assert!(matches!(
         error,
-        zup_exec::ExecutionPlanError::LedgerMismatch
+        zup_plan::ExecutionPlanError::LedgerMismatch
     ));
 }
 
@@ -440,16 +442,12 @@ fn missing_observation_rejected() {
     let err = plan_execution(&target, &snapshot, None).unwrap_err();
     assert!(matches!(
         err,
-        zup_exec::ExecutionPlanError::MissingSnapshotObservation { .. }
+        zup_plan::ExecutionPlanError::MissingSnapshotObservation { .. }
     ));
 }
 
 #[test]
-fn a_host_wide_resource_stays_host_wide_under_a_per_user_installation() {
-    // A per-user installation that declares a machine-scope service is planning a
-    // host-wide mutation. Planning must carry that privilege through unchanged rather
-    // than lowering it to the installation's own scope, because the operation is what
-    // decides whether the user is asked to authorize, not the scope it was found under.
+fn user_state_cannot_authorize_system_service_ownership() {
     let mut target = sample_target();
     target.scope = SelectedScope::User;
     target.files[0].privilege = Privilege::User;
@@ -461,22 +459,18 @@ fn a_host_wide_resource_stays_host_wide_under_a_per_user_installation() {
     target.file_associations[0].scope = SelectedScope::User;
     target.file_associations[0].privilege = Privilege::User;
     target.services[0].privilege = Privilege::System;
-    target.summary.requires_authorization = true;
 
     let mut snapshot = snapshot_happy();
     snapshot.path_entries[0].scope = SelectedScope::User;
     snapshot.protocols[0].scope = SelectedScope::User;
     snapshot.file_associations[0].scope = SelectedScope::User;
 
-    let plan = plan_execution(&target, &snapshot, None).unwrap();
-    assert_eq!(plan.services[0].privilege, Privilege::System);
-    assert!(plan.summary.requires_authorization);
-    assert_eq!(plan.files[0].privilege, Privilege::User);
-    assert_eq!(plan.launchers[0].privilege, Privilege::User);
-    assert_eq!(plan.path_entries[0].privilege, Privilege::User);
-    assert_eq!(plan.path_entries[0].scope, SelectedScope::User);
-    assert_eq!(plan.protocols[0].privilege, Privilege::User);
-    assert_eq!(plan.file_associations[0].privilege, Privilege::User);
+    assert!(matches!(
+        plan_execution(&target, &snapshot, None),
+        Err(zup_plan::ExecutionPlanError::Contract(
+            zup_plan::ContractError::Capability(_)
+        ))
+    ));
 }
 
 #[test]
@@ -493,15 +487,14 @@ fn search_path_membership_is_a_set_decision() {
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
     assert!(plan.path_entries[0].present);
     assert!(!plan.path_entries[0].previously_owned);
-    assert_eq!(plan.summary.path_entries_present, 1);
-    assert_eq!(plan.summary.path_entries_add, 0);
+    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
 
     // An empty search path is the same decision as one that lacks the entry.
     snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"C:\Windows")]);
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
     assert!(!plan.path_entries[0].present);
-    assert_eq!(plan.summary.path_entries_add, 1);
+    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
 }
 
 /// Membership is target-path identity rather than a string compare. Separators and case
@@ -532,4 +525,23 @@ fn search_path_membership_uses_target_path_identity() {
     );
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
+}
+
+#[test]
+fn observation_headers_cannot_claim_another_resource_or_scope() {
+    let target = sample_target();
+    let mutations: [fn(&mut HostSnapshot); 4] = [
+        |snapshot| snapshot.path_entries[0].desired = tpath(r"C:\Other"),
+        |snapshot| snapshot.services[0].id = ServiceId::new("foreign").unwrap(),
+        |snapshot| snapshot.protocols[0].scope = SelectedScope::User,
+        |snapshot| snapshot.file_associations[0].extension = ".foreign".into(),
+    ];
+    for mutate in mutations {
+        let mut snapshot = snapshot_happy();
+        mutate(&mut snapshot);
+        assert!(matches!(
+            plan_execution(&target, &snapshot, None),
+            Err(zup_plan::ExecutionPlanError::SnapshotResourceMismatch { .. })
+        ));
+    }
 }

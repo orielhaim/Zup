@@ -2,9 +2,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use zup_core::{AppId, Frontend, ResourceKey, SelectedScope};
-use zup_exec::InstallLedger;
-use zup_plan::{InstallPlan, PlanRequest, PlannedInstallation};
-use zup_platform::TargetPlan;
+use zup_plan::{DesiredState, InstallLedger, PlanRequest, PlannedInstallation};
+
 use zup_runtime::{BootstrapRequest, ContentAccess, OperationHost, attach_maintenance_copy};
 use zup_transaction::TransactionInput;
 
@@ -33,7 +32,7 @@ impl OperationHost for WindowsOperationHost<'_> {
         build: &zup_core::TargetBuildPlan,
         request: &PlanRequest,
         cancellation: &dyn zup_plan::CancellationQuery,
-    ) -> Result<PlannedInstallation, String> {
+    ) -> Result<PlannedInstallation, zup_runtime::OperationError> {
         let planning = zup_core::BuildPlan {
             targets: vec![build.clone()],
         };
@@ -50,12 +49,15 @@ impl OperationHost for WindowsOperationHost<'_> {
                 )
             }
         }
-        .map_err(|error| error.to_string())?;
-        zup_plan::plan_with_plugins(&planning, request, &mut executor, cancellation)
-            .map_err(|error| error.to_string())
+        .map_err(|error| zup_runtime::OperationError::refused("plugin", error))?;
+        zup_plan::plan(&planning, request, Some(&mut executor), cancellation)
+            .map_err(zup_runtime::OperationError::from)
     }
 
-    fn resolve_target(&self, install: &InstallPlan) -> Result<TargetPlan, String> {
+    fn resolve_target(
+        &self,
+        install: &DesiredState,
+    ) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String> {
         crate::resolve::resolve_target(
             install,
             &crate::resolve::WindowsTargetContext::new(self.scope),
@@ -65,17 +67,16 @@ impl OperationHost for WindowsOperationHost<'_> {
 
     fn observe(
         &self,
-        target: Option<&TargetPlan>,
+        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
         ledger: Option<&InstallLedger>,
-    ) -> Result<(Option<zup_exec::HostSnapshot>, BTreeMap<ResourceKey, bool>), String> {
+    ) -> Result<(Option<zup_plan::HostSnapshot>, BTreeMap<ResourceKey, bool>), String> {
         crate::planning::observe_target(target, ledger).map_err(|error| error.to_string())
     }
 
     fn compile(
         &self,
-        _action: zup_exec::LifecycleAction,
-        execution: &zup_exec::ExecutionPlan,
-        target: Option<&TargetPlan>,
+        execution: &zup_plan::ExecutionPlan,
+        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
         ledger: Option<&InstallLedger>,
     ) -> Result<TransactionInput, String> {
         crate::planning::transaction_input(
@@ -92,7 +93,7 @@ impl OperationHost for WindowsOperationHost<'_> {
 
     fn attach_content(
         &self,
-        target: &mut TargetPlan,
+        target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         content: &ContentAccess,
         preset: Option<&zup_core::PresetRuntime>,
     ) -> Result<(), String> {
@@ -124,7 +125,10 @@ impl OperationHost for WindowsOperationHost<'_> {
         Ok(())
     }
 
-    fn prepare_bootstrap(&self, install: &InstallPlan) -> Result<Option<BootstrapRequest>, String> {
+    fn prepare_bootstrap(
+        &self,
+        install: &DesiredState,
+    ) -> Result<Option<BootstrapRequest>, String> {
         if !self.acquire_prerequisites {
             return Ok(None);
         }
@@ -185,7 +189,7 @@ fn ui_asset_name(source: &str) -> Option<&str> {
 }
 
 fn attach_ui_runtime(
-    target: &mut TargetPlan,
+    target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     runtime_directory: &std::path::Path,
     scope: SelectedScope,
     preset: &zup_core::PresetRuntime,
@@ -229,11 +233,10 @@ fn attach_ui_runtime(
     }
 
     for (path, digest, size, source, executable) in files {
-        let destination =
-            zup_platform::TargetPath::new(target.target, crate::plain_path_text(&path))
-                .map_err(|error| format!("preset runtime destination: {error}"))?;
+        let destination = zup_plan::TargetPath::new(target.target, crate::plain_path_text(&path))
+            .map_err(|error| format!("preset runtime destination: {error}"))?;
         let text = destination.to_string();
-        target.files.push(zup_platform::TargetFile {
+        target.files.push(zup_plan::DesiredFile {
             key: zup_core::ResourceKey::File { destination: text },
             source_relative: source,
             destination,
@@ -242,9 +245,6 @@ fn attach_ui_runtime(
             privilege: scope.authorization(),
             executable,
         });
-        target.summary.file_count += 1;
-        target.summary.resource_count += 1;
-        target.summary.install_bytes = target.summary.install_bytes.saturating_add(size);
     }
     target.preset = Some(zup_core::InstalledPreset {
         preset: preset.clone(),
@@ -261,9 +261,12 @@ mod tests {
         PresetAsset, PresetRuntime, SelectedScope, Target, Template,
     };
 
-    fn empty_target(scope: SelectedScope, id: &str) -> TargetPlan {
+    fn empty_target(
+        scope: SelectedScope,
+        id: &str,
+    ) -> DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
         let target = Target::parse("windows-x64").expect("a target");
-        TargetPlan {
+        DesiredState {
             app: App {
                 id: AppId::new(id).expect("an app id"),
                 name: NonEmptyString::new("Window").expect("a name"),
@@ -274,7 +277,7 @@ mod tests {
             },
             target,
             scope,
-            install_directory: zup_platform::TargetPath::new(target, r"C:\Windows\Temp\app")
+            install_directory: zup_plan::TargetPath::new(target, r"C:\Windows\Temp\app")
                 .expect("a target path"),
             selected_components: Vec::new(),
             prerequisites: Vec::new(),
@@ -284,15 +287,7 @@ mod tests {
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: zup_platform::TargetPlanSummary {
-                file_count: 0,
-                install_bytes: 0,
-                resource_count: 0,
-                requires_authorization: false,
-                selected_component_count: 0,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
             preset: None,
         }
     }
@@ -396,10 +391,7 @@ mod tests {
                 zup_bundle::PRESET_SOURCE,
                 "and the plan names where the bytes come from rather than a file to copy"
             );
-            assert_eq!(
-                target.summary.file_count, 2,
-                "the content counts as content"
-            );
+            assert_eq!(target.summary().unwrap().file_count, 2);
             seen.push(executable);
         }
         assert_ne!(seen[0], seen[1], "two scopes are two storages");

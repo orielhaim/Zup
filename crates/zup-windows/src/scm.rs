@@ -1,7 +1,7 @@
 use windows_service::service::{ServiceAccess, ServiceStartType, ServiceType};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use zup_core::{ServiceStart, Target};
-use zup_exec::ObservedServiceState;
+use zup_plan::ObservedServiceState;
 
 use crate::cmdline;
 

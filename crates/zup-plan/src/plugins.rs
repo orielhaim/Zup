@@ -1,20 +1,19 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zup_core::{
     App, ComponentId, FileAssociationId, FileExtension, LauncherLocation, NonEmptyString,
-    PluginBinding, PluginId, PrerequisitePackage, Privilege, ProtocolScheme, RelativePath,
-    ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest, Target, Template,
+    PluginBinding, PluginId, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
+    ServiceId, ServiceStart, Sha256Digest, Target, Template,
 };
 
 use crate::error::PlanError;
-use crate::plan_types::{InstallPlan, PlanSummary};
+use crate::plan_types::DesiredState;
 use crate::resolve::resolve_template;
 use crate::resources::{
-    PlannedFile, PlannedFileAssociation, PlannedLauncher, PlannedPathEntry, PlannedProtocol,
-    PlannedService,
+    DesiredFile, DesiredFileAssociation, DesiredLauncher, DesiredPathEntry, DesiredProtocol,
+    DesiredService,
 };
 
 pub const MAX_PLUGIN_RESOURCES: usize = 4096;
@@ -231,7 +230,7 @@ pub struct GeneratedFile {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedInstallation {
-    pub plan: InstallPlan,
+    pub plan: DesiredState,
     pub generated_files: Vec<GeneratedFile>,
 }
 
@@ -253,7 +252,7 @@ pub(crate) struct CollisionIndex {
 }
 
 impl CollisionIndex {
-    pub(crate) fn from_plan(plan: &InstallPlan) -> Result<Self, PlanError> {
+    pub(crate) fn from_plan(plan: &DesiredState) -> Result<Self, PlanError> {
         let mut index = Self {
             files: BTreeMap::new(),
             file_sources: BTreeMap::new(),
@@ -300,7 +299,7 @@ impl CollisionIndex {
     }
 
     fn insert_manifest_file(&mut self, destination: &str, source: &str) -> Result<(), PlanError> {
-        let identity = logical_identity(destination);
+        let identity = destination.to_owned();
         if let Some(existing) = self.files.get(&identity) {
             return Err(collision_error(None, "manifest file", &identity, existing));
         }
@@ -312,7 +311,7 @@ impl CollisionIndex {
             },
         );
         self.file_sources
-            .entry(logical_identity(source))
+            .entry(source.to_owned())
             .or_insert_with(|| CollisionOrigin {
                 plugin_id: None,
                 resource: "manifest file".to_owned(),
@@ -327,7 +326,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = logical_identity(destination);
+        let identity = destination.to_owned();
         if let Some(existing) = self.files.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -339,7 +338,7 @@ impl CollisionIndex {
             },
         );
         if let Some(source) = source {
-            let source_identity = logical_identity(source);
+            let source_identity = source.to_owned();
             if let Some(existing) = self.file_sources.get(&source_identity) {
                 return Err(collision_error(
                     plugin_id,
@@ -366,7 +365,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = format!("launcher:{}:{}", location, logical_identity(name));
+        let identity = format!("launcher:{}:{}", location, name);
         if let Some(existing) = self.launchers.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -386,7 +385,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = logical_identity(value);
+        let identity = value.to_owned();
         if let Some(existing) = self.paths.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -406,7 +405,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = logical_identity(id);
+        let identity = id.to_owned();
         if let Some(existing) = self.services.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -426,7 +425,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let identity = logical_identity(scheme);
+        let identity = scheme.to_owned();
         if let Some(existing) = self.protocols.get(&identity) {
             return Err(collision_error(plugin_id, resource, &identity, existing));
         }
@@ -447,7 +446,7 @@ impl CollisionIndex {
         plugin_id: Option<&PluginId>,
         resource: &str,
     ) -> Result<(), PlanError> {
-        let id_identity = format!("file-association:{}", logical_identity(id));
+        let id_identity = format!("file-association:{}", id.to_owned());
         if let Some(existing) = self.file_association_ids.get(&id_identity) {
             return Err(collision_error(
                 plugin_id,
@@ -456,8 +455,7 @@ impl CollisionIndex {
                 existing,
             ));
         }
-        let extension_identity =
-            format!("file-association-extension:{}", logical_identity(extension));
+        let extension_identity = format!("file-association-extension:{}", extension);
         if let Some(existing) = self.file_association_extensions.get(&extension_identity) {
             return Err(collision_error(
                 plugin_id,
@@ -520,7 +518,7 @@ struct FileAssociationInput {
 }
 
 struct MergeContext<'a> {
-    plan: &'a mut InstallPlan,
+    plan: &'a mut DesiredState,
     generated_files: &'a mut Vec<GeneratedFile>,
     collisions: &'a mut CollisionIndex,
     binding: &'a PluginBinding,
@@ -615,7 +613,7 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
 }
 
 pub(crate) fn merge_plugin_proposal(
-    plan: &mut InstallPlan,
+    plan: &mut DesiredState,
     generated_files: &mut Vec<GeneratedFile>,
     collisions: &mut CollisionIndex,
     binding: &PluginBinding,
@@ -819,8 +817,8 @@ impl MergeContext<'_> {
         let destination =
             resolve_template(&destination, &self.plan.app, &self.plan.install_directory)?;
         check_resolved_template(plugin_id, resource_name, &destination, "destination")?;
-        let destination_identity = logical_identity(&destination.to_string());
-        let destination_hash = digest_hex(destination_identity.as_bytes());
+        let destination_identity = destination.to_string();
+        let destination_hash = zup_core::hash_bytes(destination_identity.as_bytes()).to_hex();
         let source_name = format!("{destination_hash}.bin");
         let source_relative =
             RelativePath::from_components([zup_core::PLUGIN_PAYLOAD_ROOT, source_name.as_str()])
@@ -836,10 +834,10 @@ impl MergeContext<'_> {
             resource_name,
         )?;
 
-        let sha256 = digest(&contents);
+        let sha256 = zup_core::hash_bytes(&contents);
         let privilege = self.plan.scope.authorization();
         let planned_destination = destination.clone();
-        self.plan.files.push(PlannedFile {
+        self.plan.files.push(DesiredFile {
             key: ResourceKey::File {
                 destination: destination.to_string(),
             },
@@ -883,7 +881,7 @@ impl MergeContext<'_> {
                 let value = parse_template(plugin_id, resource_name, &value, "working directory")?;
                 let value = resolve_template(&value, &self.plan.app, &self.plan.install_directory)?;
                 check_resolved_template(plugin_id, resource_name, &value, "working directory")?;
-                Ok(value)
+                Ok::<_, PlanError>(value)
             })
             .transpose()?;
         self.collisions.insert_launcher(
@@ -892,7 +890,7 @@ impl MergeContext<'_> {
             Some(plugin_id),
             resource_name,
         )?;
-        self.plan.launchers.push(PlannedLauncher {
+        self.plan.launchers.push(DesiredLauncher {
             key: ResourceKey::Launcher {
                 location,
                 name: name.to_string(),
@@ -903,6 +901,8 @@ impl MergeContext<'_> {
             arguments,
             working_directory,
             privilege: self.plan.scope.authorization(),
+
+            launcher_path: (),
         });
         Ok(())
     }
@@ -915,7 +915,7 @@ impl MergeContext<'_> {
         self.collisions
             .insert_path(&value.to_string(), Some(plugin_id), resource_name)?;
         let scope = self.plan.scope;
-        self.plan.path_entries.push(PlannedPathEntry {
+        self.plan.path_entries.push(DesiredPathEntry {
             key: ResourceKey::PathEntry {
                 value: value.to_string(),
             },
@@ -947,15 +947,14 @@ impl MergeContext<'_> {
         let arguments = check_arguments(plugin_id, resource_name, arguments, "arguments")?;
         self.collisions
             .insert_service(id.as_str(), Some(plugin_id), resource_name)?;
-        self.plan.services.push(PlannedService {
+        self.plan.services.push(DesiredService {
             key: ResourceKey::Service { id: id.clone() },
             id,
             name,
             display_name,
-            binary,
-            arguments,
             start,
             privilege: Privilege::System,
+            command: crate::CommandSpec::new(binary, arguments),
         });
         Ok(())
     }
@@ -979,15 +978,14 @@ impl MergeContext<'_> {
         let args = check_arguments(plugin_id, resource_name, args, "arguments")?;
         self.collisions
             .insert_protocol(scheme.as_str(), Some(plugin_id), resource_name)?;
-        self.plan.protocols.push(PlannedProtocol {
+        self.plan.protocols.push(DesiredProtocol {
             key: ResourceKey::Protocol {
                 scheme: scheme.clone(),
             },
             scheme,
-            executable,
-            args,
             scope: self.plan.scope,
             privilege: self.plan.scope.authorization(),
+            command: crate::CommandSpec::new(executable, args),
         });
         Ok(())
     }
@@ -1019,14 +1017,14 @@ impl MergeContext<'_> {
             Some(plugin_id),
             resource_name,
         )?;
-        self.plan.file_associations.push(PlannedFileAssociation {
+        self.plan.file_associations.push(DesiredFileAssociation {
             key: ResourceKey::FileAssociation { id: id.clone() },
             extension,
             id,
             description,
-            executable,
             scope: self.plan.scope,
             privilege: self.plan.scope.authorization(),
+            command: crate::CommandSpec::new(executable, Vec::new()),
         });
         Ok(())
     }
@@ -1204,7 +1202,7 @@ fn collision_error(
     identity: &str,
     existing: &CollisionOrigin,
 ) -> PlanError {
-    PlanError::PluginResourceCollision {
+    PlanError::ResourceCollision {
         plugin_id: plugin_id.cloned(),
         resource: resource.to_owned(),
         identity: identity.to_owned(),
@@ -1213,21 +1211,7 @@ fn collision_error(
     }
 }
 
-fn logical_identity(value: &str) -> String {
-    value.to_owned()
-}
-
-fn digest(bytes: &[u8]) -> zup_core::Sha256Digest {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    zup_core::Sha256Digest::from_hasher(hasher)
-}
-
-fn digest_hex(bytes: &[u8]) -> String {
-    digest(bytes).to_hex()
-}
-
-pub(crate) fn sort_resources(plan: &mut InstallPlan, generated_files: &mut [GeneratedFile]) {
+pub(crate) fn sort_resources(plan: &mut DesiredState, generated_files: &mut [GeneratedFile]) {
     plan.files.sort_by(|left, right| {
         left.key
             .cmp(&right.key)
@@ -1252,67 +1236,4 @@ pub(crate) fn sort_resources(plan: &mut InstallPlan, generated_files: &mut [Gene
             .cmp(&right.destination.to_string())
             .then_with(|| left.source_relative.cmp(&right.source_relative))
     });
-}
-
-pub(crate) fn summarize_plan(
-    plan: &InstallPlan,
-    selected_component_count: usize,
-) -> Result<PlanSummary, PlanError> {
-    let mut install_bytes = 0u64;
-    for file in &plan.files {
-        install_bytes = install_bytes
-            .checked_add(file.size)
-            .ok_or(PlanError::SizeOverflow)?;
-    }
-    let download_bytes = plan
-        .prerequisites
-        .iter()
-        .try_fold(0u64, |total, prerequisite| match &prerequisite.package {
-            PrerequisitePackage::Remote {
-                size: Some(size), ..
-            } => total.checked_add(*size).ok_or(PlanError::SizeOverflow),
-            PrerequisitePackage::Remote { .. } | PrerequisitePackage::Embedded { .. } => Ok(total),
-        })?;
-    let resource_count = plan.launchers.len()
-        + plan.path_entries.len()
-        + plan.services.len()
-        + plan.protocols.len()
-        + plan.file_associations.len();
-    let requires_authorization = plan
-        .prerequisites
-        .iter()
-        .any(|resource| resource.installer.privilege == Privilege::System)
-        || plan
-            .files
-            .iter()
-            .any(|resource| resource.privilege == Privilege::System)
-        || plan
-            .launchers
-            .iter()
-            .any(|resource| resource.privilege == Privilege::System)
-        || plan
-            .path_entries
-            .iter()
-            .any(|resource| resource.privilege == Privilege::System)
-        || plan
-            .services
-            .iter()
-            .any(|resource| resource.privilege == Privilege::System)
-        || plan
-            .protocols
-            .iter()
-            .any(|resource| resource.privilege == Privilege::System)
-        || plan
-            .file_associations
-            .iter()
-            .any(|resource| resource.privilege == Privilege::System);
-    Ok(PlanSummary {
-        file_count: plan.files.len(),
-        install_bytes,
-        selected_component_count,
-        resource_count,
-        requires_authorization,
-        prerequisite_count: plan.prerequisites.len(),
-        download_bytes,
-    })
 }

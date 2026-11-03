@@ -20,4 +20,4 @@ pub use materialize::{
 };
 pub use pattern::FilePattern;
 pub use zup_bundle::MAX_PLUGIN_SOURCE_BYTES;
-pub use zup_platform::{PortableSourceFilePolicy, SourceFilePolicy};
+pub use zup_core::{PortableSourceFilePolicy, SourceFilePolicy};

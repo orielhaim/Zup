@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use zup_plan::RemovalKind;
 
 use zup_bundle::{PayloadError, PayloadSource};
 use zup_core::{RelativePath, ResourceKey, Sha256Digest, hash_reader};
-use zup_exec::{HostSnapshot, ObservedFile, ObservedFileState};
-use zup_platform::TargetPath;
+use zup_plan::{HostSnapshot, ObservedFile, ObservedFileState, TargetPath};
+
+use zup_plan::{FileOperationKind, FilePrecondition};
 use zup_transaction::{
-    FileDelta, FilePrecondition, FileRemoval, FileRemovalKind, NodeKind, OperationExecutor,
-    OperationId, OperationReceipt, ReconcileResult, TransactionId, TransactionNode,
-    TransactionPlan,
+    FileRemoval, NodeKind, OperationExecutor, OperationId, OperationReceipt, ReconcileResult,
+    TransactionId, TransactionNode, TransactionPlan,
 };
 
 use crate::error::{ExecError, PathError};
@@ -19,8 +20,8 @@ use crate::fs::{
 use crate::lowering::to_host_path;
 
 #[derive(Debug, Clone)]
-pub struct FileWork {
-    pub destination: zup_platform::TargetPath,
+pub struct FileOperation {
+    pub destination: zup_plan::TargetPath,
 
     pub host_path: PathBuf,
 
@@ -47,7 +48,7 @@ impl FileIntent {
 }
 
 pub struct LinuxFileExecutor {
-    files: BTreeMap<String, FileWork>,
+    files: BTreeMap<String, FileOperation>,
     staged_dirs: BTreeMap<String, Vec<String>>,
     payload: Option<Box<dyn PayloadSource>>,
     executable_mode: rustix::fs::Mode,
@@ -155,7 +156,7 @@ impl LinuxFileExecutor {
         })
     }
 
-    pub fn register(&mut self, id: &OperationId, file: FileWork) {
+    pub fn register(&mut self, id: &OperationId, file: FileOperation) {
         self.files.insert(id.to_string(), file);
     }
 
@@ -212,7 +213,7 @@ impl LinuxFileExecutor {
             };
             self.register(
                 &node.id,
-                FileWork {
+                FileOperation {
                     destination,
                     host_path,
                     intent,
@@ -226,7 +227,7 @@ impl LinuxFileExecutor {
         Ok(())
     }
 
-    pub fn file(&self, id: &str) -> Result<&FileWork, ExecError> {
+    pub fn file(&self, id: &str) -> Result<&FileOperation, ExecError> {
         self.files.get(id).ok_or_else(|| ExecError::PlanDrift {
             path: id.to_owned(),
             reason: "no registered file for this operation".into(),
@@ -412,9 +413,9 @@ impl LinuxFileExecutor {
             NodeKind::Barrier => Ok(OperationReceipt::Control),
             NodeKind::StageFile { .. } => self.stage_node(node),
             NodeKind::FileMutation { delta, .. } => match delta {
-                FileDelta::Create | FileDelta::RestoreOwned => self.create(node),
-                FileDelta::Replace | FileDelta::RepairOwned => self.replace(node),
-                FileDelta::NoOp => Ok(OperationReceipt::Control),
+                FileOperationKind::Create | FileOperationKind::RestoreOwned => self.create(node),
+                FileOperationKind::Replace | FileOperationKind::RepairOwned => self.replace(node),
+                FileOperationKind::NoOp => Ok(OperationReceipt::Control),
                 other => Err(ExecError::PlanDrift {
                     path: node.id.to_string(),
                     reason: format!("{other:?} is not applied by the file executor"),
@@ -975,14 +976,16 @@ impl LinuxFileExecutor {
 
             NodeKind::StageFile { .. } => Ok(ReconcileResult::NotApplied),
             NodeKind::FileMutation { delta, .. } => match delta {
-                FileDelta::Create | FileDelta::RestoreOwned => {
+                FileOperationKind::Create | FileOperationKind::RestoreOwned => {
                     self.reconcile_interrupted_create(node)
                 }
-                FileDelta::Replace | FileDelta::RepairOwned => {
+                FileOperationKind::Replace | FileOperationKind::RepairOwned => {
                     self.reconcile_interrupted_replace(node)
                 }
-                FileDelta::NoOp => Ok(ReconcileResult::NotApplied),
-                FileDelta::Conflict | FileDelta::Drift => Ok(ReconcileResult::Ambiguous),
+                FileOperationKind::NoOp => Ok(ReconcileResult::NotApplied),
+                FileOperationKind::Conflict | FileOperationKind::Drift => {
+                    Ok(ReconcileResult::Ambiguous)
+                }
             },
             NodeKind::FileRemoval { .. } => self.reconcile_interrupted_removal(node),
 
@@ -1450,7 +1453,7 @@ impl LinuxFileExecutor {
     fn ensure_staged(
         &mut self,
         node: &TransactionNode,
-        file: &FileWork,
+        file: &FileOperation,
         directory: &OwnedDirectory,
         staged_name: &str,
     ) -> Result<(), ExecError> {
@@ -1523,10 +1526,10 @@ impl LinuxFileExecutor {
 
     fn check_removal_target(
         &self,
-        file: &FileWork,
+        file: &FileOperation,
         removal: &FileRemoval,
     ) -> Result<(), ExecError> {
-        if removal.kind != FileRemovalKind::RemoveOwned {
+        if removal.kind != RemovalKind::RemoveOwned {
             return Err(ExecError::PlanDrift {
                 path: file.host_path.display().to_string(),
                 reason: "a removal without owned content is never unlinked".into(),
@@ -2102,15 +2105,15 @@ fn mutation_key(node: &TransactionNode) -> Result<ResourceKey, ExecError> {
 }
 
 fn as_target(
-    anchor: &zup_platform::TargetPath,
+    anchor: &zup_plan::TargetPath,
     host_path: &Path,
-) -> Result<zup_platform::TargetPath, ExecError> {
-    zup_platform::TargetPath::new(*anchor.target(), &*host_path.to_string_lossy()).map_err(
-        |error| ExecError::PlanDrift {
+) -> Result<zup_plan::TargetPath, ExecError> {
+    zup_plan::TargetPath::new(*anchor.target(), &*host_path.to_string_lossy()).map_err(|error| {
+        ExecError::PlanDrift {
             path: host_path.display().to_string(),
             reason: error.to_string(),
-        },
-    )
+        }
+    })
 }
 
 fn staged_name(id: &OperationId) -> String {
@@ -2391,7 +2394,7 @@ impl LinuxFileExecutor {
     }
 }
 
-fn service_unit_for(service: &zup_exec::ServiceOperation) -> Result<String, ExecError> {
+fn service_unit_for(service: &zup_plan::ServiceOperation) -> Result<String, ExecError> {
     let id = zup_core::ServiceId::new(&service.id).map_err(|error| ExecError::PlanDrift {
         path: service.name.clone(),
         reason: format!("service id: {error}"),
@@ -2402,7 +2405,9 @@ fn service_unit_for(service: &zup_exec::ServiceOperation) -> Result<String, Exec
     })
 }
 
-pub fn snapshot_target(target: &zup_platform::TargetPlan) -> HostSnapshot {
+pub fn snapshot_target(
+    target: &zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+) -> HostSnapshot {
     let mut snapshot = HostSnapshot::default();
     for file in &target.files {
         let state = observe_file(file);
@@ -2415,7 +2420,7 @@ pub fn snapshot_target(target: &zup_platform::TargetPlan) -> HostSnapshot {
     snapshot
 }
 
-fn observe_file(file: &zup_platform::TargetFile) -> ObservedFileState {
+fn observe_file(file: &zup_plan::DesiredFile<zup_plan::TargetPath>) -> ObservedFileState {
     let host = match to_host_path(&file.destination) {
         Ok(host) => host,
 
@@ -2477,11 +2482,11 @@ mod fallback_tests {
     ) {
         let target = zup_core::Target::parse("linux-x64").expect("a target");
         let host = |path: &Path| {
-            zup_platform::TargetPath::new(target, path.to_string_lossy()).expect("a path")
+            zup_plan::TargetPath::new(target, path.to_string_lossy()).expect("a path")
         };
         executor.register(
             &OperationId::new("op-replace"),
-            FileWork {
+            FileOperation {
                 destination: host(destination),
                 host_path: destination.to_path_buf(),
                 intent: FileIntent {
@@ -2505,7 +2510,7 @@ mod fallback_tests {
                 key: ResourceKey::File {
                     destination: String::from("/tmp/whatever"),
                 },
-                delta: FileDelta::Replace,
+                delta: FileOperationKind::Replace,
             },
             declaration_order: 0,
             meta: Default::default(),
@@ -2847,9 +2852,11 @@ mod snapshot_tests {
     use super::*;
     use zup_core::{AppId, NonEmptyString, Privilege, RelativePath, SelectedScope, Target};
 
-    fn target_with(files: Vec<(String, zup_platform::TargetPath)>) -> zup_platform::TargetPlan {
+    fn target_with(
+        files: Vec<(String, zup_plan::TargetPath)>,
+    ) -> zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
         let target = Target::parse("linux-x64").expect("a target");
-        zup_platform::TargetPlan {
+        zup_plan::DesiredState {
             app: zup_core::App {
                 id: AppId::new("com.example.tool").expect("an id"),
                 name: NonEmptyString::new("Tool").expect("a name"),
@@ -2860,13 +2867,13 @@ mod snapshot_tests {
             },
             target,
             scope: SelectedScope::User,
-            install_directory: zup_platform::TargetPath::new(target, "/tmp/zup-snapshot-test/tool")
+            install_directory: zup_plan::TargetPath::new(target, "/tmp/zup-snapshot-test/tool")
                 .expect("a path"),
             selected_components: Vec::new(),
             prerequisites: Vec::new(),
             files: files
                 .into_iter()
-                .map(|(name, destination)| zup_platform::TargetFile {
+                .map(|(name, destination)| zup_plan::DesiredFile {
                     key: zup_core::ResourceKey::File {
                         destination: destination.to_string(),
                     },
@@ -2883,21 +2890,13 @@ mod snapshot_tests {
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
-            summary: zup_platform::TargetPlanSummary {
-                file_count: 0,
-                install_bytes: 0,
-                resource_count: 0,
-                requires_authorization: false,
-                selected_component_count: 0,
-                prerequisite_count: 0,
-                download_bytes: 0,
-            },
+
             preset: None,
         }
     }
 
-    fn destination(root: &std::path::Path, name: &str) -> zup_platform::TargetPath {
-        zup_platform::TargetPath::new(
+    fn destination(root: &std::path::Path, name: &str) -> zup_plan::TargetPath {
+        zup_plan::TargetPath::new(
             Target::parse("linux-x64").expect("a target"),
             root.join(name).to_string_lossy(),
         )

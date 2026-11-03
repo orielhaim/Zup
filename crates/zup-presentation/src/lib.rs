@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize, de::Error as _};
 use zup_core::{ComponentId, ResourceKey, SelectedScope};
-use zup_plan::InstallPlan;
+use zup_plan::DesiredState;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedChange {
@@ -42,6 +42,7 @@ impl ChangeGroup {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanPreview {
+    pub basis: PlanBasis,
     pub application: String,
     pub version: String,
     pub scope: SelectedScope,
@@ -58,7 +59,10 @@ pub struct PlanPreview {
 }
 
 impl PlanPreview {
-    pub fn from_install_plan(plan: &InstallPlan) -> Self {
+    pub fn from_desired_state<P: std::fmt::Display, L>(
+        plan: &DesiredState<P, L>,
+    ) -> Result<Self, zup_plan::ContractError> {
+        let summary = plan.summary()?;
         let mut groups = BTreeMap::<ResourceCategory, Vec<PlannedChange>>::new();
         for file in &plan.files {
             let category = if matches!(file.key, ResourceKey::Maintenance { .. }) {
@@ -118,7 +122,7 @@ impl PlanPreview {
                     category: ResourceCategory::Services,
                     kind: ChangeKind::Create,
                     label: service.name.to_string(),
-                    location: Some(service.binary.to_string()),
+                    location: Some(service.command.executable.to_string()),
                     scope: Some(SelectedScope::Machine),
                     requires_authorization: service.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
@@ -134,7 +138,7 @@ impl PlanPreview {
                     category: ResourceCategory::Protocols,
                     kind: ChangeKind::Create,
                     label: format!("{}://", protocol.scheme),
-                    location: Some(protocol.executable.to_string()),
+                    location: Some(protocol.command.executable.to_string()),
                     scope: Some(protocol.scope),
                     requires_authorization: protocol.privilege == zup_core::Privilege::System,
                     estimated_bytes: 0,
@@ -150,7 +154,7 @@ impl PlanPreview {
                     category: ResourceCategory::FileAssociations,
                     kind: ChangeKind::Create,
                     label: format!("{} files", file_association.extension),
-                    location: Some(file_association.executable.to_string()),
+                    location: Some(file_association.command.executable.to_string()),
                     scope: Some(file_association.scope),
                     requires_authorization: file_association.privilege
                         == zup_core::Privilege::System,
@@ -169,21 +173,22 @@ impl PlanPreview {
                     label: "Register in Apps & Features".into(),
                     location: None,
                     scope: Some(plan.scope),
-                    requires_authorization: plan.summary.requires_authorization,
+                    requires_authorization: summary.requires_authorization,
                     estimated_bytes: 0,
                     component: None,
                     technical_key: Some("uninstall_entry".into()),
                 });
         }
-        Self {
+        Ok(Self {
+            basis: PlanBasis::DesiredState,
             application: plan.app.name.to_string(),
             version: plan.app.version.to_string(),
             scope: plan.scope,
             install_directory: plan.install_directory.to_string(),
             selected_components: plan.selected_components.clone(),
-            estimated_bytes: plan.summary.install_bytes,
-            download_bytes: plan.summary.download_bytes,
-            requires_authorization: plan.summary.requires_authorization,
+            estimated_bytes: summary.install_bytes,
+            download_bytes: summary.download_bytes,
+            requires_authorization: summary.requires_authorization,
             groups: groups
                 .into_iter()
                 .map(|(category, changes)| ChangeGroup {
@@ -193,14 +198,14 @@ impl PlanPreview {
                 })
                 .collect(),
             requirements: requirements(&plan.prerequisites),
-        }
+        })
     }
 
     pub fn from_transaction_plan(
         plan: &zup_transaction::TransactionPlan,
         scope: SelectedScope,
-        target: Option<&zup_platform::TargetPlan>,
-    ) -> Self {
+        target: Option<&zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
+    ) -> Result<Self, zup_plan::ContractError> {
         let mut groups = BTreeMap::<ResourceCategory, Vec<PlannedChange>>::new();
         let mut estimated_bytes = 0u64;
         for node in &plan.nodes {
@@ -212,13 +217,13 @@ impl PlanPreview {
                         ResourceCategory::Files
                     };
                     let kind = match delta {
-                        zup_transaction::FileDelta::Create => ChangeKind::Create,
-                        zup_transaction::FileDelta::Replace
-                        | zup_transaction::FileDelta::RestoreOwned
-                        | zup_transaction::FileDelta::RepairOwned => ChangeKind::Update,
-                        zup_transaction::FileDelta::NoOp => ChangeKind::NoOp,
-                        zup_transaction::FileDelta::Drift => ChangeKind::Drift,
-                        zup_transaction::FileDelta::Conflict => ChangeKind::Conflict,
+                        zup_plan::FileOperationKind::Create => ChangeKind::Create,
+                        zup_plan::FileOperationKind::Replace
+                        | zup_plan::FileOperationKind::RestoreOwned
+                        | zup_plan::FileOperationKind::RepairOwned => ChangeKind::Update,
+                        zup_plan::FileOperationKind::NoOp => ChangeKind::NoOp,
+                        zup_plan::FileOperationKind::Drift => ChangeKind::Drift,
+                        zup_plan::FileOperationKind::Conflict => ChangeKind::Conflict,
                     };
                     let size = node.meta.expected_size.unwrap_or(0);
                     estimated_bytes = estimated_bytes.saturating_add(size);
@@ -291,7 +296,8 @@ impl PlanPreview {
                 | zup_transaction::NodeKind::Barrier => {}
             }
         }
-        Self {
+        Ok(Self {
+            basis: PlanBasis::ObservedMachine,
             application: target.map_or_else(String::new, |target| target.app.name.to_string()),
             version: target.map_or_else(String::new, |target| target.app.version.to_string()),
             scope,
@@ -309,7 +315,10 @@ impl PlanPreview {
                 |target| target.selected_components.clone(),
             ),
             estimated_bytes,
-            download_bytes: target.map_or(0, |target| target.summary.download_bytes),
+            download_bytes: target
+                .map(|target| target.summary())
+                .transpose()?
+                .map_or(0, |summary| summary.download_bytes),
             requires_authorization: plan.requires_authorization(),
             groups: groups
                 .into_iter()
@@ -320,11 +329,20 @@ impl PlanPreview {
                 })
                 .collect(),
             requirements: requirements(target.map_or(&[], |target| &target.prerequisites)),
-        }
+        })
     }
 
     pub fn human(&self) -> String {
         let mut output = String::new();
+        let _ = writeln!(
+            output,
+            "{}",
+            match self.basis {
+                PlanBasis::DesiredState => "Desired deployment (machine state not inspected)",
+                PlanBasis::Simulation => "Simulated deployment (machine state not inspected)",
+                PlanBasis::ObservedMachine => "Changes against observed machine state",
+            }
+        );
         let _ = writeln!(output, "{} {}", self.application, self.version);
         let _ = writeln!(output, "Scope: {}", self.scope);
         if !self.install_directory.is_empty() {
@@ -396,7 +414,8 @@ fn requirements(prerequisites: &[zup_plan::PlannedPrerequisite]) -> Vec<Requirem
 
 pub use zup_core::format_bytes;
 pub use zup_preset_protocol::{
-    ChangeKind, OperationPhase, RequirementPresentation, RequirementStatus, ResourceCategory,
+    ChangeKind, OperationPhase, PlanBasis, RequirementPresentation, RequirementStatus,
+    ResourceCategory,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,10 +427,15 @@ pub struct ProgressPresentation {
 }
 
 impl ProgressPresentation {
-    pub fn new(completed: u64, total: u64, label: impl Into<String>) -> Self {
+    pub fn new(
+        phase: OperationPhase,
+        completed: u64,
+        total: u64,
+        label: impl Into<String>,
+    ) -> Self {
         let label = label.into();
         Self {
-            phase: OperationPhase::from_action(&label),
+            phase,
             completed,
             total,
             label,
@@ -818,31 +842,30 @@ mod tests {
     #[test]
     fn transaction_preview_reports_resolved_requirements_and_downloads() {
         let target = zup_core::Target::parse("linux-x64").unwrap();
-        let directory = zup_platform::TargetPath::new(target, "/opt/app").unwrap();
-        let resolved: zup_platform::TargetPlan = serde_json::from_value(serde_json::json!({
-            "app": {"id": "com.example.app", "name": "App", "version": "1.0.0"},
-            "target": target, "scope": "user", "install_directory": directory,
-            "selected_components": ["core"],
-            "prerequisites": [{
-                "id": "runtime", "name": "Runtime", "target": "x64",
-                "requirement": {"kind": "runtime", "id": "test.runtime"},
-                "package": {"type": "remote", "url": "https://example.invalid/runtime",
-                    "sha256": zup_core::hash_bytes(b"runtime"), "size": 2048,
-                    "filename": "runtime.pkg"},
-                "installer": {}
-            }],
-            "files": [], "launchers": [], "path_entries": [], "services": [],
-            "protocols": [], "file_associations": [], "preset": null,
-            "summary": {"file_count": 0, "install_bytes": 0, "resource_count": 0,
-                "requires_authorization": true, "selected_component_count": 1,
-                "prerequisite_count": 1, "download_bytes": 2048}
-        }))
-        .unwrap();
+        let directory = zup_plan::TargetPath::new(target, "/opt/app").unwrap();
+        let resolved: zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> =
+            serde_json::from_value(serde_json::json!({
+                "app": {"id": "com.example.app", "name": "App", "version": "1.0.0"},
+                "target": target, "scope": "user", "install_directory": directory,
+                "selected_components": ["core"],
+                "prerequisites": [{
+                    "id": "runtime", "name": "Runtime", "target": "x64",
+                    "requirement": {"kind": "runtime", "id": "test.runtime"},
+                    "package": {"type": "remote", "url": "https://example.invalid/runtime",
+                        "sha256": zup_core::hash_bytes(b"runtime"), "size": 2048,
+                        "filename": "runtime.pkg"},
+                    "installer": {}
+                }],
+                "files": [], "launchers": [], "path_entries": [], "services": [],
+                "protocols": [], "file_associations": [], "preset": null
+            }))
+            .unwrap();
         let transaction =
             zup_transaction::compile_transaction(&zup_transaction::TransactionInput::new(target))
                 .unwrap();
         let preview =
-            PlanPreview::from_transaction_plan(&transaction, SelectedScope::User, Some(&resolved));
+            PlanPreview::from_transaction_plan(&transaction, SelectedScope::User, Some(&resolved))
+                .unwrap();
         assert_eq!(preview.application, "App");
         assert_eq!(preview.install_directory, "/opt/app");
         assert_eq!(preview.selected_components, resolved.selected_components);
@@ -851,32 +874,9 @@ mod tests {
         assert_eq!(preview.requirements[0].id, "runtime");
         assert_eq!(preview.requirements[0].estimated_bytes, 2048);
         let without_target =
-            PlanPreview::from_transaction_plan(&transaction, SelectedScope::User, None);
+            PlanPreview::from_transaction_plan(&transaction, SelectedScope::User, None).unwrap();
         assert!(without_target.requirements.is_empty());
         assert_eq!(without_target.download_bytes, 0);
-    }
-
-    #[test]
-    fn phase_classification_keeps_one_progress_model() {
-        assert_eq!(
-            OperationPhase::from_action("Downloading update"),
-            OperationPhase::Download
-        );
-        assert_eq!(
-            OperationPhase::from_action("Verifying signature"),
-            OperationPhase::Verify
-        );
-        assert_eq!(
-            OperationPhase::from_action("Registering services"),
-            OperationPhase::System
-        );
-        assert_eq!(
-            OperationPhase::from_action("Updating application settings"),
-            OperationPhase::System
-        );
-        let progress = ProgressPresentation::new(3, 4, "Installing files");
-        assert_eq!(progress.phase, OperationPhase::Files);
-        assert_eq!(progress.percent(), Some(75));
     }
 
     #[test]
@@ -927,7 +927,12 @@ mod tests {
     fn automation_jsonl_is_explicit_and_versioned() {
         let events = [
             InstallerEvent::started("Acme", "1.0.0", "install"),
-            InstallerEvent::progress(&ProgressPresentation::new(1, 2, "Installing files")),
+            InstallerEvent::progress(&ProgressPresentation::new(
+                OperationPhase::Files,
+                1,
+                2,
+                "Installing files",
+            )),
             InstallerEvent::Completed {
                 outcome: ProcessOutcome::Success,
             },

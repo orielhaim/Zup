@@ -30,10 +30,10 @@ impl PlannedPrerequisite {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedFile {
+pub struct DesiredFile<P = Template> {
     pub key: ResourceKey,
     pub source_relative: RelativePath,
-    pub destination: Template,
+    pub destination: P,
     pub size: u64,
     pub sha256: Sha256Digest,
     pub privilege: Privilege,
@@ -42,53 +42,52 @@ pub struct PlannedFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedLauncher {
+pub struct DesiredLauncher<P = Template, L = ()> {
     pub key: ResourceKey,
     pub location: LauncherLocation,
+    pub launcher_path: L,
     pub name: NonEmptyString,
-    pub target: Template,
+    pub target: P,
     pub arguments: Vec<String>,
-    pub working_directory: Option<Template>,
+    pub working_directory: Option<P>,
     pub privilege: Privilege,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedPathEntry {
+pub struct DesiredPathEntry<P = Template> {
     pub key: ResourceKey,
-    pub value: Template,
+    pub value: P,
     pub scope: SelectedScope,
     pub privilege: Privilege,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedService {
+pub struct DesiredService<P = Template> {
     pub key: ResourceKey,
     pub id: ServiceId,
     pub name: NonEmptyString,
     pub display_name: Option<NonEmptyString>,
-    pub binary: Template,
-    pub arguments: Vec<String>,
+    pub command: crate::CommandSpec<P>,
     pub start: ServiceStart,
     pub privilege: Privilege,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedProtocol {
+pub struct DesiredProtocol<P = Template> {
     pub key: ResourceKey,
     pub scheme: ProtocolScheme,
-    pub executable: Template,
-    pub args: Vec<String>,
+    pub command: crate::CommandSpec<P>,
     pub scope: SelectedScope,
     pub privilege: Privilege,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlannedFileAssociation {
+pub struct DesiredFileAssociation<P = Template> {
     pub key: ResourceKey,
     pub extension: FileExtension,
     pub id: FileAssociationId,
     pub description: Option<String>,
-    pub executable: Template,
+    pub command: crate::CommandSpec<P>,
     pub scope: SelectedScope,
     pub privilege: Privilege,
 }

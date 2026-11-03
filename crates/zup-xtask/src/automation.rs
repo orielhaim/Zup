@@ -205,6 +205,7 @@ fn plan() -> AutomationResult {
         .with_application(application())
         .with_targets(vec![target()])
         .with_details(Details::Plan(PlanDetails {
+            machine_state_observed: false,
             scope: "user".to_owned(),
             install_directory: Some(r"${location.user_data}/Acme".to_owned()),
             estimated_bytes: ByteCount::new(248_512_896),

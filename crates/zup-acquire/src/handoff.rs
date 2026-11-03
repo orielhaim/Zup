@@ -63,6 +63,7 @@ pub enum HandoffMode {
     Modify,
     /// Restoring committed ownership after drift.
     Repair,
+    Uninstall,
 }
 
 impl HandoffMode {
@@ -73,6 +74,7 @@ impl HandoffMode {
             Self::Upgrade => "upgrade",
             Self::Modify => "modify",
             Self::Repair => "repair",
+            Self::Uninstall => "uninstall",
         }
     }
 }

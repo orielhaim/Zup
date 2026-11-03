@@ -2,7 +2,6 @@ use rstest::rstest;
 use std::collections::BTreeMap;
 use std::fs;
 
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use zup_build::{BuildPlan, materialize};
 use zup_core::{ComponentId, LauncherLocation, Privilege, SelectedScope, ServiceStart, Target};
@@ -10,7 +9,7 @@ use zup_manifest::{TargetOverrides, compile, parse, select_targets};
 use zup_plan::{
     CancellationQuery, MAX_PLUGIN_ARGUMENTS, MAX_PLUGIN_GENERATED_FILE_BYTES, MAX_PLUGIN_RESOURCES,
     MAX_PLUGIN_STRING_BYTES, NeverCancelled, PlanError, PlanRequest, PluginExecutor, PluginFailure,
-    PluginPlanningContext, PluginResource, PluginResourceProposal, plan, plan_with_plugins,
+    PluginPlanningContext, PluginResource, PluginResourceProposal, plan,
 };
 
 const BASE: &str = r#"
@@ -192,7 +191,7 @@ source = "plugins/one.wasm"
         "helper".to_owned(),
         PluginResourceProposal::new(vec![generated("${install}/generated.txt", b"hello")]),
     )]);
-    let result = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap();
+    let result = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap();
 
     assert_eq!(result.plan.files.len(), 1);
     let generated_file = result
@@ -211,13 +210,11 @@ source = "plugins/one.wasm"
     assert!(generated_file.source_relative.as_str().ends_with(".bin"));
     assert_eq!(generated_file.size, 5);
     assert_eq!(generated_file.privilege, Privilege::User);
-    assert_eq!(result.plan.summary.install_bytes, 5);
+    assert_eq!(result.plan.summary().unwrap().install_bytes, 5);
     assert_eq!(result.generated_files.len(), 1);
     assert_eq!(result.generated_files[0].bytes, b"hello");
 
-    let mut hasher = Sha256::new();
-    hasher.update(b"hello");
-    let digest = zup_core::Sha256Digest::from_hasher(hasher);
+    let digest = zup_core::hash_bytes(b"hello");
     assert_eq!(generated_file.sha256, digest);
     assert_eq!(result.generated_files[0].sha256, digest);
 }
@@ -235,7 +232,9 @@ source = "plugins/one.wasm"
         "helper".to_owned(),
         PluginResourceProposal::new(all_resources()),
     )]);
-    let result = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap();
+    let mut request = request();
+    request.scope = SelectedScope::Machine;
+    let result = plan(&build, &request, Some(&mut executor), &NeverCancelled).unwrap();
 
     assert_eq!(result.plan.files.len(), 1);
     assert_eq!(result.plan.launchers.len(), 1);
@@ -244,8 +243,11 @@ source = "plugins/one.wasm"
     assert_eq!(result.plan.protocols.len(), 1);
     assert_eq!(result.plan.file_associations.len(), 1);
     assert_eq!(result.plan.services[0].privilege, Privilege::System);
-    assert_eq!(result.plan.launchers[0].privilege, Privilege::User);
-    assert_eq!(result.plan.file_associations[0].privilege, Privilege::User);
+    assert_eq!(result.plan.launchers[0].privilege, Privilege::System);
+    assert_eq!(
+        result.plan.file_associations[0].privilege,
+        Privilege::System
+    );
 }
 
 #[test]
@@ -274,7 +276,7 @@ when = 'component("extra")'
         PluginResourceProposal::new(vec![generated("${install}/plugin.txt", b"x")]),
     )]);
 
-    let without = plan_with_plugins(
+    let without = plan(
         &build,
         &PlanRequest {
             target: target(),
@@ -282,7 +284,7 @@ when = 'component("extra")'
             install_directory: None,
             components: zup_plan::ComponentOverrides::none(),
         },
-        &mut executor,
+        Some(&mut executor),
         &NeverCancelled,
     )
     .unwrap();
@@ -299,7 +301,7 @@ when = 'component("extra")'
         "helper".to_owned(),
         PluginResourceProposal::new(vec![generated("${install}/plugin.txt", b"x")]),
     )]);
-    let with_extra = plan_with_plugins(
+    let with_extra = plan(
         &build,
         &PlanRequest {
             target: target(),
@@ -310,7 +312,7 @@ when = 'component("extra")'
                 ..Default::default()
             },
         },
-        &mut executor,
+        Some(&mut executor),
         &NeverCancelled,
     )
     .unwrap();
@@ -336,7 +338,7 @@ source = "plugins/one.wasm"
     let mut executor =
         FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::default())]);
     executor.target = Target::parse("windows-arm64").unwrap();
-    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap_err();
+    let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginTargetMismatch { .. }));
     assert!(executor.calls.is_empty());
 }
@@ -350,7 +352,9 @@ id = "helper"
 source = "plugins/one.wasm"
 "#,
     ));
-    let error = plan(&build, &request()).expect_err("ordinary planner has no executor");
+    let error = plan(&build, &request(), None, &zup_plan::NeverCancelled)
+        .map(|installation| installation.plan)
+        .expect_err("ordinary planner has no executor");
     assert!(matches!(
         error,
         PlanError::PluginPlanningRequired { ref plugin_id } if plugin_id.as_str() == "helper"
@@ -386,7 +390,7 @@ when = 'component("core")'
         ("one".to_owned(), PluginResourceProposal::default()),
         ("two".to_owned(), PluginResourceProposal::default()),
     ]);
-    let result = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap();
+    let result = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap();
     assert_eq!(
         result.plan.selected_components,
         vec![component_id("core"), component_id("extra")]
@@ -425,7 +429,7 @@ source = "plugins/two.wasm"
 "#,
     ));
     let mut executor = FakeExecutor::failing("one", PluginFailure::internal("boom"));
-    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled)
+    let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled)
         .expect_err("failure propagates");
     assert!(matches!(
         error,
@@ -447,17 +451,13 @@ source = "plugins/one.wasm"
 "#,
     ));
     let mut executor = FakeExecutor::default();
-    let error =
-        plan_with_plugins(&build, &request(), &mut executor, &|| true).expect_err("cancelled");
-    assert!(matches!(
-        error,
-        PlanError::PluginCancelled { ref plugin_id } if plugin_id.as_str() == "helper"
-    ));
+    let error = plan(&build, &request(), Some(&mut executor), &|| true).expect_err("cancelled");
+    assert!(matches!(error, PlanError::Cancelled));
     assert!(executor.calls.is_empty());
 }
 
 #[test]
-fn case_distinct_resources_are_deferred_to_target_lowering() {
+fn windows_case_aliases_are_rejected_by_the_shared_contract() {
     let cases = [
         (
             r#"
@@ -544,8 +544,7 @@ executable = "${install}/base.txt"
             "helper".to_owned(),
             PluginResourceProposal::new(vec![proposal]),
         )]);
-        plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled)
-            .unwrap_or_else(|error| panic!("case-distinct resource was rejected: {error}"));
+        assert!(plan(&build, &request(), Some(&mut executor), &NeverCancelled).is_err());
     }
 }
 
@@ -569,9 +568,9 @@ source = "plugins/two.wasm"
             generated("${install}/same.txt", b"b"),
         ]),
     )]);
-    let error = plan_with_plugins(&build, &request(), &mut within, &NeverCancelled)
+    let error = plan(&build, &request(), Some(&mut within), &NeverCancelled)
         .expect_err("within-plugin collision");
-    assert!(matches!(error, PlanError::PluginResourceCollision { .. }));
+    assert!(matches!(error, PlanError::ResourceCollision { .. }));
 
     let mut across = FakeExecutor::new([
         (
@@ -583,11 +582,11 @@ source = "plugins/two.wasm"
             PluginResourceProposal::new(vec![generated("${install}/same.txt", b"b")]),
         ),
     ]);
-    let error = plan_with_plugins(&build, &request(), &mut across, &NeverCancelled)
+    let error = plan(&build, &request(), Some(&mut across), &NeverCancelled)
         .expect_err("across-plugin collision");
     assert!(matches!(
         error,
-        PlanError::PluginResourceCollision {
+        PlanError::ResourceCollision {
             ref plugin_id,
             ref existing_plugin_id,
             ..
@@ -626,7 +625,7 @@ source = "plugins/one.wasm"
         "helper".to_owned(),
         PluginResourceProposal::new(vec![resource]),
     )]);
-    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled)
+    let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled)
         .expect_err("malformed resource");
     assert!(matches!(
         error,
@@ -651,7 +650,7 @@ source = "plugins/one.wasm"
     )];
     let mut executor =
         FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::new(too_large))]);
-    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap_err();
+    let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginResourceLimit { .. }));
 
     let mut total = Vec::new();
@@ -663,7 +662,7 @@ source = "plugins/one.wasm"
     }
     let mut executor =
         FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::new(total))]);
-    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap_err();
+    let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginResourceLimit { .. }));
 
     let too_many = (0..=MAX_PLUGIN_RESOURCES)
@@ -673,7 +672,7 @@ source = "plugins/one.wasm"
         .collect();
     let mut executor =
         FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::new(too_many))]);
-    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap_err();
+    let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginResourceLimit { .. }));
 
     let long_string = "x".repeat(MAX_PLUGIN_STRING_BYTES + 1);
@@ -681,7 +680,7 @@ source = "plugins/one.wasm"
         "helper".to_owned(),
         PluginResourceProposal::new(vec![PluginResource::PathEntry { value: long_string }]),
     )]);
-    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap_err();
+    let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginResourceLimit { .. }));
 
     let too_many_args = (0..=MAX_PLUGIN_ARGUMENTS)
@@ -697,7 +696,7 @@ source = "plugins/one.wasm"
             working_directory: None,
         }]),
     )]);
-    let error = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap_err();
+    let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginResourceLimit { .. }));
 }
 
@@ -724,7 +723,7 @@ source = "plugins/two.wasm"
             PluginResourceProposal::new(vec![generated("${install}/two.txt", b"two")]),
         ),
     ]);
-    let result = plan_with_plugins(&build, &request(), &mut executor, &NeverCancelled).unwrap();
+    let result = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap();
     assert!(
         !result.generated_files[0]
             .source_relative
@@ -752,14 +751,14 @@ fn machine_scope_plugin_resources_are_system_authorized() {
         "helper".to_owned(),
         PluginResourceProposal::new(all_resources()),
     )]);
-    let result = plan_with_plugins(
+    let result = plan(
         &build,
         &PlanRequest::new(target(), SelectedScope::Machine),
-        &mut executor,
+        Some(&mut executor),
         &NeverCancelled,
     )
     .unwrap();
-    assert!(result.plan.summary.requires_authorization);
+    assert!(result.plan.summary().unwrap().requires_authorization);
     let system = |privilege: &Privilege| *privilege == Privilege::System;
     assert!(result.plan.files.iter().all(|r| system(&r.privilege)));
     assert!(result.plan.launchers.iter().all(|r| system(&r.privilege)));
@@ -788,12 +787,12 @@ fn cancellation_during_plugin_output_never_publishes_a_plan() {
     ));
     let calls = std::sync::atomic::AtomicUsize::new(0);
     let cancellation = || calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2;
-    let error = plan_with_plugins(
+    let error = plan(
         &build,
         &request(),
-        &mut FakeExecutor::default(),
+        Some(&mut FakeExecutor::default()),
         &cancellation,
     )
     .unwrap_err();
-    assert!(matches!(error, PlanError::PluginCancelled { .. }));
+    assert!(matches!(error, PlanError::Cancelled));
 }

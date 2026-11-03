@@ -116,7 +116,7 @@ pub const DISPATCHER_TARGET: zup_core::Target = zup_core::Target::WINDOWS_X86;
 
 /// Components required to build installers for a supported target.
 pub fn components_for_target(target: &zup_core::Target) -> Vec<ToolchainComponent> {
-    let Some(capabilities) = zup_platform::capabilities(target) else {
+    let Some(capabilities) = zup_plan::capabilities(target) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -132,7 +132,7 @@ pub fn components_for_target(target: &zup_core::Target) -> Vec<ToolchainComponen
             });
         }
     }
-    if capabilities.artifacts == zup_platform::ArtifactSupport::Universal {
+    if capabilities.artifacts == zup_plan::ArtifactSupport::Universal {
         for subsystem in [Subsystem::Gui, Subsystem::Console] {
             for online in [false, true] {
                 out.push(ToolchainComponent::Dispatcher { subsystem, online });

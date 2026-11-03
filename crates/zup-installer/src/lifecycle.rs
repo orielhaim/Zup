@@ -1,10 +1,9 @@
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use zup_acquire::CachePolicy;
 use zup_core::SelectedScope;
-use zup_exec::LifecycleAction;
+use zup_plan::LifecycleAction;
 use zup_presentation::OutputFormat;
 use zup_runtime::{
     ExecutionPolicy, Operation, OperationInput, OperationSelection, RuntimeRequest,
@@ -49,7 +48,7 @@ pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::
 #[derive(Debug, Clone, Copy)]
 pub enum Verb {
     Modify,
-    Repair { force_files: bool },
+    Repair { force: bool },
     Upgrade,
 }
 
@@ -57,7 +56,7 @@ impl Verb {
     pub fn action(self) -> Operation {
         match self {
             Self::Modify => Operation::Modify,
-            Self::Repair { force_files } => Operation::Repair { force_files },
+            Self::Repair { force } => Operation::Repair { force },
             Self::Upgrade => Operation::Upgrade,
         }
     }
@@ -182,8 +181,9 @@ fn run_handoff(
         zup_acquire::HandoffMode::Install => LifecycleAction::Install,
         zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
         zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
+        zup_acquire::HandoffMode::Uninstall => LifecycleAction::Uninstall,
         zup_acquire::HandoffMode::Repair => LifecycleAction::Repair {
-            force_files: matches!(request, Operation::Repair { force_files: true }),
+            force: matches!(request, Operation::Repair { force: true }),
         },
     };
     if let Some(action) = named_action(request)
@@ -217,7 +217,7 @@ pub(crate) fn named_action(operation: Operation) -> Option<LifecycleAction> {
         Operation::Install => Some(LifecycleAction::Install),
         Operation::Upgrade => Some(LifecycleAction::Upgrade),
         Operation::Modify => Some(LifecycleAction::Modify),
-        Operation::Repair { force_files } => Some(LifecycleAction::Repair { force_files }),
+        Operation::Repair { force } => Some(LifecycleAction::Repair { force }),
         Operation::Uninstall => Some(LifecycleAction::Uninstall),
         Operation::Apply => None,
     }
@@ -260,7 +260,7 @@ fn run_graph_transition(
 
     if let Some(identity) = ledger
         .as_ref()
-        .and_then(zup_exec::InstallLedger::release_identity)
+        .and_then(zup_plan::InstallLedger::release_identity)
     {
         if identity.app_id != installer.app.id {
             return Err(miette::miette!(
@@ -314,18 +314,18 @@ fn run_graph_transition(
         miette::miette!("release acquisition: {error}")
     })?;
 
-    if let Operation::Repair { force_files } = request {
-        let drifted = drifted_digests(&state_root, &build.installer, scope, force_files)?;
-        if drifted.is_empty() {
-            return Ok(());
-        }
+    if let Operation::Repair { force } = request {
+        let owned = ledger
+            .as_ref()
+            .map(zup_plan::owned_content_digests)
+            .ok_or_else(|| miette::miette!("installation not found in the {scope} scope"))?;
         let manifest = &acquired.manifest;
-        let plan = acquire::repair_closure(&acquired.resolved, manifest, &drifted)
+        let plan = acquire::repair_closure(&acquired.resolved, manifest, &owned)
             .map_err(|error| miette::miette!("repair closure: {error}"))?;
         let narrowed = acquire::Acquired { plan, ..acquired };
         return run_acquired_transition(
             acquire::Request {
-                action: Some(LifecycleAction::Repair { force_files }),
+                action: Some(LifecycleAction::Repair { force }),
                 scope: Some(scope),
                 ..acquire::Request::default()
             },
@@ -353,19 +353,6 @@ fn run_graph_transition(
         args.output(),
         policy,
     )
-}
-
-fn drifted_digests(
-    state_root: &Path,
-    installer: &zup_core::Installer,
-    scope: SelectedScope,
-    _force_files: bool,
-) -> miette::Result<BTreeSet<zup_core::Sha256Digest>> {
-    let ledger = zup_windows::InstallLedgerStore::new(state_root)
-        .load(&installer.app.id, scope)
-        .map_err(|error| miette::miette!("installation ledger: {error}"))?
-        .ok_or_else(|| miette::miette!("installation not found in the {scope} scope"))?;
-    Ok(zup_exec::owned_content_digests(&ledger))
 }
 
 pub fn run_acquired_transition(
@@ -411,7 +398,7 @@ pub fn run_acquired_transition(
     }
     if let Some(installed) = prior
         .as_ref()
-        .and_then(zup_exec::InstallLedger::release_identity)
+        .and_then(zup_plan::InstallLedger::release_identity)
         && installed.variant != acquired.resolved.variant.id
     {
         return Err(miette::miette!(
@@ -470,8 +457,13 @@ pub fn run_acquired_transition(
     let backend = zup_windows::WindowsRuntimeBackend::from_acquired(
         Arc::new(payload),
         acquired.cache.root().to_path_buf(),
+        acquired
+            .handoff(scope, handoff_mode(action))
+            .map_err(|error| miette::miette!("{error}"))?,
     )
-    .map_err(|error| miette::miette!("content source: {error}"))?;
+    .map_err(|error| miette::miette!("content source: {error}"))?
+    .with_generated_files(&prepared, &request.state_root)
+    .map_err(|error| miette::miette!("plugin content: {error}"))?;
     let prepared = PreparedRuntime {
         request,
         backend: Arc::new(backend),
@@ -580,26 +572,23 @@ pub fn prepare_embedded_transition_with_cancellation(
             recovery_id: None,
         },
     );
-    let backend = if prepared.action == LifecycleAction::Uninstall {
-        WindowsRuntimeBackend::from_path(executable, None)
-            .map_err(|error| miette::miette!("payload source: {error}"))?
-    } else {
-        let install = prepared
-            .install_plan()
-            .ok_or_else(|| miette::miette!("the operation planned no installation to execute"))?;
-        WindowsRuntimeBackend::from_path_with_generated_files(
-            executable,
-            &state_root,
-            scope,
-            install,
-            prepared.generated_files(),
-            &prepared.transaction_plan,
-        )
-        .map_err(|error| miette::miette!("plugin payload overlay: {error}"))?
-    };
+    let backend = WindowsRuntimeBackend::from_path(executable, None)
+        .map_err(|error| miette::miette!("payload source: {error}"))?
+        .with_generated_files(&prepared, &state_root)
+        .map_err(|error| miette::miette!("plugin payload overlay: {error}"))?;
     Ok(PreparedRuntime {
         request,
         backend: Arc::new(backend),
         action: prepared.action,
     })
+}
+
+pub(crate) fn handoff_mode(action: LifecycleAction) -> zup_acquire::HandoffMode {
+    match action {
+        LifecycleAction::Install => zup_acquire::HandoffMode::Install,
+        LifecycleAction::Upgrade => zup_acquire::HandoffMode::Upgrade,
+        LifecycleAction::Modify => zup_acquire::HandoffMode::Modify,
+        LifecycleAction::Repair { .. } => zup_acquire::HandoffMode::Repair,
+        LifecycleAction::Uninstall => zup_acquire::HandoffMode::Uninstall,
+    }
 }

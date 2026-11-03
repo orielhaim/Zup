@@ -1,14 +1,14 @@
 #![cfg(target_os = "linux")]
+use zup_plan::RemovalKind;
 
 use rstest::rstest;
 use zup_core::{SelectedScope, Sha256Digest, hash_reader};
 use zup_linux::{
-    EntryKind, ExecError, FileIntent, FileWork, LinuxFileExecutor, OwnedDirectory, PathError,
+    EntryKind, ExecError, FileIntent, FileOperation, LinuxFileExecutor, OwnedDirectory, PathError,
     STATE_DIRECTORY_MODE, STATE_FILE_MODE,
 };
-use zup_transaction::{
-    FilePrecondition, FileRemoval, FileRemovalKind, OperationId, OperationReceipt,
-};
+use zup_plan::FilePrecondition;
+use zup_transaction::{FileRemoval, OperationId, OperationReceipt};
 
 use std::path::{Path, PathBuf};
 
@@ -46,8 +46,8 @@ fn executor_for(
 ) -> LinuxFileExecutor {
     let mut executor = LinuxFileExecutor::new();
     executor.set_transaction_id(zup_transaction::TransactionId::new_v7());
-    let work = FileWork {
-        destination: zup_platform::TargetPath::new(
+    let work = FileOperation {
+        destination: zup_plan::TargetPath::new(
             zup_core::Target::parse("linux-x64").expect("a target"),
             destination.to_string_lossy(),
         )
@@ -61,7 +61,7 @@ fn executor_for(
     executor
 }
 
-fn node(delta: zup_transaction::FileDelta) -> zup_transaction::TransactionNode {
+fn node(delta: zup_plan::FileOperationKind) -> zup_transaction::TransactionNode {
     zup_transaction::TransactionNode {
         id: id(1),
         phase: zup_transaction::Phase::FileMutation,
@@ -76,11 +76,11 @@ fn node(delta: zup_transaction::FileDelta) -> zup_transaction::TransactionNode {
 
 fn removal_node(destination: &Path, bytes: &[u8]) -> zup_transaction::TransactionNode {
     let target = zup_core::Target::parse("linux-x64").expect("a target");
-    let destination = zup_platform::TargetPath::new(target, destination.to_string_lossy())
-        .expect("a target path");
+    let destination =
+        zup_plan::TargetPath::new(target, destination.to_string_lossy()).expect("a target path");
     let removal = FileRemoval {
         key: file_key(),
-        kind: FileRemovalKind::RemoveOwned,
+        kind: RemovalKind::RemoveOwned,
         scope: SelectedScope::User,
         privilege: zup_core::Privilege::User,
         destination: destination.clone(),
@@ -124,7 +124,7 @@ fn a_create_publishes_the_staged_bytes_and_reports_them() {
     executor.stage(&stage_id(), b"the payload").expect("stage");
 
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Create))
+        .apply(&node(zup_plan::FileOperationKind::Create))
         .expect("create");
 
     assert_eq!(std::fs::read(&destination).expect("read"), b"the payload");
@@ -148,7 +148,7 @@ fn a_create_publishes_the_staged_bytes_and_reports_them() {
     );
     assert!(
         executor
-            .verify(&node(zup_transaction::FileDelta::Create), &receipt)
+            .verify(&node(zup_plan::FileOperationKind::Create), &receipt)
             .is_ok()
     );
 }
@@ -171,7 +171,7 @@ fn executable_intent_becomes_the_mode_the_receipt_claims(
     executor.stage(&stage_id(), b"#!/bin/sh\n").expect("stage");
 
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Create))
+        .apply(&node(zup_plan::FileOperationKind::Create))
         .expect("create");
 
     assert_eq!(mode_of(&destination), expected);
@@ -200,7 +200,7 @@ fn a_create_refuses_a_destination_that_is_already_there() {
     executor.stage(&stage_id(), b"the payload").expect("stage");
 
     let error = executor
-        .apply(&node(zup_transaction::FileDelta::Create))
+        .apply(&node(zup_plan::FileOperationKind::Create))
         .expect_err("a create over an existing file is refused");
     assert!(
         matches!(error, ExecError::Path(PathError::AlreadyExists { .. })),
@@ -232,7 +232,7 @@ fn a_replace_backs_up_what_it_replaced() {
     executor.stage(&stage_id(), b"v2").expect("stage");
 
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Replace))
+        .apply(&node(zup_plan::FileOperationKind::Replace))
         .expect("replace");
 
     assert_eq!(std::fs::read(&destination).expect("read"), b"v2");
@@ -271,7 +271,7 @@ fn a_replace_refuses_to_overwrite_a_file_that_changed() {
     executor.stage(&stage_id(), b"v2").expect("stage");
 
     let error = executor
-        .apply(&node(zup_transaction::FileDelta::Replace))
+        .apply(&node(zup_plan::FileOperationKind::Replace))
         .expect_err("a replace over changed bytes is refused");
     assert!(matches!(error, ExecError::PlanDrift { .. }), "{error}");
     assert_eq!(
@@ -302,7 +302,7 @@ fn a_destination_parent_replaced_by_a_symlink_is_refused() {
     std::fs::remove_dir_all(&install).expect("remove the staged sibling");
     std::os::unix::fs::symlink(elsewhere.path(), &install).expect("symlink");
 
-    let outcome = executor.apply(&node(zup_transaction::FileDelta::Create));
+    let outcome = executor.apply(&node(zup_plan::FileOperationKind::Create));
     assert!(
         outcome.is_err(),
         "publishing through a link into another tree must be refused, not followed"
@@ -332,7 +332,7 @@ fn a_destination_that_is_a_symlink_is_refused() {
     executor.stage(&stage_id(), b"the payload").expect("stage");
 
     let error = executor
-        .apply(&node(zup_transaction::FileDelta::Create))
+        .apply(&node(zup_plan::FileOperationKind::Create))
         .expect_err("a link at an owned path is refused");
     assert!(
         matches!(error, ExecError::Path(PathError::AlreadyExists { .. })),
@@ -380,7 +380,7 @@ fn a_destination_that_is_not_a_regular_file_is_refused(#[case] planted: EntryKin
 
     assert!(
         executor
-            .apply(&node(zup_transaction::FileDelta::Create))
+            .apply(&node(zup_plan::FileOperationKind::Create))
             .is_err(),
         "{planted:?} where a regular file belongs must be refused"
     );
@@ -430,13 +430,13 @@ fn rolling_back_a_create_removes_only_what_the_create_made() {
     executor.stage(&stage_id(), b"the payload").expect("stage");
 
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Create))
+        .apply(&node(zup_plan::FileOperationKind::Create))
         .expect("create");
 
     std::fs::write(root.path().join("install").join("user.dat"), b"the user's").expect("write");
 
     executor
-        .rollback(&node(zup_transaction::FileDelta::Create), &receipt)
+        .rollback(&node(zup_plan::FileOperationKind::Create), &receipt)
         .expect("rollback");
 
     assert!(!destination.exists(), "the payload is gone");
@@ -462,14 +462,14 @@ fn a_rollback_refuses_to_remove_a_file_that_changed() {
     );
     executor.stage(&stage_id(), b"the payload").expect("stage");
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Create))
+        .apply(&node(zup_plan::FileOperationKind::Create))
         .expect("create");
 
     std::fs::write(&destination, b"the user's edit").expect("write");
 
     assert!(
         executor
-            .rollback(&node(zup_transaction::FileDelta::Create), &receipt)
+            .rollback(&node(zup_plan::FileOperationKind::Create), &receipt)
             .is_err(),
         "a file that is no longer the one this transaction wrote must not be removed"
     );
@@ -497,11 +497,11 @@ fn rolling_back_a_replace_restores_the_previous_contents() {
     );
     executor.stage(&stage_id(), b"v2").expect("stage");
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Replace))
+        .apply(&node(zup_plan::FileOperationKind::Replace))
         .expect("replace");
 
     executor
-        .rollback(&node(zup_transaction::FileDelta::Replace), &receipt)
+        .rollback(&node(zup_plan::FileOperationKind::Replace), &receipt)
         .expect("rollback");
 
     assert_eq!(
@@ -528,14 +528,14 @@ fn reconcile_sees_the_published_file_as_applied(
     );
     executor.stage(&stage_id(), b"the payload").expect("stage");
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Create))
+        .apply(&node(zup_plan::FileOperationKind::Create))
         .expect("create");
     if !applied {
         std::fs::remove_file(&destination).expect("undo");
     }
 
     let outcome = executor
-        .reconcile(&node(zup_transaction::FileDelta::Create), Some(&receipt))
+        .reconcile(&node(zup_plan::FileOperationKind::Create), Some(&receipt))
         .expect("reconcile");
 
     assert_eq!(
@@ -638,12 +638,12 @@ fn rolling_back_a_replace_restores_bytes_and_executable_mode() {
     );
     executor.stage(&stage_id(), b"v2").expect("stage");
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Replace))
+        .apply(&node(zup_plan::FileOperationKind::Replace))
         .expect("replace");
     assert_eq!(mode_of(&destination), 0o644);
 
     executor
-        .rollback(&node(zup_transaction::FileDelta::Replace), &receipt)
+        .rollback(&node(zup_plan::FileOperationKind::Replace), &receipt)
         .expect("rollback");
 
     assert_eq!(
@@ -675,9 +675,9 @@ fn a_replace_rollback_is_idempotent() {
     );
     executor.stage(&stage_id(), b"v2").expect("stage");
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Replace))
+        .apply(&node(zup_plan::FileOperationKind::Replace))
         .expect("replace");
-    let node = node(zup_transaction::FileDelta::Replace);
+    let node = node(zup_plan::FileOperationKind::Replace);
 
     executor.rollback(&node, &receipt).expect("first rollback");
     executor
@@ -704,13 +704,13 @@ fn a_replace_rollback_refuses_a_destination_changed_after_publish() {
     );
     executor.stage(&stage_id(), b"v2").expect("stage");
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Replace))
+        .apply(&node(zup_plan::FileOperationKind::Replace))
         .expect("replace");
     std::fs::write(&destination, b"a user's edit").expect("write");
 
     assert!(
         executor
-            .rollback(&node(zup_transaction::FileDelta::Replace), &receipt)
+            .rollback(&node(zup_plan::FileOperationKind::Replace), &receipt)
             .is_err(),
         "restoring over an unrelated edit would destroy user data"
     );
@@ -765,7 +765,7 @@ fn a_replace_rollback_refuses_a_damaged_backup() {
     );
     executor.stage(&stage_id(), b"v2").expect("stage");
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Replace))
+        .apply(&node(zup_plan::FileOperationKind::Replace))
         .expect("replace");
     let OperationReceipt::ReplaceFile { backup_path, .. } = &receipt else {
         panic!("a replace reports a replace receipt: {receipt:?}");
@@ -774,7 +774,7 @@ fn a_replace_rollback_refuses_a_damaged_backup() {
 
     assert!(
         executor
-            .rollback(&node(zup_transaction::FileDelta::Replace), &receipt)
+            .rollback(&node(zup_plan::FileOperationKind::Replace), &receipt)
             .is_err(),
         "a damaged backup must fail recovery, not install garbage"
     );
@@ -802,7 +802,7 @@ fn reconcile_refuses_a_receipt_whose_backup_is_gone() {
     );
     executor.stage(&stage_id(), b"v2").expect("stage");
     let receipt = executor
-        .apply(&node(zup_transaction::FileDelta::Replace))
+        .apply(&node(zup_plan::FileOperationKind::Replace))
         .expect("replace");
     let OperationReceipt::ReplaceFile { backup_path, .. } = &receipt else {
         panic!("a replace reports a replace receipt: {receipt:?}");
@@ -811,7 +811,7 @@ fn reconcile_refuses_a_receipt_whose_backup_is_gone() {
 
     assert_eq!(
         executor
-            .reconcile(&node(zup_transaction::FileDelta::Replace), Some(&receipt))
+            .reconcile(&node(zup_plan::FileOperationKind::Replace), Some(&receipt))
             .expect("reconcile"),
         zup_transaction::ReconcileResult::Ambiguous,
         "an applied file without its backup cannot roll back, so recovery stays ambiguous"
@@ -966,7 +966,7 @@ fn replace_completes_an_interrupted_exchange() {
     .expect("the crash lands between the exchange and the backup rename");
 
     let outcome = executor
-        .reconcile(&node(zup_transaction::FileDelta::Replace), None)
+        .reconcile(&node(zup_plan::FileOperationKind::Replace), None)
         .expect("reconcile");
     let OperationReceipt::ReplaceFile { backup_path, .. } = (match outcome {
         zup_transaction::ReconcileResult::AppliedWithReceipt(receipt) => receipt,
@@ -994,7 +994,7 @@ fn machine_install_directories_stay_traversable() {
         executor_for(&destination, b"#!/bin/sh\n", true, FilePrecondition::Absent).for_machine();
     executor.stage(&stage_id(), b"#!/bin/sh\n").expect("stage");
     executor
-        .apply(&node(zup_transaction::FileDelta::Create))
+        .apply(&node(zup_plan::FileOperationKind::Create))
         .expect("create");
 
     assert_eq!(
@@ -1012,7 +1012,7 @@ fn machine_install_directories_stay_traversable() {
         FilePrecondition::Absent,
     );
     user.stage(&stage_id(), b"#!/bin/sh\n").expect("stage");
-    user.apply(&node(zup_transaction::FileDelta::Create))
+    user.apply(&node(zup_plan::FileOperationKind::Create))
         .expect("create");
     assert_eq!(
         mode_of(&root.path().join("user-install")),
@@ -1040,7 +1040,7 @@ fn denied_ancestry_is_an_error_not_absence() {
     );
 
     std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o000)).expect("deny");
-    let outcome = executor.prepare(&node(zup_transaction::FileDelta::Create));
+    let outcome = executor.prepare(&node(zup_plan::FileOperationKind::Create));
     std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o700)).expect("restore");
 
     assert!(
@@ -1077,7 +1077,7 @@ fn large_payload_streams_with_bounded_memory() {
     let destination = install.join("big.bin");
     let target = zup_core::Target::parse("linux-x64").expect("a target");
     let host_destination =
-        zup_platform::TargetPath::new(target, destination.to_string_lossy()).expect("a path");
+        zup_plan::TargetPath::new(target, destination.to_string_lossy()).expect("a path");
     let stage_key = zup_core::ResourceKey::File {
         destination: host_destination.to_string(),
     };
@@ -1086,7 +1086,7 @@ fn large_payload_streams_with_bounded_memory() {
         LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload_root));
     executor.register(
         &stage_operation,
-        FileWork {
+        FileOperation {
             destination: host_destination,
             host_path: destination.clone(),
             intent: FileIntent {

@@ -6,9 +6,9 @@
 #![allow(dead_code)]
 
 use zup_core::Sha256Digest;
+use zup_plan::FileOperationKind;
 use zup_transaction::{
-    FileDelta, NodeKind, OperationExecutor, OperationId, OperationReceipt, ReconcileResult,
-    TransactionNode,
+    NodeKind, OperationExecutor, OperationId, OperationReceipt, ReconcileResult, TransactionNode,
 };
 
 /// One recorded executor call.
@@ -135,7 +135,7 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
             sha256: digest,
         },
         NodeKind::FileMutation { delta, .. } => match delta {
-            FileDelta::Create => OperationReceipt::CreateFile {
+            FileOperationKind::Create => OperationReceipt::CreateFile {
                 destination,
                 installed_sha256: digest,
                 installed_size: size,
@@ -145,13 +145,11 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
             _ => OperationReceipt::ReplaceFile {
                 destination,
                 previous_sha256: match operation.meta.file_precondition {
-                    Some(zup_transaction::FilePrecondition::Exact { sha256, .. }) => {
-                        sha256.to_hex()
-                    }
+                    Some(zup_plan::FilePrecondition::Exact { sha256, .. }) => sha256.to_hex(),
                     _ => digest.clone(),
                 },
                 previous_size: match operation.meta.file_precondition {
-                    Some(zup_transaction::FilePrecondition::Exact { size, .. }) => size,
+                    Some(zup_plan::FilePrecondition::Exact { size, .. }) => size,
                     _ => 1,
                 },
                 previous_mode: 0o644,

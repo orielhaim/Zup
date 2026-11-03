@@ -11792,8 +11792,6 @@ dependencies = [
  "toml_edit 0.25.17+spec-1.1.0",
  "wat",
  "windows-registry 0.100.0",
- "wit-component 0.262.0",
- "wit-parser 0.262.0",
  "zstd",
  "zup-acquire",
  "zup-artifact",
@@ -11804,13 +11802,10 @@ dependencies = [
  "zup-compose",
  "zup-core",
  "zup-distribute-github",
- "zup-exec",
  "zup-linux",
  "zup-manifest",
  "zup-pe",
  "zup-plan",
- "zup-platform",
- "zup-plugin-abi",
  "zup-plugin-build",
  "zup-plugin-contract",
  "zup-presentation",
@@ -11953,7 +11948,6 @@ dependencies = [
  "zup-bundle",
  "zup-core",
  "zup-manifest",
- "zup-platform",
 ]
 
 [[package]]
@@ -11991,7 +11985,6 @@ dependencies = [
  "zup-core",
  "zup-manifest",
  "zup-pe",
- "zup-platform",
  "zup-plugin-contract",
 ]
 
@@ -11999,6 +11992,7 @@ dependencies = [
 name = "zup-core"
 version = "0.0.1"
 dependencies = [
+ "atomic-write-file",
  "base64 0.23.1",
  "rstest",
  "schemars",
@@ -12007,6 +12001,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "target-lexicon",
+ "tempfile",
  "thiserror 2.0.21",
  "uuid 1.29.0",
 ]
@@ -12051,20 +12046,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zup-exec"
-version = "0.0.1"
-dependencies = [
- "miette",
- "semver",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tracing",
- "zup-core",
- "zup-platform",
-]
-
-[[package]]
 name = "zup-installer"
 version = "0.0.1"
 dependencies = [
@@ -12097,10 +12078,8 @@ dependencies = [
  "zup-bundle",
  "zup-compose",
  "zup-core",
- "zup-exec",
  "zup-linux",
  "zup-plan",
- "zup-platform",
  "zup-plugin-abi",
  "zup-plugin-contract",
  "zup-plugin-runtime",
@@ -12143,10 +12122,8 @@ dependencies = [
  "zup-bundle",
  "zup-compose",
  "zup-core",
- "zup-exec",
  "zup-manifest",
  "zup-plan",
- "zup-platform",
  "zup-plugin-runtime",
  "zup-presentation",
  "zup-preset-host",
@@ -12198,31 +12175,16 @@ version = "0.0.1"
 dependencies = [
  "miette",
  "rstest",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
- "zup-build",
- "zup-core",
- "zup-manifest",
-]
-
-[[package]]
-name = "zup-platform"
-version = "0.0.1"
-dependencies = [
- "atomic-write-file",
- "rstest",
  "semver",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tracing",
  "typed-path 0.13.0",
+ "zup-build",
  "zup-core",
- "zup-plan",
+ "zup-manifest",
 ]
 
 [[package]]
@@ -12300,7 +12262,6 @@ dependencies = [
  "zup-acquire",
  "zup-core",
  "zup-plan",
- "zup-platform",
  "zup-preset-protocol",
  "zup-runtime",
  "zup-transaction",
@@ -12319,7 +12280,6 @@ dependencies = [
  "zup-artifact",
  "zup-build",
  "zup-core",
- "zup-platform",
  "zup-preset-protocol",
 ]
 
@@ -12360,9 +12320,10 @@ dependencies = [
  "rstest",
  "semver",
  "thiserror 2.0.21",
+ "windows 0.62.2",
  "zup-artifact",
  "zup-core",
- "zup-exec",
+ "zup-plan",
  "zup-presentation",
  "zup-preset-ipc",
  "zup-preset-protocol",
@@ -12389,6 +12350,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "uuid 1.29.0",
+ "zup-core",
 ]
 
 [[package]]
@@ -12418,7 +12380,6 @@ dependencies = [
  "zup-linux",
  "zup-manifest",
  "zup-plan",
- "zup-platform",
  "zup-plugin-build",
  "zup-presentation",
  "zup-preset-host",
@@ -12436,7 +12397,9 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "uuid 1.29.0",
+ "zup-acquire",
  "zup-core",
+ "zup-plan",
 ]
 
 [[package]]
@@ -12491,9 +12454,7 @@ dependencies = [
  "uuid 1.29.0",
  "zup-bootstrap",
  "zup-core",
- "zup-exec",
  "zup-plan",
- "zup-platform",
  "zup-protocol",
  "zup-transaction",
 ]
@@ -12538,9 +12499,7 @@ dependencies = [
  "uuid 1.29.0",
  "zup-bundle",
  "zup-core",
- "zup-exec",
  "zup-plan",
- "zup-platform",
  "zup-presentation",
  "zup-preset-host",
  "zup-preset-ipc",
@@ -12571,7 +12530,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "zup-core",
- "zup-platform",
+ "zup-plan",
 ]
 
 [[package]]
@@ -12592,8 +12551,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "zup-core",
- "zup-exec",
- "zup-platform",
+ "zup-plan",
 ]
 
 [[package]]
@@ -12657,11 +12615,9 @@ dependencies = [
  "zup-bundle",
  "zup-compose",
  "zup-core",
- "zup-exec",
  "zup-manifest",
  "zup-pe",
  "zup-plan",
- "zup-platform",
  "zup-plugin-contract",
  "zup-plugin-runtime",
  "zup-preset-host",
@@ -12687,7 +12643,7 @@ dependencies = [
  "zup-automation",
  "zup-binary",
  "zup-core",
- "zup-platform",
+ "zup-plan",
  "zup-preset-protocol",
  "zup-publish-github",
  "zup-toolchain",

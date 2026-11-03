@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use zup_session::automation_events;
 
 use crate::lifecycle::PreparedRuntime;
-use zup_exec::LifecycleAction;
+use zup_plan::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{
     ExecutionPolicy, InstallOutcome, OperationControl, RuntimeEvent, RuntimeRequest,
@@ -533,6 +533,7 @@ mod tests {
                     Sample::Lagged => {
                         for index in 0..400 {
                             let _ = events.send(RuntimeEvent::Progress {
+                                phase: zup_core::OperationPhase::Files,
                                 completed: index,
                                 total: 400,
                                 action: "copy".into(),
@@ -542,6 +543,7 @@ mod tests {
                     }
                     Sample::Cancelled => {
                         let _ = events.send(RuntimeEvent::Progress {
+                            phase: zup_core::OperationPhase::Files,
                             completed: 0,
                             total: 1,
                             action: "copy".into(),
@@ -557,6 +559,7 @@ mod tests {
                     }),
                     Sample::Committed => {
                         let _ = events.send(RuntimeEvent::Progress {
+                            phase: zup_core::OperationPhase::Files,
                             completed: 1,
                             total: 1,
                             action: "copy".into(),

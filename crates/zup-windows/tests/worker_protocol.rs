@@ -239,6 +239,8 @@ fn execute_before_auth_rejected() {
         session_id: b.session_id,
         sequence: 1,
         message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
+            content: None,
+            intent: None,
             target: target(),
             plan_json: "{}".into(),
             plan_hash: b.expected_plan_hash.clone(),
@@ -285,6 +287,8 @@ fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
             session_id: b.session_id,
             sequence: 2,
             message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
+                content: None,
+                intent: None,
                 target: Target::parse("arm64-pc-windows-msvc").unwrap(),
                 plan_json: "not json".into(),
                 plan_hash: b.expected_plan_hash.clone(),

@@ -5,8 +5,7 @@ use windows::Win32::System::RestartManager::{
 };
 use windows::core::PCWSTR;
 use zup_core::Target;
-use zup_exec::FileOperation;
-use zup_platform::TargetPath;
+use zup_plan::{FileOperation, TargetPath};
 
 use crate::lowering::host_path;
 
@@ -105,10 +104,10 @@ pub fn plan_mutating_paths(
             zup_transaction::NodeKind::FileMutation {
                 key,
                 delta:
-                    zup_transaction::FileDelta::Create
-                    | zup_transaction::FileDelta::Replace
-                    | zup_transaction::FileDelta::RestoreOwned
-                    | zup_transaction::FileDelta::RepairOwned,
+                    zup_plan::FileOperationKind::Create
+                    | zup_plan::FileOperationKind::Replace
+                    | zup_plan::FileOperationKind::RestoreOwned
+                    | zup_plan::FileOperationKind::RepairOwned,
             } => {
                 let destination = match key {
                     zup_core::ResourceKey::File { destination }
@@ -196,7 +195,7 @@ pub fn mutating_paths(files: &[FileOperation]) -> Vec<std::path::PathBuf> {
         .filter(|f| {
             matches!(
                 f.kind,
-                zup_exec::FileOperationKind::Create | zup_exec::FileOperationKind::Replace
+                zup_plan::FileOperationKind::Create | zup_plan::FileOperationKind::Replace
             )
         })
         .map(|f| host_path(&f.destination))

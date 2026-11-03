@@ -9,14 +9,15 @@ use zup_bootstrap::{
 };
 use zup_bundle::{AcquiredPayloadSource, PayloadSource};
 use zup_core::SelectedScope;
+use zup_plan::{FileOperationKind, FilePrecondition};
 use zup_runtime::{
     BootstrapRequest, CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeBackend,
     RuntimeControl, RuntimeEvent, RuntimeFuture, RuntimeRequest, RuntimeState, SessionError,
 };
 use zup_transaction::{
-    CancellationProbe, FileDelta, FilePrecondition, FilesystemTransactionStore, InstallationLock,
-    OperationExecutor, OperationReceipt, ReconcileResult, TransactionCoordinator, TransactionId,
-    TransactionNode, TransactionOutcome, TransactionPlan, TransactionStore,
+    CancellationProbe, FilesystemTransactionStore, InstallationLock, OperationExecutor,
+    OperationReceipt, ReconcileResult, TransactionCoordinator, TransactionId, TransactionNode,
+    TransactionOutcome, TransactionStore,
 };
 
 type SharedPayloadSource = Arc<dyn PayloadSource + Send + Sync>;
@@ -41,6 +42,7 @@ pub struct WindowsRuntimeBackend {
     payload_root: PathBuf,
     payload_overlay_root: Option<PathBuf>,
     retain_on_blocked: bool,
+    content: Option<zup_acquire::RuntimeHandoff>,
 }
 
 impl WindowsRuntimeBackend {
@@ -56,18 +58,21 @@ impl WindowsRuntimeBackend {
             payload_root,
             payload_overlay_root,
             retain_on_blocked: false,
+            content: None,
         })
     }
 
-    pub fn from_path_with_generated_files(
-        payload_root: impl Into<PathBuf>,
+    pub fn with_generated_files(
+        mut self,
+        prepared: &zup_runtime::PreparedOperation,
         state_root: &Path,
-        scope: SelectedScope,
-        install: &zup_plan::InstallPlan,
-        generated_files: &[zup_plan::GeneratedFile],
-        transaction_plan: &zup_transaction::TransactionPlan,
     ) -> Result<Self, String> {
-        let payload_root = payload_root.into();
+        let Some(install) = prepared.install_plan() else {
+            return Ok(self);
+        };
+        let scope = install.scope;
+        let generated_files = prepared.generated_files();
+        let transaction_plan = &prepared.transaction_plan;
         let transaction_identity = PayloadOverlayIdentity::from_transaction(
             install.app.id.clone(),
             install.app.version.clone(),
@@ -97,7 +102,7 @@ impl WindowsRuntimeBackend {
             match crate::materialize_payload_overlay(&base, &overlay_plan, &overlay_files) {
                 Ok(overlay) => overlay,
                 Err(error) => {
-                    if let Ok(identity) = PayloadOverlayIdentity::from_install_plan(&overlay_plan)
+                    if let Ok(identity) = PayloadOverlayIdentity::from_desired_state(&overlay_plan)
                         && let Some(overlay) = identity.path_under(&base)
                     {
                         let _ = cleanup_payload_overlay(&base, Some(&overlay));
@@ -106,7 +111,14 @@ impl WindowsRuntimeBackend {
                 }
             }
         };
-        Self::from_path(payload_root, overlay).map_err(|error| error.to_string())
+        if let Some(overlay) = overlay {
+            self.payload = Arc::new(zup_bundle::OverlayPayloadSource::new(
+                SharedPayload(self.payload),
+                Some(overlay.clone()),
+            ));
+            self.payload_overlay_root = Some(overlay);
+        }
+        Ok(self)
     }
 
     pub fn for_recovery(
@@ -146,6 +158,7 @@ impl WindowsRuntimeBackend {
     pub fn from_acquired(
         payload: std::sync::Arc<AcquiredPayloadSource>,
         payload_root: impl Into<PathBuf>,
+        content: zup_acquire::RuntimeHandoff,
     ) -> Result<Self, BundleError> {
         let payload_root = payload_root.into();
         Ok(Self {
@@ -153,6 +166,7 @@ impl WindowsRuntimeBackend {
             payload_root,
             payload_overlay_root: None,
             retain_on_blocked: false,
+            content: Some(content),
         })
     }
 
@@ -167,6 +181,7 @@ impl WindowsRuntimeBackend {
             payload_root,
             payload_overlay_root: None,
             retain_on_blocked: false,
+            content: None,
         })
     }
 
@@ -647,7 +662,12 @@ async fn run_elevated_bootstrap(
                             zup_protocol::WorkerFailure::Authentication => {
                                 SessionError::Protocol(failed.message)
                             }
-                            _ => SessionError::Prerequisite(failed.message),
+                            zup_protocol::WorkerFailure::Protocol => SessionError::Protocol(failed.message),
+                            zup_protocol::WorkerFailure::Cancelled => SessionError::Cancelled,
+                            zup_protocol::WorkerFailure::RecoveryRequired => SessionError::RecoveryRequired,
+                            zup_protocol::WorkerFailure::AuthorizationRequired => SessionError::AuthorizationRequired,
+                            zup_protocol::WorkerFailure::StalePlan | zup_protocol::WorkerFailure::Policy => SessionError::PlanInvalid(failed.message),
+                            zup_protocol::WorkerFailure::Transaction => SessionError::Prerequisite(failed.message),
                         });
                     }
                     zup_protocol::Message::Progress(progress) => {
@@ -772,6 +792,7 @@ impl WindowsRuntimeBackend {
                 request,
                 &self.payload_root,
                 self.payload_overlay_root.clone(),
+                self.content.clone(),
                 cancel,
                 events,
             )
@@ -827,6 +848,7 @@ async fn run_local_install_control_inner(
     });
     let total_work = request.transaction_plan.total_work();
     let _ = events.send(RuntimeEvent::Progress {
+        phase: zup_core::OperationPhase::Prepare,
         completed: 0,
         total: total_work,
         action: "Preparing…".into(),
@@ -843,6 +865,7 @@ async fn run_local_install_control_inner(
 
     if outcome == InstallOutcome::Committed {
         let _ = events.send(RuntimeEvent::Progress {
+            phase: zup_core::OperationPhase::Finish,
             completed: total_work,
             total: total_work,
             action: "Finishing…".into(),
@@ -855,6 +878,7 @@ async fn run_elevated_worker(
     request: RuntimeRequest,
     payload_root: &Path,
     payload_overlay_root: Option<PathBuf>,
+    content: Option<zup_acquire::RuntimeHandoff>,
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
 ) -> Result<InstallOutcome, SessionError> {
@@ -929,7 +953,7 @@ async fn run_elevated_worker(
             matches!(
                 node.kind,
                 zup_transaction::NodeKind::FileMutation {
-                    delta: FileDelta::RestoreOwned | FileDelta::RepairOwned,
+                    delta: FileOperationKind::RestoreOwned | FileOperationKind::RepairOwned,
                     ..
                 }
             )
@@ -969,8 +993,9 @@ async fn run_elevated_worker(
     } else {
         serde_json::to_string(&plan).map_err(|e| SessionError::PlanInvalid(e.to_string()))?
     };
-    let total_work = transaction_work_total(&plan);
+    let total_work = plan.total_work();
     let _ = events.send(RuntimeEvent::Progress {
+        phase: zup_core::OperationPhase::Prepare,
         completed: 0,
         total: total_work,
         action: "Preparing…".into(),
@@ -1049,6 +1074,8 @@ async fn run_elevated_worker(
             sequence: 2,
             message: zup_protocol::Message::ExecuteTransaction(Box::new(
                 zup_protocol::ExecuteTransaction {
+                    content,
+                    intent: request.intent.clone(),
                     target: request.target,
                     plan_json,
                     plan_hash,
@@ -1080,66 +1107,72 @@ async fn run_elevated_worker(
     let mut cancel_sent = false;
     loop {
         tokio::select! {
-            () = cancel.cancelled(), if !cancel_sent => {
-                writer.send(&zup_protocol::WireEnvelope {
-                    version: zup_protocol::PROTOCOL_VERSION,
-                    session_id,
-                    sequence: 3,
-                    message: zup_protocol::Message::Cancel,
-                }).await.map_err(|e| SessionError::Protocol(e.to_string()))?;
-                cancel_sent = true;
-            }
-            message = reader.recv() => {
-                let message = message.map_err(|e| SessionError::Protocol(e.to_string()))?;
-                worker_sequence.accept(message.sequence)
-                    .map_err(|e| SessionError::Protocol(e.to_string()))?;
-                match message.message {
-                zup_protocol::Message::Progress(progress) => {
-                    if progress.kind == zup_protocol::ProgressKind::OperationProgress {
-                        if let (Some(completed), Some(total)) = (progress.completed, progress.total) {
-                            let _ = events.send(RuntimeEvent::Progress {
-                                completed,
-                                total,
-                                action: progress.detail,
-                            });
-                        }
-                    } else {
-                        let _ = events.send(RuntimeEvent::OperationStarted { id: progress.detail });
-                    }
-                }
-                zup_protocol::Message::Completed(completed) => {
-                    let outcome = match completed.outcome {
-                        zup_protocol::WorkerOutcome::Committed => InstallOutcome::Committed,
-                        zup_protocol::WorkerOutcome::RolledBack => InstallOutcome::RolledBack,
-                        zup_protocol::WorkerOutcome::Cancelled => InstallOutcome::Cancelled,
-                        zup_protocol::WorkerOutcome::RecoveryRequired => InstallOutcome::RecoveryRequired,
-                        zup_protocol::WorkerOutcome::CommittedPendingReconciliation => {
-                            InstallOutcome::CommittedPendingReconciliation {
-                                transaction: Some(completed.transaction_id),
-                                detail: "the transaction committed and ledger reconciliation is still required"
-                                    .into(),
-                            }
-                        }
-                        other => return Err(SessionError::Protocol(format!("unexpected worker outcome {other:?}"))),
-                    };
-                    return Ok(outcome);
-                }
-                zup_protocol::Message::Failed(failed) => {
+                   () = cancel.cancelled(), if !cancel_sent => {
+                       writer.send(&zup_protocol::WireEnvelope {
+                           version: zup_protocol::PROTOCOL_VERSION,
+                           session_id,
+                           sequence: 3,
+                           message: zup_protocol::Message::Cancel,
+                       }).await.map_err(|e| SessionError::Protocol(e.to_string()))?;
+                       cancel_sent = true;
+                   }
+                   message = reader.recv() => {
+                       let message = message.map_err(|e| SessionError::Protocol(e.to_string()))?;
+                       worker_sequence.accept(message.sequence)
+                           .map_err(|e| SessionError::Protocol(e.to_string()))?;
+                       match message.message {
+                       zup_protocol::Message::Progress(progress) => {
+                           if progress.kind == zup_protocol::ProgressKind::OperationProgress {
+                               if let (Some(completed), Some(total)) = (progress.completed, progress.total) {
+                                   let _ = events.send(RuntimeEvent::Progress {
+        phase: progress.phase,
+                                       completed,
+                                       total,
+                                       action: progress.detail,
+                                   });
+                               }
+                           } else {
+                               let _ = events.send(RuntimeEvent::OperationStarted { id: progress.detail });
+                           }
+                       }
+                       zup_protocol::Message::Completed(completed) => {
+                           let outcome = match completed.outcome {
+                               zup_protocol::WorkerOutcome::Committed => InstallOutcome::Committed,
+                               zup_protocol::WorkerOutcome::RolledBack => InstallOutcome::RolledBack,
+                               zup_protocol::WorkerOutcome::Cancelled => InstallOutcome::Cancelled,
+                               zup_protocol::WorkerOutcome::RecoveryRequired => InstallOutcome::RecoveryRequired,
+                               zup_protocol::WorkerOutcome::CommittedPendingReconciliation => {
+                                   InstallOutcome::CommittedPendingReconciliation {
+                                       transaction: Some(completed.transaction_id),
+                                       detail: "the transaction committed and ledger reconciliation is still required"
+                                           .into(),
+                                   }
+                               }
+                               other => return Err(SessionError::Protocol(format!("unexpected worker outcome {other:?}"))),
+                           };
+                           return Ok(outcome);
+                       }
+                       zup_protocol::Message::Failed(failed) => {
 
-                    return Err(match failed.kind {
-                        zup_protocol::WorkerFailure::InstallationBusy => {
-                            SessionError::InstallationBusy
-                        }
-                        zup_protocol::WorkerFailure::Authentication => {
-                            SessionError::Protocol(failed.message)
-                        }
-                        _ => SessionError::Transaction(failed.message),
-                    });
-                }
-                _ => return Err(SessionError::Protocol("unexpected worker message".into())),
-                }
-            }
-        }
+                           return Err(match failed.kind {
+                               zup_protocol::WorkerFailure::InstallationBusy => {
+                                   SessionError::InstallationBusy
+                               }
+                               zup_protocol::WorkerFailure::Authentication => {
+                                   SessionError::Protocol(failed.message)
+                               }
+                               zup_protocol::WorkerFailure::Protocol => SessionError::Protocol(failed.message),
+                               zup_protocol::WorkerFailure::Cancelled => SessionError::Cancelled,
+                               zup_protocol::WorkerFailure::RecoveryRequired => SessionError::RecoveryRequired,
+                               zup_protocol::WorkerFailure::AuthorizationRequired => SessionError::AuthorizationRequired,
+                               zup_protocol::WorkerFailure::StalePlan | zup_protocol::WorkerFailure::Policy => SessionError::PlanInvalid(failed.message),
+                               zup_protocol::WorkerFailure::Transaction => SessionError::Transaction(failed.message),
+                           });
+                       }
+                       _ => return Err(SessionError::Protocol("unexpected worker message".into())),
+                       }
+                   }
+               }
     }
 }
 
@@ -1378,7 +1411,7 @@ fn execute_local_blocking_with_events_inner(
             cancel,
             events,
             completed_work: 0,
-            total_work: transaction_work_total(&record.plan),
+            total_work: record.plan.total_work(),
             blocked_paths: crate::plan_mutating_paths(&record.plan, &request.target),
         };
         note_plan_files(&mut executor.inner, &record.plan);
@@ -1477,7 +1510,7 @@ fn execute_local_blocking_with_events_inner(
         cancel,
         events,
         completed_work: 0,
-        total_work: transaction_work_total(&plan_for_executor),
+        total_work: plan_for_executor.total_work(),
         blocked_paths: crate::plan_mutating_paths(&plan_for_executor, &request.target),
     };
 
@@ -1540,35 +1573,6 @@ fn note_plan_files<P: zup_bundle::PayloadSource>(
                 .unwrap_or(FilePrecondition::Absent);
             executor.note_file(&node.id, precondition, sha256, size);
         }
-    }
-}
-
-fn operation_work(operation: &TransactionNode) -> u64 {
-    if matches!(
-        operation.kind,
-        zup_transaction::NodeKind::StageFile { .. }
-            | zup_transaction::NodeKind::FileMutation { .. }
-    ) {
-        operation.meta.expected_size.unwrap_or(1).max(1)
-    } else {
-        1
-    }
-}
-
-fn transaction_work_total(plan: &TransactionPlan) -> u64 {
-    plan.total_work()
-}
-
-fn operation_action(operation: &TransactionNode) -> String {
-    match &operation.kind {
-        zup_transaction::NodeKind::StageFile { .. }
-        | zup_transaction::NodeKind::FileMutation { .. } => "Installing files…".into(),
-        zup_transaction::NodeKind::BackendOperation { .. }
-        | zup_transaction::NodeKind::BackendRemoval { .. } => {
-            "Updating application settings…".into()
-        }
-        zup_transaction::NodeKind::FileRemoval { .. } => "Removing files…".into(),
-        zup_transaction::NodeKind::Barrier => "Finishing…".into(),
     }
 }
 
@@ -1655,12 +1659,13 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
 
         self.completed_work = self
             .completed_work
-            .saturating_add(operation_work(operation));
+            .saturating_add(zup_runtime::operation_work(operation));
         if let Some(events) = &self.events {
             let _ = events.send(RuntimeEvent::Progress {
+                phase: zup_runtime::operation_phase(operation),
                 completed: self.completed_work.min(self.total_work),
                 total: self.total_work,
-                action: operation_action(operation),
+                action: zup_runtime::operation_action(operation).into(),
             });
         }
         Ok(receipt)

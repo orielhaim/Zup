@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use zup_plan::TargetBuildPlan;
+use zup_core::TargetBuildPlan;
 
 pub fn current_executable() -> miette::Result<PathBuf> {
     zup_windows::current_exe().map_err(|error| miette::miette!("executable: {error}"))

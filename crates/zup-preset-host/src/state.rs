@@ -1,5 +1,5 @@
 use zup_core::SelectedScope;
-use zup_exec::LifecycleAction;
+use zup_plan::LifecycleAction;
 use zup_preset_protocol::{
     Action, Capabilities, Capability, ComponentId, DiagnosticKind, DiagnosticPresentation,
     InstallScope, InstallerState, LaunchTarget, MaintenanceState, OperationKind, OperationPhase,
@@ -176,7 +176,7 @@ impl HostState {
             Action::Install => self.start(LifecycleAction::Install),
             Action::Update => self.update(),
             Action::Modify => self.maintenance_op(LifecycleAction::Modify),
-            Action::Repair => self.maintenance_op(LifecycleAction::Repair { force_files: false }),
+            Action::Repair => self.maintenance_op(LifecycleAction::Repair { force: false }),
             Action::RequestUninstall => self.request_uninstall(),
             Action::ConfirmUninstall => self.confirm_uninstall(),
             Action::DismissUninstall => self.dismiss_uninstall(),
@@ -431,8 +431,10 @@ impl HostState {
 
     pub fn observe(&mut self, event: &RuntimeEvent) {
         match event {
-            RuntimeEvent::WaitingForAuthorization => self.advance("Waiting for approval…"),
-            RuntimeEvent::WorkerConnected => self.advance("Starting…"),
+            RuntimeEvent::WaitingForAuthorization => {
+                self.advance(OperationPhase::Prepare, "Waiting for approval…")
+            }
+            RuntimeEvent::WorkerConnected => self.advance(OperationPhase::Prepare, "Starting…"),
             RuntimeEvent::PrerequisiteCheck {
                 name, satisfied, ..
             } => {
@@ -441,7 +443,7 @@ impl HostState {
                 } else {
                     format!("{name} is needed")
                 };
-                self.advance(&label);
+                self.advance(OperationPhase::Prepare, &label);
             }
             RuntimeEvent::PrerequisiteDownload {
                 completed, total, ..
@@ -454,30 +456,41 @@ impl HostState {
                 );
             }
             RuntimeEvent::PrerequisiteInstall { name, .. } => {
-                self.advance(&format!("Installing {name}…"));
+                self.advance(OperationPhase::System, &format!("Installing {name}…"));
             }
             RuntimeEvent::RebootRequired { .. } => {
                 self.snapshot.state = InstallerState::RebootRequired;
                 self.finish();
             }
-            RuntimeEvent::PreflightStarted => self.advance("Checking for open applications…"),
+            RuntimeEvent::PreflightStarted => {
+                self.advance(OperationPhase::Prepare, "Checking for open applications…")
+            }
             RuntimeEvent::ResourceBlocked { detail, .. } => {
                 self.snapshot.state = InstallerState::Blocked {
                     blockers: detail.lines().map(str::to_owned).collect(),
                 };
             }
-            RuntimeEvent::StagingStarted { .. } => self.advance("Preparing files…"),
-            RuntimeEvent::StagingProgress { detail, .. } => self.advance(detail),
-            RuntimeEvent::OperationStarted { id } => self.advance(&operation_label(id)),
+            RuntimeEvent::StagingStarted { .. } => {
+                self.advance(OperationPhase::Prepare, "Preparing files…")
+            }
+            RuntimeEvent::StagingProgress { detail, .. } => {
+                self.advance(OperationPhase::Prepare, detail)
+            }
+            RuntimeEvent::OperationStarted { .. } => {
+                self.advance(OperationPhase::Prepare, "Applying changes…")
+            }
             RuntimeEvent::Progress {
                 completed,
                 total,
                 action,
+                phase,
+                ..
             } => {
-                let phase = zup_presentation::OperationPhase::from_action(action);
-                self.progress(phase, *completed, *total, action);
+                self.progress(*phase, *completed, *total, action);
             }
-            RuntimeEvent::RollingBack => self.advance("Restoring the previous state…"),
+            RuntimeEvent::RollingBack => {
+                self.advance(OperationPhase::System, "Restoring the previous state…")
+            }
             RuntimeEvent::Completed { outcome } => match outcome {
                 zup_runtime::CompletionOutcome::Committed => self.succeed(),
                 zup_runtime::CompletionOutcome::RebootRequired => {
@@ -503,17 +516,23 @@ impl HostState {
     fn observe_state(&mut self, state: zup_runtime::RuntimeState) {
         use zup_runtime::RuntimeState as S;
         match state {
-            S::Preparing => self.advance("Preparing…"),
-            S::CheckingPrerequisites => self.advance("Checking requirements…"),
-            S::InstallingPrerequisites => self.advance("Installing required components…"),
-            S::WaitingForAuthorization => self.advance("Waiting for approval…"),
+            S::Preparing => self.advance(OperationPhase::Prepare, "Preparing…"),
+            S::CheckingPrerequisites => {
+                self.advance(OperationPhase::Prepare, "Checking requirements…")
+            }
+            S::InstallingPrerequisites => {
+                self.advance(OperationPhase::Prepare, "Installing required components…")
+            }
+            S::WaitingForAuthorization => {
+                self.advance(OperationPhase::Prepare, "Waiting for approval…")
+            }
             S::RebootRequired => {
                 self.snapshot.state = InstallerState::RebootRequired;
                 self.finish();
             }
-            S::ConnectingWorker => self.advance("Starting…"),
-            S::Executing => self.advance("Installing files…"),
-            S::RollingBack => self.advance("Restoring the previous state…"),
+            S::ConnectingWorker => self.advance(OperationPhase::Prepare, "Starting…"),
+            S::Executing => self.advance(OperationPhase::Files, "Installing files…"),
+            S::RollingBack => self.advance(OperationPhase::System, "Restoring the previous state…"),
             S::Completed => self.succeed(),
             S::Cancelled => {
                 self.snapshot.state = self.resting_state();
@@ -630,10 +649,9 @@ impl HostState {
         }
     }
 
-    fn advance(&mut self, label: &str) {
+    fn advance(&mut self, phase: OperationPhase, label: &str) {
         let waiting = self.snapshot.state == InstallerState::WaitingForSafeCancellation;
         let previous = self.snapshot.progress.take();
-        let phase = zup_presentation::OperationPhase::from_action(label);
         self.snapshot.progress = Some(ProgressPresentation::new(
             phase,
             previous.as_ref().map_or(0, |progress| progress.completed),
@@ -651,18 +669,5 @@ impl HostState {
         if !waiting {
             self.snapshot.state = InstallerState::Running;
         }
-    }
-}
-
-fn operation_label(id: &str) -> String {
-    let id = id.to_ascii_lowercase();
-    if id.contains("service") {
-        "Registering services…".into()
-    } else if id.contains("launcher") {
-        "Adding shortcuts…".into()
-    } else if id.contains("file") {
-        "Installing files…".into()
-    } else {
-        "Finishing…".into()
     }
 }

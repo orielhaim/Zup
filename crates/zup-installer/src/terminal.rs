@@ -45,7 +45,7 @@ pub(crate) enum Command {
     Modify(Components),
     Repair {
         #[arg(long, alias = "force")]
-        force_files: bool,
+        force: bool,
     },
     Uninstall,
     #[cfg(target_os = "linux")]
@@ -138,9 +138,7 @@ impl Cli {
             Some(Command::Install(_)) => Operation::Install,
             Some(Command::Upgrade(_)) => Operation::Upgrade,
             Some(Command::Modify(_)) => Operation::Modify,
-            Some(Command::Repair { force_files }) => Operation::Repair {
-                force_files: *force_files,
-            },
+            Some(Command::Repair { force }) => Operation::Repair { force: *force },
             Some(Command::Uninstall) => Operation::Uninstall,
             #[cfg(target_os = "linux")]
             Some(Command::Update { .. }) => Operation::Upgrade,
@@ -506,7 +504,8 @@ fn drive<H: SessionHost>(
         &prepared.transaction_plan,
         scope,
         prepared.target_plan(),
-    );
+    )
+    .map_err(|error| miette::miette!("{error}"))?;
     if prepared.target_plan().is_none() {
         plan.application = build.installer.app.name.to_string();
         plan.version = build.installer.app.version.to_string();

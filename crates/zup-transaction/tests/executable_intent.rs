@@ -47,7 +47,7 @@ fn the_intent_is_part_of_the_plan_identity() {
 }
 
 #[test]
-fn an_older_journal_without_the_key_is_still_readable() {
+fn missing_file_execution_intent_is_rejected() {
     let plan = plan_for(true);
     let json: serde_json::Value = serde_json::to_value(&plan).expect("a plan serializes");
     let mut json = json;
@@ -59,17 +59,10 @@ fn an_older_journal_without_the_key_is_still_readable() {
     }
     let recovered: zup_transaction::TransactionPlan =
         serde_json::from_value(json).expect("a plan without the key deserializes");
-    for node in recovered.nodes.iter().filter(|node| {
-        matches!(
-            node.kind,
-            NodeKind::StageFile { .. } | NodeKind::FileMutation { .. }
-        )
-    }) {
-        assert_eq!(
-            node.meta.executable, None,
-            "an absent key stays absent rather than being invented"
-        );
-    }
+    assert!(
+        recovered.validate().is_err(),
+        "an incomplete file effect is not authorized"
+    );
 }
 
 #[test]

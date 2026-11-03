@@ -1,7 +1,7 @@
 use std::io;
 use std::path::Path;
 
-use zup_platform::SourceFilePolicy;
+use zup_core::SourceFilePolicy;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsSourceFilePolicy;

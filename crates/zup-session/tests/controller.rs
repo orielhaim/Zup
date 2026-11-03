@@ -42,6 +42,7 @@ impl zup_runtime::RuntimeBackend for FakeBackend {
         Box::pin(async move {
             if let Some(hold) = &self.hold {
                 let _ = control.events.send(zup_runtime::RuntimeEvent::Progress {
+                    phase: zup_core::OperationPhase::Files,
                     completed: 0,
                     total: 1,
                     action: "holding".into(),
@@ -60,6 +61,7 @@ impl zup_runtime::RuntimeBackend for FakeBackend {
                 Script::Panic => panic!("operation task failed"),
                 Script::CommitAfterCancel => {
                     let _ = control.events.send(zup_runtime::RuntimeEvent::Progress {
+                        phase: zup_core::OperationPhase::Files,
                         completed: 0,
                         total: 1,
                         action: "holding".into(),
@@ -135,9 +137,9 @@ fn fixture_build() -> zup_core::TargetBuildPlan {
     }
 }
 
-fn fixture_target() -> zup_platform::TargetPlan {
+fn fixture_target() -> zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
     let target = Target::parse("windows-x64").expect("valid target");
-    zup_platform::TargetPlan {
+    zup_plan::DesiredState {
         app: zup_core::App {
             id: zup_core::AppId::new("com.example.session").expect("valid id"),
             name: zup_core::NonEmptyString::new("Session").expect("valid name"),
@@ -148,8 +150,7 @@ fn fixture_target() -> zup_platform::TargetPlan {
         },
         target,
         scope: SelectedScope::User,
-        install_directory: zup_platform::TargetPath::new(target, "C:\\Session")
-            .expect("valid path"),
+        install_directory: zup_plan::TargetPath::new(target, "C:\\Session").expect("valid path"),
         selected_components: Vec::new(),
         prerequisites: Vec::new(),
         files: Vec::new(),
@@ -158,21 +159,13 @@ fn fixture_target() -> zup_platform::TargetPlan {
         services: Vec::new(),
         protocols: Vec::new(),
         file_associations: Vec::new(),
-        summary: zup_platform::TargetPlanSummary {
-            file_count: 0,
-            install_bytes: 0,
-            resource_count: 0,
-            requires_authorization: false,
-            selected_component_count: 0,
-            prerequisite_count: 0,
-            download_bytes: 0,
-        },
+
         preset: None,
     }
 }
 
-fn fixture_install() -> zup_plan::InstallPlan {
-    zup_plan::InstallPlan {
+fn fixture_install() -> zup_plan::DesiredState {
+    zup_plan::DesiredState {
         app: zup_core::App {
             id: zup_core::AppId::new("com.example.session").expect("valid id"),
             name: zup_core::NonEmptyString::new("Session").expect("valid name"),
@@ -192,15 +185,8 @@ fn fixture_install() -> zup_plan::InstallPlan {
         services: Vec::new(),
         protocols: Vec::new(),
         file_associations: Vec::new(),
-        summary: zup_plan::PlanSummary {
-            file_count: 0,
-            install_bytes: 0,
-            selected_component_count: 0,
-            resource_count: 0,
-            requires_authorization: false,
-            prerequisite_count: 0,
-            download_bytes: 0,
-        },
+
+        preset: None,
     }
 }
 
@@ -210,7 +196,7 @@ impl zup_runtime::OperationHost for FakeHost {
         _build: &zup_core::TargetBuildPlan,
         _request: &zup_plan::PlanRequest,
         _cancellation: &dyn zup_plan::CancellationQuery,
-    ) -> Result<zup_plan::PlannedInstallation, String> {
+    ) -> Result<zup_plan::PlannedInstallation, zup_runtime::OperationError> {
         Ok(zup_plan::PlannedInstallation {
             plan: fixture_install(),
             generated_files: Vec::new(),
@@ -219,31 +205,30 @@ impl zup_runtime::OperationHost for FakeHost {
 
     fn resolve_target(
         &self,
-        _install: &zup_plan::InstallPlan,
-    ) -> Result<zup_platform::TargetPlan, String> {
+        _install: &zup_plan::DesiredState,
+    ) -> Result<zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String> {
         Ok(fixture_target())
     }
 
     fn observe(
         &self,
-        _target: Option<&zup_platform::TargetPlan>,
-        _ledger: Option<&zup_exec::InstallLedger>,
+        _target: Option<&zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
+        _ledger: Option<&zup_plan::InstallLedger>,
     ) -> Result<
         (
-            Option<zup_exec::HostSnapshot>,
+            Option<zup_plan::HostSnapshot>,
             BTreeMap<zup_core::ResourceKey, bool>,
         ),
         String,
     > {
-        Ok((Some(zup_exec::HostSnapshot::default()), BTreeMap::new()))
+        Ok((Some(zup_plan::HostSnapshot::default()), BTreeMap::new()))
     }
 
     fn compile(
         &self,
-        _action: zup_exec::LifecycleAction,
-        _execution: &zup_exec::ExecutionPlan,
-        _target: Option<&zup_platform::TargetPlan>,
-        _ledger: Option<&zup_exec::InstallLedger>,
+        _execution: &zup_plan::ExecutionPlan,
+        _target: Option<&zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
+        _ledger: Option<&zup_plan::InstallLedger>,
     ) -> Result<zup_transaction::TransactionInput, String> {
         Ok(zup_transaction::TransactionInput::new(
             Target::parse("windows-x64").expect("valid target"),
@@ -252,7 +237,7 @@ impl zup_runtime::OperationHost for FakeHost {
 
     fn attach_content(
         &self,
-        _target: &mut zup_platform::TargetPlan,
+        _target: &mut zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         _content: &zup_runtime::ContentAccess,
         _preset: Option<&zup_core::PresetRuntime>,
     ) -> Result<(), String> {
@@ -329,7 +314,7 @@ impl SessionHost for FakeHost {
             "backend {} {} uninstall={} plan={}",
             context.scope,
             context.state_root.display(),
-            prepared.action == zup_exec::LifecycleAction::Uninstall,
+            prepared.action == zup_plan::LifecycleAction::Uninstall,
             prepared.install_plan().is_some()
         ));
         if self.refuse_backend {
@@ -436,10 +421,11 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
     let root = tempfile::tempdir().expect("state root");
     let mut session_host = host("close_preset");
     session_host.after_commit_error = Some("cleanup failed".into());
-    let mut ledger = zup_exec::InstallLedger::new(
+    let mut ledger = zup_plan::InstallLedger::new(
         session_host.build.installer.app.id.clone(),
         session_host.build.installer.target,
         SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
     );
     ledger.version = session_host.build.installer.app.version.clone();
     session_host.installations = vec![zup_session::ScopedInstallation {
@@ -463,7 +449,7 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
         &discovery,
         zup_session::OperationLaunch {
             id: uuid::Uuid::now_v7(),
-            action: zup_exec::LifecycleAction::Uninstall,
+            action: zup_plan::LifecycleAction::Uninstall,
             selection: &selection,
             control,
         },
@@ -522,10 +508,11 @@ fn an_unspecified_either_scope_presents_an_existing_installation() {
         &[zup_session::ScopedInstallation {
             scope: SelectedScope::Machine,
             state_root: PathBuf::from("machine"),
-            ledger: Some(zup_exec::InstallLedger::new(
+            ledger: Some(zup_plan::InstallLedger::new(
                 zup_core::AppId::new("com.example.session").expect("id"),
                 Target::parse("windows-x64").expect("target"),
                 SelectedScope::Machine,
+                zup_core::TransactionId::new_v7(),
             )),
         }],
     )
@@ -598,10 +585,11 @@ async fn switching_from_machine_to_user_uses_the_user_installation() {
     let machine_root = tempfile::tempdir().expect("machine root");
     let mut host = host("user_scope_install_preset");
     host.build.installer.install.scope = zup_core::InstallScope::Either;
-    let mut user_ledger = zup_exec::InstallLedger::new(
+    let mut user_ledger = zup_plan::InstallLedger::new(
         host.build.installer.app.id.clone(),
         host.build.installer.target,
         SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
     );
     user_ledger.version = host.build.installer.app.version.clone();
     host.installations = vec![
@@ -648,10 +636,11 @@ async fn switching_from_machine_to_user_uses_the_user_installation() {
 async fn a_gui_uninstall_reaches_execution_without_an_install_plan() {
     let root = tempfile::tempdir().expect("state root");
     let mut host = host("uninstall_preset");
-    let mut ledger = zup_exec::InstallLedger::new(
+    let mut ledger = zup_plan::InstallLedger::new(
         host.build.installer.app.id.clone(),
         host.build.installer.target,
         SelectedScope::User,
+        zup_core::TransactionId::new_v7(),
     );
     ledger.version = host.build.installer.app.version.clone();
     host.installations = vec![zup_session::ScopedInstallation {

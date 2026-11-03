@@ -1,5 +1,6 @@
 //! Durable ownership state for one installed application and scope.
 
+use crate::{CommandSpec, TargetPath};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use zup_core::ReleaseIdentity;
@@ -7,7 +8,6 @@ use zup_core::{
     AppId, BackendResourceId, ComponentId, InstalledPreset, Privilege, RelativePath, ResourceKey,
     SelectedScope, ServiceStart, Sha256Digest, Target,
 };
-use zup_platform::{CommandSpec, TargetPath};
 
 pub const INSTALL_LEDGER_SCHEMA: u32 = 2;
 
@@ -45,7 +45,7 @@ pub struct InstallLedger {
     /// than guess at.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<InstalledPreset>,
-    pub committed_transaction: String,
+    pub committed_transaction: zup_core::TransactionId,
     #[serde(with = "resource_map")]
     pub resources: BTreeMap<ResourceKey, OwnedResource>,
 }
@@ -77,7 +77,12 @@ mod resource_map {
 }
 
 impl InstallLedger {
-    pub fn new(app_id: AppId, target: Target, scope: SelectedScope) -> Self {
+    pub fn new(
+        app_id: AppId,
+        target: Target,
+        scope: SelectedScope,
+        transaction: zup_core::TransactionId,
+    ) -> Self {
         Self {
             schema: INSTALL_LEDGER_SCHEMA,
             app_id,
@@ -88,7 +93,7 @@ impl InstallLedger {
             install_directory: None,
             release: None,
             preset: None,
-            committed_transaction: String::new(),
+            committed_transaction: transaction,
             resources: BTreeMap::new(),
         }
     }

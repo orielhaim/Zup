@@ -222,10 +222,10 @@ pub fn plan_installation(
     let artifacts = compile_plugins(&host_plan)?;
     let mut executor =
         zup_plugin_runtime::WasmtimePluginExecutor::from_compiled(&target.installer, &artifacts)?;
-    Ok(zup_plan::plan_with_plugins(
+    Ok(zup_plan::plan(
         build,
         request,
-        &mut executor,
+        Some(&mut executor),
         cancellation,
     )?)
 }
