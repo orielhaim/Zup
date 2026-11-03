@@ -80,10 +80,14 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          mkdir -p target/nextest
-          sudo env PATH="$PATH" RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" \
-            ZUP_TEST_REAL_SYSTEMD=1 CARGO_INCREMENTAL=0 \
-            cargo nextest run --profile systemd -p zup-linux --all-features --test services_systemd --no-fail-fast
+          set -euo pipefail
+          mkdir -p target/nextest/systemd
+          cargo nextest list -p zup-linux --all-features --test services_systemd --list-type binaries-only --message-format json > "$RUNNER_TEMP/systemd-binaries.json"
+          cargo metadata --all-features --format-version 1 > "$RUNNER_TEMP/systemd-cargo.json"
+          sudo env ZUP_TEST_REAL_SYSTEMD=1 \
+            "$(command -v cargo-nextest)" nextest run --profile systemd --no-fail-fast \
+            --cargo-metadata "$RUNNER_TEMP/systemd-cargo.json" \
+            --binaries-metadata "$RUNNER_TEMP/systemd-binaries.json"
 
       - name: Toolchain
         run: cargo xtask toolchain build
