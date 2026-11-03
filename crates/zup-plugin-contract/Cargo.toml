@@ -22,8 +22,8 @@ zup-plugin-abi.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
-wit-component = { version = "0.262", features = ["dummy-module"] }
-wit-parser = "0.262"
+wit-component.workspace = true
+wit-parser.workspace = true
 wat = "1"
 
 [[test]]

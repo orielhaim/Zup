@@ -25,51 +25,6 @@ const FRONTEND: &str = "gui";
 const FRONTEND: &str = "console";
 
 #[test]
-fn init_creates_a_small_editor_ready_manifest() {
-    let root = TempDir::new().unwrap();
-    let manifest = root.path().join("zup.toml");
-    let output = zup()
-        .args([
-            "init",
-            "--manifest",
-            manifest.to_str().unwrap(),
-            "--non-interactive",
-            "--name",
-            "Acme",
-            "--app-id",
-            "com.example.acme",
-            "--version",
-            "1.4.0",
-            "--source",
-            "dist",
-            "--scope",
-            "user",
-            "--main",
-            "Acme.exe",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let source = fs::read_to_string(&manifest).unwrap();
-    assert!(source.starts_with("#:schema https://zup.dev/schema/zup.toml.json"));
-    assert!(source.contains("allow_directory_override = true"));
-    assert!(root.path().join("dist").is_dir());
-    let checked = zup_with_toolchain(root.path())
-        .args(["check", "--manifest", manifest.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        checked.status.success(),
-        "{}",
-        String::from_utf8_lossy(&checked.stderr)
-    );
-}
-
-#[test]
 fn plan_reports_the_resolved_installation_as_machine_output() {
     let root = TempDir::new().unwrap();
     let manifest = root.path().join("zup.toml");
@@ -216,4 +171,321 @@ fn an_operation_requires_a_concrete_scope() {
     let output = zup().args(["plan", "--scope", "either"]).output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("either"));
+}
+
+mod initialization {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{Duration, Instant};
+
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use rstest::rstest;
+    use zup_core::{Frontend, InstallScope, Target, TargetOverrides};
+
+    fn manifest(root: &Path) -> zup_manifest::Manifest {
+        let source = fs::read_to_string(root.join("zup.toml")).unwrap();
+        let manifest = zup_manifest::parse(&source).unwrap();
+        let overrides = TargetOverrides::default();
+        for target in zup_manifest::select_targets(&manifest, &[], &overrides).unwrap() {
+            zup_manifest::compile(&manifest, &target, &overrides).unwrap();
+        }
+        manifest
+    }
+
+    fn init(root: &Path, args: &[&str]) -> std::process::Output {
+        zup()
+            .current_dir(root)
+            .arg("init")
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn succeeds(output: std::process::Output) {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[rstest]
+    #[case("-y", false)]
+    #[case("--yes", true)]
+    fn unattended_initialization_needs_no_identity_flags(
+        #[case] flag: &str,
+        #[case] terminal: bool,
+    ) {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("Acme Desktop");
+        fs::create_dir(&root).unwrap();
+        if terminal {
+            wizard(&root, &[flag], &[]);
+        } else {
+            succeeds(init(&root, &[flag]));
+        }
+        let manifest = manifest(&root);
+        assert_eq!(manifest.app.name.as_str(), "Acme Desktop");
+        assert_eq!(manifest.app.id.as_str(), "com.example.acme-desktop");
+        assert_eq!(manifest.app.version.to_string(), "0.1.0");
+        assert!(manifest.app.main.is_none());
+        assert_eq!(manifest.install.scope, InstallScope::User);
+        assert_eq!(manifest.frontend, Frontend::Gui);
+        let profiles = manifest.build.targets;
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles.contains_key(Target::host().unwrap().as_str()));
+        assert!(root.join("dist").is_dir());
+    }
+
+    #[test]
+    fn explicit_overrides_produce_a_valid_multi_target_project() {
+        let root = TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join("payload/bin")).unwrap();
+        fs::write(
+            root.path().join("payload/bin/launch"),
+            "an existing entry point",
+        )
+        .unwrap();
+        succeeds(init(
+            root.path(),
+            &[
+                "-y",
+                "--name",
+                "Acme \"Desktop\"",
+                "--app-id",
+                "com.acme.desktop",
+                "--version",
+                "2.3.4",
+                "--target",
+                "windows-x64,linux-arm64",
+                "--target",
+                "windows-x64",
+                "--source",
+                "payload",
+                "--main",
+                "bin/launch",
+                "--scope",
+                "either",
+                "--frontend",
+                "console",
+            ],
+        ));
+        let manifest = manifest(root.path());
+        assert_eq!(manifest.app.name.as_str(), "Acme \"Desktop\"");
+        assert_eq!(manifest.app.id.as_str(), "com.acme.desktop");
+        assert_eq!(manifest.app.version.to_string(), "2.3.4");
+        assert_eq!(manifest.app.main.unwrap().as_literal(), Some("bin/launch"));
+        assert_eq!(manifest.install.scope, InstallScope::Either);
+        assert_eq!(manifest.frontend, Frontend::Console);
+        assert_eq!(
+            manifest
+                .build
+                .targets
+                .keys()
+                .map(|key| key.as_str())
+                .collect::<Vec<_>>(),
+            ["linux-arm64", "windows-x64"]
+        );
+        for profile in manifest.build.targets.values() {
+            assert_eq!(profile.source.directory, Path::new("payload"));
+        }
+    }
+
+    #[test]
+    fn a_main_override_must_name_an_existing_file() {
+        let root = TempDir::new().unwrap();
+        let output = init(root.path(), &["-y", "--main", "missing.exe"]);
+        assert!(!output.status.success());
+        assert!(!root.path().join("zup.toml").exists());
+        assert!(!root.path().join("dist").exists());
+    }
+
+    #[test]
+    fn overwriting_requires_force_and_valid_answers() {
+        let root = TempDir::new().unwrap();
+        succeeds(init(root.path(), &["-y", "--name", "Original"]));
+        let original = fs::read(root.path().join("zup.toml")).unwrap();
+        assert!(
+            !init(root.path(), &["-y", "--name", "Changed"])
+                .status
+                .success()
+        );
+        assert!(
+            !init(root.path(), &["-y", "--force", "--version", "invalid"])
+                .status
+                .success()
+        );
+        assert_eq!(fs::read(root.path().join("zup.toml")).unwrap(), original);
+        succeeds(init(root.path(), &["-y", "--force", "--name", "Changed"]));
+        assert_eq!(manifest(root.path()).app.name.as_str(), "Changed");
+    }
+
+    #[test]
+    fn discovery_uses_real_binaries_and_leaves_ambiguous_entry_points_unset() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("out");
+        fs::create_dir(&source).unwrap();
+        let name = if cfg!(windows) { "Acme.EXE" } else { "Acme" };
+        fs::copy(env!("CARGO_BIN_EXE_zup"), source.join(name)).unwrap();
+        succeeds(init(root.path(), &["-y"]));
+        let first = manifest(root.path());
+        assert_eq!(first.app.main.unwrap().as_literal(), Some(name));
+        assert_eq!(
+            first
+                .build
+                .targets
+                .values()
+                .next()
+                .unwrap()
+                .source
+                .directory,
+            Path::new("out")
+        );
+        fs::copy(
+            source.join(name),
+            source.join(if cfg!(windows) {
+                "helper.exe"
+            } else {
+                "helper"
+            }),
+        )
+        .unwrap();
+        succeeds(init(root.path(), &["-y", "--force"]));
+        assert!(manifest(root.path()).app.main.is_none());
+        succeeds(init(
+            root.path(),
+            &["-y", "--force", "--target", "windows-x64,linux-x64"],
+        ));
+        assert!(manifest(root.path()).app.main.is_none());
+    }
+
+    #[test]
+    fn unattended_mode_is_explicit_and_the_removed_flag_is_rejected() {
+        let root = TempDir::new().unwrap();
+        for args in [&[][..], &["--yes", "--non-interactive"][..]] {
+            assert!(!init(root.path(), args).status.success());
+            assert!(!root.path().join("zup.toml").exists());
+        }
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn the_wizard_uses_the_same_defaults_and_accepts_multiple_targets(#[case] edit: bool) {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("Acme Desktop");
+        fs::create_dir(&root).unwrap();
+        succeeds(init(&root, &["--yes"]));
+        let defaults = manifest(&root);
+        fs::remove_file(root.join("zup.toml")).unwrap();
+        let targets = if edit {
+            "\x1b[D\x1b[H \x1b[B\x1b[B\x1b[B\x1b[B \r"
+        } else {
+            "\r"
+        };
+        wizard(
+            &root,
+            &[],
+            &[
+                ("Application name", if edit { " Pro\r" } else { "\r" }),
+                ("Application ID", "\r"),
+                ("Space to select", targets),
+                ("Source directory", "\r"),
+            ],
+        );
+        let actual = manifest(&root);
+        if edit {
+            assert_eq!(actual.app.name.as_str(), "Acme Desktop Pro");
+            assert_eq!(actual.app.id.as_str(), "com.example.acme-desktop-pro");
+            assert_eq!(
+                actual
+                    .build
+                    .targets
+                    .keys()
+                    .map(|key| key.as_str())
+                    .collect::<Vec<_>>(),
+                ["linux-arm64", "windows-x64"]
+            );
+        } else {
+            assert_eq!(actual, defaults);
+        }
+    }
+
+    fn wizard(root: &Path, args: &[&str], exchanges: &[(&str, &str)]) {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 30,
+                cols: 100,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_zup"));
+        command.cwd(root);
+        command.arg("init");
+        command.args(args);
+        command.env("TERM", "xterm-256color");
+        command.env("NO_COLOR", "1");
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().unwrap()));
+        let reply = writer.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buffer = [0; 2048];
+            let mut pending = Vec::new();
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                pending.extend_from_slice(&buffer[..count]);
+                // ConPTY requests its terminal emulator's cursor position.
+                if pending.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                    let mut reply = reply.lock().unwrap();
+                    if reply
+                        .write_all(b"\x1b[1;1R")
+                        .and_then(|_| reply.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                if pending.len() > 3 {
+                    pending.drain(..pending.len() - 3);
+                }
+                if sender.send(buffer[..count].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut transcript = String::new();
+        let mut next = 0;
+        loop {
+            if let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(20)) {
+                transcript.push_str(&String::from_utf8_lossy(&bytes));
+                if let Some((question, answer)) = exchanges.get(next)
+                    && transcript.contains(question)
+                {
+                    let mut writer = writer.lock().unwrap();
+                    writer.write_all(answer.as_bytes()).unwrap();
+                    writer.flush().unwrap();
+                    transcript.clear();
+                    next += 1;
+                }
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                assert_eq!(next, exchanges.len(), "missing question: {transcript}");
+                assert!(status.success(), "{transcript}");
+                return;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let _ = child.wait();
+                panic!("wizard stalled after question {next}: {transcript}");
+            }
+        }
+    }
 }

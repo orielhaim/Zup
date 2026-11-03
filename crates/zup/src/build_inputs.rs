@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use zup_core::{App, ResolvedTargetConfig, SelectedScope, Target, TargetOperatingSystem};
+use zup_core::{App, ResolvedTargetConfig, SelectedScope, TargetOperatingSystem};
 
 use crate::toolchain::{ToolchainResolver, ToolchainSource};
 
@@ -333,12 +333,6 @@ fn derived_output_path(
     candidate
 }
 
-pub fn default_build_target() -> miette::Result<String> {
-    Target::host()
-        .map(|target| target.to_string())
-        .map_err(|error| miette::miette!("{error}"))
-}
-
 /// The dispatch is on the *target's* operating system, never on the build
 pub fn check_target_lowering(
     build: &zup_build::BuildPlan,
@@ -461,18 +455,7 @@ pub fn normalized_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_core::Frontend;
-
-    #[test]
-    fn the_default_build_target_is_the_host_itself() {
-        let host = Target::host().unwrap();
-        assert_eq!(
-            host.is_windows(),
-            !cfg!(target_os = "linux"),
-            "a Windows target builds on any host: composition is target-selected, never host-selected"
-        );
-        assert!(default_build_target().unwrap() == host.to_string());
-    }
+    use zup_core::{Frontend, Target};
 
     fn empty_resolver() -> ToolchainResolver {
         ToolchainResolver::new(

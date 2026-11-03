@@ -10,8 +10,8 @@ publish = false
 [dependencies]
 anyhow = "1"
 # Componentization belongs to the build host, independent of author tooling.
-wit-component = { version = "0.262", features = ["dummy-module"] }
-wit-parser = "0.262"
+wit-component.workspace = true
+wit-parser.workspace = true
 zup-plugin-abi.workspace = true
 zup-plugin-contract = { workspace = true, features = ["compiler"] }
 sha2.workspace = true
