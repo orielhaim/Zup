@@ -56,7 +56,7 @@ pub fn run(frontend: zup_core::Frontend) -> miette::Result<()> {
         }
         let cli = cli::parse();
         let output = cli.output_format();
-        let graphical = frontend == zup_core::Frontend::Gui && cli.graphical();
+        let graphical = frontend == zup_core::Frontend::Gui && cli.may_show_error_dialog();
         let context = RuntimeContext::new(frontend).with_output(output);
         let result = cli::dispatch(cli, context);
         if let Err(error) = &result

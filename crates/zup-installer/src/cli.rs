@@ -186,7 +186,10 @@ pub(crate) struct UninstallRunnerArgs {
 }
 
 impl Cli {
-    pub(crate) fn graphical(&self) -> bool {
+    pub(crate) fn may_show_error_dialog(&self) -> bool {
+        if self.output_format() != OutputFormat::Human {
+            return false;
+        }
         match &self.command {
             None => true,
             Some(Commands::Install(args) | Commands::Modify(args) | Commands::Upgrade(args)) => {

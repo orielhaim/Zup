@@ -3,7 +3,6 @@ name: Full Verification
 on:
   push:
     branches: [master]
-  pull_request:
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
@@ -21,8 +20,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: full-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: full-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,7 +52,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fast-${{ runner.os }}-${{ runner.arch }}-debug0
-          cache-on-failure: false
+          cache-on-failure: true
 
       - uses: ilammy/setup-nasm@v1
         if: runner.os == 'Windows'
@@ -69,15 +68,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
-
-      - name: Linux package selection
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
-          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
-          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
 
       - name: Linux dependencies
         if: runner.os == 'Linux'
@@ -100,12 +90,12 @@ jobs:
 
       - name: Windows tests
         if: runner.os == 'Windows'
-        run: cargo nextest run --profile integration --workspace --all-features --no-fail-fast
+        run: cargo nextest run --profile integration -p zup -p zup-installer -p zup-preview -p zup-windows --all-features --no-fail-fast
 
       - name: Linux tests
         if: runner.os == 'Linux'
         shell: bash
-        run: cargo nextest run --profile integration --all-features --no-fail-fast $PORTABLE $LINUX
+        run: cargo nextest run --profile integration -p zup -p zup-installer -p zup-preview -p zup-linux --all-features --no-fail-fast
 
       - name: Generated SDK projects
         if: inputs.sdk == true

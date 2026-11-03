@@ -45,7 +45,8 @@ Prefer the generated workflow when you want Zup to keep the target matrix and re
 
 Pull requests run fast tests and doctests on Windows x64 and Linux x64,
 plus terminal lifecycle tests on both ARM64 hosts. Full Verification runs
-only the staged-toolchain integration cases on the two x64 hosts. It reuses
+after pushes to `master`, weekly, or on manual dispatch. It runs only the
+staged-toolchain integration cases on the two x64 hosts. It reuses
 their tooling to compose a Linux installer on Windows and a Universal Windows
 installer on Linux, then runs each installer on its target host. Nextest stops
 individual tests after five minutes and publishes failure diagnostics.
