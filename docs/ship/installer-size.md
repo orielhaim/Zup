@@ -65,6 +65,6 @@ cargo build -p zup --bin zup
 python scripts/ci/installer-size.py --cli target/debug/zup --toolchain target/installer/toolchain/0.0.1 --output target/sizes
 ```
 
-On Windows, use `target/debug/zup.exe`. The Full Verification workflow has a size-only mode with revision, profile, and native-runner selection. Its artifacts contain the byte counts, inspection results, and Windows runtime link maps.
+On Windows, use `target/debug/zup.exe`. Run measurements locally on each native host. Size benchmarks are excluded from CI.
 
 Sources: [baseline](https://github.com/orielhaim/Zup/actions/runs/40712661630), [optimized Linux measurements](https://github.com/orielhaim/Zup/actions/runs/40716845790), [final Windows x64](https://github.com/orielhaim/Zup/actions/runs/40726815465), [final Windows ARM64](https://github.com/orielhaim/Zup/actions/runs/40726820983).

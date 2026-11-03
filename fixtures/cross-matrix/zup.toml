@@ -1,9 +1,8 @@
 #:schema https://zup.dev/schema/zup.toml.json
 #
-# The cross-build matrix fixture: the smallest application that exercises
-# every supported host/target combination. CI builds all three targets on
-# both Windows and Linux, verifies each artifact, and runs the console
-# installers' full lifecycle on their target operating system.
+# CI composes Linux on Windows and Universal Windows on Linux, then runs
+# each installer's lifecycle on its target host. Other targets remain available
+# for local cross-build checks.
 #
 # Nothing here is special: one payload file, user scope, no services, no
 # launchers or custom preset settings.
