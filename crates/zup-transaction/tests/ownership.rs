@@ -32,6 +32,7 @@ fn owned_file(work: &zup_plan::FileOperation) -> OwnedResource {
         sha256: digest(b"old"),
         size: 3,
         created_directories: Vec::new(),
+        executable: false,
         privilege: Privilege::User,
     }
 }
@@ -88,6 +89,7 @@ fn removal_cannot_forget_or_retarget_committed_resources() {
             sha256: removal.sha256,
             size: removal.size,
             created_directories: Vec::new(),
+            executable: false,
             privilege: Privilege::User,
         },
     );

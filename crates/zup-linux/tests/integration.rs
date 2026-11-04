@@ -595,3 +595,153 @@ fn which(name: &str) -> Option<PathBuf> {
             })
     })
 }
+
+#[test]
+fn customized_desktop_launcher_is_executable_and_owned_through_uninstall() {
+    use std::os::unix::fs::PermissionsExt;
+    let user = IsolatedUser::isolate();
+    let scratch = tempfile::tempdir().unwrap();
+    let config = PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap());
+    std::fs::write(
+        config.join("user-dirs.dirs"),
+        "XDG_DESKTOP_DIR=\"$HOME/Custom Desktop\"\n",
+    )
+    .unwrap();
+    let desktop = PathBuf::from(std::env::var_os("HOME").unwrap()).join("Custom Desktop");
+    let mut launcher = menu_launcher("Tool");
+    launcher.location = zup_core::LauncherLocation::Desktop;
+    let installer = compose_integration_fixture(
+        scratch.path(),
+        "desktop",
+        "1.0.0",
+        &v1_files(),
+        &[launcher],
+        &[],
+        &[],
+        &[],
+    );
+    assert!(matches!(
+        run_installer(&installer, &user.state, Operation::Apply),
+        LinuxOutcome::Committed { .. }
+    ));
+    let shortcut = desktop.join("com.example.tool.desktop");
+    assert_ne!(
+        std::fs::metadata(&shortcut).unwrap().permissions().mode() & 0o111,
+        0
+    );
+    std::fs::set_permissions(&shortcut, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(
+        run_installer(&installer, &user.state, Operation::Repair { force: false }),
+        LinuxOutcome::Committed { .. }
+    ));
+    assert_ne!(
+        std::fs::metadata(&shortcut).unwrap().permissions().mode() & 0o100,
+        0
+    );
+    std::fs::write(desktop.join("personal.txt"), b"personal").unwrap();
+    assert!(matches!(
+        run_installer(&installer, &user.state, Operation::Uninstall),
+        LinuxOutcome::Committed { .. }
+    ));
+    assert!(!shortcut.exists());
+    assert_eq!(
+        std::fs::read(desktop.join("personal.txt")).unwrap(),
+        b"personal"
+    );
+}
+
+#[test]
+fn disabled_desktop_does_not_publish_into_home() {
+    let user = IsolatedUser::isolate();
+    let scratch = tempfile::tempdir().unwrap();
+    let config = PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap());
+    std::fs::write(
+        config.join("user-dirs.dirs"),
+        "XDG_DESKTOP_DIR=\"$HOME/\"\n",
+    )
+    .unwrap();
+    let mut launcher = menu_launcher("Tool");
+    launcher.location = zup_core::LauncherLocation::Desktop;
+    let installer = compose_integration_fixture(
+        scratch.path(),
+        "disabled-desktop",
+        "1.0.0",
+        &v1_files(),
+        &[launcher],
+        &[],
+        &[],
+        &[],
+    );
+    let outcome = run(&zup_linux::LinuxRunRequest {
+        installer,
+        scope: zup_core::SelectedScope::User,
+        state_root: Some(user.state.clone()),
+        action: Operation::Apply,
+        selection: Default::default(),
+    });
+    assert!(outcome.is_err());
+    assert!(
+        !PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join("com.example.tool.desktop")
+            .exists()
+    );
+}
+
+#[test]
+fn path_directories_are_owned_and_reach_the_systemd_environment() {
+    use zup_linux::test_support::{compose_installer, inert_template, package_bytes_full};
+    let user = IsolatedUser::isolate();
+    let scratch = tempfile::tempdir().unwrap();
+    let entries = [zup_core::PathEntry {
+        value: zup_core::Template::parse("${location.programs}/tool/bin with $literal").unwrap(),
+        component: None,
+        when: None,
+    }];
+    let package = package_bytes_full(
+        scratch.path(),
+        &zup_core::Target::host().unwrap(),
+        "1.0.0",
+        &v1_files(),
+        zup_core::Frontend::Console,
+        None,
+        &[],
+        &[],
+        &[],
+        &[],
+        &entries,
+        &[],
+    );
+    let installer = scratch.path().join("path-installer");
+    compose_installer(Path::new(inert_template()), &installer, &package);
+    assert!(matches!(
+        run_installer(&installer, &user.state, Operation::Apply),
+        LinuxOutcome::Committed { .. }
+    ));
+    let config = PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap())
+        .join("environment.d/99-zup-user-com.example.tool.conf");
+    assert!(config.is_file());
+    let output = std::process::Command::new(
+        "/usr/lib/systemd/user-environment-generators/30-systemd-environment-d-generator",
+    )
+    .env_clear()
+    .env("HOME", std::env::var_os("HOME").unwrap())
+    .env(
+        "XDG_CONFIG_HOME",
+        std::env::var_os("XDG_CONFIG_HOME").unwrap(),
+    )
+    .env("PATH", "/usr/bin:/bin")
+    .output()
+    .unwrap();
+    assert!(output.status.success());
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.replace("\\$", "$").contains("bin with $literal"),
+        "{output}"
+    );
+    assert!(output.contains("/usr/bin"), "{output}");
+    assert!(matches!(
+        run_installer(&installer, &user.state, Operation::Uninstall),
+        LinuxOutcome::Committed { .. }
+    ));
+    assert!(!config.exists());
+}

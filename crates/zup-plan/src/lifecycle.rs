@@ -241,13 +241,15 @@ fn repair_owned(
                     sha256,
                     size,
                     destination,
+                    executable,
                     ..
                 }),
                 FileOperationKind::Drift,
                 ObservedFileState::Absent,
             ) if destination.equivalent(&op.destination)
                 && *sha256 == op.expected_sha256
-                && *size == op.expected_size =>
+                && *size == op.expected_size
+                && *executable == op.executable =>
             {
                 op.kind = FileOperationKind::RestoreOwned;
                 op.precondition = FilePrecondition::Absent;
@@ -258,17 +260,20 @@ fn repair_owned(
                     sha256,
                     size,
                     destination,
+                    executable,
                     ..
                 }),
                 FileOperationKind::Drift,
                 ObservedFileState::File {
                     size: found_size,
                     sha256: found_hash,
+                    ..
                 },
             ) if force
                 && destination.equivalent(&op.destination)
                 && *sha256 == op.expected_sha256
-                && *size == op.expected_size =>
+                && *size == op.expected_size
+                && *executable == op.executable =>
             {
                 op.kind = FileOperationKind::RepairOwned;
                 op.precondition = FilePrecondition::Exact {
@@ -276,6 +281,21 @@ fn repair_owned(
                     sha256: *found_hash,
                 };
                 op.conflict = None;
+            }
+            (
+                Some(OwnedResource::File {
+                    sha256,
+                    size,
+                    executable,
+                    ..
+                }),
+                FileOperationKind::Replace,
+                _,
+            ) if *sha256 == op.expected_sha256
+                && *size == op.expected_size
+                && *executable == op.executable =>
+            {
+                op.kind = FileOperationKind::RepairOwned;
             }
             (Some(_), FileOperationKind::Replace, _) | (None, FileOperationKind::Create, _) => {
                 return Err(LifecycleError::RepairDesiredChanged {

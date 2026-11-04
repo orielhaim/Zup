@@ -9,7 +9,7 @@ use zup_core::{
     SelectedScope, ServiceStart, Sha256Digest, Target,
 };
 
-pub const INSTALL_LEDGER_SCHEMA: u32 = 2;
+pub const INSTALL_LEDGER_SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallLedger {
@@ -126,6 +126,7 @@ pub enum OwnedResource {
         source_relative: RelativePath,
         sha256: Sha256Digest,
         size: u64,
+        executable: bool,
         created_directories: Vec<TargetPath>,
         privilege: Privilege,
     },

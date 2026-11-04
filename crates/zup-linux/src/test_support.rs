@@ -46,7 +46,12 @@ impl MachineTestRoots {
         ] {
             std::fs::create_dir_all(directory).expect("an isolated root");
         }
-        let roots = MachineRoots::new(programs, state.clone(), shared_data);
+        let roots = MachineRoots::new(
+            programs,
+            state.clone(),
+            shared_data,
+            base.join("environment.d"),
+        );
         let systemd = crate::machine::SystemdRoots::new(units);
         Self {
             roots,
@@ -668,6 +673,7 @@ pub fn machine_package_bytes(
     version: &str,
     files: &[FixtureFile],
     allow_directory_override: bool,
+    path: &[zup_core::PathEntry],
 ) -> Vec<u8> {
     let target = Target::host().expect("a supported Linux host");
     let payload_dir = scratch.join("payload");
@@ -722,7 +728,7 @@ pub fn machine_package_bytes(
             plugins: Vec::new(),
             files: Vec::new(),
             launchers: Vec::new(),
-            path: Vec::new(),
+            path: path.to_vec(),
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
@@ -754,7 +760,7 @@ pub fn machine_fixture_override(
     files: &[FixtureFile],
     allow_directory_override: bool,
 ) -> PathBuf {
-    let package = machine_package_bytes(scratch, version, files, allow_directory_override);
+    let package = machine_package_bytes(scratch, version, files, allow_directory_override, &[]);
     let output = scratch.join(file_name);
     compose_installer(Path::new(inert_template()), &output, &package);
     output
@@ -891,6 +897,8 @@ pub fn package_bytes_for(
         &[],
         &[],
         &[],
+        &[],
+        &[],
     )
 }
 
@@ -914,6 +922,8 @@ pub fn gui_package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -
         &[],
         &[],
         &[],
+        &[],
+        &[],
     )
 }
 
@@ -929,6 +939,8 @@ pub fn package_bytes_full(
     protocols: &[Protocol],
     associations: &[FileAssociation],
     icons: &[FixtureIcon],
+    path: &[zup_core::PathEntry],
+    prerequisites: &[zup_core::Prerequisite],
 ) -> Vec<u8> {
     let target = *target;
     let payload_dir = scratch.join("payload");
@@ -993,13 +1005,13 @@ pub fn package_bytes_full(
                 },
                 allow_directory_override: false,
             },
-            prerequisites: Vec::new(),
+            prerequisites: prerequisites.to_vec(),
             components: Vec::new(),
             component_groups: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
             launchers: launchers.to_vec(),
-            path: Vec::new(),
+            path: path.to_vec(),
             services: Vec::new(),
             protocols: protocols.to_vec(),
             file_associations: associations.to_vec(),
@@ -1058,6 +1070,8 @@ pub fn compose_integration_fixture(
         protocols,
         associations,
         icons,
+        &[],
+        &[],
     );
     let output = scratch.join(file_name);
     compose_installer(Path::new(inert_template()), &output, &package);

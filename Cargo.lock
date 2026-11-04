@@ -12234,6 +12234,7 @@ dependencies = [
 name = "zup-linux"
 version = "0.0.1"
 dependencies = [
+ "directories",
  "private-fs",
  "rstest",
  "rustix",
@@ -12253,6 +12254,7 @@ dependencies = [
  "zup-acquire",
  "zup-artifact",
  "zup-binary",
+ "zup-bootstrap",
  "zup-build",
  "zup-bundle",
  "zup-compose",

@@ -1195,6 +1195,7 @@ mod tests {
             dir.path().join("opt"),
             dir.path().join("var/lib/zup"),
             dir.path().join("var/opt"),
+            dir.path().join("environment.d"),
         );
         let systemd = SystemdRoots::new(dir.path().join("units"));
         std::fs::create_dir_all(&systemd.unit_dir).unwrap();
@@ -1238,6 +1239,7 @@ mod tests {
             dir.path().join("opt"),
             dir.path().join("var/lib/zup"),
             dir.path().join("var/opt"),
+            dir.path().join("environment.d"),
         );
         let systemd = SystemdRoots::new(dir.path().join("units"));
         std::fs::create_dir_all(&systemd.unit_dir).unwrap();
@@ -1275,6 +1277,7 @@ mod tests {
                 dir.path().join("opt"),
                 dir.path().join("var/lib/zup"),
                 dir.path().join("var/opt"),
+                dir.path().join("environment.d"),
             );
             let systemd = SystemdRoots::new(dir.path().join("units"));
             std::fs::create_dir_all(&systemd.unit_dir).unwrap();

@@ -2451,6 +2451,7 @@ fn observe_file(file: &zup_plan::DesiredFile<zup_plan::TargetPath>) -> ObservedF
             Ok(current) => ObservedFileState::File {
                 size: current.size,
                 sha256: current.sha256,
+                executable: Some(current.mode & 0o100 != 0),
             },
             Err(_) => ObservedFileState::NonFile,
         },

@@ -716,8 +716,8 @@ fn prepare_operation(
         }
     }
 
-    let generated =
-        crate::operation_host::generated_content(&prepared).map_err(IpcError::Policy)?;
+    let generated = crate::operation_host::generated_content(&prepared, Some(&roots))
+        .map_err(IpcError::Policy)?;
     let plan = prepared.transaction_plan;
     if plan.nodes.iter().any(|node| {
         matches!(
@@ -1017,6 +1017,17 @@ fn enforce_machine_file_policy(
             if destination != crate::machine::MachineDestination::MachineState {
                 return Err(IpcError::Policy(
                     "preset content belongs to machine state".into(),
+                ));
+            }
+        }
+        ResourceKey::File { .. }
+            if source
+                .as_str()
+                .starts_with("__zup_generated__/environment/") =>
+        {
+            if destination != crate::machine::MachineDestination::Environment {
+                return Err(IpcError::Policy(
+                    "environment configuration belongs to the environment.d tree".into(),
                 ));
             }
         }

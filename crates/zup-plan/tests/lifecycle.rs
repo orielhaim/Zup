@@ -79,6 +79,7 @@ fn ledger(files: &[DesiredFile<zup_plan::TargetPath>]) -> InstallLedger {
                 sha256: file.sha256,
                 size: file.size,
                 created_directories: vec![],
+                executable: false,
                 privilege: file.privilege,
             },
         );
@@ -118,6 +119,7 @@ fn upgrade_adds_updates_and_retires_owned_files() {
         &target,
         &[
             ObservedFileState::File {
+                executable: None,
                 size: old_a.size,
                 sha256: old_a.sha256,
             },
@@ -200,6 +202,7 @@ fn repair_restores_missing_and_requires_force_for_digest_drift() {
     let changed = snapshot(
         &target,
         &[ObservedFileState::File {
+            executable: None,
             size: 4,
             sha256: hash_reader(&b"edit"[..]).unwrap().1,
         }],
@@ -234,6 +237,7 @@ fn observations_are_matched_by_identity_for_install_and_repair() {
         &target,
         &[
             ObservedFileState::File {
+                executable: None,
                 size: a.size,
                 sha256: a.sha256,
             },
@@ -343,6 +347,7 @@ fn windows_case_changes_preserve_ownership(
     let observed = snapshot(
         &desired,
         &[ObservedFileState::File {
+            executable: None,
             size: original.size,
             sha256: original.sha256,
         }],
@@ -437,4 +442,31 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
     )
     .unwrap();
     assert_ne!(result.services[0].kind, IntegrationChangeKind::RepairOwned);
+}
+
+#[test]
+fn repair_cannot_change_the_committed_execution_policy() {
+    let original = file("a.exe", b"owned");
+    let installed = ledger(std::slice::from_ref(&original));
+    let mut changed = original.clone();
+    changed.executable = true;
+    let target = make_target("1.0.0", vec![changed]);
+    let observed = snapshot(
+        &target,
+        &[ObservedFileState::File {
+            size: original.size,
+            sha256: original.sha256,
+            executable: Some(true),
+        }],
+    );
+    assert!(matches!(
+        plan_lifecycle(
+            LifecycleAction::Repair { force: false },
+            Some(&target),
+            Some(&observed),
+            Some(&installed),
+            &BTreeMap::new()
+        ),
+        Err(zup_plan::LifecycleError::RepairDesiredChanged { .. })
+    ));
 }

@@ -4,8 +4,6 @@ use zup_core::{LauncherLocation, ResourceKey, SelectedScope, Target};
 use zup_plan::{DesiredState, TargetPath};
 
 use crate::error::PlanError;
-#[cfg(target_os = "linux")]
-use crate::locations::user_data_home;
 
 pub const GENERATED_PREFIX: &str = "__zup_generated__";
 
@@ -24,6 +22,7 @@ pub struct GeneratedFile {
     // Rendered for the Linux runtime; other hosts validate shapes, not bytes.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub bytes: Vec<u8>,
+    pub executable: bool,
     pub size: u64,
     pub sha256: zup_core::Sha256Digest,
 }
@@ -37,14 +36,10 @@ pub struct IntegrationOutput {
     pub needs_desktop_refresh: bool,
 }
 
-#[cfg(target_os = "linux")]
-pub fn lower_integration(plan: &DesiredState) -> Result<IntegrationOutput, PlanError> {
-    lower_integration_with(plan, &user_data_home()?)
-}
-
-pub fn lower_integration_with(
+pub(crate) fn lower_integration_with_resolver(
     plan: &DesiredState,
-    data_home: &std::path::Path,
+    data_home: &Path,
+    resolver: &crate::locations::LinuxInstallLocationResolver,
 ) -> Result<IntegrationOutput, PlanError> {
     refuse_unsupported(plan)?;
     if plan.scope != SelectedScope::User {
@@ -56,7 +51,7 @@ pub fn lower_integration_with(
                 "launchers, URI protocols, and file associations are not supported in machine scope: machine desktop integration is deferred past this phase".into(),
             ));
         }
-        return Ok(IntegrationOutput::default());
+        return lower_path_entries(plan, resolver);
     }
     if plan.target.operating_system() != zup_core::TargetOperatingSystem::Linux {
         return Err(PlanError::IntegrationUnsupported(format!(
@@ -64,28 +59,38 @@ pub fn lower_integration_with(
             plan.target.as_str()
         )));
     }
-    if plan.launchers.is_empty() && plan.protocols.is_empty() && plan.file_associations.is_empty() {
+    if plan.launchers.is_empty()
+        && plan.protocols.is_empty()
+        && plan.file_associations.is_empty()
+        && plan.path_entries.is_empty()
+    {
         return Ok(IntegrationOutput::default());
     }
-    lower_integration_in(plan, data_home)
+    lower_integration_in(plan, data_home, resolver)
 }
 
-pub fn lower_integration_in(
+fn lower_integration_in(
     plan: &DesiredState,
     data_home: &std::path::Path,
+    resolver: &crate::locations::LinuxInstallLocationResolver,
 ) -> Result<IntegrationOutput, PlanError> {
     let data_home = data_home.to_path_buf();
     let stem = stable_stem(plan.app.id.as_str());
     let icon = stable_stem(plan.app.id.as_str());
-    let mut output = IntegrationOutput::default();
+    let mut output = lower_path_entries(plan, resolver)?;
 
-    let mut menu_launchers: Vec<_> = plan
-        .launchers
-        .iter()
-        .filter(|launcher| launcher.location == LauncherLocation::Menu)
-        .collect();
+    let mut menu_launchers: Vec<_> = plan.launchers.iter().collect();
     menu_launchers.sort_by(|a, b| {
-        (a.target.to_string(), a.name.to_string()).cmp(&(b.target.to_string(), b.name.to_string()))
+        (
+            a.location.to_string(),
+            a.target.to_string(),
+            a.name.to_string(),
+        )
+            .cmp(&(
+                b.location.to_string(),
+                b.target.to_string(),
+                b.name.to_string(),
+            ))
     });
     for (index, launcher) in menu_launchers.iter().enumerate() {
         let file_name = if index == 0 {
@@ -93,10 +98,13 @@ pub fn lower_integration_in(
         } else {
             format!("{stem}-launcher-{}.desktop", index + 1)
         };
-        let destination = xdg_target(
-            &plan.target,
-            &data_home.join("applications").join(&file_name),
-        )?;
+        let desktop = launcher.location == LauncherLocation::Desktop;
+        let directory = if desktop {
+            resolver.desktop()?
+        } else {
+            data_home.join("applications")
+        };
+        let destination = xdg_target(&plan.target, &directory.join(&file_name))?;
         let target = resolve_install_template(&plan.target, &launcher.target)?;
         let working_directory = launcher
             .working_directory
@@ -118,12 +126,15 @@ pub fn lower_integration_in(
             mime_types: Vec::new(),
             hidden: false,
         };
-        output.needs_desktop_refresh = true;
-        output.files.push(generated(
-            &format!("{GENERATED_PREFIX}/applications/{file_name}"),
+        output.needs_desktop_refresh |= !desktop;
+        let category = if desktop { "desktop" } else { "applications" };
+        let mut file = generated(
+            &format!("{GENERATED_PREFIX}/{category}/{file_name}"),
             destination,
             entry.render()?.into_bytes(),
-        )?);
+        )?;
+        file.executable = desktop;
+        output.files.push(file);
     }
 
     if !plan.protocols.is_empty() {
@@ -259,8 +270,9 @@ pub fn lower_integration_in(
 #[cfg(target_os = "linux")]
 pub fn generated_map(
     plan: &DesiredState,
+    resolver: &crate::locations::LinuxInstallLocationResolver,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, PlanError> {
-    let output = lower_integration(plan)?;
+    let output = lower_integration_with_resolver(plan, &resolver.data_home()?, resolver)?;
     Ok(output
         .files
         .into_iter()
@@ -587,61 +599,77 @@ fn protocol_args(protocol: &zup_plan::DesiredProtocol) -> Result<Vec<ExecArgumen
         .collect())
 }
 
-fn refuse_unsupported(plan: &DesiredState) -> Result<(), PlanError> {
-    if plan
-        .launchers
-        .iter()
-        .any(|l| l.location == LauncherLocation::Desktop)
-    {
-        return Err(PlanError::IntegrationUnsupported(
-            "a `desktop` launcher is not supported on Linux in this phase: a file in \
-             `$XDG_DATA_HOME/applications` makes an application discoverable, which the \
-             `menu` location provides, but placing a trusted icon on the user's desktop \
-             has no desktop-neutral implementation"
-                .into(),
-        ));
+fn lower_path_entries(
+    plan: &DesiredState,
+    resolver: &crate::locations::LinuxInstallLocationResolver,
+) -> Result<IntegrationOutput, PlanError> {
+    let mut output = IntegrationOutput::default();
+    if plan.path_entries.is_empty() {
+        return Ok(output);
     }
-    if !plan.path_entries.is_empty() {
-        return Err(PlanError::IntegrationUnsupported(format!(
-            "{} PATH entry resource{} {} not supported on Linux in this phase: a directory-level \
-             PATH mutation is not command exposure, and Linux command exposure without editing \
-             shell configuration needs a portable `command` semantic this phase does not add",
-            plan.path_entries.len(),
-            if plan.path_entries.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
-            if plan.path_entries.len() == 1 {
-                "is"
-            } else {
-                "are"
-            },
-        )));
+    resolver.require_environment_generator()?;
+    let directory = match plan.scope {
+        SelectedScope::User => resolver.config_home()?.join("environment.d"),
+        SelectedScope::Machine => resolver.environment_directory().to_path_buf(),
+    };
+    let mut paths = std::collections::BTreeSet::new();
+    for entry in &plan.path_entries {
+        let path =
+            zup_plan::resolve_template_path(&entry.value, &plan.target, resolver, plan.scope)
+                .map_err(|error| PlanError::IntegrationUnsupported(error.to_string()))?;
+        if plan.scope == SelectedScope::Machine {
+            let install = zup_plan::resolve_template_path(
+                &plan.install_directory,
+                &plan.target,
+                resolver,
+                plan.scope,
+            )
+            .map_err(|error| PlanError::IntegrationUnsupported(error.to_string()))?;
+            if !path.starts_with(&install) {
+                return Err(PlanError::IntegrationUnsupported(
+                    "machine PATH directories must lie within the application's install directory"
+                        .into(),
+                ));
+            }
+            resolver.validate_machine_path(&path)?;
+        }
+        let text = path.as_str();
+        if text.contains(':') || text.chars().any(char::is_control) {
+            return Err(PlanError::IntegrationUnsupported(
+                "a PATH directory contains a colon or control character".into(),
+            ));
+        }
+        paths.insert(text.to_owned());
     }
+    let paths = paths
+        .into_iter()
+        .map(|path| {
+            path.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('$', "$$")
+        })
+        .collect::<Vec<_>>()
+        .join(":");
+    let name = format!(
+        "99-zup-{}-{}.conf",
+        plan.scope,
+        stable_stem(plan.app.id.as_str())
+    );
+    output.files.push(generated(
+        &format!("{GENERATED_PREFIX}/environment/{name}"),
+        xdg_target(&plan.target, &directory.join(name))?,
+        format!("PATH=\"{paths}${{PATH:+:${{PATH}}}}\"\n").into_bytes(),
+    )?);
+    Ok(output)
+}
 
+fn refuse_unsupported(plan: &DesiredState) -> Result<(), PlanError> {
     if plan.scope != SelectedScope::Machine && !plan.services.is_empty() {
         return Err(PlanError::IntegrationUnsupported(format!(
             "{} service resource{} {} not supported on Linux in this phase",
             plan.services.len(),
             if plan.services.len() == 1 { "" } else { "s" },
             if plan.services.len() == 1 {
-                "is"
-            } else {
-                "are"
-            },
-        )));
-    }
-    if !plan.prerequisites.is_empty() {
-        return Err(PlanError::IntegrationUnsupported(format!(
-            "{} package-manager prerequisite resource{} {} not supported on Linux in this phase",
-            plan.prerequisites.len(),
-            if plan.prerequisites.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
-            if plan.prerequisites.len() == 1 {
                 "is"
             } else {
                 "are"
@@ -674,9 +702,19 @@ fn resolve_install_template(
 }
 
 fn xdg_target(target: &Target, path: &Path) -> Result<TargetPath, PlanError> {
-    let text = path.to_string_lossy().into_owned();
-    TargetPath::new(*target, &text).map_err(|error| PlanError::InvalidTargetPath {
-        path: text,
+    let text = path.to_str().ok_or_else(|| PlanError::InvalidTargetPath {
+        path: path.display().to_string(),
+        reason: "an integration destination is not UTF-8".into(),
+    })?;
+    #[cfg(target_os = "linux")]
+    if text.contains('\\') {
+        return Err(PlanError::InvalidTargetPath {
+            path: text.into(),
+            reason: "an integration destination contains a backslash".into(),
+        });
+    }
+    TargetPath::new(*target, text).map_err(|error| PlanError::InvalidTargetPath {
+        path: text.into(),
         reason: error.to_string(),
     })
 }
@@ -707,6 +745,7 @@ fn generated(
         source_relative: source_relative.to_owned(),
         destination,
         bytes,
+        executable: false,
         size,
         sha256,
     })

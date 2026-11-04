@@ -30,6 +30,8 @@ mod paths;
 #[cfg(target_os = "linux")]
 mod pkexec;
 #[cfg(target_os = "linux")]
+mod prerequisites;
+#[cfg(target_os = "linux")]
 mod refresh;
 mod resolve;
 #[cfg(target_os = "linux")]

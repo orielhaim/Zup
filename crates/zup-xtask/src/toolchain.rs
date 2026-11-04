@@ -65,6 +65,8 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
         )?);
     }
 
+    if zup_plan::capabilities(&host)
+        .is_some_and(|caps| caps.supports_preset(zup_core::Frontend::Gui))
     {
         let preset = build_and_stage_preset(root, &staged, &version, profile)?;
         println!("  preset             {}", component_name(&preset));
@@ -433,7 +435,12 @@ pub fn staging_directory(root: &Path, profile: &str, version: &str) -> PathBuf {
 }
 
 fn target_directory(root: &Path, profile: &str) -> PathBuf {
-    root.join("target").join(output_directory(profile))
+    let directory = match std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+        Some(directory) if directory.is_absolute() => directory,
+        Some(directory) => root.join(directory),
+        None => root.join("target"),
+    };
+    directory.join(output_directory(profile))
 }
 
 fn output_directory(profile: &str) -> &str {

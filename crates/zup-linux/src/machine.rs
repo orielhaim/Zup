@@ -22,6 +22,8 @@ pub enum MachineDestination {
     SharedData,
 
     MachineState,
+
+    Environment,
 }
 
 pub fn authorize_machine_destination(
@@ -54,6 +56,14 @@ pub fn authorize_machine_destination(
     if host.starts_with(&roots.state) {
         return Ok(MachineDestination::MachineState);
     }
+    if host.parent() == Some(roots.environment.as_path())
+        && host
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("99-zup-") && name.ends_with(".conf"))
+    {
+        return Ok(MachineDestination::Environment);
+    }
     Err(refused(
         "outside the machine payload, variable-data, and Zup state trees",
     ))
@@ -65,12 +75,12 @@ pub fn authorize_machine_install_directory(
 ) -> Result<(), PathError> {
     match authorize_machine_destination(host, roots)? {
         MachineDestination::Programs => Ok(()),
-        MachineDestination::SharedData | MachineDestination::MachineState => {
-            Err(PathError::PolicyRefused {
-                path: host.display().to_string(),
-                reason: "a machine install directory lives under the program tree".to_owned(),
-            })
-        }
+        MachineDestination::SharedData
+        | MachineDestination::MachineState
+        | MachineDestination::Environment => Err(PathError::PolicyRefused {
+            path: host.display().to_string(),
+            reason: "a machine install directory lives under the program tree".to_owned(),
+        }),
     }
 }
 
@@ -742,6 +752,7 @@ mod tests {
             base.path().join("opt"),
             base.path().join("var/lib/zup"),
             base.path().join("var/opt"),
+            base.path().join("environment.d"),
         );
         (base, roots)
     }
@@ -928,6 +939,7 @@ mod tests {
             base.path().join("opt"),
             base.path().join("var/lib/zup"),
             base.path().join("var/opt"),
+            base.path().join("environment.d"),
         );
         for root in [&roots.programs, &roots.shared_data] {
             std::fs::create_dir_all(root).expect("a root");

@@ -123,7 +123,7 @@ pub fn prepare(
         let reservation = quarantine
             .reserve(
                 &operation.id,
-                operation.package.filename(),
+                operation.package.filename().ok_or_else(|| BootstrapPlanError::Plan("a missing detect-only requirement cannot be installed; repository policy is unsupported on Windows".into()))?,
                 operation.package.size(),
             )
             .map_err(|error| BootstrapPlanError::Reservation(error.to_string()))?;
@@ -131,6 +131,12 @@ pub fn prepare(
             .remove_partial(&reservation)
             .map_err(|error| BootstrapPlanError::ClearStaging(error.to_string()))?;
         let artifact = match &operation.package {
+            zup_core::PrerequisitePackage::DetectOnly
+            | zup_core::PrerequisitePackage::Repository => {
+                return Err(BootstrapPlanError::Plan(
+                    "repository prerequisites are not supported on Windows".into(),
+                ));
+            }
             zup_core::PrerequisitePackage::Embedded { .. } => {
                 let bundle = bundle.ok_or_else(|| {
                     BootstrapPlanError::Embedded(format!(
@@ -143,7 +149,14 @@ pub fn prepare(
                     .prerequisite_bytes(&operation.id)
                     .map_err(|error| BootstrapPlanError::Embedded(error.to_string()))?;
                 quarantine
-                    .stage_bytes(&reservation, &bytes, operation.package.digest())
+                    .stage_bytes(
+                        &reservation,
+                        &bytes,
+                        operation
+                            .package
+                            .digest()
+                            .expect("embedded artifact digest"),
+                    )
                     .map_err(|error| BootstrapPlanError::Stage(error.to_string()))?
             }
             zup_core::PrerequisitePackage::Remote {

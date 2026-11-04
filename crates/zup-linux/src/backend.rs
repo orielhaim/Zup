@@ -45,6 +45,16 @@ impl LinuxRuntimeBackend {
         if let Some(id) = request.recovery_id {
             return self.execute_recovery(request, control, &id);
         }
+        if let Some(bootstrap) = &request.bootstrap {
+            crate::prerequisites::execute(bootstrap, control)
+                .map_err(SessionError::Prerequisite)?;
+            if control.cancellation.is_cancelled() {
+                return Ok(ExecutionReport {
+                    outcome: InstallOutcome::Cancelled,
+                    recovery_transaction: None,
+                });
+            }
+        }
         match request.scope {
             SelectedScope::User => self.execute_user(request, control),
             SelectedScope::Machine => self.execute_machine(request, control),

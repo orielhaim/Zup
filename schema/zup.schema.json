@@ -623,6 +623,30 @@
       "description": "The portable semantic condition a prerequisite must satisfy.\n\nEvery variant names a fact the target system can be asked about. Detection\nmechanics, package formats, and registry layout belong to the platform\nprovider, not to this model.",
       "oneOf": [
         {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "native_package"
+            },
+            "id": {
+              "type": "string"
+            },
+            "minimum_version": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        {
           "description": "A runtime that must be present, optionally within a version range.",
           "type": "object",
           "properties": {
@@ -701,6 +725,30 @@
     },
     "PrerequisitePackage": {
       "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "detect_only"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "repository"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
         {
           "type": "object",
           "properties": {

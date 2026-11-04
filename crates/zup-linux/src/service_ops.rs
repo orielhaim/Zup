@@ -533,6 +533,7 @@ mod tests {
             base.path().join("opt"),
             base.path().join("var/lib/zup"),
             base.path().join("var/opt"),
+            base.path().join("environment.d"),
         );
         let systemd = SystemdRoots::new(base.path().join("units"));
         std::fs::create_dir_all(&systemd.unit_dir).expect("a unit tree");

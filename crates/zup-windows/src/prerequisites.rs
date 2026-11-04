@@ -53,6 +53,9 @@ pub struct WindowsPrerequisiteDetector;
 impl PrerequisiteSatisfier for WindowsPrerequisiteDetector {
     fn satisfy(&self, operation: &BootstrapOperation) -> Result<DetectionResult, BootstrapError> {
         match &operation.requirement {
+            PrerequisiteRequirement::NativePackage { .. } => Err(BootstrapError::Requirement(
+                "native Linux packages are not supported on Windows".into(),
+            )),
             PrerequisiteRequirement::Runtime(runtime) => satisfy_runtime(operation, runtime),
             PrerequisiteRequirement::InstalledPackage(package) => {
                 satisfy_installed_package(package)
@@ -249,8 +252,10 @@ impl PrerequisiteProvider for WindowsPrerequisiteProvider {
     fn execute(&self, request: &ProviderRequest) -> Result<ProviderOutcome, BootstrapError> {
         let format = verify_artifact(
             &request.executable,
-            request.expected_digest,
-            request.expected_size,
+            request.package.digest().ok_or_else(|| {
+                BootstrapError::ProviderPreflight("missing artifact digest".into())
+            })?,
+            request.package.size(),
         )
         .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?;
         let launch = plan_launch(request, format)?;
@@ -625,8 +630,7 @@ mod tests {
             requirement,
             executable,
             arguments: Vec::new(),
-            expected_digest: Sha256Digest::from_bytes([0u8; 32]),
-            expected_size: None,
+            package: remote_package("runtime.exe"),
             success_exit_codes: vec![0],
             reboot_exit_codes: vec![1641, 3010],
         }

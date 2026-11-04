@@ -97,7 +97,7 @@ impl SessionHost for LinuxSessionHost {
         _context: &zup_session::OperationContext,
         prepared: &PreparedOperation,
     ) -> Result<Arc<dyn RuntimeBackend>, String> {
-        let generated = crate::operation_host::generated_content(prepared)?;
+        let generated = crate::operation_host::generated_content(prepared, None)?;
         Ok(Arc::new(crate::backend::LinuxRuntimeBackend {
             installer: self.installer.clone(),
             operation: prepared.operation,

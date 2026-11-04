@@ -746,7 +746,7 @@ fn machine_package_substitution_is_detected() {
     compose_installer(
         Path::new(inert_template()),
         &swap,
-        &machine_package_bytes(scratch.path(), "1.0.0", &machine_v2_files(), false),
+        &machine_package_bytes(scratch.path(), "1.0.0", &machine_v2_files(), false, &[]),
     );
     std::fs::rename(&swap, &installer).expect("swap");
     send_envelope_on(
@@ -1484,4 +1484,48 @@ fn machine_launcher_failures_surface_at_once() {
             "{name}: expected `{expect}` in `{error}`"
         );
     }
+}
+
+#[test]
+fn machine_path_configuration_is_owned_through_the_worker_lifecycle() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().unwrap();
+    let entries = [zup_core::PathEntry {
+        value: Template::parse("${install}").unwrap(),
+        component: None,
+        when: None,
+    }];
+    let package = machine_package_bytes(
+        scratch.path(),
+        "1.0.0",
+        &machine_v1_files(),
+        false,
+        &entries,
+    );
+    let installer = scratch.path().join("path-setup");
+    compose_installer(Path::new(inert_template()), &installer, &package);
+    commit(
+        &roots,
+        &installer,
+        Operation::Apply,
+        None,
+        "machine PATH install",
+    );
+    let config = roots
+        .roots
+        .environment
+        .join("99-zup-machine-com.example.tool.conf");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        text.contains(machine_install_dir(&roots.roots).to_str().unwrap()),
+        "{text}"
+    );
+    commit(
+        &roots,
+        &installer,
+        Operation::Uninstall,
+        None,
+        "machine PATH uninstall",
+    );
+    assert!(!config.exists());
 }

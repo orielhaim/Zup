@@ -22,7 +22,7 @@ pub use target_lexicon::{
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetParseError {
     #[error(
-        "unknown target `{target}`: expected `windows-x64`, `windows-x86`, `windows-arm64`, `linux-x64` or `linux-arm64`"
+        "unknown target `{target}`: expected `windows-x64`, `windows-x86`, `windows-arm64`, `linux-x64`, `linux-arm64`, `linux-x64-musl` or `linux-arm64-musl`"
     )]
     Unknown { target: String },
     #[error("unsupported target `{target}`: zup builds installers for Windows and Linux")]
@@ -290,6 +290,10 @@ impl Target {
 
     pub const fn is_windows(self) -> bool {
         matches!(self.index, 0..=2)
+    }
+
+    pub const fn is_musl(self) -> bool {
+        matches!(self.index, 5..=6)
     }
 
     pub const fn is_linux(self) -> bool {

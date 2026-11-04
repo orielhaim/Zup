@@ -144,6 +144,7 @@ fn snapshot_happy() -> HostSnapshot {
             key: target.files[0].key.clone(),
             path: target.files[0].destination.clone(),
             state: ObservedFileState::File {
+                executable: None,
                 size: 4,
                 sha256: digest(b"data"),
             },
@@ -282,6 +283,7 @@ fn files_replace_non_file_conflict() {
     let mut snapshot = snapshot_happy();
 
     snapshot.files[0].state = ObservedFileState::File {
+        executable: None,
         size: 4,
         sha256: digest(b"old!"),
     };
@@ -302,6 +304,7 @@ fn files_replace_non_file_conflict() {
             sha256: digest(b"old!"),
             size: 4,
             created_directories: vec![],
+            executable: false,
             privilege: Privilege::System,
         },
     );
@@ -309,6 +312,7 @@ fn files_replace_non_file_conflict() {
     assert_eq!(plan.files[0].kind, FileOperationKind::Replace);
 
     snapshot.files[0].state = ObservedFileState::File {
+        executable: None,
         size: 4,
         sha256: digest(b"edit"),
     };

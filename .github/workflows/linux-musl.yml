@@ -1,0 +1,24 @@
+name: Linux musl
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  alpine:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build and execute native Alpine installers
+        run: >-
+          docker run --rm -v "$PWD:/work" -w /work
+          rust:1.99-alpine3.24 sh -ec
+          'apk add --no-cache build-base cmake perl pkgconf linux-headers git;
+          sh scripts/verify-musl.sh'

@@ -17,6 +17,9 @@ pub const WINDOWS_ARM: &str = "windows-11-arm";
 pub const WINDOWS_ARM_VS2026: &str = "windows-11-vs2026-arm";
 
 pub fn native_runner(target: Target) -> Option<Runner> {
+    if target.is_musl() {
+        return None;
+    }
     let windows = target.is_windows();
     let runner = match target.architecture() {
         TargetArchitecture::X86_64 if windows => Runner {

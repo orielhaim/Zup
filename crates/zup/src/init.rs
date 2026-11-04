@@ -125,6 +125,23 @@ fn resolve(args: InitCommand, root: &Path) -> miette::Result<Answers> {
         }
         targets
     };
+    let frontend = args.frontend.map(Into::into).unwrap_or_else(|| {
+        let default = Frontend::default();
+        if targets.iter().all(|target| {
+            zup_plan::capabilities(target).is_some_and(|caps| caps.frontends.contains(&default))
+        }) {
+            default
+        } else {
+            Frontend::Console
+        }
+    });
+    for target in &targets {
+        if !zup_plan::capabilities(target).is_some_and(|caps| caps.frontends.contains(&frontend)) {
+            return Err(miette::miette!(
+                "frontend `{frontend}` is not supported for `{target}`"
+            ));
+        }
+    }
     let source = match args.source {
         Some(source) => source.trim().to_owned(),
         None => {
@@ -160,7 +177,7 @@ fn resolve(args: InitCommand, root: &Path) -> miette::Result<Answers> {
         source,
         main,
         scope: args.scope.unwrap_or(ScopePolicyArg::User),
-        frontend: args.frontend.map(Into::into).unwrap_or_default(),
+        frontend,
     })
 }
 

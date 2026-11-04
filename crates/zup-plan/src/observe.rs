@@ -21,7 +21,11 @@ pub struct ObservedFile {
 #[serde(rename_all = "snake_case")]
 pub enum ObservedFileState {
     Absent,
-    File { size: u64, sha256: Sha256Digest },
+    File {
+        size: u64,
+        sha256: Sha256Digest,
+        executable: Option<bool>,
+    },
     NonFile,
 }
 

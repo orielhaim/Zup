@@ -214,6 +214,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
                 destination: zup_windows::plain_path_text(&path),
             },
             zup_plan::OwnedResource::File {
+                executable: true,
                 destination: target_path(&path),
                 sha256: digest,
                 size: 1,
@@ -295,6 +296,7 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
                 destination: zup_windows::plain_path_text(&path),
             },
             zup_plan::OwnedResource::File {
+                executable: true,
                 destination: target_path(&path),
                 sha256: digest,
                 size: 1,

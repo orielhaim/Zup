@@ -189,6 +189,7 @@ pub fn project_committed_files(
             key.clone(),
             OwnedResource::File {
                 destination: path(destination)?,
+                executable: node.meta.executable.ok_or(LedgerProjectionError)?,
                 source_relative: node
                     .meta
                     .source_relative

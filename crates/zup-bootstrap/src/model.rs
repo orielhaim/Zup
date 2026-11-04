@@ -12,8 +12,8 @@ use zup_core::{
     Target,
 };
 
-pub const BOOTSTRAP_PLAN_SCHEMA: u32 = 1;
-pub const BOOTSTRAP_STATE_SCHEMA: u32 = 1;
+pub const BOOTSTRAP_PLAN_SCHEMA: u32 = 2;
+pub const BOOTSTRAP_STATE_SCHEMA: u32 = 2;
 pub const MAX_BOOTSTRAP_OPERATIONS: usize = 256;
 pub const MAX_BOOTSTRAP_STATE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_BOOTSTRAP_PLAN_BYTES: usize = 8 * 1024 * 1024;
@@ -152,14 +152,6 @@ pub struct QuarantinedArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackageIdentity {
-    pub prerequisite_id: PrerequisiteId,
-    pub filename: String,
-    pub size: Option<u64>,
-    pub sha256: Sha256Digest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoundBootstrapOperation {
     pub operation: BootstrapOperation,
     pub artifact: QuarantinedArtifact,
@@ -213,11 +205,13 @@ impl BoundBootstrapPlan {
             if let Some(artifact) = artifacts.get(&operation.id) {
                 let expected_path = RelativePath::from_components([
                     operation.id.as_str(),
-                    operation.package.filename(),
+                    operation.package.filename().ok_or_else(|| {
+                        BootstrapError::ArtifactMismatch(operation.id.to_string())
+                    })?,
                 ])
                 .map_err(|_| BootstrapError::InvalidState("invalid artifact path"))?;
                 if artifact.relative_path != expected_path
-                    || artifact.sha256 != operation.package.digest()
+                    || Some(artifact.sha256) != operation.package.digest()
                     || artifact.size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES
                     || operation
                         .package
@@ -293,7 +287,6 @@ pub struct BootstrapState {
     pub completed: Vec<PrerequisiteId>,
     pub remaining: Vec<PrerequisiteId>,
     pub operations: Vec<BootstrapOperationStateRecord>,
-    pub packages: Vec<PackageIdentity>,
     pub reboot_required: bool,
 }
 
@@ -327,16 +320,6 @@ impl BootstrapState {
             completed: Vec::new(),
             remaining: ids,
             operations,
-            packages: plan
-                .operations
-                .iter()
-                .map(|operation| PackageIdentity {
-                    prerequisite_id: operation.id.clone(),
-                    filename: operation.package.filename().to_owned(),
-                    size: operation.package.size(),
-                    sha256: operation.package.digest(),
-                })
-                .collect(),
             reboot_required: false,
         }
     }
@@ -351,8 +334,6 @@ impl BootstrapState {
             || self.plan_hash != plan.fingerprint()
             || self.operations.len() != plan.operations.len()
             || self.operations.len() > MAX_BOOTSTRAP_OPERATIONS
-            || self.packages.len() != plan.operations.len()
-            || self.packages.len() > MAX_BOOTSTRAP_OPERATIONS
         {
             return Err(BootstrapError::InvalidState("state identity or bounds"));
         }
@@ -381,29 +362,6 @@ impl BootstrapState {
             return Err(BootstrapError::InvalidState(
                 "operation identity or partition",
             ));
-        }
-        let package_ids = self
-            .packages
-            .iter()
-            .map(|package| &package.prerequisite_id)
-            .collect::<BTreeSet<_>>();
-        if package_ids != plan_ids || package_ids.len() != self.packages.len() {
-            return Err(BootstrapError::InvalidState(
-                "package identity or duplicate state",
-            ));
-        }
-        for package in &self.packages {
-            let Some(operation) = plan.operation(&package.prerequisite_id) else {
-                return Err(BootstrapError::InvalidState(
-                    "package references unknown operation",
-                ));
-            };
-            if package.sha256 != operation.package.digest()
-                || package.size != operation.package.size()
-                || package.filename != operation.package.filename()
-            {
-                return Err(BootstrapError::InvalidState("package identity changed"));
-            }
         }
         Ok(())
     }
@@ -513,9 +471,8 @@ pub struct ProviderRequest {
     pub prerequisite_id: PrerequisiteId,
     pub requirement: PrerequisiteRequirement,
     pub executable: PathBuf,
+    pub package: PrerequisitePackage,
     pub arguments: Vec<String>,
-    pub expected_digest: Sha256Digest,
-    pub expected_size: Option<u64>,
     pub success_exit_codes: Vec<i32>,
     pub reboot_exit_codes: Vec<i32>,
 }
@@ -576,6 +533,10 @@ pub enum BootstrapError {
 }
 
 fn validate_operation(operation: &BootstrapOperation) -> Result<(), BootstrapError> {
+    operation
+        .requirement
+        .validate_native_package()
+        .map_err(BootstrapError::InvalidState)?;
     if operation.name.trim().is_empty() || operation.name.len() > 1024 {
         return Err(BootstrapError::Limit("invalid prerequisite name"));
     }

@@ -103,16 +103,17 @@ pub fn resolve_target(
             },
         ),
     })?;
-    let integration = crate::integration::lower_integration_with(plan, &data_home).map_err(
-        |error| match error {
-            PlanError::Unsupported { reasons } => PlanError::Unsupported { reasons },
-            PlanError::IntegrationUnsupported(reasons) => PlanError::Unsupported { reasons },
-            other => PlanError::InvalidTargetPath {
-                path: String::new(),
-                reason: other.to_string(),
-            },
+    let integration = crate::integration::lower_integration_with_resolver(
+        plan, &data_home, resolver,
+    )
+    .map_err(|error| match error {
+        PlanError::Unsupported { reasons } => PlanError::Unsupported { reasons },
+        PlanError::IntegrationUnsupported(reasons) => PlanError::Unsupported { reasons },
+        other => PlanError::InvalidTargetPath {
+            path: String::new(),
+            reason: other.to_string(),
         },
-    )?;
+    })?;
     for generated in &integration.files {
         files.push(DesiredFile {
             key: generated.key.clone(),
@@ -126,8 +127,11 @@ pub fn resolve_target(
             destination: generated.destination.clone(),
             size: generated.size,
             sha256: generated.sha256,
-            executable: false,
-            privilege: zup_core::Privilege::User,
+            executable: generated.executable,
+            privilege: match scope {
+                SelectedScope::User => zup_core::Privilege::User,
+                SelectedScope::Machine => zup_core::Privilege::System,
+            },
         });
     }
 
@@ -196,7 +200,7 @@ pub fn validate_target_plan(
     if plan.scope != zup_core::SelectedScope::Machine {
         unsupported("service", plan.services.len());
     }
-    unsupported("package-manager prerequisite", plan.prerequisites.len());
+
     unsupported("launcher", plan.launchers.len());
     unsupported("PATH entry", plan.path_entries.len());
     unsupported("URI protocol", plan.protocols.len());

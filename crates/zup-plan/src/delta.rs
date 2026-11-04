@@ -321,21 +321,22 @@ fn plan_files(
             }) if destination.equivalent(&desired.destination) => Some((*size, *sha256)),
             _ => None,
         };
+        let declaration_matches = !matches!(owned, Some(OwnedResource::File { executable, .. }) if *executable != desired.executable);
 
         let (kind, precondition, conflict) = if owned.is_some() && installed.is_none()
-            || installed.is_some_and(|identity| !matches!(&observed.state, ObservedFileState::File { size, sha256 } if (*size, *sha256) == identity))
+            || installed.is_some_and(|identity| !matches!(&observed.state, ObservedFileState::File { size, sha256, .. } if (*size, *sha256) == identity))
         {
             (FileOperationKind::Drift, FilePrecondition::Absent, Some(Conflict::File { path: observed.path.to_string() }))
         } else { match &observed.state {
             ObservedFileState::Absent => {
                 (FileOperationKind::Create, FilePrecondition::Absent, None)
             }
-            ObservedFileState::File { size, sha256 } => {
+            ObservedFileState::File { size, sha256, executable } => {
                 let precondition = FilePrecondition::Exact {
                     size: *size,
                     sha256: *sha256,
                 };
-                if *sha256 == desired.sha256 {
+                if *sha256 == desired.sha256 && executable.is_none_or(|current| current == desired.executable) && declaration_matches {
                     (FileOperationKind::NoOp, precondition, None)
                 } else if installed.is_some() {
                     (FileOperationKind::Replace, precondition, None)

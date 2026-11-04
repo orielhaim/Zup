@@ -135,11 +135,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             serde_json::to_value(&kinds).unwrap(),
-            serde_json::json!(["runtime", "installed_package", "file_version"])
+            serde_json::json!([
+                "native_package",
+                "runtime",
+                "installed_package",
+                "file_version"
+            ])
         );
         for variant in requirement["oneOf"].as_array().unwrap() {
             let properties = variant["properties"].as_object().unwrap();
             match properties["kind"]["const"].as_str().unwrap() {
+                "native_package" => assert!(properties.contains_key("minimum_version")),
                 "runtime" => assert!(properties.contains_key("id")),
                 "installed_package" => assert!(properties.contains_key("id")),
                 "file_version" => assert!(properties.contains_key("path")),

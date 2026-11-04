@@ -183,18 +183,21 @@ Operators: `!`, `&&`, `||`, parentheses.
 
 ## Prerequisites
 
-`[[prerequisites]]` requires `id`, `name`, `requirement`, and `package`.
+`[[prerequisites]]` requires `id`, `name`, `requirement`, and `package`. Linux uses `requirement = { kind = "native_package", id = "package-name", minimum_version = "native-version" }` with `package = { type = "detect_only" }` or `{ type = "repository" }`. The minimum version is optional and uses native package-manager ordering. See [Prerequisites](/guide/prerequisites).
 
 Optional fields: `description`, `component`, `when`, `target`, `installer`, `targets`.
 
 Requirement kinds:
 
+- `native_package` - `id`, optional `minimum_version` (Linux native version)
 - `runtime` - `id`, optional `version`
 - `installed_package` - `id`, optional `version`
 - `file_version` - `path`, optional `version`
 
 Package kinds:
 
+- `detect_only` - detect without installing
+- `repository` - install through the native Linux package manager
 - `embedded` - `path`, `sha256`, `size`
 - `remote` - `url`, `sha256`, `filename`, optional `size`
 

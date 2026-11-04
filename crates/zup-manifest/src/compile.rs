@@ -446,6 +446,20 @@ fn validate_prerequisite(prerequisite: &Prerequisite) -> Result<(), ManifestErro
         src: None,
         span: None,
     };
+    prerequisite
+        .requirement
+        .validate_native_package()
+        .map_err(invalid)?;
+    if matches!(prerequisite.package, PrerequisitePackage::Repository)
+        && !matches!(
+            prerequisite.requirement,
+            PrerequisiteRequirement::NativePackage { .. }
+        )
+    {
+        return Err(invalid(
+            "repository policy requires a native_package requirement",
+        ));
+    }
     if prerequisite.installer.arguments.len() > zup_core::MAX_PREREQUISITE_ARGUMENTS
         || prerequisite.installer.arguments.iter().any(|argument| {
             argument.len() > zup_core::MAX_PREREQUISITE_ARGUMENT_BYTES
@@ -475,6 +489,7 @@ fn validate_prerequisite(prerequisite: &Prerequisite) -> Result<(), ManifestErro
         ));
     }
     match &prerequisite.package {
+        PrerequisitePackage::DetectOnly | PrerequisitePackage::Repository => {}
         PrerequisitePackage::Embedded { path, size, .. } => {
             if *size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES {
                 return Err(invalid(
