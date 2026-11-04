@@ -183,7 +183,7 @@ pub(crate) fn observe_unit(
         return Ok(ObservedServiceState::Absent);
     };
 
-    let Ok((display_name, argv)) = parse_unit(&bytes) else {
+    let Ok((display_name, argv, readiness)) = parse_unit(&bytes) else {
         return Ok(ObservedServiceState::InvalidService);
     };
     if argv.is_empty() {
@@ -205,10 +205,11 @@ pub(crate) fn observe_unit(
         Err(_) => return Ok(ObservedServiceState::InvalidService),
     };
     Ok(ObservedServiceState::Service {
+        readiness,
         display_name,
         command,
         start,
-        runtime_state: None,
+        runtime_state: Some(manager.runtime(unit).map_err(ExecError::from)?.state),
     })
 }
 

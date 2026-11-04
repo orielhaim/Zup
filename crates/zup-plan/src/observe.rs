@@ -129,6 +129,7 @@ pub enum ObservedServiceState {
         display_name: String,
         command: CommandSpec,
         start: ServiceStart,
+        readiness: zup_core::ServiceReadiness,
         runtime_state: Option<ServiceRuntimeState>,
     },
 }
@@ -142,11 +143,13 @@ impl ObservedServiceState {
                 display_name,
                 command,
                 start,
+                readiness,
                 ..
             } => Some(crate::ServiceState::Registration {
                 display_name: display_name.clone(),
                 command: command.clone(),
                 start: *start,
+                readiness: *readiness,
             }),
         }
     }

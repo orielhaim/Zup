@@ -925,6 +925,17 @@ async fn run_worker_inner(
         completed_work: 0,
         total_work,
         blocked_paths: crate::plan_mutating_paths(&record.plan, &record.target),
+        service_controls: record
+            .plan
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                zup_transaction::NodeKind::ServiceControl { operation } => {
+                    Some(operation.as_ref().clone())
+                }
+                _ => None,
+            })
+            .collect(),
     };
     for node in &record.plan.nodes {
         if matches!(
@@ -1507,6 +1518,7 @@ struct WorkerFileExecutor {
     total_work: u64,
 
     blocked_paths: Vec<PathBuf>,
+    service_controls: Vec<zup_transaction::ServiceControlOperation>,
 }
 
 struct TokenProbe(CancellationToken);
@@ -1533,7 +1545,8 @@ impl OperationExecutor for WorkerFileExecutor {
             .iter()
             .map(|path| path.as_path())
             .collect::<Vec<_>>();
-        let blocked = crate::preflight(&blockers).map_err(|error| error.to_string())?;
+        let blocked = crate::restart_manager::preflight_services(&blockers, &self.service_controls)
+            .map_err(|error| error.to_string())?;
         let Some(detail) = crate::blocked_reason(&blocked) else {
             return Ok(());
         };
@@ -1558,6 +1571,12 @@ impl OperationExecutor for WorkerFileExecutor {
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
+        if let OperationReceipt::ServiceControl(receipt) = receipt {
+            return zup_transaction::verify_service_control(
+                &mut crate::service_control::ScmLifecycle,
+                receipt,
+            );
+        }
         match &operation.kind {
             zup_transaction::NodeKind::BackendOperation { .. }
             | zup_transaction::NodeKind::BackendRemoval { .. } => {
@@ -1573,6 +1592,12 @@ impl OperationExecutor for WorkerFileExecutor {
             return Err("cancelled".into());
         }
         let receipt = match &operation.kind {
+            zup_transaction::NodeKind::ServiceControl { operation } => {
+                zup_transaction::apply_service_control(
+                    &mut crate::service_control::ScmLifecycle,
+                    operation,
+                )
+            }
             zup_transaction::NodeKind::Barrier => Ok(OperationReceipt::Control),
             zup_transaction::NodeKind::BackendOperation { .. } => {
                 crate::integration::apply_managed(operation).map_err(|e| e.to_string())
@@ -1612,6 +1637,10 @@ impl OperationExecutor for WorkerFileExecutor {
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         match receipt {
+            OperationReceipt::ServiceControl(receipt) => zup_transaction::rollback_service_control(
+                &mut crate::service_control::ScmLifecycle,
+                receipt,
+            ),
             OperationReceipt::StageFile { .. }
             | OperationReceipt::CreateFile { .. }
             | OperationReceipt::ReplaceFile { .. }
@@ -1628,6 +1657,17 @@ impl OperationExecutor for WorkerFileExecutor {
         op: &TransactionNode,
         _receipt: Option<&OperationReceipt>,
     ) -> Result<ReconcileResult, Self::Error> {
+        if let zup_transaction::NodeKind::ServiceControl { operation } = &op.kind {
+            let receipt = match _receipt {
+                Some(OperationReceipt::ServiceControl(receipt)) => Some(receipt.as_ref()),
+                _ => None,
+            };
+            return zup_transaction::reconcile_service_control(
+                &mut crate::service_control::ScmLifecycle,
+                operation,
+                receipt,
+            );
+        }
         match &op.kind {
             zup_transaction::NodeKind::BackendOperation { .. } => {
                 return crate::integration::reconcile_managed(op).map_err(|e| e.to_string());

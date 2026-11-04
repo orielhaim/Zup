@@ -49,6 +49,8 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
             reason: format!("service display name: {error}"),
         })?;
     let synthetic = DesiredService {
+        lifecycle: op.lifecycle,
+        readiness: op.readiness,
         key: op.key.clone(),
         id,
         name,
@@ -77,24 +79,33 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
 
 fn render_registration(
     unit: &str,
-    display: &str,
-    command: &CommandSpec,
-    start: ServiceStart,
+    registration: &zup_plan::ServiceState,
     key: &ResourceKey,
     id: &zup_core::ServiceId,
     name: &zup_core::NonEmptyString,
 ) -> Result<Vec<u8>, ExecError> {
+    let zup_plan::ServiceState::Registration {
+        display_name: display,
+        command,
+        start,
+        readiness,
+    } = registration
+    else {
+        return Err(ExecError::refused(unit, "service registration required"));
+    };
     let display = zup_core::NonEmptyString::new(display).map_err(|error| ExecError::Refused {
         unit: unit.to_owned(),
         reason: format!("service display name: {error}"),
     })?;
     let synthetic = DesiredService {
+        lifecycle: Default::default(),
+        readiness: *readiness,
         key: key.clone(),
         id: id.clone(),
         name: name.clone(),
         display_name: Some(display),
         command: command.clone(),
-        start,
+        start: *start,
         privilege: Privilege::System,
     };
     render_unit(
@@ -736,12 +747,7 @@ pub fn apply_remove(
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
-    let zup_plan::ServiceState::Registration {
-        display_name,
-        command,
-        start,
-    } = installed
-    else {
+    let zup_plan::ServiceState::Registration { .. } = installed else {
         return Err(ExecError::refused(
             unit,
             "owned service state is a registration",
@@ -751,8 +757,7 @@ pub fn apply_remove(
         unit: unit.to_owned(),
         reason: format!("service name: {error}"),
     })?;
-    let installed_bytes =
-        render_registration(unit, display_name, command, *start, key, id, &service_name)?;
+    let installed_bytes = render_registration(unit, installed, key, id, &service_name)?;
 
     let retired = observe(unit, &canonical, context.manager)?;
     if retired.source.is_none() && retired.policy != "enabled" && retired.policy != "masked" {
@@ -832,12 +837,7 @@ pub fn rollback_remove(
             "a service removal names a service key",
         ));
     };
-    let zup_plan::ServiceState::Registration {
-        display_name,
-        command,
-        start,
-    } = installed
-    else {
+    let zup_plan::ServiceState::Registration { .. } = installed else {
         return Err(ExecError::refused(
             unit,
             "owned service state is a registration",
@@ -859,7 +859,7 @@ pub fn rollback_remove(
         unit: unit.to_owned(),
         reason: format!("service name: {error}"),
     })?;
-    let bytes = render_registration(unit, display_name, command, *start, key, id, &service_name)?;
+    let bytes = render_registration(unit, installed, key, id, &service_name)?;
     write_source(unit, &canonical, &bytes, true)?;
     context.manager.reload().map_err(ExecError::from)?;
     restore_policy(unit, &canonical, &receipt.previous_policy, context.manager)?;
@@ -1141,6 +1141,8 @@ mod tests {
         start: ServiceStart,
     ) -> ServiceOperation {
         ServiceOperation {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new(id).unwrap(),
             },

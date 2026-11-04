@@ -388,6 +388,7 @@ pub(crate) fn validate_backend_node(
                         &previous,
                         installed,
                         &zup_plan::ServiceState::Registration {
+                            readiness: op.readiness,
                             display_name: op.display_name,
                             command: op.command,
                             start: op.start,
@@ -495,6 +496,52 @@ pub(crate) fn validate_backend_node(
             }
         }
     }
+}
+
+pub(crate) fn validate_service_control(
+    plan: &zup_transaction::TransactionPlan,
+    operation: &zup_transaction::ServiceControlOperation,
+    ledger: Option<&InstallLedger>,
+) -> Result<(), String> {
+    let owned = ledger.and_then(|ledger| ledger.resources.get(&operation.key));
+    if let Some(OwnedResource::Service {
+        name, installed, ..
+    }) = owned
+    {
+        if name != &operation.native_name || installed != &operation.owned_configuration {
+            return Err("service control ownership address mismatch".into());
+        }
+        if operation.configuration == *installed {
+            return Ok(());
+        }
+    }
+    for node in &plan.nodes {
+        let Some(backend) = &node.meta.backend else {
+            continue;
+        };
+        if backend.intent != BackendOperationIntent::Apply {
+            continue;
+        }
+        let Ok(ApplyPayload::Service(service)) = decode(&backend.payload) else {
+            continue;
+        };
+        let installed = zup_plan::ServiceState::Registration {
+            readiness: service.readiness,
+            display_name: service.display_name.clone(),
+            command: service.command.clone(),
+            start: service.start,
+        };
+        if service.key == operation.key
+            && service.name == operation.native_name
+            && installed == operation.configuration
+            && (owned.is_some()
+                || service.kind == IntegrationChangeKind::Create
+                    && service.previous == zup_plan::ObservedServiceState::Absent)
+        {
+            return Ok(());
+        }
+    }
+    Err("service control is not bound to an owned registration transition".into())
 }
 
 pub(crate) fn ledger_key_for_backend_node(
@@ -612,6 +659,51 @@ pub(crate) fn compile_execution_plan(
         input.files.push(file.clone());
     }
     for removal in &execution.removals {
+        if let OwnedResource::Service {
+            name,
+            installed,
+            privilege,
+            ..
+        } = &removal.owned
+        {
+            use zup_transaction::NativeServiceManager;
+            let mut control = zup_transaction::ServiceControlOperation {
+                key: removal.key.clone(),
+                native_name: name.clone(),
+                privilege: *privilege,
+                stage: zup_transaction::ServiceControlStage::Quiesce,
+                configuration: installed.clone(),
+                owned_configuration: installed.clone(),
+                before: zup_transaction::ServiceTerminalState::Running,
+                after: zup_transaction::ServiceTerminalState::Stopped,
+                manager_generation: crate::service_control::manager_generation()
+                    .map_err(TransactionPayloadError::Identity)?,
+                before_execution_generation: "probe".into(),
+                timeout_seconds: 90,
+                rollback_timeout_seconds: 90,
+                dependencies: Vec::new(),
+            };
+            let current = crate::service_control::ScmLifecycle
+                .observe(&control)
+                .map_err(TransactionPayloadError::Identity)?;
+            if current.configuration != *installed {
+                return Err(TransactionPayloadError::Identity(
+                    "service changed before uninstall".into(),
+                ));
+            }
+            match current.runtime {
+                zup_plan::ServiceRuntimeState::Running => {
+                    control.before_execution_generation = current.execution_generation;
+                    input.service_controls.push(control);
+                }
+                zup_plan::ServiceRuntimeState::Stopped => {}
+                _ => {
+                    return Err(TransactionPayloadError::Identity(
+                        "service runtime is ambiguous during uninstall".into(),
+                    ));
+                }
+            }
+        }
         match &removal.owned {
             OwnedResource::File {
                 destination,
@@ -687,6 +779,59 @@ pub(crate) fn compile_execution_plan(
         )?);
     }
     for service in &execution.services {
+        let payload_changed = input.files.iter().any(|file| {
+            file.destination == service.command.executable
+                && file.kind != zup_plan::FileOperationKind::NoOp
+        });
+        let owned = ledger.and_then(|ledger| ledger.resources.get(&service.key));
+        let affected = payload_changed || service.kind != IntegrationChangeKind::NoOp;
+        if affected
+            && (owned.is_some()
+                || service.previous == zup_plan::ObservedServiceState::Absent
+                    && service.lifecycle.install == zup_core::InitialServiceState::Running)
+        {
+            use zup_transaction::NativeServiceManager;
+            let generation = crate::service_control::manager_generation()
+                .map_err(TransactionPayloadError::Identity)?;
+            let execution_generation = if service.previous == zup_plan::ObservedServiceState::Absent
+            {
+                "stopped".into()
+            } else {
+                let configuration = service.previous.configuration().ok_or_else(|| {
+                    TransactionPayloadError::NotExecutable("service registration".into())
+                })?;
+                let probe = zup_transaction::ServiceControlOperation {
+                    key: service.key.clone(),
+                    native_name: service.name.clone(),
+                    privilege: service.privilege,
+                    stage: zup_transaction::ServiceControlStage::Quiesce,
+                    configuration: configuration.clone(),
+                    owned_configuration: configuration,
+                    before: zup_transaction::ServiceTerminalState::Running,
+                    after: zup_transaction::ServiceTerminalState::Stopped,
+                    manager_generation: generation.clone(),
+                    before_execution_generation: "probe".into(),
+                    timeout_seconds: 90,
+                    rollback_timeout_seconds: 90,
+                    dependencies: Vec::new(),
+                };
+                crate::service_control::ScmLifecycle
+                    .observe(&probe)
+                    .map_err(TransactionPayloadError::Identity)?
+                    .execution_generation
+            };
+            input.service_controls.extend(
+                zup_transaction::plan_service_controls(
+                    service,
+                    owned,
+                    payload_changed,
+                    service.name.clone(),
+                    generation,
+                    execution_generation,
+                )
+                .map_err(TransactionPayloadError::Identity)?,
+            );
+        }
         if service.kind == IntegrationChangeKind::NoOp {
             continue;
         }

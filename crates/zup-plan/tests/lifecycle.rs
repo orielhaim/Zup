@@ -379,6 +379,8 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
     let mut target = make_target("1.0.0", vec![]);
     target.scope = SelectedScope::Machine;
     target.services.push(DesiredService {
+        lifecycle: Default::default(),
+        readiness: Default::default(),
         key: key.clone(),
         id: id.clone(),
         name: NonEmptyString::new("daemon").unwrap(),
@@ -396,6 +398,7 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
             privilege: Privilege::System,
             previous: ServiceState::Absent,
             installed: ServiceState::Registration {
+                readiness: Default::default(),
                 display_name: "Daemon".into(),
                 command: command.clone(),
                 start: zup_core::ServiceStart::Automatic,
@@ -407,6 +410,7 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
             key: key.clone(),
             id,
             state: ObservedServiceState::Service {
+                readiness: Default::default(),
                 display_name: "Administrator edit".into(),
                 command,
                 start: zup_core::ServiceStart::Manual,

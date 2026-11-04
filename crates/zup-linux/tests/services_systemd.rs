@@ -15,6 +15,57 @@ use zup_transaction::{
     FilesystemTransactionStore, TransactionCoordinator, TransactionOutcome, compile_transaction,
 };
 
+struct DiagnosticExecutor<'a>(&'a mut LinuxFileExecutor);
+
+impl zup_transaction::OperationExecutor for DiagnosticExecutor<'_> {
+    type Error = String;
+    fn prepare(&mut self, node: &zup_transaction::TransactionNode) -> Result<(), String> {
+        self.0.prepare(node).map_err(|error| {
+            eprintln!("prepare {}: {error}", node.id);
+            error.to_string()
+        })
+    }
+    fn apply(
+        &mut self,
+        node: &zup_transaction::TransactionNode,
+    ) -> Result<zup_transaction::OperationReceipt, String> {
+        self.0.apply(node).map_err(|error| {
+            eprintln!("apply {}: {error}", node.id);
+            error.to_string()
+        })
+    }
+    fn verify(
+        &mut self,
+        node: &zup_transaction::TransactionNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), String> {
+        self.0.verify(node, receipt).map_err(|error| {
+            eprintln!("verify {}: {error}", node.id);
+            error.to_string()
+        })
+    }
+    fn rollback(
+        &mut self,
+        node: &zup_transaction::TransactionNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), String> {
+        self.0.rollback(node, receipt).map_err(|error| {
+            eprintln!("rollback {}: {error}", node.id);
+            error.to_string()
+        })
+    }
+    fn reconcile(
+        &mut self,
+        node: &zup_transaction::TransactionNode,
+        receipt: Option<&zup_transaction::OperationReceipt>,
+    ) -> Result<zup_transaction::ReconcileResult, String> {
+        self.0.reconcile(node, receipt).map_err(|error| {
+            eprintln!("reconcile {}: {error}", node.id);
+            error.to_string()
+        })
+    }
+}
+
 fn bus_available() -> bool {
     probe_systemd().is_ok()
 }
@@ -61,6 +112,8 @@ fn rendered_units_verify() {
         let target = zup_core::Target::host().expect("a supported Linux host");
         let executable = zup_plan::TargetPath::new(target, binary).expect("a path");
         let service = zup_plan::DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: zup_core::ResourceKey::Service {
                 id: zup_core::ServiceId::new("verify").expect("an id"),
             },
@@ -159,6 +212,199 @@ fn real_systemd_service_lifecycle() {
     assert!(world.load_ledger().is_none(), "the ledger retires");
 }
 
+#[test]
+fn real_systemd_running_upgrade_and_uninstall() {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/bin/sh\nexec /bin/sleep 300\n",
+    )
+    .unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let mut manager = RealSystemd::connect().unwrap();
+    let before = manager.runtime(&world.unit).unwrap();
+    assert_eq!(before.state, zup_plan::ServiceRuntimeState::Running);
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/bin/sh\nexec /bin/sleep 301\n",
+    )
+    .unwrap();
+    let upgrade = world.plan("2.0.0", ServiceStart::Manual);
+    assert_eq!(
+        world
+            .drive(&upgrade, zup_plan::LifecycleAction::Upgrade)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let after = manager.runtime(&world.unit).unwrap();
+    assert_eq!(after.state, zup_plan::ServiceRuntimeState::Running);
+    assert_ne!(after.execution_generation, before.execution_generation);
+    assert_eq!(
+        world
+            .drive(&upgrade, zup_plan::LifecycleAction::Repair { force: false })
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    assert_eq!(
+        manager.runtime(&world.unit).unwrap().execution_generation,
+        after.execution_generation
+    );
+    manager
+        .control(
+            &world.unit,
+            zup_transaction::ServiceTerminalState::Stopped,
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/bin/sh\nexec /bin/sleep 302\n",
+    )
+    .unwrap();
+    let upgrade = world.plan("3.0.0", ServiceStart::Manual);
+    assert_eq!(
+        world
+            .drive(&upgrade, zup_plan::LifecycleAction::Upgrade)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    assert_eq!(
+        manager.runtime(&world.unit).unwrap().state,
+        zup_plan::ServiceRuntimeState::Stopped
+    );
+    manager
+        .control(
+            &world.unit,
+            zup_transaction::ServiceTerminalState::Running,
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+    assert_eq!(
+        world
+            .drive(&upgrade, zup_plan::LifecycleAction::Uninstall)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    assert!(!world.source_path().exists());
+}
+
+#[test]
+fn real_systemd_failed_exec_restores_previous_payload_and_runtime() {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    let original = b"#!/bin/sh\nexec /bin/sleep 300\n";
+    std::fs::write(world.payload.join("tool"), original).unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/zup-test-missing-interpreter\n",
+    )
+    .unwrap();
+    let upgrade = world.plan("2.0.0", ServiceStart::Manual);
+    assert_eq!(
+        world
+            .drive(&upgrade, zup_plan::LifecycleAction::Upgrade)
+            .unwrap(),
+        TransactionOutcome::RolledBack
+    );
+    assert_eq!(std::fs::read(world.program.join("svc")).unwrap(), original);
+    assert_eq!(
+        RealSystemd::connect()
+            .unwrap()
+            .runtime(&world.unit)
+            .unwrap()
+            .state,
+        zup_plan::ServiceRuntimeState::Running
+    );
+    world.uninstall();
+}
+
+#[test]
+fn real_systemd_notify_readiness_and_failure_before_ready() {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    let original = b"#!/usr/bin/python3\nimport os, socket, time\na = os.environ['NOTIFY_SOCKET']\ns = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)\ns.connect(('\\0' + a[1:]) if a.startswith('@') else a)\ns.sendall(b'READY=1')\ntime.sleep(300)\n";
+    std::fs::write(world.payload.join("tool"), original).unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    plan.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let before = RealSystemd::connect()
+        .unwrap()
+        .runtime(&world.unit)
+        .unwrap()
+        .execution_generation;
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Repair { force: false })
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    assert_eq!(
+        RealSystemd::connect()
+            .unwrap()
+            .runtime(&world.unit)
+            .unwrap()
+            .execution_generation,
+        before
+    );
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/usr/bin/python3\nraise SystemExit(7)\n",
+    )
+    .unwrap();
+    let mut upgrade = world.plan("2.0.0", ServiceStart::Manual);
+    upgrade.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    assert_eq!(
+        world
+            .drive(&upgrade, zup_plan::LifecycleAction::Upgrade)
+            .unwrap(),
+        TransactionOutcome::RolledBack
+    );
+    assert_eq!(std::fs::read(world.program.join("svc")).unwrap(), original);
+    assert_eq!(
+        RealSystemd::connect()
+            .unwrap()
+            .runtime(&world.unit)
+            .unwrap()
+            .state,
+        zup_plan::ServiceRuntimeState::Running
+    );
+    world.uninstall();
+}
+
 struct RealWorld {
     tag: String,
     program: PathBuf,
@@ -209,6 +455,8 @@ impl RealWorld {
         let bytes = std::fs::read(self.payload.join("tool")).expect("payload bytes");
         let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).expect("bytes hash");
         let service = zup_plan::DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new(format!("zup-test-{}", self.tag)).expect("an id"),
             },
@@ -316,17 +564,20 @@ impl RealWorld {
                                         display_name,
                                         command,
                                         start,
+                                        readiness,
                                         ..
                                     },
                                     zup_plan::ServiceState::Registration {
                                         display_name: wanted_display,
                                         command: wanted_command,
                                         start: wanted_start,
+                                        readiness: wanted_readiness,
                                     },
                                 ) => {
                                     display_name == wanted_display
                                         && command == wanted_command
                                         && start == wanted_start
+                                        && readiness == wanted_readiness
                                 }
                                 _ => false,
                             }
@@ -361,6 +612,7 @@ impl RealWorld {
             &execution,
             (!execution.uninstall).then_some(plan),
             ServiceCompilation {
+                ledger: ledger.as_ref(),
                 roots: &MachineRoots::production(),
                 systemd: &SystemdRoots::production(),
                 manager: &mut manager,
@@ -399,7 +651,7 @@ impl RealWorld {
             .map_err(|error| format!("register: {error}"))?;
         executor.set_transaction_id(record.transaction_id);
         let settled = record
-            .execute(&mut executor)
+            .execute(&mut DiagnosticExecutor(&mut executor))
             .map_err(|error| format!("execute: {error}"))?;
         let (record, outcome) = (settled.record, settled.outcome);
         match outcome {
@@ -563,6 +815,16 @@ impl RealWorld {
     }
 
     fn cleanup_once(&mut self) {
+        if !self.unit.is_empty()
+            && self.source.exists()
+            && let Ok(mut manager) = RealSystemd::connect()
+        {
+            let _ = manager.control(
+                &self.unit,
+                zup_transaction::ServiceTerminalState::Stopped,
+                std::time::Duration::from_secs(30),
+            );
+        }
         if !self.unit.is_empty() {
             if let Ok(mut manager) = RealSystemd::connect() {
                 let _ = manager.unmask(&self.unit);
@@ -577,6 +839,20 @@ impl RealWorld {
             std::fs::remove_file(&self.source).ok();
             if let Ok(mut manager) = RealSystemd::connect() {
                 let _ = manager.reload();
+            }
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                let _ = runtime.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                        let connection = zbus_systemd::zbus::Connection::system().await?;
+                        let manager =
+                            zbus_systemd::systemd1::ManagerProxy::new(&connection).await?;
+                        manager.reset_failed_unit(self.unit.clone()).await
+                    })
+                    .await
+                });
             }
         }
         std::fs::remove_dir_all(&self.program).ok();

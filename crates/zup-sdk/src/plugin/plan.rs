@@ -1,7 +1,8 @@
 use zup_plugin_abi as abi;
 
 pub use super::exports::zup::plugin::planner::{
-    FileAssociation, GeneratedFile, Launcher, LauncherLocation, Protocol, Service, ServiceStart,
+    ChangedServiceState, FileAssociation, GeneratedFile, InitialServiceState, Launcher,
+    LauncherLocation, Protocol, Service, ServiceLifecycle, ServiceReadiness, ServiceStart,
 };
 use super::exports::zup::plugin::planner::{PathEntry, PluginError, ResourceItem};
 
@@ -100,6 +101,13 @@ impl Service {
             binary: binary.into(),
             arguments: Vec::new(),
             start: ServiceStart::Manual,
+            readiness: ServiceReadiness::Manager,
+            lifecycle: ServiceLifecycle {
+                install: InitialServiceState::Stopped,
+                change: ChangedServiceState::Preserve,
+                start_timeout_seconds: 90,
+                stop_timeout_seconds: 90,
+            },
         }
     }
 
@@ -116,6 +124,18 @@ impl Service {
         S: Into<String>,
     {
         self.arguments = arguments.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_readiness(mut self, readiness: ServiceReadiness) -> Self {
+        self.readiness = readiness;
+        self
+    }
+
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: ServiceLifecycle) -> Self {
+        self.lifecycle = lifecycle;
         self
     }
 

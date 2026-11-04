@@ -267,6 +267,8 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
             continue;
         }
         services.push(DesiredService {
+            lifecycle: service.lifecycle,
+            readiness: service.readiness,
             key: ResourceKey::Service {
                 id: service.id.clone(),
             },

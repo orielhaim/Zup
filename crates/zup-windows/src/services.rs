@@ -49,6 +49,7 @@ fn previous(op: &ServiceOperation) -> Result<ServiceState, ServiceError> {
 
 fn installed(op: &ServiceOperation) -> ServiceState {
     ServiceState::Registration {
+        readiness: op.readiness,
         display_name: op.display_name.clone(),
         command: op.command.clone(),
         start: op.start,
@@ -79,6 +80,7 @@ fn service_info(
         display_name,
         command,
         start,
+        readiness,
     } = desired
     else {
         return Err(ServiceError::NotExecutable {
@@ -86,6 +88,12 @@ fn service_info(
             reason: "service registration required".to_owned(),
         });
     };
+    if *readiness != zup_core::ServiceReadiness::Manager {
+        return Err(ServiceError::NotExecutable {
+            name: name.into(),
+            reason: "SCM supports manager readiness only".into(),
+        });
+    }
     Ok(ServiceInfo {
         name: name.into(),
         display_name: display_name.into(),
@@ -95,7 +103,9 @@ fn service_info(
         executable_path: host_path(&command.executable),
         launch_arguments: command.arguments.iter().map(Into::into).collect(),
         dependencies: existing.map_or_else(Vec::new, |config| config.dependencies.clone()),
-        account_name: None,
+        account_name: existing
+            .is_none()
+            .then(|| "NT AUTHORITY\\LocalService".into()),
         account_password: None,
     })
 }
@@ -246,6 +256,7 @@ mod tests {
     fn service_reconciliation_is_fail_closed() {
         let previous = ServiceState::Absent;
         let desired = ServiceState::Registration {
+            readiness: Default::default(),
             display_name: "Zup Test".into(),
             command: CommandSpec::new(
                 TargetPath::new(Target::parse("windows-x64").unwrap(), r"C:\Zup\svc.exe").unwrap(),
@@ -296,6 +307,8 @@ mod tests {
         let executable =
             TargetPath::new(target_triple, r"C:\Program Files\Zup Test\service.exe").unwrap();
         let mut op = ServiceOperation {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service { id },
             kind: IntegrationChangeKind::Create,
             id: name.clone(),

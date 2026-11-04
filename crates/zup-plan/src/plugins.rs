@@ -58,6 +58,8 @@ pub enum PluginResource {
         binary: String,
         arguments: Vec<String>,
         start: ServiceStart,
+        lifecycle: zup_core::ServiceLifecycle,
+        readiness: zup_core::ServiceReadiness,
     },
     Protocol {
         scheme: String,
@@ -502,6 +504,8 @@ struct ServiceInput {
     binary: String,
     arguments: Vec<String>,
     start: ServiceStart,
+    lifecycle: zup_core::ServiceLifecycle,
+    readiness: zup_core::ServiceReadiness,
 }
 
 struct ProtocolInput {
@@ -571,6 +575,8 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
                 binary,
                 arguments,
                 start,
+                lifecycle: _,
+                readiness: _,
             } => {
                 add_text_size(&mut total, id)?;
                 add_text_size(&mut total, name)?;
@@ -720,6 +726,8 @@ pub(crate) fn merge_plugin_proposal(
                 binary,
                 arguments,
                 start,
+                lifecycle,
+                readiness,
             } => {
                 merge.merge_service(
                     &resource_name,
@@ -730,6 +738,8 @@ pub(crate) fn merge_plugin_proposal(
                         binary,
                         arguments,
                         start,
+                        lifecycle,
+                        readiness,
                     },
                 )?;
             }
@@ -934,6 +944,8 @@ impl MergeContext<'_> {
             binary,
             arguments,
             start,
+            lifecycle,
+            readiness,
         } = input;
         let plugin_id = &self.binding.id;
         let id: ServiceId = parse_id(plugin_id, resource_name, &id, "service id")?;
@@ -947,7 +959,17 @@ impl MergeContext<'_> {
         let arguments = check_arguments(plugin_id, resource_name, arguments, "arguments")?;
         self.collisions
             .insert_service(id.as_str(), Some(plugin_id), resource_name)?;
+        lifecycle
+            .validate(start)
+            .and_then(|()| readiness.validate_for(self.plan.target))
+            .map_err(|reason| PlanError::PluginResourceRejected {
+                plugin_id: plugin_id.clone(),
+                resource: resource_name.to_owned(),
+                reason: reason.to_owned(),
+            })?;
         self.plan.services.push(DesiredService {
+            lifecycle,
+            readiness,
             key: ResourceKey::Service { id: id.clone() },
             id,
             name,

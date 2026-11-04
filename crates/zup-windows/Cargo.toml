@@ -75,6 +75,7 @@ windows = { version = "0.62", features = [
   "Win32_System_RestartManager",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
+  "Wdk_System_SystemInformation",
 ] }
 
 [build-dependencies]

@@ -311,10 +311,12 @@ fn inspect_owned_matches(
                         display_name,
                         command,
                         start,
+                        readiness,
                         ..
                     } => {
                         *installed
                             == ServiceState::Registration {
+                                readiness,
                                 display_name,
                                 command,
                                 start,

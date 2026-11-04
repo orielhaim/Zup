@@ -43,6 +43,31 @@ fn with(src: &str) -> String {
     format!("{}\n{}", base(), src.trim_start())
 }
 
+#[rstest]
+#[case::windows("windows-x64", false)]
+#[case::linux("linux-x64", true)]
+fn notify_readiness_is_validated_for_the_target(#[case] target: &str, #[case] supported: bool) {
+    let text = with(
+        r#"
+[[services]]
+id = "worker"
+name = "Worker"
+binary = "${install}/worker"
+start = "manual"
+readiness = "notify"
+"#,
+    )
+    .replace("windows-x64", target);
+    let result = parse_and_compile(&text, target);
+    assert_eq!(result.is_ok(), supported);
+    if let Ok(installer) = result {
+        assert_eq!(
+            installer.services[0].readiness,
+            zup_core::ServiceReadiness::Notify
+        );
+    }
+}
+
 fn compile_selected(manifest: &Manifest) -> Result<Installer, ManifestError> {
     let overrides = TargetOverrides::default();
     let targets = select_targets(manifest, &["windows-x64"], &overrides).unwrap();

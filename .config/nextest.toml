@@ -2,6 +2,13 @@
 test-threads = 8
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+[test-groups.systemd-manager]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(zup-linux) & binary(services_systemd)'
+test-group = 'systemd-manager'
+
 # Fast CI excludes staged-toolchain tests and generated SDK projects.
 [profile.fast]
 test-threads = 8

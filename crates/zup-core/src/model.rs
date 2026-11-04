@@ -355,6 +355,10 @@ pub struct Service {
     pub arguments: Vec<String>,
     pub start: ServiceStart,
     #[serde(default)]
+    pub lifecycle: crate::ServiceLifecycle,
+    #[serde(default)]
+    pub readiness: crate::ServiceReadiness,
+    #[serde(default)]
     pub component: Option<ComponentId>,
     #[serde(default)]
     pub when: Option<Condition>,

@@ -54,6 +54,8 @@ pub fn resolve_target(
                 })?;
 
             let synthetic = zup_plan::DesiredService {
+                lifecycle: service.lifecycle,
+                readiness: service.readiness,
                 key: ResourceKey::Service {
                     id: service.id.clone(),
                 },
@@ -80,6 +82,8 @@ pub fn resolve_target(
                 }
             })?;
             services.push(zup_plan::DesiredService {
+                lifecycle: service.lifecycle,
+                readiness: service.readiness,
                 key: ResourceKey::Service {
                     id: service.id.clone(),
                 },
@@ -336,6 +340,8 @@ mod tests {
     fn services_are_refused_with_everything_named() {
         let mut input = plan();
         input.services.push(zup_plan::DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },
@@ -421,6 +427,8 @@ mod tests {
 
     fn machine_service(start: zup_core::ServiceStart) -> zup_plan::DesiredService {
         zup_plan::DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },
@@ -566,6 +574,8 @@ mod tests {
 
     fn target_service(target: &zup_core::Target) -> zup_plan::DesiredService<zup_plan::TargetPath> {
         zup_plan::DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: zup_core::ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },

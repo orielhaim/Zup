@@ -180,6 +180,7 @@ fn compile_files_only(
 }
 
 pub struct ServiceCompilation<'a> {
+    pub ledger: Option<&'a zup_plan::InstallLedger>,
     pub roots: &'a crate::locations::MachineRoots,
 
     pub systemd: &'a crate::machine::SystemdRoots,
@@ -193,6 +194,7 @@ pub fn compile_machine_execution_plan(
     compilation: ServiceCompilation<'_>,
 ) -> Result<TransactionInput, PlanError> {
     let ServiceCompilation {
+        ledger,
         roots,
         systemd,
         manager,
@@ -237,6 +239,48 @@ pub fn compile_machine_execution_plan(
     }
 
     for op in &execution.services {
+        let payload_changed = input.files.iter().any(|file| {
+            file.destination == op.command.executable && file.kind != FileOperationKind::NoOp
+        });
+        let owned = ledger.and_then(|ledger| ledger.resources.get(&op.key));
+        if (payload_changed || op.kind != IntegrationChangeKind::NoOp)
+            && (owned.is_some()
+                || op.previous == zup_plan::ObservedServiceState::Absent
+                    && op.lifecycle.install == zup_core::InitialServiceState::Running)
+        {
+            let unit = crate::services::unit_name(&parse_service_id(op)?)?;
+            let generation = manager.generation().map_err(|error| PlanError::Service {
+                unit: unit.clone(),
+                reason: error.to_string(),
+            })?;
+            let runtime = if op.previous == zup_plan::ObservedServiceState::Absent {
+                None
+            } else {
+                Some(manager.runtime(&unit).map_err(|error| PlanError::Service {
+                    unit: unit.clone(),
+                    reason: error.to_string(),
+                })?)
+            };
+            let stopped_damaged = op.previous == zup_plan::ObservedServiceState::InvalidService
+                && runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.state == zup_plan::ServiceRuntimeState::Stopped);
+            if !stopped_damaged {
+                let execution_generation = runtime
+                    .map_or_else(|| "stopped".into(), |runtime| runtime.execution_generation);
+                input.service_controls.extend(
+                    zup_transaction::plan_service_controls(
+                        op,
+                        owned,
+                        payload_changed,
+                        unit.clone(),
+                        generation,
+                        execution_generation,
+                    )
+                    .map_err(|reason| PlanError::Service { unit, reason })?,
+                );
+            }
+        }
         let unit = crate::services::unit_name(&parse_service_id(op)?).map_err(|error| {
             PlanError::Service {
                 unit: op.name.clone(),
@@ -344,7 +388,13 @@ pub fn compile_machine_execution_plan(
     }
 
     for removal in &service_removals {
-        let OwnedResource::Service { name, .. } = &removal.owned else {
+        let OwnedResource::Service {
+            name,
+            installed,
+            privilege,
+            ..
+        } = &removal.owned
+        else {
             continue;
         };
         let zup_core::ResourceKey::Service { id } = &removal.key else {
@@ -356,6 +406,38 @@ pub fn compile_machine_execution_plan(
             unit: name.clone(),
             reason: error.to_string(),
         })?;
+        let runtime = manager.runtime(&unit).map_err(|error| PlanError::Service {
+            unit: unit.clone(),
+            reason: error.to_string(),
+        })?;
+        match runtime.state {
+            zup_plan::ServiceRuntimeState::Running => {
+                input
+                    .service_controls
+                    .push(zup_transaction::ServiceControlOperation {
+                        key: removal.key.clone(),
+                        native_name: unit.clone(),
+                        privilege: *privilege,
+                        stage: zup_transaction::ServiceControlStage::Quiesce,
+                        configuration: installed.clone(),
+                        owned_configuration: installed.clone(),
+                        before: zup_transaction::ServiceTerminalState::Running,
+                        after: zup_transaction::ServiceTerminalState::Stopped,
+                        manager_generation: runtime.manager_generation,
+                        before_execution_generation: runtime.execution_generation,
+                        timeout_seconds: 90,
+                        rollback_timeout_seconds: 90,
+                        dependencies: Vec::new(),
+                    })
+            }
+            zup_plan::ServiceRuntimeState::Stopped => {}
+            _ => {
+                return Err(PlanError::Service {
+                    unit,
+                    reason: "cannot remove a service with ambiguous runtime state".into(),
+                });
+            }
+        }
         let canonical =
             crate::machine::authorize_systemd_unit(&unit, systemd).map_err(|error| {
                 PlanError::Service {
@@ -513,6 +595,8 @@ mod tests {
             executable: true,
         };
         let service = zup_plan::DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: ServiceId::new("tool").expect("an id"),
             },
@@ -552,6 +636,8 @@ mod tests {
         kind: IntegrationChangeKind,
     ) -> ServiceOperation {
         ServiceOperation {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: ServiceId::new("tool").expect("an id"),
             },
@@ -596,6 +682,7 @@ mod tests {
             &execution,
             Some(plan),
             ServiceCompilation {
+                ledger: None,
                 roots,
                 systemd,
                 manager,

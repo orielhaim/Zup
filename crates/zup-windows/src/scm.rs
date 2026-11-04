@@ -18,7 +18,10 @@ pub enum ScmError {
 pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState, ScmError> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|error| ScmError::Unavailable(error.to_string()))?;
-    let service = match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {
+    let service = match manager.open_service(
+        name,
+        ServiceAccess::QUERY_CONFIG | ServiceAccess::QUERY_STATUS,
+    ) {
         Ok(service) => service,
         Err(windows_service::Error::Winapi(error)) if error.raw_os_error() == Some(1060) => {
             return Ok(ObservedServiceState::Absent);
@@ -40,6 +43,32 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
         return Err(ScmError::Unsupported {
             name: name.to_owned(),
             reason: "service type".to_owned(),
+        });
+    }
+    if config
+        .account_name
+        .as_ref()
+        .and_then(|name| name.to_str())
+        .is_none_or(|account| !account.eq_ignore_ascii_case("NT AUTHORITY\\LocalService"))
+        || !config.dependencies.is_empty()
+    {
+        return Err(ScmError::Unsupported { name: name.into(), reason: "only LocalService identity with no SCM dependencies is currently modeled; refusing untracked security or dependency changes".into() });
+    }
+    let failure = service
+        .get_failure_actions()
+        .map_err(|error| ScmError::Unreadable {
+            name: name.into(),
+            reason: error.to_string(),
+        })?;
+    if failure.actions.as_ref().is_some_and(|actions| {
+        actions
+            .iter()
+            .any(|action| action.action_type != windows_service::service::ServiceActionType::None)
+    }) {
+        return Err(ScmError::Unsupported {
+            name: name.into(),
+            reason: "SCM failure actions require an explicit supported runtime-failure policy"
+                .into(),
         });
     }
     let command_line = config
@@ -76,9 +105,18 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
         }
     };
     Ok(ObservedServiceState::Service {
+        readiness: Default::default(),
         display_name,
         command,
         start,
-        runtime_state: None,
+        runtime_state: Some(crate::service_control::runtime(
+            service
+                .query_status()
+                .map_err(|error| ScmError::Unreadable {
+                    name: name.into(),
+                    reason: error.to_string(),
+                })?
+                .current_state,
+        )),
     })
 }

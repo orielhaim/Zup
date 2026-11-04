@@ -43,6 +43,13 @@ Launcher::desktop("Acme", "${install}/acme.exe")
 Service::new("acme-agent", "AcmeAgent", "${install}/agent.exe")
     .with_display_name("Acme Agent")
     .with_start(ServiceStart::Automatic)
+    .with_readiness(ServiceReadiness::Manager)
+    .with_lifecycle(ServiceLifecycle {
+        install: InitialServiceState::Running,
+        change: ChangedServiceState::Preserve,
+        start_timeout_seconds: 60,
+        stop_timeout_seconds: 30,
+    })
 ```
 
 The `id` is what uninstall refers to and what a later install matches on, so it

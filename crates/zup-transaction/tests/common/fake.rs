@@ -179,6 +179,13 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
                 payload: b"opaque".to_vec(),
             }
         }
+        NodeKind::ServiceControl { operation } => {
+            OperationReceipt::ServiceControl(Box::new(zup_transaction::ServiceControlReceipt {
+                operation: operation.as_ref().clone(),
+                completion: zup_transaction::ServiceControlCompletion::Reached,
+                execution_generation: "fake-execution".into(),
+            }))
+        }
         NodeKind::Barrier => OperationReceipt::Control,
     }
 }

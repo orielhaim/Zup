@@ -12,6 +12,7 @@ use crate::plugin::is_valid_source;
 use crate::target::{resolve_target_config, validate_target_matrix, validate_target_references};
 
 struct ManifestView {
+    target: zup_core::Target,
     app: App,
     ui: Ui,
     install: Install,
@@ -32,6 +33,7 @@ impl ManifestView {
     fn for_target(manifest: &Manifest, target: &ResolvedTargetConfig) -> Self {
         let profile = &target.profile;
         Self {
+            target: target.target,
             app: manifest.app.clone(),
             ui: manifest.ui.clone(),
             install: target.install.clone(),
@@ -618,6 +620,22 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
 
     let mut services = BTreeSet::new();
     for service in &manifest.services {
+        service
+            .readiness
+            .validate_for(manifest.target)
+            .map_err(|reason| ManifestError::Invalid {
+                message: format!("service `{}`: {reason}", service.id),
+                src: None,
+                span: None,
+            })?;
+        service
+            .lifecycle
+            .validate(service.start)
+            .map_err(|reason| ManifestError::Invalid {
+                message: format!("service `{}`: {reason}", service.id),
+                src: None,
+                span: None,
+            })?;
         if !services.insert(service.id.clone()) {
             return Err(ManifestError::DuplicateService {
                 id: service.id.to_string(),

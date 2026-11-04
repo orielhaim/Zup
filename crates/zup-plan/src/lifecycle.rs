@@ -357,14 +357,14 @@ fn repair_owned(
                 observed.state,
                 ObservedServiceState::Service { .. } | ObservedServiceState::InvalidService
             )
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed: ServiceState::Registration { display_name, command, start }, .. }) if display_name == &op.display_name && command == &op.command && start == &op.start)
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed: ServiceState::Registration { display_name, command, start, readiness }, .. }) if display_name == &op.display_name && command == &op.command && start == &op.start && readiness == &op.readiness)
         {
             op.kind = IntegrationChangeKind::RepairOwned;
             op.conflict = None;
         }
         if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedServiceState::Absent)
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed: ServiceState::Registration { display_name, command, start }, .. }) if display_name == &op.display_name && command == &op.command && start == &op.start)
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed: ServiceState::Registration { display_name, command, start, readiness }, .. }) if display_name == &op.display_name && command == &op.command && start == &op.start && readiness == &op.readiness)
         {
             op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;

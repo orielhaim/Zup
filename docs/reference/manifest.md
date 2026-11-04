@@ -155,7 +155,15 @@ Required: `value`. Optional: `component`, `when`, `targets`.
 
 ### `[[services]]`
 
-Required: `id`, `name`, `binary`, `start`. Optional: `display_name`, `arguments`, `component`, `when`, `targets`. `start` is `automatic`, `manual`, or `disabled`.
+Required: `id`, `name`, `binary`, `start`. Optional: `display_name`, `arguments`, `lifecycle`, `readiness`, `component`, `when`, `targets`. `start` is `automatic`, `manual`, or `disabled` and controls boot policy independently of installation-time execution.
+
+`lifecycle = { install = "stopped", change = "preserve" }` is the default. Set `install = "running"` to request startup after a new registration. `change = "preserve"` restores a previously running service after its executable or registration changes and leaves a stopped service stopped. `change = "stopped"` leaves it stopped after a change. Disabled services cannot request startup.
+
+See [service lifecycle](/guide/services) for the implemented behavior and current limits.
+
+`lifecycle.start_timeout_seconds` and `lifecycle.stop_timeout_seconds` default to 90 seconds and must each be between 1 and 3600. These control native lifecycle transition deadlines, including compensation in the corresponding direction.
+
+`readiness` defaults to `manager`. Linux systemd also supports `notify`, requiring the main service process to send `READY=1`. Windows rejects `notify`. Readiness is owned configuration and changing it requires a registration update.
 
 ### `[[protocols]]`
 

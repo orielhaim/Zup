@@ -139,11 +139,37 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
         },
         ResourceItem::PathEntry(entry) => PluginResource::PathEntry { value: entry.value },
         ResourceItem::Service(service) => PluginResource::Service {
+            readiness: match service.readiness {
+                zup_plugin_contract::ServiceReadiness::Manager => {
+                    zup_core::ServiceReadiness::Manager
+                }
+                zup_plugin_contract::ServiceReadiness::Notify => zup_core::ServiceReadiness::Notify,
+            },
             id: service.id,
             name: service.name,
             display_name: service.display_name,
             binary: service.binary,
             arguments: service.arguments,
+            lifecycle: zup_core::ServiceLifecycle {
+                install: match service.lifecycle.install {
+                    zup_plugin_contract::InitialServiceState::Stopped => {
+                        zup_core::InitialServiceState::Stopped
+                    }
+                    zup_plugin_contract::InitialServiceState::Running => {
+                        zup_core::InitialServiceState::Running
+                    }
+                },
+                change: match service.lifecycle.change {
+                    zup_plugin_contract::ChangedServiceState::Preserve => {
+                        zup_core::ChangedServiceState::Preserve
+                    }
+                    zup_plugin_contract::ChangedServiceState::Stopped => {
+                        zup_core::ChangedServiceState::Stopped
+                    }
+                },
+                start_timeout_seconds: service.lifecycle.start_timeout_seconds,
+                stop_timeout_seconds: service.lifecycle.stop_timeout_seconds,
+            },
             start: match service.start {
                 ContractServiceStart::Automatic => ServiceStart::Automatic,
                 ContractServiceStart::Manual => ServiceStart::Manual,

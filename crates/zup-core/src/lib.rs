@@ -6,6 +6,8 @@ mod digest;
 mod ids;
 mod installer;
 mod model;
+mod service;
+pub use service::{ChangedServiceState, InitialServiceState, ServiceLifecycle, ServiceReadiness};
 mod path;
 mod prerequisite;
 mod release;

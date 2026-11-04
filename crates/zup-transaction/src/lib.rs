@@ -20,6 +20,13 @@ pub use reconciliation::{
     LedgerPublication, PublicationError, ReconciliationError, ReconciliationState,
     ledger_publication, reconcile_committed, retired_records, settled_records,
 };
+mod service;
+pub use service::{
+    NativeServiceManager, ServiceControlCompletion, ServiceControlOperation, ServiceControlReceipt,
+    ServiceControlStage, ServiceObservation, ServiceTerminalState, apply_service_control,
+    plan_service_controls, reconcile_service_control, rollback_service_control,
+    verify_service_control,
+};
 mod storage;
 
 pub use coordinator::{
@@ -42,7 +49,7 @@ pub use private::{
 };
 pub use record::{
     CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, PublishError, StoreError,
-    TransactionPhase, TransactionRecord, VisiblePublish, settle_visible,
+    TransactionFailure, TransactionPhase, TransactionRecord, VisiblePublish, settle_visible,
 };
 pub use storage::{CONTENT_STORE_DIRECTORY, ContentStoreIdentity};
 pub use storage::{FilesystemTransactionStore, JournalVolume, TransactionStore};

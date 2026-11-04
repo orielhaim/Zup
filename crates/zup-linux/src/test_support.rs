@@ -219,6 +219,7 @@ pub fn recv_envelope_on(
 
 #[derive(Debug, Clone)]
 pub struct FakeSystemd {
+    pub runtimes: BTreeMap<String, crate::systemd::UnitRuntime>,
     units: BTreeMap<String, FakeUnit>,
 
     pub version: String,
@@ -236,6 +237,7 @@ pub struct FakeSystemd {
 impl Default for FakeSystemd {
     fn default() -> Self {
         Self {
+            runtimes: BTreeMap::new(),
             units: BTreeMap::new(),
 
             version: "259".into(),
@@ -328,6 +330,65 @@ impl FakeSystemd {
 }
 
 impl SystemdManager for FakeSystemd {
+    fn generation(&mut self) -> Result<String, IpcError> {
+        Ok("fake-manager".into())
+    }
+
+    fn runtime(&mut self, unit: &str) -> Result<crate::systemd::UnitRuntime, IpcError> {
+        if let Some(error) = self.fail("runtime", unit) {
+            return Err(error);
+        }
+        Ok(self
+            .runtimes
+            .get(unit)
+            .cloned()
+            .unwrap_or(crate::systemd::UnitRuntime {
+                service_type: "exec".into(),
+                pending_job: false,
+                state: zup_plan::ServiceRuntimeState::Stopped,
+                sub_state: "dead".into(),
+                result: "success".into(),
+                manager_generation: "fake-manager".into(),
+                execution_generation: "stopped".into(),
+            }))
+    }
+
+    fn control(
+        &mut self,
+        unit: &str,
+        state: zup_transaction::ServiceTerminalState,
+        _timeout: Duration,
+    ) -> Result<(), IpcError> {
+        if let Some(error) = self.fail("control", unit) {
+            return Err(error);
+        }
+        let current = self.runtime(unit)?;
+        let running = state == zup_transaction::ServiceTerminalState::Running;
+        self.runtimes.insert(
+            unit.into(),
+            crate::systemd::UnitRuntime {
+                service_type: current.service_type,
+                pending_job: false,
+                state: if running {
+                    zup_plan::ServiceRuntimeState::Running
+                } else {
+                    zup_plan::ServiceRuntimeState::Stopped
+                },
+                sub_state: if running { "running" } else { "dead" }.into(),
+                result: "success".into(),
+                manager_generation: current.manager_generation,
+                execution_generation: if running {
+                    uuid::Uuid::now_v7().to_string()
+                } else {
+                    "stopped".into()
+                },
+            },
+        );
+        if self.lost("control") {
+            return Err(IpcError::SystemdUnavailable("control reply lost".into()));
+        }
+        Ok(())
+    }
     fn reload(&mut self) -> Result<(), IpcError> {
         if let Some(error) = self.fail("reload", "") {
             return Err(error);
@@ -363,6 +424,8 @@ impl SystemdManager for FakeSystemd {
         }
         let entry = self.units.get(unit);
         Ok(UnitInfo {
+            drop_in_paths: Vec::new(),
+            need_daemon_reload: false,
             load_state: entry
                 .map(|entry| entry.load_state.clone())
                 .unwrap_or_else(|| "not-found".to_owned()),
@@ -492,6 +555,20 @@ impl SharedFakeSystemd {
 }
 
 impl SystemdManager for SharedFakeSystemd {
+    fn generation(&mut self) -> Result<String, IpcError> {
+        self.0.borrow_mut().generation()
+    }
+    fn runtime(&mut self, unit: &str) -> Result<crate::systemd::UnitRuntime, IpcError> {
+        self.0.borrow_mut().runtime(unit)
+    }
+    fn control(
+        &mut self,
+        unit: &str,
+        state: zup_transaction::ServiceTerminalState,
+        timeout: Duration,
+    ) -> Result<(), IpcError> {
+        self.0.borrow_mut().control(unit, state, timeout)
+    }
     fn reload(&mut self) -> Result<(), IpcError> {
         self.0.borrow_mut().reload()
     }

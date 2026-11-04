@@ -60,6 +60,10 @@ impl LinuxLedgerStore {
                 .map_err(|error| ExecError::Ownership(error.to_string()))?;
         for node in &plan.nodes {
             match &node.kind {
+                NodeKind::ServiceControl { operation } => {
+                    crate::service_control::validate_binding(plan, operation, ledger.as_ref())
+                        .map_err(|_| ExecError::Ownership(node.id.to_string()))?
+                }
                 NodeKind::FileMutation { key, .. } => {
                     if !valid_file_key(key, app_id, app_version, &plan.target) {
                         return Err(ExecError::Ownership(node.id.to_string()));
@@ -375,17 +379,20 @@ fn publish_service_node(
             display_name,
             command,
             start,
+            readiness,
             ..
         } => ServiceState::Registration {
             display_name: display_name.clone(),
             command: command.clone(),
             start: *start,
+            readiness: *readiness,
         },
     };
     let installed = ServiceState::Registration {
         display_name: service.display_name.clone(),
         command: service.command.clone(),
         start: service.start,
+        readiness: service.readiness,
     };
 
     let _ = service_receipt;

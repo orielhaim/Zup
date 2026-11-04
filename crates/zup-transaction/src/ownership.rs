@@ -134,6 +134,23 @@ pub fn validate_ownership<'a>(
                 }
                 _ => false,
             },
+            NodeKind::ServiceControl { operation } => {
+                match ledger.and_then(|ledger| ledger.resources.get(&operation.key)) {
+                    Some(OwnedResource::Service {
+                        installed,
+                        privilege,
+                        ..
+                    }) => {
+                        *privilege == operation.privilege
+                            && installed == &operation.owned_configuration
+                    }
+                    None => {
+                        operation.owned_configuration == zup_plan::ServiceState::Absent
+                            && operation.stage == crate::ServiceControlStage::Restore
+                    }
+                    _ => false,
+                }
+            }
             NodeKind::BackendOperation { .. }
             | NodeKind::BackendRemoval { .. }
             | NodeKind::Barrier

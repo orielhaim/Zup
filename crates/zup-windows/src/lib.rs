@@ -81,6 +81,8 @@ mod scm;
 #[cfg(windows)]
 mod search_path;
 #[cfg(windows)]
+mod service_control;
+#[cfg(windows)]
 mod services;
 #[cfg(windows)]
 mod shell_link;

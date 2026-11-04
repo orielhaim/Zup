@@ -67,6 +67,7 @@ zup-toolchain.workspace = true
 zup-transaction.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+futures-util = "0.3"
 rustix.workspace = true
 tokio.workspace = true
 zbus_systemd.workspace = true

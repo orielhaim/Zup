@@ -157,6 +157,13 @@ fn all_resources() -> Vec<PluginResource> {
             value: "${install}/plugin-bin".to_owned(),
         },
         PluginResource::Service {
+            readiness: Default::default(),
+            lifecycle: zup_core::ServiceLifecycle {
+                install: zup_core::InitialServiceState::Running,
+                start_timeout_seconds: 17,
+                stop_timeout_seconds: 23,
+                ..Default::default()
+            },
             id: "plugin-service".to_owned(),
             name: "plugin-service".to_owned(),
             display_name: Some("Plugin Service".to_owned()),
@@ -243,11 +250,53 @@ source = "plugins/one.wasm"
     assert_eq!(result.plan.protocols.len(), 1);
     assert_eq!(result.plan.file_associations.len(), 1);
     assert_eq!(result.plan.services[0].privilege, Privilege::System);
+    assert_eq!(
+        result.plan.services[0].lifecycle.install,
+        zup_core::InitialServiceState::Running
+    );
+    assert_eq!(result.plan.services[0].lifecycle.start_timeout_seconds, 17);
+    assert_eq!(result.plan.services[0].lifecycle.stop_timeout_seconds, 23);
     assert_eq!(result.plan.launchers[0].privilege, Privilege::System);
     assert_eq!(
         result.plan.file_associations[0].privilege,
         Privilege::System
     );
+}
+
+#[rstest]
+#[case::zero_deadline(0, ServiceStart::Manual)]
+#[case::excessive_deadline(3601, ServiceStart::Manual)]
+#[case::disabled_start(90, ServiceStart::Disabled)]
+fn plugin_service_policy_is_validated_by_the_trusted_planner(
+    #[case] timeout: u32,
+    #[case] start: ServiceStart,
+) {
+    let build = build(&with(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/one.wasm"
+"#,
+    ));
+    let mut resources = all_resources();
+    let PluginResource::Service {
+        lifecycle,
+        start: policy,
+        ..
+    } = &mut resources[3]
+    else {
+        panic!("service fixture required");
+    };
+    lifecycle.start_timeout_seconds = timeout;
+    *policy = start;
+    let mut executor =
+        FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::new(resources))]);
+    let mut request = request();
+    request.scope = SelectedScope::Machine;
+    assert!(matches!(
+        plan(&build, &request, Some(&mut executor), &NeverCancelled),
+        Err(PlanError::PluginResourceRejected { .. })
+    ));
 }
 
 #[test]
@@ -500,6 +549,8 @@ binary = "${install}/base.txt"
 start = "manual"
 "#,
             PluginResource::Service {
+                lifecycle: Default::default(),
+                readiness: Default::default(),
                 id: "sameservice".to_owned(),
                 name: "sameservice".to_owned(),
                 display_name: None,
@@ -606,6 +657,8 @@ source = "plugins/two.wasm"
     executable: "${install}/base.txt".to_owned(),
 })]
 #[case::nul_service_id(PluginResource::Service {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
     id: "\0".to_owned(),
     name: "service".to_owned(),
     display_name: None,

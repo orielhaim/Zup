@@ -876,7 +876,8 @@ pub fn apply_node<P: PayloadSource>(
                 }),
             }
         }
-        NodeKind::FileRemoval { .. }
+        NodeKind::ServiceControl { .. }
+        | NodeKind::FileRemoval { .. }
         | NodeKind::BackendOperation { .. }
         | NodeKind::BackendRemoval { .. } => Err(WindowsFileExecutorError::Unsupported {
             id: op.id.to_string(),
@@ -1014,9 +1015,11 @@ pub fn verify_installed_file(
                 "removal backup",
             )
         }
-        Receipt::Control | Receipt::Backend { .. } => Err(WindowsFileExecutorError::Unsupported {
-            id: "receipt".into(),
-        }),
+        Receipt::ServiceControl(_) | Receipt::Control | Receipt::Backend { .. } => {
+            Err(WindowsFileExecutorError::Unsupported {
+                id: "receipt".into(),
+            })
+        }
     }
 }
 

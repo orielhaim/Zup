@@ -322,6 +322,8 @@ mod tests {
         let config = config("linux-x64", Frontend::Console, InstallScope::User);
         let mut plan = plan();
         plan.installer.services.push(zup_core::Service {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             id: zup_core::ServiceId::new("tool").unwrap(),
             name: zup_core::NonEmptyString::new("Tool").unwrap(),
             display_name: None,
@@ -372,6 +374,8 @@ mod tests {
 
     fn machine_service() -> zup_core::Service {
         zup_core::Service {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             id: zup_core::ServiceId::new("tool").unwrap(),
             name: zup_core::NonEmptyString::new("Tool").unwrap(),
             display_name: None,

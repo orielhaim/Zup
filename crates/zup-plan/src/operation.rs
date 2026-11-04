@@ -151,6 +151,8 @@ pub struct ServiceOperation {
     pub display_name: String,
     pub command: CommandSpec,
     pub start: ServiceStart,
+    pub lifecycle: zup_core::ServiceLifecycle,
+    pub readiness: zup_core::ServiceReadiness,
     pub privilege: Privilege,
     pub previous: ObservedServiceState,
     pub conflict: Option<Conflict>,

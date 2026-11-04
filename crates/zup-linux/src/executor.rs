@@ -282,6 +282,9 @@ impl LinuxFileExecutor {
 
     pub fn prepare(&mut self, node: &TransactionNode) -> Result<(), ExecError> {
         match &node.kind {
+            NodeKind::ServiceControl { operation } => operation
+                .validate()
+                .map_err(|reason| ExecError::refused(&operation.native_name, reason)),
             NodeKind::Barrier => Ok(()),
             NodeKind::StageFile { .. } => {
                 let _ = self.file(node.id.as_str())?;
@@ -410,6 +413,10 @@ impl LinuxFileExecutor {
 
     pub fn apply(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
         match &node.kind {
+            NodeKind::ServiceControl { operation } => {
+                zup_transaction::apply_service_control(&mut self.service_context()?, operation)
+                    .map_err(|reason| ExecError::refused(&operation.native_name, reason))
+            }
             NodeKind::Barrier => Ok(OperationReceipt::Control),
             NodeKind::StageFile { .. } => self.stage_node(node),
             NodeKind::FileMutation { delta, .. } => match delta {
@@ -451,6 +458,10 @@ impl LinuxFileExecutor {
         receipt: &OperationReceipt,
     ) -> Result<(), ExecError> {
         match receipt {
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::verify_service_control(&mut self.service_context()?, receipt)
+                    .map_err(|reason| ExecError::refused(&receipt.operation.native_name, reason))
+            }
             OperationReceipt::CreateFile {
                 destination,
                 installed_sha256,
@@ -545,6 +556,10 @@ impl LinuxFileExecutor {
         receipt: &OperationReceipt,
     ) -> Result<(), ExecError> {
         match receipt {
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::rollback_service_control(&mut self.service_context()?, receipt)
+                    .map_err(|reason| ExecError::refused(&receipt.operation.native_name, reason))
+            }
             OperationReceipt::CreateFile {
                 destination,
                 installed_sha256,
@@ -899,6 +914,14 @@ impl LinuxFileExecutor {
             return self.reconcile_interrupted(node);
         };
         match receipt {
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::reconcile_service_control(
+                    &mut self.service_context()?,
+                    &receipt.operation,
+                    Some(receipt),
+                )
+                .map_err(|reason| ExecError::refused(&receipt.operation.native_name, reason))
+            }
             OperationReceipt::CreateFile {
                 destination,
                 installed_sha256,
@@ -972,6 +995,12 @@ impl LinuxFileExecutor {
         node: &TransactionNode,
     ) -> Result<ReconcileResult, ExecError> {
         match &node.kind {
+            NodeKind::ServiceControl { operation } => zup_transaction::reconcile_service_control(
+                &mut self.service_context()?,
+                operation,
+                None,
+            )
+            .map_err(|reason| ExecError::refused(&operation.native_name, reason)),
             NodeKind::Barrier => Ok(ReconcileResult::Applied),
 
             NodeKind::StageFile { .. } => Ok(ReconcileResult::NotApplied),
@@ -2031,6 +2060,7 @@ fn removed_state(
 
 fn receipt_backup_valid(receipt: &OperationReceipt) -> bool {
     match receipt {
+        OperationReceipt::ServiceControl(_) => true,
         OperationReceipt::CreateFile { .. }
         | OperationReceipt::Control
         | OperationReceipt::StageFile { .. }

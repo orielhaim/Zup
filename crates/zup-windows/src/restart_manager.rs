@@ -11,10 +11,51 @@ use crate::lowering::host_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockingProcess {
+    pub service_name: Option<String>,
+    pub execution_generation: String,
     pub pid: u32,
     pub name: String,
     pub app_type: i32,
     pub restartable: bool,
+}
+
+pub(crate) fn preflight_services(
+    files: &[&Path],
+    controls: &[zup_transaction::ServiceControlOperation],
+) -> Result<FilePreflight, String> {
+    use zup_transaction::NativeServiceManager;
+    let FilePreflight::Blocked {
+        mut processes,
+        reboot_reason,
+    } = preflight(files)?
+    else {
+        return Ok(FilePreflight::Ready);
+    };
+    for operation in controls
+        .iter()
+        .filter(|operation| operation.stage == zup_transaction::ServiceControlStage::Quiesce)
+    {
+        let observed = crate::service_control::ScmLifecycle.observe(operation)?;
+        if observed.configuration != operation.configuration
+            || observed.manager_generation != operation.manager_generation
+            || observed.execution_generation != operation.before_execution_generation
+            || !operation.before.matches(observed.runtime)
+        {
+            return Err("service changed during executable preflight".into());
+        }
+        processes.retain(|process| {
+            process.service_name.as_deref() != Some(operation.native_name.as_str())
+                || process.execution_generation != operation.before_execution_generation
+        });
+    }
+    Ok(if processes.is_empty() && reboot_reason == 0 {
+        FilePreflight::Ready
+    } else {
+        FilePreflight::Blocked {
+            processes,
+            reboot_reason,
+        }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +213,21 @@ fn blocked_or_ready(processes: Vec<RM_PROCESS_INFO>, reboot_reason: u32) -> File
                 name
             };
             BlockingProcess {
+                service_name: {
+                    let end = process
+                        .strServiceShortName
+                        .iter()
+                        .position(|c| *c == 0)
+                        .unwrap_or(process.strServiceShortName.len());
+                    (end != 0)
+                        .then(|| String::from_utf16_lossy(&process.strServiceShortName[..end]))
+                },
+                execution_generation: format!(
+                    "{}:{}:{}",
+                    process.Process.dwProcessId,
+                    process.Process.ProcessStartTime.dwHighDateTime,
+                    process.Process.ProcessStartTime.dwLowDateTime
+                ),
                 pid: process.Process.dwProcessId,
                 name,
                 app_type: process.ApplicationType.0,

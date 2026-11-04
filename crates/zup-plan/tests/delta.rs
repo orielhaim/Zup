@@ -75,6 +75,8 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
             privilege: Privilege::System,
         }],
         services: vec![zup_plan::DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: ServiceId::new("acme-agent").unwrap(),
             },
@@ -112,11 +114,27 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
 
 fn exact_service() -> ObservedServiceState {
     ObservedServiceState::Service {
+        readiness: Default::default(),
         display_name: "Acme Agent".into(),
         command: cmd(r"C:\PF\Acme\acme-agent.exe", &[]),
         start: ServiceStart::Automatic,
         runtime_state: None,
     }
+}
+
+#[rstest::rstest]
+#[case::startup(false)]
+#[case::readiness(true)]
+fn execution_cannot_change_the_bound_service_policy(#[case] readiness: bool) {
+    let desired = sample_target();
+    let mut execution = plan_execution(&desired, &snapshot_happy(), None).unwrap();
+    execution.validate_desired(Some(&desired)).unwrap();
+    if readiness {
+        execution.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    } else {
+        execution.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    }
+    assert!(execution.validate_desired(Some(&desired)).is_err());
 }
 
 fn exact_file_association() -> ObservedFileAssociation {
@@ -185,6 +203,7 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     let original_service = ServiceState::Registration {
+        readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
         start: ServiceStart::Manual,
@@ -195,6 +214,7 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
         start: ServiceStart::Manual,
@@ -246,6 +266,7 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
         start: ServiceStart::Manual,

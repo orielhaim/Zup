@@ -174,6 +174,20 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
                     return Err(error);
                 }
                 warn!(transaction_id = %record.transaction_id, error = %error, "execution failed");
+                let operation = match &error {
+                    TransactionError::Executor { operation, .. } => {
+                        Some(OperationId::new(operation))
+                    }
+                    _ => None,
+                };
+                let message: String = error.to_string().chars().take(4096).collect();
+                commit(&mut record, &self.store, |record| {
+                    record.failure = Some(crate::TransactionFailure {
+                        operation: operation.clone(),
+                        message: message.clone(),
+                    });
+                    Ok(())
+                })?;
                 let outcome = fail(&self.store, &mut record, executor)?;
                 Ok((record, outcome))
             }
@@ -286,6 +300,16 @@ where
             cross_barrier(store, record, executor, &node)?;
         } else if matches!(state, NodeState::Pending) {
             run_mutation(store, record, executor, &node)?;
+        } else if let NodeState::Applied { receipt } = state
+            && matches!(node.kind, NodeKind::ServiceControl { .. })
+        {
+            executor
+                .verify(&node, &receipt)
+                .map_err(|error| TransactionError::Executor {
+                    operation: node.id.to_string(),
+                    message: error.to_string(),
+                })?;
+            commit_node(record, store, &node.id, NodeState::Verified { receipt })?;
         }
     }
     Ok(())
@@ -381,6 +405,19 @@ where
         },
     )?;
     info!(operation = %node.id, "node applied");
+    if matches!(node.kind, NodeKind::ServiceControl { .. }) {
+        let Some(NodeState::Applied { receipt }) = record.nodes.get(&node.id) else {
+            unreachable!("applied receipt was just persisted");
+        };
+        let receipt = receipt.clone();
+        executor
+            .verify(node, &receipt)
+            .map_err(|error| TransactionError::Executor {
+                operation: node.id.to_string(),
+                message: error.to_string(),
+            })?;
+        commit_node(record, store, &node.id, NodeState::Verified { receipt })?;
+    }
     Ok(())
 }
 
@@ -532,7 +569,7 @@ where
     if record
         .nodes
         .values()
-        .any(|state| *state == NodeState::RollingBack)
+        .any(|state| matches!(state, NodeState::RollingBack { .. }))
     {
         warn!(transaction_id = %record.transaction_id, "rollback was interrupted");
         commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
@@ -561,7 +598,18 @@ where
             NodeState::Applied { receipt } | NodeState::Verified { receipt } => receipt,
             _ => continue,
         };
-        commit_node(record, store, op_id, NodeState::RollingBack)?;
+        if rollback_failed && matches!(node.kind, NodeKind::ServiceControl { .. }) {
+            commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+            return Ok(TransactionOutcome::RecoveryRequired);
+        }
+        commit_node(
+            record,
+            store,
+            op_id,
+            NodeState::RollingBack {
+                receipt: receipt.clone(),
+            },
+        )?;
 
         match executor.rollback(&node, &receipt) {
             Ok(()) => {
@@ -570,8 +618,19 @@ where
             }
             Err(error) => {
                 rollback_failed = true;
-                let _ = commit_node(record, store, op_id, NodeState::Failed);
+                let message: String = error.to_string().chars().take(4096).collect();
+                commit(record, store, |record| {
+                    record.rollback_failure = Some(crate::TransactionFailure {
+                        operation: Some(op_id.clone()),
+                        message: message.clone(),
+                    });
+                    Ok(())
+                })?;
                 warn!(operation = %op_id, error = %error, "rollback failed");
+                if matches!(node.kind, NodeKind::ServiceControl { .. }) {
+                    commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+                    return Ok(TransactionOutcome::RecoveryRequired);
+                }
             }
         }
     }

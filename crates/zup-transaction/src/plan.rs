@@ -18,7 +18,7 @@ use crate::input::{
 };
 use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 
-pub const TRANSACTION_PLAN_SCHEMA: u32 = 2;
+pub const TRANSACTION_PLAN_SCHEMA: u32 = 4;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum TransactionPlanError {
@@ -62,8 +62,10 @@ pub enum Phase {
     Stage,
     Preflight,
     CommitIntent,
+    ServiceQuiesce,
     FileMutation,
     Backend,
+    ServiceRestore,
     Verify,
     Commit,
 }
@@ -72,6 +74,9 @@ pub enum Phase {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum NodeKind {
     Barrier,
+    ServiceControl {
+        operation: Box<crate::ServiceControlOperation>,
+    },
     StageFile {
         key: ResourceKey,
     },
@@ -100,6 +105,7 @@ impl NodeKind {
         matches!(
             self,
             Self::FileMutation { .. }
+                | Self::ServiceControl { .. }
                 | Self::FileRemoval { .. }
                 | Self::BackendOperation { .. }
                 | Self::BackendRemoval { .. }
@@ -237,6 +243,37 @@ impl TransactionPlan {
                 reason: reason.into(),
             };
             match &node.kind {
+                NodeKind::ServiceControl { operation } => {
+                    operation.validate().map_err(|reason| invalid(&reason))?;
+                    let phase = match operation.stage {
+                        crate::ServiceControlStage::Quiesce => Phase::ServiceQuiesce,
+                        crate::ServiceControlStage::Restore => Phase::ServiceRestore,
+                    };
+                    let token = match operation.stage {
+                        crate::ServiceControlStage::Quiesce => "service_quiesce",
+                        crate::ServiceControlStage::Restore => "service_restore",
+                    };
+                    if node.id != OperationId::resource(token, &operation.key) {
+                        return Err(invalid("service control identity is not canonical"));
+                    }
+                    if node.phase != phase
+                        || node.meta
+                            != (NodeMeta {
+                                privilege: Some(operation.privilege),
+                                ..Default::default()
+                            })
+                    {
+                        return Err(invalid("service control metadata is inconsistent"));
+                    }
+                    if !matches!(&operation.configuration, zup_plan::ServiceState::Registration { command, .. } if command.executable.target() == &self.target)
+                        || !matches!(
+                            &operation.owned_configuration,
+                            zup_plan::ServiceState::Absent
+                        ) && !matches!(&operation.owned_configuration, zup_plan::ServiceState::Registration { command, .. } if command.executable.target() == &self.target)
+                    {
+                        return Err(invalid("service control target mismatch"));
+                    }
+                }
                 NodeKind::Barrier => {}
                 NodeKind::StageFile { .. } | NodeKind::FileMutation { .. } => {
                     if node.meta.source_relative.is_none()
@@ -294,6 +331,54 @@ impl TransactionPlan {
                         return Err(invalid("backend removal metadata is inconsistent"));
                     }
                 }
+            }
+        }
+        for node in &self.nodes {
+            let NodeKind::ServiceControl { operation } = &node.kind else {
+                continue;
+            };
+            let edge = |from: &OperationId, to: &OperationId| {
+                self.dependencies
+                    .iter()
+                    .any(|edge| &edge.from == from && &edge.to == to)
+            };
+            if !edge(&OperationId::new(OperationId::COMMIT_INTENT), &node.id)
+                || !edge(&node.id, &OperationId::new(OperationId::VERIFY))
+            {
+                return Err(TransactionPlanError::InvalidOrder);
+            }
+            for mutation in &self.nodes {
+                if !matches!(
+                    mutation.kind,
+                    NodeKind::FileMutation { .. }
+                        | NodeKind::FileRemoval { .. }
+                        | NodeKind::BackendOperation { .. }
+                        | NodeKind::BackendRemoval { .. }
+                ) {
+                    continue;
+                }
+                let ordered = match operation.stage {
+                    crate::ServiceControlStage::Quiesce => edge(&node.id, &mutation.id),
+                    crate::ServiceControlStage::Restore => edge(&mutation.id, &node.id),
+                };
+                if !ordered {
+                    return Err(TransactionPlanError::InvalidOrder);
+                }
+            }
+            for dependency in &operation.dependencies {
+                let dependency = self.nodes.iter().find(|other| matches!(&other.kind, NodeKind::ServiceControl { operation: other } if other.key == *dependency && other.stage == operation.stage)).ok_or(TransactionPlanError::InvalidOrder)?;
+                let ordered = match operation.stage {
+                    crate::ServiceControlStage::Quiesce => edge(&node.id, &dependency.id),
+                    crate::ServiceControlStage::Restore => edge(&dependency.id, &node.id),
+                };
+                if !ordered {
+                    return Err(TransactionPlanError::InvalidOrder);
+                }
+            }
+            if operation.stage == crate::ServiceControlStage::Restore
+                && let Some(stop) = self.nodes.iter().find(|other| matches!(&other.kind, NodeKind::ServiceControl { operation: other } if other.key == operation.key && other.stage == crate::ServiceControlStage::Quiesce))
+                && !edge(&stop.id, &node.id) {
+                return Err(TransactionPlanError::InvalidOrder);
             }
         }
         let mut graph = DiGraph::new();
@@ -609,6 +694,89 @@ pub fn compile_transaction(
         from: verify,
         to: commit,
     });
+
+    let mut control_ids = BTreeMap::new();
+    for operation in &input.service_controls {
+        operation
+            .validate()
+            .map_err(|reason| TransactionPlanError::InvalidNode {
+                id: format!("{:?}", operation.key),
+                reason,
+            })?;
+        let (token, phase) = match operation.stage {
+            crate::ServiceControlStage::Quiesce => ("service_quiesce", Phase::ServiceQuiesce),
+            crate::ServiceControlStage::Restore => ("service_restore", Phase::ServiceRestore),
+        };
+        let id = OperationId::resource(token, &operation.key);
+        if control_ids
+            .insert((operation.key.clone(), token), id.clone())
+            .is_some()
+        {
+            return Err(TransactionPlanError::DuplicateOperationId { id: id.to_string() });
+        }
+        push(
+            TransactionNode {
+                id: id.clone(),
+                phase,
+                kind: NodeKind::ServiceControl {
+                    operation: Box::new(operation.clone()),
+                },
+                declaration_order: 0,
+                meta: NodeMeta {
+                    privilege: Some(operation.privilege),
+                    ..Default::default()
+                },
+            },
+            &mut order,
+            &mut nodes,
+        );
+        edges.push(Dependency {
+            from: OperationId::new(OperationId::COMMIT_INTENT),
+            to: id.clone(),
+        });
+        edges.push(Dependency {
+            from: id.clone(),
+            to: OperationId::new(OperationId::VERIFY),
+        });
+        for mutation in file_ids
+            .iter()
+            .chain(file_removal_ids.iter())
+            .chain(backend_node_ids.iter())
+        {
+            let (from, to) = match operation.stage {
+                crate::ServiceControlStage::Quiesce => (id.clone(), mutation.clone()),
+                crate::ServiceControlStage::Restore => (mutation.clone(), id.clone()),
+            };
+            edges.push(Dependency { from, to });
+        }
+    }
+    for operation in &input.service_controls {
+        let token = match operation.stage {
+            crate::ServiceControlStage::Quiesce => "service_quiesce",
+            crate::ServiceControlStage::Restore => "service_restore",
+        };
+        let id = &control_ids[&(operation.key.clone(), token)];
+        if token == "service_restore"
+            && let Some(stop) = control_ids.get(&(operation.key.clone(), "service_quiesce"))
+        {
+            edges.push(Dependency {
+                from: stop.clone(),
+                to: id.clone(),
+            });
+        }
+        for dependency in &operation.dependencies {
+            let other = control_ids
+                .get(&(dependency.clone(), token))
+                .ok_or_else(|| TransactionPlanError::UnknownDependency {
+                    id: format!("{dependency:?}"),
+                })?;
+            let (from, to) = match operation.stage {
+                crate::ServiceControlStage::Quiesce => (id.clone(), other.clone()),
+                crate::ServiceControlStage::Restore => (other.clone(), id.clone()),
+            };
+            edges.push(Dependency { from, to });
+        }
+    }
 
     validate_graph(&nodes, &edges)?;
     let execution_order = topological_ids(&nodes, &edges, false)?;

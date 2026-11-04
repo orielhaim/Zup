@@ -76,7 +76,7 @@ fn fixture(name: &str) -> Vec<u8> {
             r#"(drop (memory.grow (i32.const 129))) (i32.store (i32.const 1024) (i32.const 1)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 8388609)) (i32.store (i32.const 1036) (i32.const 0)) (i32.store (i32.const 1040) (i32.const 0)) (i32.const 1024)"#
         }
         "all" => {
-            r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 6)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 3000)) (i32.store (i32.const 2056) (i32.const 4)) (i32.store (i32.const 2060) (i32.const 4000)) (i32.store (i32.const 2064) (i32.const 3)) (i32.store (i32.const 2100) (i32.const 1)) (i32.store (i32.const 2104) (i32.const 0)) (i32.store (i32.const 2108) (i32.const 3000)) (i32.store (i32.const 2112) (i32.const 4)) (i32.store (i32.const 2116) (i32.const 3064)) (i32.store (i32.const 2120) (i32.const 7)) (i32.store (i32.const 2124) (i32.const 0)) (i32.store (i32.const 2128) (i32.const 0)) (i32.store (i32.const 2132) (i32.const 0)) (i32.store (i32.const 2136) (i32.const 0)) (i32.store (i32.const 2152) (i32.const 2)) (i32.store (i32.const 2156) (i32.const 3000)) (i32.store (i32.const 2160) (i32.const 4)) (i32.store (i32.const 2204) (i32.const 3)) (i32.store (i32.const 2208) (i32.const 3000)) (i32.store (i32.const 2212) (i32.const 4)) (i32.store (i32.const 2216) (i32.const 3064)) (i32.store (i32.const 2220) (i32.const 7)) (i32.store (i32.const 2224) (i32.const 0)) (i32.store (i32.const 2228) (i32.const 0)) (i32.store (i32.const 2232) (i32.const 0)) (i32.store (i32.const 2236) (i32.const 3000)) (i32.store (i32.const 2240) (i32.const 4)) (i32.store (i32.const 2244) (i32.const 0)) (i32.store (i32.const 2248) (i32.const 0)) (i32.store (i32.const 2252) (i32.const 1)) (i32.store (i32.const 2256) (i32.const 4)) (i32.store (i32.const 2260) (i32.const 3000)) (i32.store (i32.const 2264) (i32.const 4)) (i32.store (i32.const 2268) (i32.const 3064)) (i32.store (i32.const 2272) (i32.const 7)) (i32.store (i32.const 2276) (i32.const 0)) (i32.store (i32.const 2280) (i32.const 0)) (i32.store (i32.const 2308) (i32.const 5)) (i32.store (i32.const 2312) (i32.const 3000)) (i32.store (i32.const 2316) (i32.const 4)) (i32.store (i32.const 2320) (i32.const 3064)) (i32.store (i32.const 2324) (i32.const 7)) (i32.store (i32.const 2328) (i32.const 0)) (i32.store (i32.const 2332) (i32.const 0)) (i32.store (i32.const 2336) (i32.const 0)) (i32.store (i32.const 2340) (i32.const 3000)) (i32.store (i32.const 2344) (i32.const 4)) (i32.const 1024)"#
+            r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 6)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 3000)) (i32.store (i32.const 2056) (i32.const 4)) (i32.store (i32.const 2060) (i32.const 4000)) (i32.store (i32.const 2064) (i32.const 3)) (i32.store (i32.const 2116) (i32.const 1)) (i32.store (i32.const 2120) (i32.const 0)) (i32.store (i32.const 2124) (i32.const 3000)) (i32.store (i32.const 2128) (i32.const 4)) (i32.store (i32.const 2132) (i32.const 3064)) (i32.store (i32.const 2136) (i32.const 7)) (i32.store (i32.const 2140) (i32.const 0)) (i32.store (i32.const 2144) (i32.const 0)) (i32.store (i32.const 2148) (i32.const 0)) (i32.store (i32.const 2152) (i32.const 0)) (i32.store (i32.const 2184) (i32.const 2)) (i32.store (i32.const 2188) (i32.const 3000)) (i32.store (i32.const 2192) (i32.const 4)) (i32.store (i32.const 2252) (i32.const 3)) (i32.store (i32.const 2256) (i32.const 3000)) (i32.store (i32.const 2260) (i32.const 4)) (i32.store (i32.const 2264) (i32.const 3064)) (i32.store (i32.const 2268) (i32.const 7)) (i32.store (i32.const 2272) (i32.const 0)) (i32.store (i32.const 2276) (i32.const 0)) (i32.store (i32.const 2280) (i32.const 0)) (i32.store (i32.const 2284) (i32.const 3000)) (i32.store (i32.const 2288) (i32.const 4)) (i32.store (i32.const 2292) (i32.const 0)) (i32.store (i32.const 2296) (i32.const 0)) (i32.store (i32.const 2300) (i32.const 1)) (i32.store (i32.const 2320) (i32.const 4)) (i32.store (i32.const 2324) (i32.const 3000)) (i32.store (i32.const 2328) (i32.const 4)) (i32.store (i32.const 2332) (i32.const 3064)) (i32.store (i32.const 2336) (i32.const 7)) (i32.store (i32.const 2340) (i32.const 0)) (i32.store (i32.const 2344) (i32.const 0)) (i32.store (i32.const 2388) (i32.const 5)) (i32.store (i32.const 2392) (i32.const 3000)) (i32.store (i32.const 2396) (i32.const 4)) (i32.store (i32.const 2400) (i32.const 3064)) (i32.store (i32.const 2404) (i32.const 7)) (i32.store (i32.const 2408) (i32.const 0)) (i32.store (i32.const 2412) (i32.const 0)) (i32.store (i32.const 2416) (i32.const 0)) (i32.store (i32.const 2420) (i32.const 3000)) (i32.store (i32.const 2424) (i32.const 4)) (i32.store8 (i32.const 2304) (i32.const 1)) (i32.store8 (i32.const 2305) (i32.const 0)) (i32.store (i32.const 2308) (i32.const 17)) (i32.store (i32.const 2312) (i32.const 23)) (i32.store8 (i32.const 2316) (i32.const 1)) (i32.const 1024)"#
         }
         "configure" => {
             r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 1)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 5000)) (i32.store (i32.const 2056) (i32.const 28)) (i32.store (i32.const 2060) (i32.const 6000)) (i32.store (i32.const 2064) (i32.const 103)) (i32.const 1024)"#
@@ -256,10 +256,24 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
         proposal.resources[2],
         PluginResource::PathEntry { .. }
     ));
-    assert!(matches!(
-        proposal.resources[3],
-        PluginResource::Service { .. }
-    ));
+    let PluginResource::Service {
+        lifecycle,
+        readiness,
+        ..
+    } = &proposal.resources[3]
+    else {
+        panic!("service resource required");
+    };
+    assert_eq!(*readiness, zup_core::ServiceReadiness::Notify);
+    assert_eq!(
+        *lifecycle,
+        zup_core::ServiceLifecycle {
+            install: zup_core::InitialServiceState::Running,
+            change: zup_core::ChangedServiceState::Preserve,
+            start_timeout_seconds: 17,
+            stop_timeout_seconds: 23,
+        }
+    );
     assert!(matches!(
         proposal.resources[4],
         PluginResource::Protocol { .. }

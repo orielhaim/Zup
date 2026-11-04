@@ -175,6 +175,7 @@ impl OperationHost for LinuxOperationHost {
                     execution,
                     target,
                     crate::input::ServiceCompilation {
+                        ledger: _ledger,
                         roots: &machine.roots,
                         systemd: &machine.systemd,
                         manager: &mut manager,

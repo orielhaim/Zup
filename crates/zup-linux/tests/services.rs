@@ -26,6 +26,83 @@ const APP_ID: &str = "com.example.tool";
 const SERVICE_ID: &str = "tool";
 const PAYLOAD_BYTES: &[u8] = b"fake-elf-bytes";
 
+#[test]
+fn explicit_start_and_upgrade_preserve_runtime_state() {
+    let mut fixture = Fixture::new();
+    let mut plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--v1".into()]);
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    let unit = fixture.unit(&plan);
+    fixture.seed(&unit);
+    fixture.commit(&plan, LifecycleAction::Install);
+    assert_eq!(
+        fixture.manager.runtime(&unit).unwrap().state,
+        zup_plan::ServiceRuntimeState::Running
+    );
+    let first = fixture.manager.runtime(&unit).unwrap().execution_generation;
+    let upgraded = fixture.plan("2.0.0", ServiceStart::Automatic, vec!["--v2".into()]);
+    fixture.commit(&upgraded, LifecycleAction::Upgrade);
+    let runtime = fixture.manager.runtime(&unit).unwrap();
+    assert_eq!(runtime.state, zup_plan::ServiceRuntimeState::Running);
+    assert_ne!(runtime.execution_generation, first);
+    fixture
+        .manager
+        .control(
+            &unit,
+            zup_transaction::ServiceTerminalState::Stopped,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+    let stopped_upgrade = fixture.plan("3.0.0", ServiceStart::Automatic, vec!["--v3".into()]);
+    fixture.commit(&stopped_upgrade, LifecycleAction::Upgrade);
+    assert_eq!(
+        fixture.manager.runtime(&unit).unwrap().state,
+        zup_plan::ServiceRuntimeState::Stopped
+    );
+}
+
+#[test]
+fn unchanged_repair_does_not_restart_a_running_service() {
+    let mut fixture = Fixture::new();
+    let mut plan = fixture.plan("1.0.0", ServiceStart::Manual, Vec::new());
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    let unit = fixture.unit(&plan);
+    fixture.seed(&unit);
+    fixture.commit(&plan, LifecycleAction::Install);
+    let before = fixture.manager.runtime(&unit).unwrap();
+    fixture.commit(&plan, LifecycleAction::Repair { force: false });
+    assert_eq!(fixture.manager.runtime(&unit).unwrap(), before);
+    fixture.commit(&plan, LifecycleAction::Uninstall);
+    assert_eq!(
+        fixture.manager.runtime(&unit).unwrap().state,
+        zup_plan::ServiceRuntimeState::Stopped
+    );
+    assert!(fixture.source(&unit).is_none());
+}
+
+#[test]
+fn lost_stop_reply_requires_recovery_before_payload_changes() {
+    let mut fixture = Fixture::new();
+    let mut plan = fixture.plan("1.0.0", ServiceStart::Manual, vec!["--old".into()]);
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    let unit = fixture.unit(&plan);
+    fixture.seed(&unit);
+    fixture.commit(&plan, LifecycleAction::Install);
+    let before = fixture.source(&unit).unwrap();
+    fixture
+        .manager
+        .borrow_mut()
+        .lose_reply
+        .insert("control".into(), "lost".into());
+    let upgraded = fixture.plan("2.0.0", ServiceStart::Manual, vec!["--new".into()]);
+    let (outcome, _) = fixture.run(&upgraded, LifecycleAction::Upgrade).unwrap();
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
+    assert_eq!(fixture.source(&unit).unwrap(), before);
+    assert_eq!(
+        fixture.manager.runtime(&unit).unwrap().state,
+        zup_plan::ServiceRuntimeState::Stopped
+    );
+}
+
 fn target() -> Target {
     Target::parse("linux-x64").expect("a target")
 }
@@ -98,6 +175,8 @@ impl Fixture {
         let destination = binary.clone();
         let (size, sha256) = zup_core::hash_reader(PAYLOAD_BYTES).expect("bytes hash");
         let service = zup_plan::DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new(SERVICE_ID).expect("an id"),
             },
@@ -201,17 +280,20 @@ impl Fixture {
                                         display_name,
                                         command,
                                         start,
+                                        readiness,
                                         ..
                                     },
                                     zup_plan::ServiceState::Registration {
                                         display_name: wanted_display,
                                         command: wanted_command,
                                         start: wanted_start,
+                                        readiness: wanted_readiness,
                                     },
                                 ) => {
                                     display_name == wanted_display
                                         && command == wanted_command
                                         && start == wanted_start
+                                        && readiness == wanted_readiness
                                 }
                                 _ => false,
                             }
@@ -256,6 +338,7 @@ impl Fixture {
             &execution,
             (!execution.uninstall).then_some(plan),
             ServiceCompilation {
+                ledger: ledger.as_ref(),
                 roots: &self.roots,
                 systemd: &self.systemd,
                 manager: &mut manager,
@@ -344,6 +427,7 @@ impl Fixture {
             &execution,
             (!execution.uninstall).then_some(plan),
             ServiceCompilation {
+                ledger: None,
                 roots: &self.roots,
                 systemd: &self.systemd,
                 manager: &mut manager,
@@ -391,6 +475,7 @@ impl Fixture {
             &execution,
             (!execution.uninstall).then_some(plan),
             ServiceCompilation {
+                ledger: Some(&ledger),
                 roots: &self.roots,
                 systemd: &self.systemd,
                 manager: &mut manager,
@@ -907,6 +992,7 @@ fn tampered_unit_bytes_refuse_at_apply() {
         &execution,
         Some(&plan),
         zup_linux::ServiceCompilation {
+            ledger: None,
             roots: &fixture.roots,
             systemd: &fixture.systemd,
             manager: &mut manager,

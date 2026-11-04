@@ -137,8 +137,17 @@ pub fn render_unit(
     let description = render_description(display_name).map_err(refused)?;
     let executable = host_executable(&service.command).map_err(refused)?;
     let exec_start = render_exec_start(&executable, &service.command.arguments).map_err(refused)?;
+    let service_type = match service.readiness {
+        zup_core::ServiceReadiness::Manager => SERVICE_TYPE,
+        zup_core::ServiceReadiness::Notify => "notify",
+    };
+    let notify = if service.readiness == zup_core::ServiceReadiness::Notify {
+        "NotifyAccess=main\n"
+    } else {
+        ""
+    };
     let text = format!(
-        "[Unit]\nDescription={description}\n\n[Service]\nType={SERVICE_TYPE}\nExecStart={exec_start}\n\n[Install]\nWantedBy={WANTED_BY}\n"
+        "[Unit]\nDescription={description}\n\n[Service]\nType={service_type}\n{notify}ExecStart={exec_start}\nTimeoutStartSec=90\nTimeoutStopSec=90\n\n[Install]\nWantedBy={WANTED_BY}\n"
     );
     Ok(text.into_bytes())
 }
@@ -289,10 +298,13 @@ pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
 
 // Parsed back by the Linux runtime and by the render round-trip tests.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn parse_unit(bytes: &[u8]) -> Result<(String, Vec<String>), String> {
+pub fn parse_unit(
+    bytes: &[u8],
+) -> Result<(String, Vec<String>, zup_core::ServiceReadiness), String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "a unit source is UTF-8".to_owned())?;
     let mut description: Option<String> = None;
     let mut exec_start: Option<String> = None;
+    let mut readiness = None;
     let mut section = "";
     for line in text.lines() {
         let line = line.trim();
@@ -315,6 +327,16 @@ pub fn parse_unit(bytes: &[u8]) -> Result<(String, Vec<String>), String> {
             continue;
         };
         match (section, key.trim()) {
+            ("Service", "Type") => {
+                if readiness.is_some() {
+                    return Err("duplicate service type".into());
+                }
+                readiness = Some(match value.trim() {
+                    "exec" => zup_core::ServiceReadiness::Manager,
+                    "notify" => zup_core::ServiceReadiness::Notify,
+                    _ => return Err("unsupported service readiness type".into()),
+                });
+            }
             ("Unit", "Description") => {
                 description = Some(value.trim().replace("%%", "%"));
             }
@@ -326,7 +348,11 @@ pub fn parse_unit(bytes: &[u8]) -> Result<(String, Vec<String>), String> {
     }
     let description = description.ok_or("a unit source names a Description")?;
     let exec_start = exec_start.ok_or("a unit source names an ExecStart")?;
-    Ok((description, parse_exec_start(&exec_start)?))
+    Ok((
+        description,
+        parse_exec_start(&exec_start)?,
+        readiness.ok_or("service type is required")?,
+    ))
 }
 
 #[cfg(test)]
@@ -341,6 +367,8 @@ mod tests {
     ) -> DesiredService<zup_plan::TargetPath> {
         let target = zup_core::Target::parse("linux-x64").unwrap();
         DesiredService {
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: zup_core::ResourceKey::Service {
                 id: ServiceId::new(id).unwrap(),
             },
@@ -458,7 +486,7 @@ mod tests {
             !exec_line.contains("sh -c"),
             "direct execution, never shell"
         );
-        let (_description, argv) = parse_unit(&desired.bytes).unwrap();
+        let (_description, argv, _) = parse_unit(&desired.bytes).unwrap();
         assert_eq!(argv[0], "/opt/acme/tool");
         assert_eq!(
             argv[1..],

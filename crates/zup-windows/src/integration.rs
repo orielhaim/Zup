@@ -693,9 +693,11 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     display_name,
                     command,
                     start,
+                    readiness,
                     ..
                 }) => Ok(compare_removal(
                     &ServiceState::Registration {
+                        readiness,
                         display_name,
                         command,
                         start,

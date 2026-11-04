@@ -12,7 +12,10 @@ mod plan;
 pub mod prelude;
 
 pub use api::{Context, Plugin, Scope};
-pub use plan::{Error, FileAssociation, Launcher, Path, Plan, Protocol, Service};
+pub use plan::{
+    ChangedServiceState, Error, FileAssociation, InitialServiceState, Launcher, Path, Plan,
+    Protocol, Service, ServiceLifecycle, ServiceReadiness, ServiceStart,
+};
 
 pub use api::__answer;
 

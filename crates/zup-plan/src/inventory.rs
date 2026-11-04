@@ -9,7 +9,7 @@ use zup_core::{
     SelectedScope, ServiceStart, Sha256Digest, Target,
 };
 
-pub const INSTALL_LEDGER_SCHEMA: u32 = 3;
+pub const INSTALL_LEDGER_SCHEMA: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallLedger {
@@ -258,6 +258,7 @@ pub enum ServiceState {
         display_name: String,
         command: CommandSpec,
         start: ServiceStart,
+        readiness: zup_core::ServiceReadiness,
     },
 }
 

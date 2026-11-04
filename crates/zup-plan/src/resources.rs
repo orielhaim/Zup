@@ -69,6 +69,8 @@ pub struct DesiredService<P = Template> {
     pub display_name: Option<NonEmptyString>,
     pub command: crate::CommandSpec<P>,
     pub start: ServiceStart,
+    pub lifecycle: zup_core::ServiceLifecycle,
+    pub readiness: zup_core::ServiceReadiness,
     pub privilege: Privilege,
 }
 

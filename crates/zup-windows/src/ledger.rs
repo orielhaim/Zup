@@ -148,6 +148,14 @@ impl InstallLedgerStore {
                 .map_err(|error| LedgerError::Ownership(error.to_string()))?;
         for node in &plan.nodes {
             match &node.kind {
+                NodeKind::ServiceControl { operation } => {
+                    crate::transaction_payload::validate_service_control(
+                        plan,
+                        operation,
+                        ledger.as_ref(),
+                    )
+                    .map_err(LedgerError::Ownership)?
+                }
                 NodeKind::FileMutation { key, .. } => {
                     if !valid_file_key(key, app_id, app_version, &plan.target) {
                         return Err(LedgerError::Ownership(node.id.to_string()));

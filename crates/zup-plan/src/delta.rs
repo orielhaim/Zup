@@ -566,6 +566,7 @@ fn plan_services(
                     display_name,
                     command,
                     start,
+                    readiness,
                     ..
                 } => {
                     let desired_display = desired
@@ -575,7 +576,8 @@ fn plan_services(
                         .unwrap_or_else(|| desired.name.to_string());
                     let matches = *display_name == desired_display
                         && commands_match(command, &desired.command)
-                        && *start == desired.start;
+                        && *start == desired.start
+                        && *readiness == desired.readiness;
                     if matches {
                         (IntegrationChangeKind::NoOp, None)
                     } else {
@@ -596,6 +598,8 @@ fn plan_services(
         };
 
         out.push(ServiceOperation {
+            lifecycle: desired.lifecycle,
+            readiness: desired.readiness,
             key: desired.key.clone(),
             kind,
             id: desired.id.to_string(),

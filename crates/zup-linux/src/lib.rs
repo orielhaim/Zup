@@ -37,6 +37,8 @@ mod resolve;
 #[cfg(target_os = "linux")]
 mod run;
 #[cfg(target_os = "linux")]
+mod service_control;
+#[cfg(target_os = "linux")]
 mod service_exec;
 #[cfg(target_os = "linux")]
 mod service_ops;

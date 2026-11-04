@@ -45,6 +45,23 @@ interface planner {
     disabled,
   }
 
+  enum initial-service-state {
+    stopped,
+    running,
+  }
+
+  enum changed-service-state {
+    preserve,
+    stopped,
+  }
+
+  record service-lifecycle {
+    install: initial-service-state,
+    change: changed-service-state,
+    start-timeout-seconds: u32,
+    stop-timeout-seconds: u32,
+  }
+
   record service {
     id: string,
     name: string,
@@ -52,6 +69,13 @@ interface planner {
     binary: string,
     arguments: list<string>,
     start: service-start,
+    lifecycle: service-lifecycle,
+    readiness: service-readiness,
+  }
+
+  enum service-readiness {
+    manager,
+    notify,
   }
 
   record protocol {
