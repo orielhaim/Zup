@@ -35,6 +35,9 @@ path = "junit.xml"
 [profile.systemd.junit]
 path = "junit.xml"
 
+[profile.scm.junit]
+path = "junit.xml"
+
 # Run the staged-toolchain cases once on each x64 native host.
 [profile.integration]
 test-threads = 8

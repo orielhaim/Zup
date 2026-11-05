@@ -54,10 +54,9 @@ source = "configure.wasm"
     )
     .unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();
-    fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/plugins/configure/dist/configure.wasm"),
+    fs::write(
         root.path().join("configure.wasm"),
+        zup_plugin_abi::test_fixture::component(),
     )
     .unwrap();
     let plan = zup()

@@ -311,7 +311,7 @@ fn a_build_compiles_and_embeds_a_declared_plugin() {
     fs::write(project.path().join("dist/app.exe"), b"payload").expect("a payload file");
     fs::write(
         project.path().join("plugins/helper.wasm"),
-        include_bytes!("../../../examples/plugins/configure/dist/configure.wasm"),
+        zup_plugin_abi::test_fixture::component(),
     )
     .expect("a plugin component");
     fs::write(

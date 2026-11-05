@@ -344,7 +344,7 @@ fn a_machine_scope_checks_before_build() {
 #[test]
 fn a_machine_service_project_checks_and_builds() {
     let project = Project::with_manifest(&format!(
-        "{}\n[[services]]\nid = \"tool\"\nname = \"Tool\"\nbinary = \"${{install}}/tool\"\nstart = \"automatic\"\n",
+        "{}\n[[services]]\nexecution = {{ type = \"systemd_user\", user = \"root\" }}\nid = \"tool\"\nname = \"Tool\"\nbinary = \"${{install}}/tool\"\nstart = \"automatic\"\n",
         MANIFEST
             .replace("scope = \"user\"", "scope = \"machine\"")
             .replace(
@@ -374,7 +374,7 @@ fn a_machine_service_project_checks_and_builds() {
 #[test]
 fn an_unsupported_native_resource_is_refused_before_build() {
     let project = Project::with_manifest(&format!(
-        "{MANIFEST}\n[[services]]\nid = \"tool\"\nname = \"Tool\"\nbinary = \"${{install}}/tool\"\nstart = \"automatic\"\n"
+        "{MANIFEST}\n[[services]]\nexecution = {{ type = \"systemd_user\", user = \"root\" }}\nid = \"tool\"\nname = \"Tool\"\nbinary = \"${{install}}/tool\"\nstart = \"automatic\"\n"
     ));
     let result = project.zup("check", &["--target", "linux"]);
     assert!(!result.status.success(), "a service project was accepted");

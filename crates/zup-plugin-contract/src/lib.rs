@@ -9,7 +9,8 @@ mod validation;
 pub use bindings::exports::zup::plugin::planner::{
     ChangedServiceState, Context, FileAssociation, GeneratedFile, InitialServiceState,
     InstallScope, InstallationPlan, Launcher, LauncherLocation, PathEntry, PluginError, Protocol,
-    ResourceItem, Service, ServiceLifecycle, ServiceReadiness, ServiceStart,
+    ResourceItem, Service, ServiceExecution, ServiceLifecycle, ServiceReadiness, ServiceStart,
+    SystemdUser, WindowsServiceAccount,
 };
 pub use config::{EngineError, PluginEngine};
 pub use fingerprint::{EngineFingerprint, engine_fingerprint};

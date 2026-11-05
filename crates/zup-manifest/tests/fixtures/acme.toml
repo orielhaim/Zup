@@ -55,6 +55,7 @@ value = "${install}/bin"
 component = "cli"
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "acme-agent"
 name = "acme-agent"
 display_name = "Acme Agent"

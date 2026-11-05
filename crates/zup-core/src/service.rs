@@ -1,5 +1,59 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsServiceAccount {
+    LocalService,
+    NetworkService,
+    LocalSystem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServiceExecution {
+    Windows {
+        account: WindowsServiceAccount,
+    },
+    SystemdDynamicUser,
+    SystemdUser {
+        user: String,
+        #[serde(default)]
+        group: Option<String>,
+    },
+}
+
+impl ServiceExecution {
+    pub fn validate_for(&self, target: crate::Target) -> Result<(), &'static str> {
+        match (self, target.operating_system()) {
+            (Self::Windows { .. }, crate::TargetOperatingSystem::Windows)
+            | (Self::SystemdDynamicUser, crate::TargetOperatingSystem::Linux) => Ok(()),
+            (Self::SystemdUser { user, group }, crate::TargetOperatingSystem::Linux) => {
+                let valid = |name: &str| {
+                    !name.is_empty()
+                        && name.len() <= 31
+                        && name
+                            .bytes()
+                            .next()
+                            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                        && name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                };
+                if valid(user) && group.as_deref().is_none_or(valid) {
+                    Ok(())
+                } else {
+                    Err(
+                        "service user and group must be plain system account names of at most 31 bytes",
+                    )
+                }
+            }
+            _ => Err("service execution identity does not match the target service manager"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -80,5 +134,51 @@ impl ServiceLifecycle {
             return Err("disabled services cannot request startup after installation");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[rstest::rstest]
+    #[case::root("root", true)]
+    #[case::named("app-worker", true)]
+    #[case::numeric("1000", false)]
+    #[case::specifier("%i", false)]
+    #[case::directive("app\nUser=root", false)]
+    #[case::empty("", false)]
+    fn system_accounts_are_literal_names(#[case] user: &str, #[case] valid: bool) {
+        let target = crate::Target::parse("linux-x64").unwrap();
+        for execution in [
+            ServiceExecution::SystemdUser {
+                user: user.into(),
+                group: None,
+            },
+            ServiceExecution::SystemdUser {
+                user: "worker".into(),
+                group: Some(user.into()),
+            },
+        ] {
+            assert_eq!(execution.validate_for(target).is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn execution_identity_cannot_cross_platforms() {
+        let linux = crate::Target::parse("linux-arm64-musl").unwrap();
+        let windows = crate::Target::parse("windows-x64").unwrap();
+        assert!(
+            ServiceExecution::SystemdDynamicUser
+                .validate_for(windows)
+                .is_err()
+        );
+        assert!(
+            ServiceExecution::Windows {
+                account: WindowsServiceAccount::LocalSystem
+            }
+            .validate_for(linux)
+            .is_err()
+        );
     }
 }

@@ -24,6 +24,8 @@ zup-core.workspace = true
 zup-preset-protocol.workspace = true
 zup-publish-github.workspace = true
 zup-toolchain.workspace = true
+zup-plugin-abi = { workspace = true, features = ["test-fixture"] }
+zup-plugin-build.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

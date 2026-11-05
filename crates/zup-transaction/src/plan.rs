@@ -18,7 +18,7 @@ use crate::input::{
 };
 use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 
-pub const TRANSACTION_PLAN_SCHEMA: u32 = 4;
+pub const TRANSACTION_PLAN_SCHEMA: u32 = 1;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum TransactionPlanError {
@@ -274,7 +274,19 @@ impl TransactionPlan {
                         return Err(invalid("service control target mismatch"));
                     }
                 }
-                NodeKind::Barrier => {}
+                NodeKind::Barrier => {
+                    let expected = match node.id.as_str() {
+                        OperationId::BEGIN => Phase::Begin,
+                        OperationId::PREFLIGHT => Phase::Preflight,
+                        OperationId::COMMIT_INTENT => Phase::CommitIntent,
+                        OperationId::VERIFY => Phase::Verify,
+                        OperationId::COMMIT => Phase::Commit,
+                        _ => return Err(invalid("unknown transaction barrier")),
+                    };
+                    if node.phase != expected || node.meta != NodeMeta::default() {
+                        return Err(invalid("transaction barrier metadata is inconsistent"));
+                    }
+                }
                 NodeKind::StageFile { .. } | NodeKind::FileMutation { .. } => {
                     if node.meta.source_relative.is_none()
                         || node.meta.file_precondition.is_none()
@@ -284,6 +296,23 @@ impl TransactionPlan {
                         || node.meta.privilege.is_none()
                     {
                         return Err(invalid("file metadata is incomplete"));
+                    }
+                    match &node.kind {
+                        NodeKind::StageFile { key } => {
+                            if node.phase != Phase::Stage || node.id != OperationId::stage_file(key) {
+                                return Err(invalid("staging identity is not canonical"));
+                            }
+                        }
+                        NodeKind::FileMutation { key, delta } => {
+                            if node.phase != Phase::FileMutation
+                                || !matches!(delta, FileOperationKind::Create | FileOperationKind::Replace | FileOperationKind::RestoreOwned | FileOperationKind::RepairOwned)
+                                || node.id != OperationId::resource(file_delta_token(*delta), key)
+                                || !self.nodes.iter().any(|stage| matches!(&stage.kind, NodeKind::StageFile { key: staged } if staged == key) && stage.meta == node.meta)
+                            {
+                                return Err(invalid("file mutation has no matching staged intent"));
+                            }
+                        }
+                        _ => unreachable!(),
                     }
                 }
                 NodeKind::FileRemoval { key } => {
@@ -333,14 +362,53 @@ impl TransactionPlan {
                 }
             }
         }
+        let barrier = |id: &str| {
+            self.nodes
+                .iter()
+                .find(|node| node.id.as_str() == id && node.kind.is_barrier())
+                .map(|node| &node.id)
+                .ok_or(TransactionPlanError::InvalidOrder)
+        };
+        let begin = barrier(OperationId::BEGIN)?;
+        let preflight = barrier(OperationId::PREFLIGHT)?;
+        let intent = barrier(OperationId::COMMIT_INTENT)?;
+        let verify = barrier(OperationId::VERIFY)?;
+        let commit = barrier(OperationId::COMMIT)?;
+        let edge = |from: &OperationId, to: &OperationId| {
+            self.dependencies
+                .iter()
+                .any(|edge| &edge.from == from && &edge.to == to)
+        };
+        if !edge(preflight, intent) || !edge(verify, commit) {
+            return Err(TransactionPlanError::InvalidOrder);
+        }
+        let stages: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind, NodeKind::StageFile { .. }))
+            .collect();
+        if stages.is_empty() && !edge(begin, preflight) {
+            return Err(TransactionPlanError::InvalidOrder);
+        }
+        for stage in stages {
+            if stage.phase != Phase::Stage || !edge(begin, &stage.id) || !edge(&stage.id, preflight)
+            {
+                return Err(TransactionPlanError::InvalidOrder);
+            }
+        }
         for node in &self.nodes {
+            if matches!(
+                node.kind,
+                NodeKind::FileMutation { .. }
+                    | NodeKind::FileRemoval { .. }
+                    | NodeKind::BackendOperation { .. }
+                    | NodeKind::BackendRemoval { .. }
+            ) && (!edge(intent, &node.id) || !edge(&node.id, verify))
+            {
+                return Err(TransactionPlanError::InvalidOrder);
+            }
             let NodeKind::ServiceControl { operation } = &node.kind else {
                 continue;
-            };
-            let edge = |from: &OperationId, to: &OperationId| {
-                self.dependencies
-                    .iter()
-                    .any(|edge| &edge.from == from && &edge.to == to)
             };
             if !edge(&OperationId::new(OperationId::COMMIT_INTENT), &node.id)
                 || !edge(&node.id, &OperationId::new(OperationId::VERIFY))

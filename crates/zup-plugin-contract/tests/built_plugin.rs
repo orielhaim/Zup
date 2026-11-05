@@ -1,12 +1,7 @@
 use zup_plugin_contract::{Context, InstallScope, PluginEngine};
 
 fn component() -> Vec<u8> {
-    std::fs::read(env!("ZUP_TEST_PLUGIN")).unwrap_or_else(|error| {
-        panic!(
-            "no plugin component at {}: {error}",
-            env!("ZUP_TEST_PLUGIN"),
-        )
-    })
+    zup_plugin_abi::test_fixture::component()
 }
 
 #[test]
@@ -33,5 +28,53 @@ fn a_built_plugin_answers_the_host() {
     assert!(
         !plan.resources.is_empty(),
         "the plugin declares what it installs"
+    );
+}
+
+#[rstest::rstest]
+#[case::windows("windows-x64", false)]
+#[case::linux("linux-x64", true)]
+fn sdk_service_policies_survive_component_linking_and_execution(
+    #[case] target: &str,
+    #[case] notify: bool,
+) {
+    use zup_plugin_contract::{
+        ChangedServiceState, InitialServiceState, ResourceItem, ServiceReadiness,
+    };
+    let engine = PluginEngine::host().unwrap();
+    let validated = engine.compile_component(&component()).unwrap();
+    let plan = validated
+        .plan(&Context {
+            plugin_id: "configure".into(),
+            app_id: "com.example.worker".into(),
+            app_name: "Worker".into(),
+            app_version: "1.0.0".into(),
+            install_directory: "${location.programs}/Worker".into(),
+            install_scope: InstallScope::Machine,
+            target: target.into(),
+            selected_components: vec!["service".into()],
+        })
+        .unwrap()
+        .unwrap();
+    let service = plan
+        .resources
+        .iter()
+        .find_map(|resource| match resource {
+            ResourceItem::Service(service) => Some(service),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(service.lifecycle.install, InitialServiceState::Running);
+    assert_eq!(service.lifecycle.change, ChangedServiceState::Preserve);
+    assert_eq!(service.lifecycle.start_timeout_seconds, 17);
+    assert_eq!(service.lifecycle.stop_timeout_seconds, 23);
+    assert_eq!(service.requires_files, ["${install}/configure.txt"]);
+    assert_eq!(
+        service.readiness,
+        if notify {
+            ServiceReadiness::Notify
+        } else {
+            ServiceReadiness::Manager
+        }
     );
 }

@@ -7,7 +7,10 @@ mod ids;
 mod installer;
 mod model;
 mod service;
-pub use service::{ChangedServiceState, InitialServiceState, ServiceLifecycle, ServiceReadiness};
+pub use service::{
+    ChangedServiceState, InitialServiceState, ServiceExecution, ServiceLifecycle, ServiceReadiness,
+    WindowsServiceAccount,
+};
 mod path;
 mod prerequisite;
 mod release;

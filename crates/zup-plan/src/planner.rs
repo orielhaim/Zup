@@ -267,8 +267,14 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
             continue;
         }
         services.push(DesiredService {
+            execution: service.execution.clone(),
             lifecycle: service.lifecycle,
             readiness: service.readiness,
+            requires_files: service
+                .requires_files
+                .iter()
+                .map(|path| resolve_template(path, &installer.app, &install_directory))
+                .collect::<Result<_, _>>()?,
             key: ResourceKey::Service {
                 id: service.id.clone(),
             },

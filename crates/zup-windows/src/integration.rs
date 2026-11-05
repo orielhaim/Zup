@@ -690,6 +690,7 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     Ok(compare_removal(&ServiceState::Absent, previous, installed))
                 }
                 Ok(zup_plan::ObservedServiceState::Service {
+                    execution,
                     display_name,
                     command,
                     start,
@@ -697,6 +698,7 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     ..
                 }) => Ok(compare_removal(
                     &ServiceState::Registration {
+                        execution,
                         readiness,
                         display_name,
                         command,

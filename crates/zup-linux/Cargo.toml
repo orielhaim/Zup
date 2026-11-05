@@ -8,8 +8,8 @@ description = "Linux backend for zup"
 publish = false
 
 [features]
-online = ["dep:zup-update", "dep:zup-acquire", "dep:zstd", "dep:zup-presentation", "dep:tempfile"]
-test-support = ["dep:tempfile", "dep:zup-preset-ipc", "zup-preset-ipc/test-support"]
+online = ["dep:zup-update", "dep:zup-acquire", "dep:zstd", "dep:zup-presentation"]
+test-support = ["dep:zup-preset-ipc", "zup-preset-ipc/test-support"]
 
 [[bin]]
 name = "test-gui-install-preset"
@@ -31,7 +31,7 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 typed-path.workspace = true

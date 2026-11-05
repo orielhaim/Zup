@@ -56,6 +56,9 @@ jobs:
           mold-version: 3.0.0
           make-default: "true"
 
+      - name: Test CI diagnostics reporter
+        run: python -m unittest discover -s scripts/ci -p "test_*.py"
+
       - name: Formatting
         run: cargo fmt --all --check
 
@@ -134,6 +137,11 @@ jobs:
           command -v update-desktop-database
           command -v desktop-file-validate
           mold --version
+
+      - name: Build version-matched plugin test fixtures
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo xtask fixtures build
 
       - name: Windows tests
         if: runner.os == 'Windows'

@@ -316,7 +316,40 @@ fn validate_service_apply(
         return Err(ExecError::Ownership(node.id.to_string()));
     }
     match ledger.and_then(|ledger| ledger.resources.get(&service.key)) {
-        None | Some(OwnedResource::Service { .. }) => Ok(()),
+        None if service.kind == zup_plan::IntegrationChangeKind::Create
+            && service.previous == ObservedServiceState::Absent =>
+        {
+            Ok(())
+        }
+        Some(OwnedResource::Service {
+            name,
+            privilege,
+            installed,
+            ..
+        }) if name == &service.name && privilege == &service.privilege => {
+            let desired = ServiceState::Registration {
+                execution: service.execution.clone(),
+                readiness: service.readiness,
+                display_name: service.display_name.clone(),
+                command: service.command.clone(),
+                start: service.start,
+            };
+            let valid = match service.kind {
+                zup_plan::IntegrationChangeKind::UpdateOwned => {
+                    service.previous.configuration().as_ref() == Some(installed)
+                }
+                zup_plan::IntegrationChangeKind::RestoreOwned => {
+                    service.previous == ObservedServiceState::Absent && &desired == installed
+                }
+                zup_plan::IntegrationChangeKind::RepairOwned => {
+                    service.previous != ObservedServiceState::Absent && &desired == installed
+                }
+                _ => false,
+            };
+            valid
+                .then_some(())
+                .ok_or_else(|| ExecError::Ownership(node.id.to_string()))
+        }
         _ => Err(ExecError::Ownership(node.id.to_string())),
     }
 }
@@ -376,12 +409,14 @@ fn publish_service_node(
         },
         ObservedServiceState::Absent => ServiceState::Absent,
         ObservedServiceState::Service {
+            execution,
             display_name,
             command,
             start,
             readiness,
             ..
         } => ServiceState::Registration {
+            execution: execution.clone(),
             display_name: display_name.clone(),
             command: command.clone(),
             start: *start,
@@ -389,6 +424,7 @@ fn publish_service_node(
         },
     };
     let installed = ServiceState::Registration {
+        execution: service.execution.clone(),
         display_name: service.display_name.clone(),
         command: service.command.clone(),
         start: service.start,
@@ -403,6 +439,7 @@ fn publish_service_node(
     ledger.resources.insert(
         key,
         OwnedResource::Service {
+            requires_files: service.requires_files.clone(),
             name: service.name.clone(),
             privilege: service.privilege,
             previous: old_previous.unwrap_or(previous),

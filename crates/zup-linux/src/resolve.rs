@@ -53,15 +53,26 @@ pub fn resolve_target(
                     reason: error.to_string(),
                 })?;
 
-            let synthetic = zup_plan::DesiredService {
+            let display = service
+                .display_name
+                .as_ref()
+                .unwrap_or(&service.name)
+                .clone();
+            let resolved = zup_plan::DesiredService {
+                execution: service.execution.clone(),
                 lifecycle: service.lifecycle,
                 readiness: service.readiness,
+                requires_files: service
+                    .requires_files
+                    .iter()
+                    .map(|path| resolve(path, "service required file"))
+                    .collect::<Result<_, _>>()?,
                 key: ResourceKey::Service {
                     id: service.id.clone(),
                 },
                 id: service.id.clone(),
-                name: service.name.clone(),
-                display_name: service.display_name.clone(),
+                name: zup_core::NonEmptyString::new(&unit).expect("derived unit is nonempty"),
+                display_name: Some(display.clone()),
                 command: zup_plan::CommandSpec::new(
                     binary.clone(),
                     service.command.arguments.clone(),
@@ -69,31 +80,14 @@ pub fn resolve_target(
                 start: service.start,
                 privilege: service.privilege,
             };
-            let display = service
-                .display_name
-                .as_ref()
-                .map(|name| name.to_string())
-                .unwrap_or_else(|| service.name.to_string());
-            crate::services::render_unit(&synthetic, &display).map_err(|error| {
+            crate::services::render_unit(&resolved, display.as_str()).map_err(|error| {
                 PathError::Invalid {
                     kind: "service command",
                     path: unit.clone(),
                     reason: error.to_string(),
                 }
             })?;
-            services.push(zup_plan::DesiredService {
-                lifecycle: service.lifecycle,
-                readiness: service.readiness,
-                key: ResourceKey::Service {
-                    id: service.id.clone(),
-                },
-                id: service.id.clone(),
-                name: service.name.clone(),
-                display_name: service.display_name.clone(),
-                command: zup_plan::CommandSpec::new(binary, service.command.arguments.clone()),
-                start: service.start,
-                privilege: service.privilege,
-            });
+            services.push(resolved);
         }
     }
 
@@ -340,6 +334,11 @@ mod tests {
     fn services_are_refused_with_everything_named() {
         let mut input = plan();
         input.services.push(zup_plan::DesiredService {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -427,6 +426,11 @@ mod tests {
 
     fn machine_service(start: zup_core::ServiceStart) -> zup_plan::DesiredService {
         zup_plan::DesiredService {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -574,6 +578,11 @@ mod tests {
 
     fn target_service(target: &zup_core::Target) -> zup_plan::DesiredService<zup_plan::TargetPath> {
         zup_plan::DesiredService {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: zup_core::ResourceKey::Service {

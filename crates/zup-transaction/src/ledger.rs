@@ -58,11 +58,16 @@ pub fn validate_ledger_identity(
                 }),
             OwnedResource::PathEntry { value, .. } => matches!(key, ResourceKey::PathEntry { value: identity }
                 if value.target() == &ledger.target && zup_plan::TargetPath::new(ledger.target, identity).is_ok_and(|identity| value == &identity)),
-            OwnedResource::Service { name, previous, installed, .. } =>
+            OwnedResource::Service { name, previous, installed, requires_files, privilege } =>
                 matches!(key, ResourceKey::Service { .. }) && !name.is_empty()
+                  && requires_files.len() <= 256
+                  && requires_files.iter().collect::<BTreeSet<_>>().len() == requires_files.len()
+                  && requires_files.iter().all(|path| path.target() == &ledger.target
+                      && matches!(ledger.resources.get(&ResourceKey::File { destination: path.to_string() }.canonical_for(&ledger.target)),
+                          Some(OwnedResource::File { destination, privilege: file_privilege, .. }) if destination == path && file_privilege == privilege))
                 && [previous, installed].iter().all(|state| match state {
                     zup_plan::ServiceState::Absent => true,
-                    zup_plan::ServiceState::Registration { command, .. } => command.executable.target() == &ledger.target,
+                    zup_plan::ServiceState::Registration { command, execution, .. } => command.executable.target() == &ledger.target && execution.validate_for(ledger.target).is_ok(),
                 }),
             OwnedResource::Protocol { previous, installed, .. } =>
                 matches!(key, ResourceKey::Protocol { .. }) && [previous, installed].iter().all(|state| match state {

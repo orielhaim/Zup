@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 1,
   "$comment": [
     "The GitHub Actions zup's own workflows depend on, tracked by release series.",
     "",

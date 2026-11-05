@@ -16,9 +16,8 @@ use zup_linux::LinuxOutcome;
 use zup_linux::test_support::{
     MachineTestRoots, compose_installer, drive_client_isolated, inert_template, machine_fixture,
     machine_fixture_override, machine_install_dir, machine_maintenance_path, machine_package_bytes,
-    machine_v1_files, machine_v2_files, plan_for_test, recv_envelope_on,
-    run_machine_elevated_for_test, run_machine_isolated, run_tool, send_envelope_on,
-    serve_worker_isolated, validate_rendezvous_for_test,
+    machine_v1_files, machine_v2_files, plan_for_test, recv_envelope_on, run_machine_isolated,
+    run_tool, send_envelope_on, serve_worker_isolated, validate_rendezvous_for_test,
 };
 use zup_protocol::{
     ExecuteOperation, Message, PROTOCOL_VERSION, PrepareOperation, SessionId, WireEnvelope,
@@ -1439,9 +1438,8 @@ fn machine_launcher_failures_surface_at_once() {
 
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
-    // The elevated client binds machine state to the production namespace
-    // before elevation, so launcher mapping is exercised from there.
-    let production = zup_linux::MachineRoots::production();
+    let (_base, roots) = isolated();
+    let (intent, plan) = plan_for_test(&installer, &roots, Operation::Install, None);
     let cases = [
         (
             "dismissal",
@@ -1466,12 +1464,8 @@ fn machine_launcher_failures_surface_at_once() {
             }),
         };
         let start = std::time::Instant::now();
-        let outcome = run_machine_elevated_for_test(
-            &installer,
-            &production.state,
-            Operation::Install,
-            None,
-            &launcher,
+        let outcome = zup_linux::test_support::launch_prepared_for_test(
+            &installer, &intent, &plan, &launcher,
         );
         let elapsed = start.elapsed();
         assert!(

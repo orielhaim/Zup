@@ -621,6 +621,14 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
     let mut services = BTreeSet::new();
     for service in &manifest.services {
         service
+            .execution
+            .validate_for(manifest.target)
+            .map_err(|reason| ManifestError::Invalid {
+                message: format!("service `{}`: {reason}", service.id),
+                src: None,
+                span: None,
+            })?;
+        service
             .readiness
             .validate_for(manifest.target)
             .map_err(|reason| ManifestError::Invalid {

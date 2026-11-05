@@ -1485,6 +1485,9 @@
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
+        "execution": {
+          "$ref": "#/$defs/ServiceExecution"
+        },
         "id": {
           "type": "string"
         },
@@ -1524,6 +1527,14 @@
           "$ref": "#/$defs/ServiceReadiness",
           "default": "manager"
         },
+        "requires_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Template"
+          },
+          "maxItems": 256,
+          "default": []
+        },
         "component": {
           "type": [
             "string",
@@ -1552,10 +1563,77 @@
       },
       "additionalProperties": false,
       "required": [
+        "execution",
         "id",
         "name",
         "binary",
         "start"
+      ]
+    },
+    "ServiceExecution": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "windows"
+            },
+            "account": {
+              "$ref": "#/$defs/WindowsServiceAccount"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "account"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "systemd_dynamic_user"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "systemd_user"
+            },
+            "user": {
+              "type": "string"
+            },
+            "group": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "user"
+          ]
+        }
+      ]
+    },
+    "WindowsServiceAccount": {
+      "type": "string",
+      "enum": [
+        "local_service",
+        "network_service",
+        "local_system"
       ]
     },
     "ServiceStart": {

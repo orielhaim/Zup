@@ -11,6 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-appender = "0.2"
+tempfile.workspace = true
 semver.workspace = true
 thiserror.workspace = true
 tokio = { version = "1", features = [
@@ -32,4 +33,3 @@ zup-transaction.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true
-tempfile.workspace = true

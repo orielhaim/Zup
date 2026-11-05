@@ -76,10 +76,6 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
         println!("  preset-peer        {}", component_name(&peer));
         written.push(peer);
     }
-    #[cfg(windows)]
-    {
-        build_example_plugin(root)?;
-    }
     Ok(written)
 }
 
@@ -296,28 +292,6 @@ fn zigbuild(root: &Path, args: &[&str]) -> Result<(), String> {
         return Err(format!("`cargo zigbuild {}` failed", args.join(" ")));
     }
     Ok(())
-}
-
-#[cfg(windows)]
-fn build_example_plugin(root: &Path) -> Result<(), String> {
-    let project = root.join("examples").join("plugins").join("configure");
-    if !project.is_dir() {
-        return Err(format!("no example plugin at {}", project.display()));
-    }
-    cargo(
-        root,
-        &[
-            "run",
-            "--quiet",
-            "-p",
-            "zup",
-            "--",
-            "plugin",
-            "build",
-            "--project",
-            &project.to_string_lossy(),
-        ],
-    )
 }
 
 fn build_and_stage_test_preset(

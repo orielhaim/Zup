@@ -17,6 +17,17 @@ pub const SERVICE_BACKEND_PREFIX: &str = "linux:service:";
 
 pub const MAX_UNIT_BYTES: usize = 64 * 1024;
 
+pub fn plan_requires_manager(plan: &zup_transaction::TransactionPlan) -> bool {
+    plan.nodes.iter().any(|node| {
+        matches!(node.kind, zup_transaction::NodeKind::ServiceControl { .. })
+            || node
+                .meta
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.id.as_str().starts_with(SERVICE_BACKEND_PREFIX))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServicePayload {
@@ -183,7 +194,13 @@ pub(crate) fn observe_unit(
         return Ok(ObservedServiceState::Absent);
     };
 
-    let Ok((display_name, argv, readiness)) = parse_unit(&bytes) else {
+    let Ok(crate::services::UnitDefinition {
+        display_name,
+        argv,
+        readiness,
+        execution,
+    }) = parse_unit(&bytes, target)
+    else {
         return Ok(ObservedServiceState::InvalidService);
     };
     if argv.is_empty() {
@@ -204,12 +221,31 @@ pub(crate) fn observe_unit(
         Ok(executable) => zup_plan::CommandSpec::new(executable, argv[1..].to_vec()),
         Err(_) => return Ok(ObservedServiceState::InvalidService),
     };
+    let runtime = manager.runtime(unit).map_err(ExecError::from)?;
+    let loaded = manager.load_unit(unit).map_err(ExecError::from)?;
+    if loaded.need_daemon_reload
+        || !loaded.drop_in_paths.is_empty()
+        || if start == ServiceStart::Disabled {
+            loaded.load_state != "masked" || runtime.state != zup_plan::ServiceRuntimeState::Stopped
+        } else {
+            loaded.load_state != "loaded"
+                || Path::new(&loaded.fragment_path) != path
+                || runtime.execution.as_ref() != Some(&execution)
+        }
+    {
+        return Ok(ObservedServiceState::InvalidService);
+    }
     Ok(ObservedServiceState::Service {
+        execution,
         readiness,
         display_name,
         command,
         start,
-        runtime_state: Some(manager.runtime(unit).map_err(ExecError::from)?.state),
+        runtime_state: Some(if runtime.pending_job {
+            zup_plan::ServiceRuntimeState::Unknown
+        } else {
+            runtime.state
+        }),
     })
 }
 

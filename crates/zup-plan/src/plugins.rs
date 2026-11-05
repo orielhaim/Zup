@@ -52,6 +52,7 @@ pub enum PluginResource {
         value: String,
     },
     Service {
+        execution: zup_core::ServiceExecution,
         id: String,
         name: String,
         display_name: Option<String>,
@@ -60,6 +61,7 @@ pub enum PluginResource {
         start: ServiceStart,
         lifecycle: zup_core::ServiceLifecycle,
         readiness: zup_core::ServiceReadiness,
+        requires_files: Vec<String>,
     },
     Protocol {
         scheme: String,
@@ -498,6 +500,7 @@ struct LauncherInput {
 }
 
 struct ServiceInput {
+    execution: zup_core::ServiceExecution,
     id: String,
     name: String,
     display_name: Option<String>,
@@ -506,6 +509,7 @@ struct ServiceInput {
     start: ServiceStart,
     lifecycle: zup_core::ServiceLifecycle,
     readiness: zup_core::ServiceReadiness,
+    requires_files: Vec<String>,
 }
 
 struct ProtocolInput {
@@ -569,6 +573,7 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
             }
             PluginResource::PathEntry { value } => add_text_size(&mut total, value)?,
             PluginResource::Service {
+                execution,
                 id,
                 name,
                 display_name,
@@ -577,7 +582,12 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
                 start,
                 lifecycle: _,
                 readiness: _,
+                requires_files,
             } => {
+                add_text_size(
+                    &mut total,
+                    &serde_json::to_string(execution).expect("service execution serializes"),
+                )?;
                 add_text_size(&mut total, id)?;
                 add_text_size(&mut total, name)?;
                 if let Some(display_name) = display_name {
@@ -588,6 +598,9 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
                     add_text_size(&mut total, argument)?;
                 }
                 add_text_size(&mut total, service_start_text(*start))?;
+                for path in requires_files {
+                    add_text_size(&mut total, path)?;
+                }
             }
             PluginResource::Protocol {
                 scheme,
@@ -720,6 +733,7 @@ pub(crate) fn merge_plugin_proposal(
                 merge.merge_path(&resource_name, value)?;
             }
             PluginResource::Service {
+                execution,
                 id,
                 name,
                 display_name,
@@ -728,10 +742,12 @@ pub(crate) fn merge_plugin_proposal(
                 start,
                 lifecycle,
                 readiness,
+                requires_files,
             } => {
                 merge.merge_service(
                     &resource_name,
                     ServiceInput {
+                        execution,
                         id,
                         name,
                         display_name,
@@ -740,6 +756,7 @@ pub(crate) fn merge_plugin_proposal(
                         start,
                         lifecycle,
                         readiness,
+                        requires_files,
                     },
                 )?;
             }
@@ -938,6 +955,7 @@ impl MergeContext<'_> {
 
     fn merge_service(&mut self, resource_name: &str, input: ServiceInput) -> Result<(), PlanError> {
         let ServiceInput {
+            execution,
             id,
             name,
             display_name,
@@ -946,6 +964,7 @@ impl MergeContext<'_> {
             start,
             lifecycle,
             readiness,
+            requires_files,
         } = input;
         let plugin_id = &self.binding.id;
         let id: ServiceId = parse_id(plugin_id, resource_name, &id, "service id")?;
@@ -962,14 +981,23 @@ impl MergeContext<'_> {
         lifecycle
             .validate(start)
             .and_then(|()| readiness.validate_for(self.plan.target))
+            .and_then(|()| execution.validate_for(self.plan.target))
             .map_err(|reason| PlanError::PluginResourceRejected {
                 plugin_id: plugin_id.clone(),
                 resource: resource_name.to_owned(),
                 reason: reason.to_owned(),
             })?;
         self.plan.services.push(DesiredService {
+            execution,
             lifecycle,
             readiness,
+            requires_files: requires_files
+                .into_iter()
+                .map(|path| {
+                    let path = parse_template(plugin_id, resource_name, &path, "required file")?;
+                    resolve_template(&path, &self.plan.app, &self.plan.install_directory)
+                })
+                .collect::<Result<_, _>>()?,
             key: ResourceKey::Service { id: id.clone() },
             id,
             name,

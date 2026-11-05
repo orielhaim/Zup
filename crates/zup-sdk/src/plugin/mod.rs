@@ -14,7 +14,8 @@ pub mod prelude;
 pub use api::{Context, Plugin, Scope};
 pub use plan::{
     ChangedServiceState, Error, FileAssociation, InitialServiceState, Launcher, Path, Plan,
-    Protocol, Service, ServiceLifecycle, ServiceReadiness, ServiceStart,
+    Protocol, Service, ServiceExecution, ServiceLifecycle, ServiceReadiness, ServiceStart,
+    SystemdUser, WindowsServiceAccount,
 };
 
 pub use api::__answer;

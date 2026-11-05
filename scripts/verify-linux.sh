@@ -3,6 +3,8 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 cargo fmt --all --check
+rustup target add wasm32-unknown-unknown
+cargo xtask fixtures build
 cargo clippy -p zup-linux -p zup-bootstrap -p zup-plan -p zup-binary --all-features --all-targets -- -D warnings
 cargo build -p zup-installer --features console,headless,gui -p zup-linux --features zup-linux/test-support
 profile="${CARGO_TARGET_DIR:-$root/target}/debug"

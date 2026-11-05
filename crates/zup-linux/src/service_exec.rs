@@ -49,6 +49,8 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
             reason: format!("service display name: {error}"),
         })?;
     let synthetic = DesiredService {
+        execution: op.execution.clone(),
+        requires_files: Vec::new(),
         lifecycle: op.lifecycle,
         readiness: op.readiness,
         key: op.key.clone(),
@@ -85,6 +87,7 @@ fn render_registration(
     name: &zup_core::NonEmptyString,
 ) -> Result<Vec<u8>, ExecError> {
     let zup_plan::ServiceState::Registration {
+        execution,
         display_name: display,
         command,
         start,
@@ -98,6 +101,8 @@ fn render_registration(
         reason: format!("service display name: {error}"),
     })?;
     let synthetic = DesiredService {
+        execution: execution.clone(),
+        requires_files: Vec::new(),
         lifecycle: Default::default(),
         readiness: *readiness,
         key: key.clone(),
@@ -1141,6 +1146,11 @@ mod tests {
         start: ServiceStart,
     ) -> ServiceOperation {
         ServiceOperation {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {

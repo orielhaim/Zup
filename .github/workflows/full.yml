@@ -92,9 +92,31 @@ jobs:
       - name: Toolchain
         run: cargo xtask toolchain build
 
+      - name: Build version-matched plugin test fixtures
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo xtask fixtures build
+
       - name: Windows tests
         if: runner.os == 'Windows'
         run: cargo nextest run --profile integration -p zup -p zup-installer -p zup-preview -p zup-windows --all-features --no-fail-fast
+
+      - name: Linux native installer service lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p zup
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          sudo python3 scripts/verify-systemd-service.py \
+            --zup "$PWD/target/debug/zup" \
+            --runtime "$PWD/target/debug/toolchain/$version/zup-setup-headless-linux-x64" \
+            --plugin "$PWD/target/test-fixtures/configure.wasm"
+
+      - name: Windows native SCM lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/verify-windows-services.ps1
 
       - name: Linux tests
         if: runner.os == 'Linux'

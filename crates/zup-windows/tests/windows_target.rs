@@ -147,6 +147,7 @@ value = "${install}/bin"
 component = "core"
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "acme-agent"
 name = "acme-agent"
 display_name = "Acme Agent"
@@ -645,11 +646,13 @@ fn native_service_names_are_unique_across_logical_ids() {
     let source = format!(
         r#"{prefix}
 [[services]]
+execution = {{ type = "windows", account = "local_service" }}
 id = "first"
 name = "SharedService"
 start = "automatic"
 binary = "${{install}}/app.txt"
 [[services]]
+execution = {{ type = "windows", account = "local_service" }}
 id = "second"
 name = "sharedservice"
 start = "automatic"

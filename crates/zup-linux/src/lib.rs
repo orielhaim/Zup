@@ -26,6 +26,8 @@ mod machine;
 #[cfg(target_os = "linux")]
 mod operation_host;
 #[cfg(target_os = "linux")]
+mod package_process;
+#[cfg(target_os = "linux")]
 mod paths;
 #[cfg(target_os = "linux")]
 mod pkexec;

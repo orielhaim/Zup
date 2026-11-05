@@ -1,5 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+use std::io::{Seek, SeekFrom};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -214,14 +216,68 @@ fn rpm_version_expression(found: &str, required: &str) -> Result<String> {
 }
 
 fn query(executable: &str, arguments: &[&str]) -> Result<std::process::Output> {
-    Command::new(executable)
+    let stdout = tempfile::tempfile()?;
+    let stderr = tempfile::tempfile()?;
+    let mut child = Command::new(trusted_executable(executable)?)
         .args(arguments)
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
-        .output()
-        .map_err(BootstrapError::Io)
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline
+            || stdout.metadata()?.len() > 1024 * 1024
+            || stderr.metadata()?.len() > 1024 * 1024
+        {
+            // Only these fixed, read-only database queries may be terminated.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(BootstrapError::Provider(format!(
+                "native package query `{executable}` exceeded its time or output limit"
+            )));
+        }
+        std::thread::park_timeout(std::time::Duration::from_millis(20));
+    };
+    fn read(mut file: std::fs::File) -> Result<Vec<u8>> {
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(BootstrapError::Limit("native query output is too large"));
+        }
+        Ok(bytes)
+    }
+    Ok(std::process::Output {
+        status,
+        stdout: read(stdout)?,
+        stderr: read(stderr)?,
+    })
+}
+
+fn trusted_executable(executable: &str) -> Result<PathBuf> {
+    let path = std::fs::canonicalize(executable)?;
+    for ancestor in path.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor)?;
+        if metadata.uid() != 0
+            || metadata.mode() & 0o022 != 0
+            || metadata.file_type().is_symlink()
+            || (ancestor == path && (!metadata.is_file() || metadata.mode() & 0o111 == 0))
+            || (ancestor != path && !metadata.is_dir())
+        {
+            return Err(BootstrapError::ProviderPreflight(format!(
+                "native package executable has untrusted ownership or permissions: {}",
+                ancestor.display()
+            )));
+        }
+    }
+    Ok(path)
 }
 
 fn successful(output: &std::process::Output) -> Result<()> {
@@ -268,11 +324,30 @@ pub(crate) fn validate(
 struct NativeProvider<'a> {
     manager: Manager,
     control: &'a RuntimeControl,
+    directory: &'a private_fs::PrivateDir,
+    interrupted: BTreeSet<zup_core::PrerequisiteId>,
+}
+
+impl NativeProvider<'_> {
+    fn process<'a>(
+        &'a self,
+        id: &'a zup_core::PrerequisiteId,
+    ) -> crate::package_process::PackageProcess<'a> {
+        crate::package_process::PackageProcess {
+            directory: self.directory,
+            id,
+            program: self.manager.executable(),
+            control: self.control,
+            timeout: std::time::Duration::from_secs(15 * 60),
+        }
+    }
 }
 
 impl PrerequisiteSatisfier for NativeProvider<'_> {
     fn satisfy(&self, operation: &BootstrapOperation) -> Result<DetectionResult> {
         validate(&operation.requirement, &operation.package)?;
+        self.process(&operation.id)
+            .check_previous(self.interrupted.contains(&operation.id))?;
         if !matches!(
             operation.target,
             zup_core::PrerequisiteArchitecture::Current | zup_core::PrerequisiteArchitecture::Any
@@ -339,13 +414,14 @@ impl PrerequisiteProvider for NativeProvider<'_> {
                 "system package installation needs root or interactive polkit authorization".into(),
             ));
         }
-        let mut command = Command::new(if root {
+        let manager = trusted_executable(self.manager.executable())?;
+        let mut command = Command::new(trusted_executable(if root {
             self.manager.executable()
         } else {
             "/usr/bin/pkexec"
-        });
+        })?);
         if !root {
-            command.arg(self.manager.executable());
+            command.arg(manager);
         }
         command
             .args(
@@ -366,10 +442,12 @@ impl PrerequisiteProvider for NativeProvider<'_> {
             id: request.prerequisite_id.to_string(),
             name: id.to_string(),
         });
-        let status = command.status()?;
+        let (status, diagnostic) = self
+            .process(&request.prerequisite_id)
+            .execute(&mut command)?;
         if !status.success() {
             return Err(BootstrapError::Provider(format!(
-                "native package installation exited with {status}; check package-manager diagnostics and repair its database before retrying"
+                "native package installation exited with {status}; check package-manager diagnostics and repair its database before retrying. {diagnostic}"
             )));
         }
         Ok(ProviderOutcome::Succeeded)
@@ -466,6 +544,18 @@ fn execute_inner(request: &BootstrapRequest, control: &RuntimeControl) -> Result
     let provider = NativeProvider {
         manager: Manager::discover()?,
         control,
+        directory: &directory,
+        interrupted: state
+            .operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation.state,
+                    zup_bootstrap::BootstrapOperationState::Running
+                )
+            })
+            .map(|operation| operation.id.clone())
+            .collect(),
     };
     let mut persist = |state: &BootstrapState| {
         let bytes = serde_json::to_vec(state)?;
@@ -477,6 +567,14 @@ fn execute_inner(request: &BootstrapRequest, control: &RuntimeControl) -> Result
         )
         .map_err(|error| BootstrapError::Provider(error.to_string()))
     };
+    for id in &provider.interrupted {
+        if provider.process(id).check_previous(true)?
+            == crate::package_process::PreviousProcess::NotStarted
+        {
+            state.mark(id, zup_bootstrap::BootstrapOperationState::Pending)?;
+        }
+    }
+    state.recompute();
     persist(&state)?;
     if zup_bootstrap::recover(plan, &provider, &mut state)? == BootstrapOutcome::RecoveryRequired {
         persist(&state)?;

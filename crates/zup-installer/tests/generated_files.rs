@@ -53,7 +53,7 @@ fn precompiled(app_id: &str, install_name: &str) -> Vec<u8> {
         (type (func (param i32 i32 i32 i32) (result i32)))
         (type (func))
         (memory (export "cm32p2_memory") 1)
-        (func (export "cm32p2|zup:plugin/planner@1|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
+        (func (export "cm32p2|zup:plugin/planner@2|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
             (i32.store (i32.const 1024) (i32.const 0))
             (i32.store (i32.const 1028) (i32.const 2048))
             (i32.store (i32.const 1032) (i32.const 1))
@@ -64,7 +64,7 @@ fn precompiled(app_id: &str, install_name: &str) -> Vec<u8> {
             (i32.store (i32.const 2064) (i32.const {contents_len}))
             (i32.const 1024)
         )
-        (func (export "cm32p2|zup:plugin/planner@1|plan_post") (param i32))
+        (func (export "cm32p2|zup:plugin/planner@2|plan_post") (param i32))
         (func (export "cm32p2_realloc") (param i32 i32 i32 i32) (result i32)
             local.get 0
         )

@@ -179,8 +179,14 @@ pub fn resolve_target<R: InstallLocationResolver>(
         let binary = resolve(&service.command.executable, "service binary")?;
         collisions.register_service(service.id.as_str(), service.name.as_str())?;
         services.push(DesiredService {
+            execution: service.execution.clone(),
             lifecycle: service.lifecycle,
             readiness: service.readiness,
+            requires_files: service
+                .requires_files
+                .iter()
+                .map(|path| resolve(path, "service required file"))
+                .collect::<Result<_, _>>()?,
             key: ResourceKey::Service {
                 id: service.id.clone(),
             },

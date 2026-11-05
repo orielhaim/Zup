@@ -12,8 +12,8 @@ use zup_core::{
     Target,
 };
 
-pub const BOOTSTRAP_PLAN_SCHEMA: u32 = 2;
-pub const BOOTSTRAP_STATE_SCHEMA: u32 = 2;
+pub const BOOTSTRAP_PLAN_SCHEMA: u32 = 1;
+pub const BOOTSTRAP_STATE_SCHEMA: u32 = 1;
 pub const MAX_BOOTSTRAP_OPERATIONS: usize = 256;
 pub const MAX_BOOTSTRAP_STATE_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_BOOTSTRAP_PLAN_BYTES: usize = 8 * 1024 * 1024;

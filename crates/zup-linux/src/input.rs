@@ -239,10 +239,8 @@ pub fn compile_machine_execution_plan(
     }
 
     for op in &execution.services {
-        let payload_changed = input.files.iter().any(|file| {
-            file.destination == op.command.executable && file.kind != FileOperationKind::NoOp
-        });
         let owned = ledger.and_then(|ledger| ledger.resources.get(&op.key));
+        let payload_changed = op.affected_by_files(&execution.files, &execution.removals, owned);
         if (payload_changed || op.kind != IntegrationChangeKind::NoOp)
             && (owned.is_some()
                 || op.previous == zup_plan::ObservedServiceState::Absent
@@ -595,6 +593,11 @@ mod tests {
             executable: true,
         };
         let service = zup_plan::DesiredService {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -636,6 +639,11 @@ mod tests {
         kind: IntegrationChangeKind,
     ) -> ServiceOperation {
         ServiceOperation {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -922,6 +930,7 @@ mod tests {
                     id: ServiceId::new("tool").expect("an id"),
                 },
                 zup_plan::OwnedResource::Service {
+                    requires_files: Vec::new(),
                     name: "Tool".to_owned(),
                     privilege: Privilege::System,
                     previous: zup_plan::ServiceState::Absent,
@@ -985,6 +994,7 @@ mod tests {
             scope: zup_core::SelectedScope::Machine,
             privilege: Privilege::System,
             owned: zup_plan::OwnedResource::Service {
+                requires_files: Vec::new(),
                 name: "Tool".to_owned(),
                 privilege: Privilege::System,
                 previous: zup_plan::ServiceState::Absent,

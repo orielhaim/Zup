@@ -62,6 +62,10 @@ world plugin {
 "#,
     "signature"
 )]
+#[case::changed_output_record(
+    VALID_WIT.replace("    readiness: service-readiness,", ""),
+    "signature"
+)]
 fn a_world_that_does_not_match_the_contract_is_refused(#[case] wit: String, #[case] refusal: &str) {
     assert_ne!(wit, VALID_WIT, "the fixture must actually change the world");
     let engine = PluginEngine::host().unwrap();
@@ -123,6 +127,17 @@ fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
     );
     assert_eq!(
         first.to_hex(),
-        "6a6409031be665f1e12fb8e0846c8e039fe9873af353f80f8defed722778687a"
+        "4d301c56e3577f9697248a85f3ec7e8c3e347dc0c0be232d958b444da31d1459"
+    );
+}
+
+#[test]
+fn artifact_engine_version_matches_the_exact_dependency() {
+    let manifest: toml::Value = toml::from_str(include_str!("../../../Cargo.toml")).unwrap();
+    assert_eq!(
+        manifest["workspace"]["dependencies"]["wasmtime"]["version"]
+            .as_str()
+            .unwrap(),
+        format!("={}", zup_plugin_contract::WASMTIME_VERSION)
     );
 }

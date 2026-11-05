@@ -322,6 +322,11 @@ mod tests {
         let config = config("linux-x64", Frontend::Console, InstallScope::User);
         let mut plan = plan();
         plan.installer.services.push(zup_core::Service {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             id: zup_core::ServiceId::new("tool").unwrap(),
@@ -374,6 +379,11 @@ mod tests {
 
     fn machine_service() -> zup_core::Service {
         zup_core::Service {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             id: zup_core::ServiceId::new("tool").unwrap(),

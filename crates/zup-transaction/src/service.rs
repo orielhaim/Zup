@@ -49,6 +49,16 @@ pub struct ServiceControlOperation {
 
 impl ServiceControlOperation {
     pub fn validate(&self) -> Result<(), String> {
+        for state in [&self.configuration, &self.owned_configuration] {
+            if let ServiceState::Registration {
+                execution, command, ..
+            } = state
+            {
+                execution
+                    .validate_for(*command.executable.target())
+                    .map_err(str::to_owned)?;
+            }
+        }
         if !matches!(self.key, ResourceKey::Service { .. })
             || !matches!(self.configuration, ServiceState::Registration { .. })
             || self.native_name.is_empty()
@@ -148,8 +158,9 @@ pub fn plan_service_controls(
     execution_generation: String,
 ) -> Result<Vec<ServiceControlOperation>, String> {
     service.lifecycle.validate(service.start)?;
-    use zup_plan::{IntegrationChangeKind, ObservedServiceState};
+    use zup_plan::ObservedServiceState;
     let installed = ServiceState::Registration {
+        execution: service.execution.clone(),
         readiness: service.readiness,
         display_name: service.display_name.clone(),
         command: service.command.clone(),
@@ -177,7 +188,7 @@ pub fn plan_service_controls(
         None => return Ok(Vec::new()),
         _ => return Err("service ownership or configuration changed".into()),
     };
-    if !payload_changed && service.kind == IntegrationChangeKind::NoOp {
+    if !payload_changed && previous == installed {
         return Ok(Vec::new());
     }
     let mut operations = Vec::new();
@@ -264,6 +275,7 @@ pub trait NativeServiceManager {
         &mut self,
         operation: &ServiceControlOperation,
         state: ServiceTerminalState,
+        expected: &ServiceObservation,
     ) -> Result<(), String>;
 }
 
@@ -297,7 +309,7 @@ pub fn apply_service_control(
             operation.native_name
         ));
     }
-    manager.transition(operation, operation.after)?;
+    manager.transition(operation, operation.after, &current)?;
     let current = manager.observe(operation)?;
     check_identity(operation, &current)?;
     if !operation.after.matches(current.runtime) {
@@ -352,7 +364,7 @@ pub fn rollback_service_control(
         return Ok(());
     }
     verify_service_control(manager, receipt)?;
-    manager.transition(&receipt.operation, receipt.operation.before)?;
+    manager.transition(&receipt.operation, receipt.operation.before, &current)?;
     let current = manager.observe(&receipt.operation)?;
     check_identity(&receipt.operation, &current)?;
     if !receipt.operation.before.matches(current.runtime) {

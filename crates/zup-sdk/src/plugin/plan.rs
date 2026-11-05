@@ -2,7 +2,8 @@ use zup_plugin_abi as abi;
 
 pub use super::exports::zup::plugin::planner::{
     ChangedServiceState, FileAssociation, GeneratedFile, InitialServiceState, Launcher,
-    LauncherLocation, Protocol, Service, ServiceLifecycle, ServiceReadiness, ServiceStart,
+    LauncherLocation, Protocol, Service, ServiceExecution, ServiceLifecycle, ServiceReadiness,
+    ServiceStart, SystemdUser, WindowsServiceAccount,
 };
 use super::exports::zup::plugin::planner::{PathEntry, PluginError, ResourceItem};
 
@@ -93,8 +94,14 @@ impl Launcher {
 }
 
 impl Service {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, binary: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        binary: impl Into<String>,
+        execution: ServiceExecution,
+    ) -> Self {
         Self {
+            execution,
             id: id.into(),
             name: name.into(),
             display_name: None,
@@ -102,6 +109,7 @@ impl Service {
             arguments: Vec::new(),
             start: ServiceStart::Manual,
             readiness: ServiceReadiness::Manager,
+            requires_files: Vec::new(),
             lifecycle: ServiceLifecycle {
                 install: InitialServiceState::Stopped,
                 change: ChangedServiceState::Preserve,
@@ -124,6 +132,16 @@ impl Service {
         S: Into<String>,
     {
         self.arguments = arguments.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_required_files<I, S>(mut self, files: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.requires_files = files.into_iter().map(Into::into).collect();
         self
     }
 

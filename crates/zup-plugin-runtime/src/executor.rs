@@ -139,6 +139,33 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
         },
         ResourceItem::PathEntry(entry) => PluginResource::PathEntry { value: entry.value },
         ResourceItem::Service(service) => PluginResource::Service {
+            execution: match service.execution {
+                zup_plugin_contract::ServiceExecution::Windows(account) => {
+                    zup_core::ServiceExecution::Windows {
+                        account: match account {
+                            zup_plugin_contract::WindowsServiceAccount::LocalService => {
+                                zup_core::WindowsServiceAccount::LocalService
+                            }
+                            zup_plugin_contract::WindowsServiceAccount::NetworkService => {
+                                zup_core::WindowsServiceAccount::NetworkService
+                            }
+                            zup_plugin_contract::WindowsServiceAccount::LocalSystem => {
+                                zup_core::WindowsServiceAccount::LocalSystem
+                            }
+                        },
+                    }
+                }
+                zup_plugin_contract::ServiceExecution::SystemdDynamicUser => {
+                    zup_core::ServiceExecution::SystemdDynamicUser
+                }
+                zup_plugin_contract::ServiceExecution::SystemdUser(user) => {
+                    zup_core::ServiceExecution::SystemdUser {
+                        user: user.user,
+                        group: user.group,
+                    }
+                }
+            },
+            requires_files: service.requires_files,
             readiness: match service.readiness {
                 zup_plugin_contract::ServiceReadiness::Manager => {
                     zup_core::ServiceReadiness::Manager

@@ -21,6 +21,13 @@ pub enum ContractError {
     Target(Target),
     #[error("unsupported deployment: {0}")]
     Capability(String),
+    #[error(
+        "service `{service}` requires `{path}`, which must be a unique managed file with the service's privilege"
+    )]
+    ServiceFile {
+        service: zup_core::ServiceId,
+        path: String,
+    },
 }
 
 impl<P: Display, L> DesiredState<P, L> {
@@ -71,6 +78,33 @@ impl<P: Display, L> DesiredState<P, L> {
             )?;
         }
         for service in &self.services {
+            service
+                .execution
+                .validate_for(self.target)
+                .map_err(|reason| ContractError::Capability(reason.into()))?;
+            let mut dependencies = BTreeSet::new();
+            if service.requires_files.len() > 256 {
+                return Err(ContractError::Capability(
+                    "a service may require at most 256 managed files".into(),
+                ));
+            }
+            for path in &service.requires_files {
+                let identity = ResourceKey::File {
+                    destination: path.to_string(),
+                }
+                .canonical_for(&self.target);
+                if !dependencies.insert(identity.clone())
+                    || !self.files.iter().any(|file| {
+                        file.key.canonical_for(&self.target) == identity
+                            && file.privilege == service.privilege
+                    })
+                {
+                    return Err(ContractError::ServiceFile {
+                        service: service.id.clone(),
+                        path: path.to_string(),
+                    });
+                }
+            }
             claim(
                 &service.key,
                 ResourceKey::Service {

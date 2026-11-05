@@ -126,6 +126,7 @@ pub enum ObservedServiceState {
     Absent,
     InvalidService,
     Service {
+        execution: zup_core::ServiceExecution,
         display_name: String,
         command: CommandSpec,
         start: ServiceStart,
@@ -140,12 +141,14 @@ impl ObservedServiceState {
             Self::Absent => Some(crate::ServiceState::Absent),
             Self::InvalidService => None,
             Self::Service {
+                execution,
                 display_name,
                 command,
                 start,
                 readiness,
                 ..
             } => Some(crate::ServiceState::Registration {
+                execution: execution.clone(),
                 display_name: display_name.clone(),
                 command: command.clone(),
                 start: *start,

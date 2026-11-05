@@ -382,7 +382,7 @@ fn each_scope_keeps_its_own_window_under_its_own_authority() {
 fn the_persisted_window_is_the_runtime_model() {
     let ui = window(b"a preset executable", b"<svg/>");
     let ledger: InstallLedger = serde_json::from_value(serde_json::json!({
-        "schema": 2,
+        "schema": zup_plan::INSTALL_LEDGER_SCHEMA,
         "app_id": "com.zup.test-ui",
         "scope": "user",
         "target": "windows-x64",

@@ -729,6 +729,7 @@ name = "Service"
 default = false
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "acme-agent"
 name = "acme-agent"
 binary = "${install}/acme-agent.exe"
@@ -777,6 +778,7 @@ destination = "${install}/${app.name}/a.txt"
 value = "${install}/bin/${app.version}"
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "svc"
 name = "svc"
 binary = "${install}/svc.exe"

@@ -445,12 +445,24 @@ impl InstallLedgerStore {
             let Some(OperationReceipt::Backend { payload, .. }) = record.receipt(&node.id) else {
                 return Err(LedgerError::Invalid);
             };
-            if let Some(owned) = owned_from_backend_receipt(
+            if let Some(mut owned) = owned_from_backend_receipt(
                 &key,
                 ledger.resources.get(&key),
                 payload,
                 &record.target,
             )? {
+                if let OwnedResource::Service { requires_files, .. } = &mut owned
+                    && matches!(node.kind, NodeKind::BackendOperation { .. })
+                {
+                    let backend = node.meta.backend.as_ref().ok_or(LedgerError::Invalid)?;
+                    let crate::transaction_payload::ApplyPayload::Service(service) =
+                        serde_json::from_slice(&backend.payload)
+                            .map_err(|_| LedgerError::Invalid)?
+                    else {
+                        return Err(LedgerError::Invalid);
+                    };
+                    *requires_files = service.requires_files;
+                }
                 ledger.resources.insert(key, owned);
             }
         }
@@ -564,6 +576,7 @@ fn owned_from_backend_receipt(
             previous,
             installed,
         } => Some(OwnedResource::Service {
+            requires_files: Vec::new(),
             name,
             privilege,
             previous: old

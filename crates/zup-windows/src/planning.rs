@@ -308,6 +308,7 @@ fn inspect_owned_matches(
                     ObservedServiceState::InvalidService => false,
                     ObservedServiceState::Absent => *installed == ServiceState::Absent,
                     ObservedServiceState::Service {
+                        execution,
                         display_name,
                         command,
                         start,
@@ -316,6 +317,7 @@ fn inspect_owned_matches(
                     } => {
                         *installed
                             == ServiceState::Registration {
+                                execution,
                                 readiness,
                                 display_name,
                                 command,

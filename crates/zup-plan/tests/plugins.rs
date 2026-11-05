@@ -157,6 +157,10 @@ fn all_resources() -> Vec<PluginResource> {
             value: "${install}/plugin-bin".to_owned(),
         },
         PluginResource::Service {
+            execution: zup_core::ServiceExecution::Windows {
+                account: zup_core::WindowsServiceAccount::LocalService,
+            },
+            requires_files: Vec::new(),
             readiness: Default::default(),
             lifecycle: zup_core::ServiceLifecycle {
                 install: zup_core::InitialServiceState::Running,
@@ -543,12 +547,17 @@ value = "${install}/Same"
         (
             r#"
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "SameService"
 name = "SameService"
 binary = "${install}/base.txt"
 start = "manual"
 "#,
             PluginResource::Service {
+                execution: zup_core::ServiceExecution::Windows {
+                    account: zup_core::WindowsServiceAccount::LocalService,
+                },
+                requires_files: Vec::new(),
                 lifecycle: Default::default(),
                 readiness: Default::default(),
                 id: "sameservice".to_owned(),
@@ -657,6 +666,8 @@ source = "plugins/two.wasm"
     executable: "${install}/base.txt".to_owned(),
 })]
 #[case::nul_service_id(PluginResource::Service {
+    execution: zup_core::ServiceExecution::Windows { account: zup_core::WindowsServiceAccount::LocalService },
+    requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
     id: "\0".to_owned(),

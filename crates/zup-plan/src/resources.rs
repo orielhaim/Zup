@@ -63,6 +63,7 @@ pub struct DesiredPathEntry<P = Template> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesiredService<P = Template> {
+    pub execution: zup_core::ServiceExecution,
     pub key: ResourceKey,
     pub id: ServiceId,
     pub name: NonEmptyString,
@@ -71,6 +72,7 @@ pub struct DesiredService<P = Template> {
     pub start: ServiceStart,
     pub lifecycle: zup_core::ServiceLifecycle,
     pub readiness: zup_core::ServiceReadiness,
+    pub requires_files: Vec<P>,
     pub privilege: Privilege,
 }
 

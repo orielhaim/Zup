@@ -105,6 +105,8 @@ impl ExecutionPlan {
                     || effect.command != resource.command
                     || effect.lifecycle != resource.lifecycle
                     || effect.readiness != resource.readiness
+                    || effect.execution != resource.execution
+                    || effect.requires_files != resource.requires_files
                     || effect.start != resource.start
                     || effect.privilege != resource.privilege
                 {

@@ -563,6 +563,7 @@ fn plan_services(
                     }),
                 ),
                 ObservedServiceState::Service {
+                    execution,
                     display_name,
                     command,
                     start,
@@ -575,10 +576,12 @@ fn plan_services(
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| desired.name.to_string());
                     let matches = *display_name == desired_display
+                        && *execution == desired.execution
                         && commands_match(command, &desired.command)
                         && *start == desired.start
-                        && *readiness == desired.readiness;
-                    if matches {
+                        && *readiness == desired.readiness
+                        && owned.is_none_or(|owned| matches!(owned, OwnedResource::Service { requires_files, .. } if requires_files == &desired.requires_files));
+                    if matches && installed.is_some() {
                         (IntegrationChangeKind::NoOp, None)
                     } else {
                         if installed.is_some() {
@@ -588,7 +591,8 @@ fn plan_services(
                                 IntegrationChangeKind::Conflict,
                                 Some(Conflict::ServiceAlreadyExistsWithDifferentConfiguration {
                                     service: desired.name.to_string(),
-                                    reason: "existing service configuration differs".to_owned(),
+                                    reason: "existing service is not owned by this installation"
+                                        .to_owned(),
                                 }),
                             )
                         }
@@ -598,8 +602,10 @@ fn plan_services(
         };
 
         out.push(ServiceOperation {
+            execution: desired.execution.clone(),
             lifecycle: desired.lifecycle,
             readiness: desired.readiness,
+            requires_files: desired.requires_files.clone(),
             key: desired.key.clone(),
             kind,
             id: desired.id.to_string(),

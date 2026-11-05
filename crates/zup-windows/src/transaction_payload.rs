@@ -388,6 +388,7 @@ pub(crate) fn validate_backend_node(
                         &previous,
                         installed,
                         &zup_plan::ServiceState::Registration {
+                            execution: op.execution,
                             readiness: op.readiness,
                             display_name: op.display_name,
                             command: op.command,
@@ -526,6 +527,7 @@ pub(crate) fn validate_service_control(
             continue;
         };
         let installed = zup_plan::ServiceState::Registration {
+            execution: service.execution.clone(),
             readiness: service.readiness,
             display_name: service.display_name.clone(),
             command: service.command.clone(),
@@ -779,11 +781,9 @@ pub(crate) fn compile_execution_plan(
         )?);
     }
     for service in &execution.services {
-        let payload_changed = input.files.iter().any(|file| {
-            file.destination == service.command.executable
-                && file.kind != zup_plan::FileOperationKind::NoOp
-        });
         let owned = ledger.and_then(|ledger| ledger.resources.get(&service.key));
+        let payload_changed =
+            service.affected_by_files(&execution.files, &execution.removals, owned);
         let affected = payload_changed || service.kind != IntegrationChangeKind::NoOp;
         if affected
             && (owned.is_some()

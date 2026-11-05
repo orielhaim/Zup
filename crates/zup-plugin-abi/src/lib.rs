@@ -2,6 +2,9 @@
 
 mod limits;
 
+#[cfg(feature = "test-fixture")]
+pub mod test_fixture;
+
 pub use limits::{
     AOT_FORMAT_VERSION, EPOCH_DEADLINE_TICKS, INVOCATION_DEADLINE_MILLIS, MAX_AOT_BYTES,
     MAX_FUEL_PER_CALL, MAX_INSTANCES, MAX_MEMORY_BYTES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES,

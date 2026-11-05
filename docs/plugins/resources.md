@@ -14,20 +14,16 @@ plan.validate()?;
 Ok(plan)
 ```
 
-`validate()` is optional. It refuses an oversized plan at the point of the
-mistake; the host enforces the same limit regardless.
+`validate()` checks output limits locally; the host always validates the result.
 
 | Method | Constructor |
 | --- | --- |
 | `generated_file` | `GeneratedFile::new(dest, bytes)` or `GeneratedFile::text(dest, str)` |
 | `launcher` | `Launcher::menu(name, target)` or `Launcher::desktop(name, target)` |
 | `path_entry` | `Path::new(dir)` |
-| `service` | `Service::new(id, name, binary)` |
+| `service` | `Service::new(id, name, binary, execution)` |
 | `protocol` | `Protocol::new(scheme, exec)` |
 | `file_association` | `FileAssociation::new(id, ext, exec)` |
-
-Each constructor supplies the defaults. A new resource kind gets a constructor
-of its own when the WIT grows one.
 
 ## Launchers
 
@@ -40,7 +36,8 @@ Launcher::desktop("Acme", "${install}/acme.exe")
 ## Services
 
 ```rust
-Service::new("acme-agent", "AcmeAgent", "${install}/agent.exe")
+Service::new("acme-agent", "AcmeAgent", "${install}/agent.exe",
+    ServiceExecution::Windows(WindowsServiceAccount::LocalService))
     .with_display_name("Acme Agent")
     .with_start(ServiceStart::Automatic)
     .with_readiness(ServiceReadiness::Manager)
@@ -68,5 +65,4 @@ must be stable across versions. On Windows this is the ProgID the shell matches 
 
 ## Ownership
 
-Return only resources the application should own. Once accepted, plugin resources
-follow the same lifecycle as manifest resources. A plan that contradicts the application's own manifest is refused rather than applied. Do not return a fixed resource from a plugin merely to avoid writing it in the manifest.
+Return only resources the application owns. Plugin resources follow the manifest lifecycle; conflicting declarations are refused.

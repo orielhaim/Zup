@@ -117,14 +117,15 @@ async fn generated_overlay_is_consumed_and_cleaned_by_adapter() {
     let root = TempDir::new().unwrap();
     let (mut request, _) = request(&root, SelectedScope::User);
     let source = RelativePath::new("__zup_plugins__/generated.exe").unwrap();
-    let file = &mut request
-        .transaction_plan
-        .nodes
-        .iter_mut()
-        .find(|node| matches!(node.kind, zup_transaction::NodeKind::FileMutation { .. }))
-        .unwrap()
-        .meta;
-    file.source_relative = Some(source.clone());
+    for node in &mut request.transaction_plan.nodes {
+        if matches!(
+            node.kind,
+            zup_transaction::NodeKind::StageFile { .. }
+                | zup_transaction::NodeKind::FileMutation { .. }
+        ) {
+            node.meta.source_relative = Some(source.clone());
+        }
+    }
     let identity = PayloadOverlayIdentity::from_transaction(
         request.app_id.clone(),
         request.app_version.clone(),

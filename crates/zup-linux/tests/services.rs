@@ -80,6 +80,70 @@ fn unchanged_repair_does_not_restart_a_running_service() {
 }
 
 #[test]
+fn concurrent_native_jobs_refuse_upgrade_without_stopping_the_service() {
+    let mut fixture = Fixture::new();
+    let mut initial = fixture.plan("1.0.0", ServiceStart::Manual, vec!["--v1".into()]);
+    initial.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    let unit = fixture.unit(&initial);
+    fixture.seed(&unit);
+    fixture.commit(&initial, LifecycleAction::Install);
+    let mut runtime = fixture.manager.runtime(&unit).unwrap();
+    runtime.pending_job = true;
+    fixture
+        .manager
+        .borrow_mut()
+        .runtimes
+        .insert(unit.clone(), runtime.clone());
+    let source = fixture.source(&unit).unwrap();
+    let upgraded = fixture.plan("2.0.0", ServiceStart::Manual, vec!["--v2".into()]);
+    assert!(fixture.run(&upgraded, LifecycleAction::Upgrade).is_err());
+    assert_eq!(fixture.manager.runtime(&unit).unwrap(), runtime);
+    assert_eq!(fixture.source(&unit).unwrap(), source);
+}
+
+#[test]
+fn declared_file_changes_and_retired_dependencies_control_only_their_consumer() {
+    let mut fixture = Fixture::new();
+    let initial = fixture.configured_plan("1.0.0", b"first", true);
+    let unit = fixture.unit(&initial);
+    fixture.seed(&unit);
+    fixture.commit(&initial, LifecycleAction::Install);
+    let first = fixture.manager.runtime(&unit).unwrap().execution_generation;
+
+    let retired = fixture.configured_plan("2.0.0", b"second", false);
+    fixture.commit(&retired, LifecycleAction::Upgrade);
+    let second = fixture.manager.runtime(&unit).unwrap().execution_generation;
+    assert_ne!(
+        second, first,
+        "the old running service still consumes the retired declaration"
+    );
+
+    let unrelated = fixture.configured_plan("3.0.0", b"third", false);
+    fixture.commit(&unrelated, LifecycleAction::Upgrade);
+    assert_eq!(
+        fixture.manager.runtime(&unit).unwrap().execution_generation,
+        second
+    );
+
+    let declared = fixture.configured_plan("3.0.0", b"third", true);
+    let ledger = fixture.commit(&declared, LifecycleAction::Modify).unwrap();
+    assert_eq!(
+        fixture.manager.runtime(&unit).unwrap().execution_generation,
+        second
+    );
+    assert!(
+        matches!(ledger.resources.get(&declared.services[0].key), Some(OwnedResource::Service { requires_files, .. }) if requires_files == &declared.services[0].requires_files)
+    );
+
+    let changed = fixture.configured_plan("5.0.0", b"fourth", true);
+    fixture.commit(&changed, LifecycleAction::Upgrade);
+    assert_ne!(
+        fixture.manager.runtime(&unit).unwrap().execution_generation,
+        second
+    );
+}
+
+#[test]
 fn lost_stop_reply_requires_recovery_before_payload_changes() {
     let mut fixture = Fixture::new();
     let mut plan = fixture.plan("1.0.0", ServiceStart::Manual, vec!["--old".into()]);
@@ -129,6 +193,41 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn configured_plan(
+        &self,
+        version: &str,
+        bytes: &[u8],
+        declared: bool,
+    ) -> DesiredState<TargetPath, TargetPath> {
+        let mut plan = self.plan(version, ServiceStart::Manual, Vec::new());
+        let destination = TargetPath::new(
+            target(),
+            self.roots
+                .programs
+                .join("acme/worker.conf")
+                .to_string_lossy(),
+        )
+        .unwrap();
+        std::fs::write(self.payload.join("worker.conf"), bytes).unwrap();
+        plan.files.push(DesiredFile {
+            key: ResourceKey::File {
+                destination: destination.to_string(),
+            },
+            source_relative: zup_core::RelativePath::new("worker.conf").unwrap(),
+            destination: destination.clone(),
+            size: bytes.len() as u64,
+            sha256: zup_core::hash_bytes(bytes),
+            privilege: Privilege::System,
+            executable: false,
+        });
+        plan.services[0].requires_files = if declared {
+            vec![destination]
+        } else {
+            Vec::new()
+        };
+        plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+        plan
+    }
     fn new() -> Self {
         let base = tempfile::tempdir().expect("an isolated base");
         let roots = MachineRoots::new(
@@ -175,6 +274,11 @@ impl Fixture {
         let destination = binary.clone();
         let (size, sha256) = zup_core::hash_reader(PAYLOAD_BYTES).expect("bytes hash");
         let service = zup_plan::DesiredService {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -281,6 +385,7 @@ impl Fixture {
                                         command,
                                         start,
                                         readiness,
+                                        execution,
                                         ..
                                     },
                                     zup_plan::ServiceState::Registration {
@@ -288,12 +393,14 @@ impl Fixture {
                                         command: wanted_command,
                                         start: wanted_start,
                                         readiness: wanted_readiness,
+                                        execution: wanted_execution,
                                     },
                                 ) => {
                                     display_name == wanted_display
                                         && command == wanted_command
                                         && start == wanted_start
                                         && readiness == wanted_readiness
+                                        && execution == wanted_execution
                                 }
                                 _ => false,
                             }
@@ -1038,6 +1145,43 @@ fn tampered_unit_bytes_refuse_at_apply() {
     assert!(
         !matches!(outcome, TransactionOutcome::Committed),
         "a substituted payload never commits"
+    );
+    assert!(fixture.source(&unit).is_none());
+}
+
+#[test]
+fn serialized_updates_cannot_claim_service_ownership() {
+    let mut fixture = Fixture::new();
+    let desired = fixture.plan("1.0.0", ServiceStart::Manual, vec![]);
+    let unit = fixture.unit(&desired);
+    fixture.seed(&unit);
+    let record = fixture.begin(&desired);
+    let mut plan = record.plan.clone();
+    let mut changed = false;
+    for node in &mut plan.nodes {
+        let Some(backend) = &mut node.meta.backend else {
+            continue;
+        };
+        let Ok(mut payload) = zup_linux::decode_payload(&backend.payload) else {
+            continue;
+        };
+        if let zup_linux::ServicePayload::Apply { service, .. } = &mut payload {
+            service.kind = zup_plan::IntegrationChangeKind::UpdateOwned;
+            backend.payload = zup_linux::encode_payload(&payload).unwrap();
+            changed = true;
+        }
+    }
+    assert!(changed);
+    assert!(
+        fixture
+            .ledgers()
+            .validate_plan(
+                &desired.app.id,
+                SelectedScope::Machine,
+                &desired.app.version,
+                &plan,
+            )
+            .is_err()
     );
     assert!(fixture.source(&unit).is_none());
 }

@@ -288,6 +288,7 @@ fn malformed_ownership_cannot_change_resource_family_or_alias_an_identity() {
     installed.resources.insert(
         work.key.clone(),
         OwnedResource::Service {
+            requires_files: Vec::new(),
             name: "foreign".into(),
             privilege: Privilege::System,
             previous: zup_plan::ServiceState::Absent,

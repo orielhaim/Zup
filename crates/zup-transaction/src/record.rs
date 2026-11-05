@@ -11,7 +11,7 @@ use zup_core::{AppId, SelectedScope, Sha256Digest, Target};
 use crate::id::{OperationId, TransactionId};
 use crate::plan::TransactionPlan;
 
-pub const JOURNAL_SCHEMA: u32 = 3;
+pub const JOURNAL_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

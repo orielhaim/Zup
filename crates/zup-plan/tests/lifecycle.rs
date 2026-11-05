@@ -379,6 +379,10 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
     let mut target = make_target("1.0.0", vec![]);
     target.scope = SelectedScope::Machine;
     target.services.push(DesiredService {
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
+        requires_files: Vec::new(),
         lifecycle: Default::default(),
         readiness: Default::default(),
         key: key.clone(),
@@ -394,10 +398,14 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
     owned.resources.insert(
         key.clone(),
         OwnedResource::Service {
+            requires_files: Vec::new(),
             name: "daemon".into(),
             privilege: Privilege::System,
             previous: ServiceState::Absent,
             installed: ServiceState::Registration {
+                execution: zup_core::ServiceExecution::Windows {
+                    account: zup_core::WindowsServiceAccount::LocalService,
+                },
                 readiness: Default::default(),
                 display_name: "Daemon".into(),
                 command: command.clone(),
@@ -410,6 +418,9 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
             key: key.clone(),
             id,
             state: ObservedServiceState::Service {
+                execution: zup_core::ServiceExecution::Windows {
+                    account: zup_core::WindowsServiceAccount::LocalService,
+                },
                 readiness: Default::default(),
                 display_name: "Administrator edit".into(),
                 command,

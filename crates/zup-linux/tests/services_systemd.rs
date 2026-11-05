@@ -112,6 +112,11 @@ fn rendered_units_verify() {
         let target = zup_core::Target::host().expect("a supported Linux host");
         let executable = zup_plan::TargetPath::new(target, binary).expect("a path");
         let service = zup_plan::DesiredService {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: zup_core::ResourceKey::Service {
@@ -417,6 +422,72 @@ struct RealWorld {
     _scratch: tempfile::TempDir,
 }
 
+#[test]
+fn real_systemd_configuration_only_upgrade_quiesces_a_declared_consumer() {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    let configuration = world.program.join("worker.conf");
+    let observed = world.program.join("observed");
+    let source = format!(
+        "#!/usr/bin/python3\nimport os, socket, time\nopen({observed:?}, 'w').write(open({configuration:?}).read())\na = os.environ['NOTIFY_SOCKET']\ns = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)\ns.connect(('\\0' + a[1:]) if a.startswith('@') else a)\ns.sendall(b'READY=1')\ntime.sleep(300)\n"
+    );
+    std::fs::write(world.payload.join("tool"), source).unwrap();
+    let mut previous_generation = None;
+    for (version, bytes) in [
+        ("1.0.0", b"first".as_slice()),
+        ("2.0.0", b"second".as_slice()),
+    ] {
+        std::fs::write(world.payload.join("worker.conf"), bytes).unwrap();
+        let mut plan = world.plan(version, ServiceStart::Manual);
+        let destination =
+            TargetPath::new(RealWorld::target(), configuration.to_string_lossy()).unwrap();
+        plan.services[0].requires_files = vec![destination.clone()];
+        plan.services[0].readiness = zup_core::ServiceReadiness::Notify;
+        plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+        plan.files.push(DesiredFile {
+            key: ResourceKey::File {
+                destination: destination.to_string(),
+            },
+            source_relative: zup_core::RelativePath::new("worker.conf").unwrap(),
+            destination,
+            size: bytes.len() as u64,
+            sha256: zup_core::hash_bytes(bytes),
+            privilege: Privilege::System,
+            executable: false,
+        });
+        world.resolve_unit(&plan);
+        assert_eq!(
+            world
+                .drive(
+                    &plan,
+                    if previous_generation.is_none() {
+                        zup_plan::LifecycleAction::Install
+                    } else {
+                        zup_plan::LifecycleAction::Upgrade
+                    }
+                )
+                .unwrap(),
+            TransactionOutcome::Committed
+        );
+        assert_eq!(std::fs::read(&observed).unwrap(), bytes);
+        let generation = RealSystemd::connect()
+            .unwrap()
+            .runtime(&world.unit)
+            .unwrap()
+            .execution_generation;
+        assert_ne!(previous_generation.as_ref(), Some(&generation));
+        previous_generation = Some(generation);
+    }
+    world.uninstall();
+    assert!(
+        observed.exists(),
+        "uninstall preserves an undeclared service output"
+    );
+}
+
 impl RealWorld {
     fn stage(tag: &str) -> Self {
         let program = PathBuf::from(format!("/opt/zup-test-{tag}"));
@@ -455,6 +526,11 @@ impl RealWorld {
         let bytes = std::fs::read(self.payload.join("tool")).expect("payload bytes");
         let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).expect("bytes hash");
         let service = zup_plan::DesiredService {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -565,6 +641,7 @@ impl RealWorld {
                                         command,
                                         start,
                                         readiness,
+                                        execution,
                                         ..
                                     },
                                     zup_plan::ServiceState::Registration {
@@ -572,12 +649,14 @@ impl RealWorld {
                                         command: wanted_command,
                                         start: wanted_start,
                                         readiness: wanted_readiness,
+                                        execution: wanted_execution,
                                     },
                                 ) => {
                                     display_name == wanted_display
                                         && command == wanted_command
                                         && start == wanted_start
                                         && readiness == wanted_readiness
+                                        && execution == wanted_execution
                                 }
                                 _ => false,
                             }

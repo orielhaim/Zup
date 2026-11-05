@@ -222,7 +222,7 @@ fn directory_entries(root: &Path) -> BTreeSet<String> {
 }
 
 fn plugin_component() -> Vec<u8> {
-    include_bytes!("../../../examples/plugins/configure/dist/configure.wasm").to_vec()
+    zup_plugin_abi::test_fixture::component()
 }
 
 #[test]

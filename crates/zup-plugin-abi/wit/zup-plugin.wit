@@ -62,7 +62,25 @@ interface planner {
     stop-timeout-seconds: u32,
   }
 
+  enum windows-service-account {
+    local-service,
+    network-service,
+    local-system,
+  }
+
+  record systemd-user {
+    user: string,
+    group: option<string>,
+  }
+
+  variant service-execution {
+    windows(windows-service-account),
+    systemd-dynamic-user,
+    systemd-user(systemd-user),
+  }
+
   record service {
+    execution: service-execution,
     id: string,
     name: string,
     display-name: option<string>,
@@ -71,6 +89,7 @@ interface planner {
     start: service-start,
     lifecycle: service-lifecycle,
     readiness: service-readiness,
+    requires-files: list<string>,
   }
 
   enum service-readiness {

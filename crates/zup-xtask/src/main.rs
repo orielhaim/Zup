@@ -11,6 +11,7 @@ xtask toolchain package --cli <file> [--profile <name>] [--out <dir>] [--source 
 xtask release clean-room [--material <dir>] [--work <dir>]
 xtask automation generate [--root <dir>]
 xtask automation check [--root <dir>]
+xtask fixtures build [--root <dir>]
 
 options:
     --root <dir>         workspace to inspect (default: this repository)
@@ -91,6 +92,17 @@ fn run() -> Result<ExitCode, String> {
         "emit-host-packages" => emit_host(&mut arguments),
         "toolchain" => stage_toolchain(&mut arguments),
         "automation" => automation(&mut arguments),
+        "fixtures" => {
+            if arguments.next().as_deref() != Some("build") {
+                return Err("fixtures requires `build`".into());
+            }
+            let options = parse(&mut arguments, "fixtures build", &["--root"])?;
+            let root = options
+                .root
+                .unwrap_or_else(zup_xtask::toolchain::repository_root);
+            zup_xtask::fixtures::build(&root)?;
+            Ok(ExitCode::SUCCESS)
+        }
         "release" => release(&mut arguments),
         unknown => Err(format!("unknown command `{unknown}`\n\n{USAGE}")),
     }

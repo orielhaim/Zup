@@ -129,27 +129,67 @@ pub fn render_unit(
     service: &DesiredService<zup_plan::TargetPath>,
     display_name: &str,
 ) -> Result<Vec<u8>, PlanError> {
-    let id = service.id.to_string();
-    let refused = |reason: String| PlanError::ServiceRefused {
-        id: id.clone(),
-        reason,
+    let executable =
+        host_executable(&service.command).map_err(|reason| PlanError::ServiceRefused {
+            id: service.id.to_string(),
+            reason,
+        })?;
+    let definition = UnitDefinition {
+        display_name: display_name.into(),
+        argv: std::iter::once(executable)
+            .chain(service.command.arguments.iter().cloned())
+            .collect(),
+        readiness: service.readiness,
+        execution: service.execution.clone(),
     };
-    let description = render_description(display_name).map_err(refused)?;
-    let executable = host_executable(&service.command).map_err(refused)?;
-    let exec_start = render_exec_start(&executable, &service.command.arguments).map_err(refused)?;
-    let service_type = match service.readiness {
-        zup_core::ServiceReadiness::Manager => SERVICE_TYPE,
-        zup_core::ServiceReadiness::Notify => "notify",
-    };
-    let notify = if service.readiness == zup_core::ServiceReadiness::Notify {
-        "NotifyAccess=main\n"
-    } else {
-        ""
-    };
-    let text = format!(
-        "[Unit]\nDescription={description}\n\n[Service]\nType={service_type}\n{notify}ExecStart={exec_start}\nTimeoutStartSec=90\nTimeoutStopSec=90\n\n[Install]\nWantedBy={WANTED_BY}\n"
-    );
-    Ok(text.into_bytes())
+    definition
+        .render(*service.command.executable.target())
+        .map_err(|reason| PlanError::ServiceRefused {
+            id: service.id.to_string(),
+            reason,
+        })
+}
+
+pub struct UnitDefinition {
+    pub display_name: String,
+    pub argv: Vec<String>,
+    pub readiness: zup_core::ServiceReadiness,
+    pub execution: zup_core::ServiceExecution,
+}
+
+impl UnitDefinition {
+    fn render(&self, target: zup_core::Target) -> Result<Vec<u8>, String> {
+        let description = render_description(&self.display_name)?;
+        let (executable, arguments) = self
+            .argv
+            .split_first()
+            .ok_or("service executable is missing")?;
+        let exec_start = render_exec_start(executable, arguments)?;
+        self.execution.validate_for(target).map_err(str::to_owned)?;
+        let execution = match &self.execution {
+            zup_core::ServiceExecution::SystemdDynamicUser => "DynamicUser=yes\n".to_owned(),
+            zup_core::ServiceExecution::SystemdUser { user, group } => {
+                let mut value = format!("User={user}\n");
+                if let Some(group) = group {
+                    value.push_str(&format!("Group={group}\n"));
+                }
+                value
+            }
+            zup_core::ServiceExecution::Windows { .. } => {
+                return Err("Windows execution identity cannot run under systemd".into());
+            }
+        };
+        let service_type = match self.readiness {
+            zup_core::ServiceReadiness::Manager => SERVICE_TYPE,
+            zup_core::ServiceReadiness::Notify => "notify",
+        };
+        let notify = if self.readiness == zup_core::ServiceReadiness::Notify {
+            "NotifyAccess=main\n"
+        } else {
+            ""
+        };
+        Ok(format!("[Unit]\nDescription={description}\n\n[Service]\nType={service_type}\n{notify}{execution}NoNewPrivileges=yes\nExecStart={exec_start}\nTimeoutStartSec=90\nTimeoutStopSec=90\n\n[Install]\nWantedBy={WANTED_BY}\n").into_bytes())
+    }
 }
 
 fn render_description(display: &str) -> Result<String, String> {
@@ -298,13 +338,15 @@ pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
 
 // Parsed back by the Linux runtime and by the render round-trip tests.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn parse_unit(
-    bytes: &[u8],
-) -> Result<(String, Vec<String>, zup_core::ServiceReadiness), String> {
+pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefinition, String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "a unit source is UTF-8".to_owned())?;
     let mut description: Option<String> = None;
     let mut exec_start: Option<String> = None;
     let mut readiness = None;
+    let mut user = None;
+    let mut group = None;
+    let mut dynamic = false;
+    let mut no_new_privileges = false;
     let mut section = "";
     for line in text.lines() {
         let line = line.trim();
@@ -327,6 +369,12 @@ pub fn parse_unit(
             continue;
         };
         match (section, key.trim()) {
+            ("Service", "User") if user.is_none() => user = Some(value.trim().to_owned()),
+            ("Service", "Group") if group.is_none() => group = Some(value.trim().to_owned()),
+            ("Service", "DynamicUser") if value.trim() == "yes" && !dynamic => dynamic = true,
+            ("Service", "NoNewPrivileges") if value.trim() == "yes" && !no_new_privileges => {
+                no_new_privileges = true
+            }
             ("Service", "Type") => {
                 if readiness.is_some() {
                     return Err("duplicate service type".into());
@@ -348,11 +396,24 @@ pub fn parse_unit(
     }
     let description = description.ok_or("a unit source names a Description")?;
     let exec_start = exec_start.ok_or("a unit source names an ExecStart")?;
-    Ok((
-        description,
-        parse_exec_start(&exec_start)?,
-        readiness.ok_or("service type is required")?,
-    ))
+    if !no_new_privileges {
+        return Err("managed services require NoNewPrivileges=yes".into());
+    }
+    let execution = match (dynamic, user, group) {
+        (true, None, None) => zup_core::ServiceExecution::SystemdDynamicUser,
+        (false, Some(user), group) => zup_core::ServiceExecution::SystemdUser { user, group },
+        _ => return Err("service execution identity is missing or inconsistent".into()),
+    };
+    let definition = UnitDefinition {
+        display_name: description,
+        argv: parse_exec_start(&exec_start)?,
+        readiness: readiness.ok_or("service type is required")?,
+        execution,
+    };
+    if definition.render(target)? != bytes {
+        return Err("service definition differs from the canonical managed configuration".into());
+    }
+    Ok(definition)
 }
 
 #[cfg(test)]
@@ -367,6 +428,11 @@ mod tests {
     ) -> DesiredService<zup_plan::TargetPath> {
         let target = zup_core::Target::parse("linux-x64").unwrap();
         DesiredService {
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: zup_core::ResourceKey::Service {
@@ -446,7 +512,10 @@ mod tests {
             !text.contains("Restart="),
             "no speculative directives: {text}"
         );
-        assert!(!text.contains("User="), "no account directives: {text}");
+        assert!(
+            text.contains("User=root\nNoNewPrivileges=yes\n"),
+            "explicit account and privilege policy: {text}"
+        );
         assert!(
             !text.contains("Environment"),
             "no environment directives: {text}"
@@ -486,7 +555,12 @@ mod tests {
             !exec_line.contains("sh -c"),
             "direct execution, never shell"
         );
-        let (_description, argv, _) = parse_unit(&desired.bytes).unwrap();
+        let argv = parse_unit(
+            &desired.bytes,
+            zup_core::Target::parse("linux-x64").unwrap(),
+        )
+        .unwrap()
+        .argv;
         assert_eq!(argv[0], "/opt/acme/tool");
         assert_eq!(
             argv[1..],
@@ -509,5 +583,23 @@ mod tests {
         assert!(render_description("a\nb").is_err());
         assert!(render_description("100%").is_ok());
         assert_eq!(render_description("100%").unwrap(), "100%%");
+    }
+
+    #[rstest::rstest]
+    #[case::identity("User=root", "User=nobody")]
+    #[case::security("NoNewPrivileges=yes", "NoNewPrivileges=no")]
+    #[case::extra(
+        "NoNewPrivileges=yes",
+        "NoNewPrivileges=yes\nAmbientCapabilities=CAP_SYS_ADMIN"
+    )]
+    #[case::duplicate("User=root", "User=root\nUser=nobody")]
+    fn modified_security_configuration_is_not_adopted(#[case] old: &str, #[case] new: &str) {
+        let desired = service("tool", "/opt/acme/tool", vec![], ServiceStart::Manual);
+        let canonical = render_unit(&desired, "Tool").unwrap();
+        let changed = String::from_utf8(canonical).unwrap().replace(old, new);
+        let parsed = parse_unit(changed.as_bytes(), *desired.command.executable.target());
+        if let Ok(parsed) = parsed {
+            assert_ne!(parsed.execution, desired.execution);
+        }
     }
 }

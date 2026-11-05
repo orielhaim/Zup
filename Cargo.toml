@@ -137,7 +137,7 @@ walkdir = "2"
 directories = "6"
 globset = "0.4"
 sha2 = { version = "0.11", default-features = false }
-wasmtime = { version = "50.0", default-features = false, features = [
+wasmtime = { version = "=50.0.1", default-features = false, features = [
   "component-model",
   "runtime",
   "std",

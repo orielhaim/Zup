@@ -32,6 +32,7 @@ pub fn validate_binding(
             continue;
         };
         let installed = zup_plan::ServiceState::Registration {
+            execution: service.execution.clone(),
             display_name: service.display_name.clone(),
             command: service.command.clone(),
             start: service.start,
@@ -99,6 +100,7 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
             _ => return Err("service registration required".into()),
         };
         let zup_plan::ServiceState::Registration {
+            execution,
             display_name,
             command,
             start,
@@ -108,6 +110,8 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
             unreachable!()
         };
         let service = zup_plan::DesiredService {
+            execution: execution.clone(),
+            requires_files: Vec::new(),
             key: operation.key.clone(),
             id: id.clone(),
             name: zup_core::NonEmptyString::new(&operation.native_name)
@@ -142,13 +146,16 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
             return Err("service fragment changed".into());
         }
         let runtime = self.manager.runtime(&unit).map_err(|e| e.to_string())?;
+        if runtime.pending_job {
+            return Err("service has a concurrent native manager job".into());
+        }
         let expected_type = match readiness {
             zup_core::ServiceReadiness::Manager => "exec",
             zup_core::ServiceReadiness::Notify => "notify",
         };
-        if runtime.service_type != expected_type {
+        if runtime.service_type != expected_type || runtime.execution.as_ref() != Some(execution) {
             return Err(
-                "native service readiness type differs from the authorized configuration".into(),
+                "native service readiness or execution identity differs from the authorized configuration".into(),
             );
         }
         Ok(ServiceObservation {
@@ -163,9 +170,11 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
         &mut self,
         operation: &ServiceControlOperation,
         state: ServiceTerminalState,
+        expected: &ServiceObservation,
     ) -> Result<(), String> {
         let current = self.observe(operation)?;
-        if current.configuration != operation.configuration
+        if &current != expected
+            || current.configuration != operation.configuration
             || current.manager_generation != operation.manager_generation
         {
             return Err("service changed before native control".into());

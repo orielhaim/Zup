@@ -1,6 +1,6 @@
 # Plugin API
 
-Plugin authors depend on `zup-sdk` with the `plugin` feature:
+Depend on `zup-sdk` with the `plugin` feature:
 
 ```toml
 [dependencies]
@@ -9,157 +9,51 @@ zup-sdk = { version = "0.1.0", features = ["plugin"] }
 
 ```rust
 use zup_sdk::plugin::prelude::*;
-```
 
-The canonical cross-language interface is the WIT at
-`crates/zup-plugin-abi/wit/zup-plugin.wit`, which declares:
-
-```wit
-package zup:plugin@1.0.0;
-
-world plugin {
-  export planner;
-}
-```
-
-A plugin exports one operation:
-
-```wit
-plan: func(context: context) -> result<installation-plan, plugin-error>;
-```
-
-The SDK generates its bindings from that WIT, so a project has no copy of it and
-there is no vendored file to fall out of date.
-
-## `Plugin`
-
-```rust
 impl Plugin for MyPlugin {
     fn plan(context: Context) -> Result<Plan, Error> {
-        // ...
+        // Return declared resources.
     }
 }
 
 zup_sdk::plugin::export!(MyPlugin);
 ```
 
-`export!` writes the component's export symbols and converts the `Plan` into what
-the ABI carries. Nothing else in a plugin crate mentions WebAssembly.
+Bindings come from `crates/zup-plugin-abi/wit/zup-plugin.wit`, the canonical `zup:plugin@1.0.0` contract. Prototype changes may break this contract without changing its version; rebuild plugins against the current SDK.
 
-## `Context`
+## Context
 
-```text
-plugin_id             String
-app_id                String
-app_name              String
-app_version           String
-install_directory     String
-scope                 Scope
-target                String
-selected_components   Vec<String>
-```
+`Context` contains `plugin_id`, `app_id`, `app_name`, `app_version`, `install_directory`, `scope`, `target`, and `selected_components`. Scope is `User` or `Machine`.
 
-`Scope` is `User` or `Machine`, with `as_str()` giving `"user"` or `"machine"`.
+## Resources
 
-## `Plan`
+Start with `Plan::new()` and add resources:
 
-| Method | Purpose |
+| Method | Constructor |
 | --- | --- |
-| `new()` | a plan that declares nothing |
-| `generated_file(GeneratedFile)` | a file written during install |
-| `launcher(Launcher)` | a start-menu or desktop entry |
-| `path_entry(impl Into<Path>)` | a directory to add to the system `PATH` |
-| `service(Service)` | a Windows service |
-| `protocol(Protocol)` | a URL scheme to register |
-| `file_association(FileAssociation)` | a file type to associate |
-| `validate()` | refuse an oversized plan before it reaches a host |
+| `generated_file` | `GeneratedFile::new(destination, bytes)` or `GeneratedFile::text(destination, text)` |
+| `launcher` | `Launcher::menu(name, target)` or `Launcher::desktop(name, target)` |
+| `path_entry` | `Path::new(directory)` |
+| `service` | `Service::new(id, name, binary, execution)` |
+| `protocol` | `Protocol::new(scheme, executable)` |
+| `file_association` | `FileAssociation::new(id, extension, executable)` |
 
-## Resource constructors
+Resources use `.with_arguments(...)` where supported. Launchers accept `.with_working_directory(...)`; services and file associations accept display names or descriptions. Keep registration IDs stable across application upgrades.
 
-### `GeneratedFile`
+Services expose `.with_start(...)`, `.with_lifecycle(...)`, `.with_readiness(...)`, and `.with_required_files(...)`. Their defaults and platform restrictions match [manifest services](/guide/services). Plugins describe resources; the trusted host authorizes and executes them.
 
-```rust
-GeneratedFile::new(destination, contents: impl Into<Vec<u8>>)
-GeneratedFile::text(destination, contents: impl AsRef<str>)
-```
+`Plan::validate()` checks output limits locally. The host always validates the returned plan. See [resource examples](/plugins/resources).
 
-### `Launcher`
+## Errors
 
-```rust
-Launcher::menu(name, target)
-Launcher::desktop(name, target)
-    .with_arguments([...])
-    .with_working_directory("...")
-```
+Use `Error::new(code, message)`, `Error::unsupported(message)`, or `Error::invalid(message)`. Read them with `.code()` and `.message()`.
 
-### `Path`
+## Build
 
-```rust
-Path::new("...").as_str()
-```
-
-### `Service`
-
-```rust
-Service::new(id, name, binary)
-    .with_display_name("...")
-    .with_arguments([...])
-    .with_start(ServiceStart::Automatic)
-```
-
-`ServiceStart` is `Automatic`, `Manual` or `Disabled`.
-
-### `Protocol`
-
-```rust
-Protocol::new(scheme, executable).with_arguments([...])
-```
-
-### `FileAssociation`
-
-```rust
-FileAssociation::new(id, extension, executable).with_description("...")
-```
-
-The `id` is the machine-wide identity of the registration and has to be stable
-across versions, so it is named rather than derived: an extension is shared by
-every application on the machine and cannot make an id unique.
-
-## `Error`
-
-```rust
-Error::new(code, message)
-Error::unsupported(message)     // code "unsupported"
-Error::invalid(message)         // code "invalid-context"
-error.code()
-error.message()
-```
-
-## The WIT records behind these names
-
-| Rust | WIT |
-| --- | --- |
-| `GeneratedFile` | `generated-file { destination, contents }` |
-| `Launcher` | `launcher { location, name, target, arguments, working-directory }` |
-| `LauncherLocation` | `launcher-location { menu, desktop }` |
-| `Path` | `path-entry { value }` |
-| `Service` | `service { id, name, display-name, binary, arguments, start }` |
-| `ServiceStart` | `service-start { automatic, manual, disabled }` |
-| `Protocol` | `protocol { scheme, executable, args }` |
-| `FileAssociation` | `file-association { extension, id, description, executable }` |
-| `Scope` | `install-scope { user, machine }` |
-| `Error` | `plugin-error { code, message }` |
-
-## Building
-
-```bash
+```sh
 zup plugin build
 ```
 
-That compiles for `wasm32-unknown-unknown` and componentises the result into
-`dist/<name>.wasm`. `--profile` picks the Cargo profile, `--output` the
-destination, `--project` the project directory.
+This builds `wasm32-unknown-unknown` and writes `dist/<name>.wasm`. Options include `--project`, `--profile`, and `--output`.
 
-The ABI version an artifact must declare is `zup:plugin@1.0.0`, and the
-repository's copy of the WIT is the authoritative definition for the version you
-build against.
+Repository tests require `cargo xtask fixtures build` first. Tests reject missing or stale fixtures; no prebuilt Wasm fixture is checked in.

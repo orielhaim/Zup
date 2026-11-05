@@ -45,14 +45,38 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
             reason: "service type".to_owned(),
         });
     }
-    if config
+    let account = config
         .account_name
         .as_ref()
-        .and_then(|name| name.to_str())
-        .is_none_or(|account| !account.eq_ignore_ascii_case("NT AUTHORITY\\LocalService"))
-        || !config.dependencies.is_empty()
+        .and_then(|value| value.to_str())
+        .and_then(|value| match value.to_ascii_lowercase().as_str() {
+            "nt authority\\localservice" => Some(zup_core::WindowsServiceAccount::LocalService),
+            "nt authority\\networkservice" => Some(zup_core::WindowsServiceAccount::NetworkService),
+            "localsystem" => Some(zup_core::WindowsServiceAccount::LocalSystem),
+            _ => None,
+        })
+        .ok_or_else(|| ScmError::Unsupported {
+            name: name.into(),
+            reason: "only explicitly modeled credential-free SCM accounts are supported".into(),
+        })?;
+    if !config.dependencies.is_empty() {
+        return Err(ScmError::Unsupported {
+            name: name.into(),
+            reason: "SCM dependencies are not yet modeled".into(),
+        });
+    }
+    if service
+        .get_config_service_sid_info()
+        .map_err(|error| ScmError::Unreadable {
+            name: name.into(),
+            reason: error.to_string(),
+        })?
+        != windows_service::service::ServiceSidType::Unrestricted
     {
-        return Err(ScmError::Unsupported { name: name.into(), reason: "only LocalService identity with no SCM dependencies is currently modeled; refusing untracked security or dependency changes".into() });
+        return Err(ScmError::Unsupported {
+            name: name.into(),
+            reason: "managed services require an unrestricted service SID".into(),
+        });
     }
     let failure = service
         .get_failure_actions()
@@ -105,6 +129,7 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
         }
     };
     Ok(ObservedServiceState::Service {
+        execution: zup_core::ServiceExecution::Windows { account },
         readiness: Default::default(),
         display_name,
         command,

@@ -15,6 +15,11 @@ name = "zup-test-worker"
 path = "src/bin/test_worker.rs"
 required-features = ["test-launcher"]
 
+[[bin]]
+name = "zup-test-service"
+path = "src/bin/test_service.rs"
+required-features = ["test-launcher"]
+
 # Portable composition: modules without a `cfg(windows)` gate compose Windows
 # installers from PE bytes on any host. Everything else is the native runtime
 # and lives under `[target.'cfg(windows)'.dependencies]`.

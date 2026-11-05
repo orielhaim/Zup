@@ -133,38 +133,6 @@ pub(crate) fn plan_expected(
     ))
 }
 
-#[cfg(feature = "test-support")]
-pub(crate) fn run_machine_elevated(
-    request: &LinuxRunRequest,
-    launcher: &impl PkexecLauncher,
-) -> Result<LinuxOutcome, ExecError> {
-    match run_machine_elevated_once(request, launcher) {
-        Err(ExecError::StalePlan) => run_machine_elevated_once(request, launcher),
-        outcome => outcome,
-    }
-}
-
-#[cfg(feature = "test-support")]
-pub(crate) fn run_machine_elevated_once(
-    request: &LinuxRunRequest,
-    launcher: &impl PkexecLauncher,
-) -> Result<LinuxOutcome, ExecError> {
-    let roots = MachineRoots::production();
-    let state_root =
-        crate::machine::resolve_machine_state_root(request.state_root.as_deref(), &roots)?;
-    let systemd = crate::machine::SystemdRoots::production();
-    let (intent, expected) = plan_expected(request, &state_root, &roots, &systemd, 0)?;
-    drive_elevated(
-        &request.installer,
-        &intent,
-        &expected.digest,
-        &expected.target,
-        launcher,
-        None,
-        None,
-    )
-}
-
 pub(crate) fn drive_elevated(
     worker_exe: &std::path::Path,
     intent: &PrepareOperation,

@@ -299,6 +299,10 @@ where
             }
             cross_barrier(store, record, executor, &node)?;
         } else if matches!(state, NodeState::Pending) {
+            if matches!(&node.kind, NodeKind::ServiceControl { operation } if operation.stage == crate::ServiceControlStage::Restore)
+            {
+                verify_applied(store, record, executor)?;
+            }
             run_mutation(store, record, executor, &node)?;
         } else if let NodeState::Applied { receipt } = state
             && matches!(node.kind, NodeKind::ServiceControl { .. })

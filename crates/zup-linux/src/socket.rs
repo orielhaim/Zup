@@ -383,14 +383,9 @@ fn peek_frame(stream: &UnixStream) -> Result<bool, IpcError> {
 }
 
 pub fn recv_envelope(stream: &mut UnixStream, timeout: Duration) -> Result<WireEnvelope, IpcError> {
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|source| IpcError::Io {
-            path: "<recv>".to_owned(),
-            source,
-        })?;
+    let deadline = std::time::Instant::now() + timeout;
     let mut length = [0u8; LENGTH_WIDTH];
-    read_exact(stream, &mut length)?;
+    read_exact(stream, &mut length, deadline, false)?;
     let length = u32::from_be_bytes(length) as usize;
     if length == 0 || length > MAX_FRAME_BYTES {
         return Err(IpcError::Framing(format!(
@@ -398,18 +393,49 @@ pub fn recv_envelope(stream: &mut UnixStream, timeout: Duration) -> Result<WireE
         )));
     }
     let mut bytes = vec![0u8; length];
-    read_exact(stream, &mut bytes)?;
+    read_exact(stream, &mut bytes, deadline, true)?;
     decode_payload(&bytes).map_err(|error| IpcError::Framing(error.to_string()))
 }
 
-fn read_exact(stream: &mut UnixStream, mut buffer: &mut [u8]) -> Result<(), IpcError> {
+fn read_exact(
+    stream: &mut UnixStream,
+    mut buffer: &mut [u8],
+    deadline: std::time::Instant,
+    mut frame_started: bool,
+) -> Result<(), IpcError> {
+    let timed_out = |started| {
+        if started {
+            IpcError::Framing("frame did not complete before its deadline".into())
+        } else {
+            IpcError::Timeout
+        }
+    };
     while !buffer.is_empty() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(timed_out(frame_started));
+        }
+        stream
+            .set_read_timeout(Some(remaining))
+            .map_err(|source| IpcError::Io {
+                path: "<recv>".into(),
+                source,
+            })?;
         match stream.read(buffer) {
             Ok(0) => return Err(IpcError::Framing("peer closed mid-frame".to_owned())),
-            Ok(consumed) => buffer = &mut buffer[consumed..],
+            Ok(consumed) => {
+                frame_started = true;
+                buffer = &mut buffer[consumed..];
+            }
             Err(source) => {
-                if source.kind() == std::io::ErrorKind::TimedOut {
-                    return Err(IpcError::Timeout);
+                if source.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) {
+                    return Err(timed_out(frame_started));
                 }
                 return Err(IpcError::Io {
                     path: "<recv>".to_owned(),
@@ -443,6 +469,32 @@ mod tests {
         let received = recv_envelope(&mut second, FRAME_TIMEOUT).expect("recv");
         assert_eq!(received.sequence, 7);
         assert_eq!(received.session_id, session);
+    }
+
+    #[test]
+    fn idle_poll_timeouts_preserve_framing_for_the_next_message() {
+        let (mut first, mut second) = UnixStream::pair().unwrap();
+        assert!(matches!(
+            recv_envelope(&mut second, Duration::from_millis(10)),
+            Err(IpcError::Timeout)
+        ));
+        send_envelope(&mut first, &envelope(SessionId::new_v7(), 9)).unwrap();
+        assert_eq!(
+            recv_envelope(&mut second, FRAME_TIMEOUT).unwrap().sequence,
+            9
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(&[0, 0][..])]
+    #[case(&[0, 0, 0, 16, 1][..])]
+    fn partial_frame_timeouts_are_terminal_protocol_errors(#[case] partial: &[u8]) {
+        let (mut first, mut second) = UnixStream::pair().unwrap();
+        first.write_all(partial).unwrap();
+        assert!(matches!(
+            recv_envelope(&mut second, Duration::from_millis(10)),
+            Err(IpcError::Framing(_))
+        ));
     }
 
     #[test]

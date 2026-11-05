@@ -50,6 +50,7 @@ fn notify_readiness_is_validated_for_the_target(#[case] target: &str, #[case] su
     let text = with(
         r#"
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "worker"
 name = "Worker"
 binary = "${install}/worker"
@@ -58,6 +59,14 @@ readiness = "notify"
 "#,
     )
     .replace("windows-x64", target);
+    let text = if target.starts_with("linux-") {
+        text.replace(
+            r#"execution = { type = "windows", account = "local_service" }"#,
+            r#"execution = { type = "systemd_dynamic_user" }"#,
+        )
+    } else {
+        text
+    };
     let result = parse_and_compile(&text, target);
     assert_eq!(result.is_ok(), supported);
     if let Ok(installer) = result {
@@ -115,12 +124,14 @@ name = "Also core"
 #[case::service(
     r#"
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "svc"
 name = "svc"
 binary = "${install}/svc.exe"
 start = "manual"
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "svc"
 name = "svc2"
 binary = "${install}/svc2.exe"
@@ -298,6 +309,7 @@ component = "tools"
         (
             r#"
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "s"
 name = "s"
 binary = "${install}/s.exe"

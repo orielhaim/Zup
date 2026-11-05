@@ -75,6 +75,10 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
             privilege: Privilege::System,
         }],
         services: vec![zup_plan::DesiredService {
+            execution: zup_core::ServiceExecution::Windows {
+                account: zup_core::WindowsServiceAccount::LocalService,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -114,12 +118,38 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
 
 fn exact_service() -> ObservedServiceState {
     ObservedServiceState::Service {
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
         readiness: Default::default(),
         display_name: "Acme Agent".into(),
         command: cmd(r"C:\PF\Acme\acme-agent.exe", &[]),
         start: ServiceStart::Automatic,
         runtime_state: None,
     }
+}
+
+#[rstest::rstest]
+#[case::missing(0)]
+#[case::duplicate(1)]
+#[case::lower_privilege(2)]
+fn service_file_dependencies_must_be_unique_managed_resources_with_matching_authority(
+    #[case] problem: u8,
+) {
+    let mut desired = sample_target();
+    let path = desired.files[0].destination.clone();
+    desired.services[0].requires_files = vec![path.clone()];
+    desired.validate_resolved().unwrap();
+    match problem {
+        0 => desired.services[0].requires_files = vec![tpath(r"C:\PF\Acme\missing.dll")],
+        1 => desired.services[0].requires_files.push(path),
+        2 => desired.files[0].privilege = Privilege::User,
+        _ => unreachable!(),
+    }
+    assert!(matches!(
+        desired.validate_resolved(),
+        Err(zup_plan::ContractError::ServiceFile { .. })
+    ));
 }
 
 #[rstest::rstest]
@@ -203,6 +233,9 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     let original_service = ServiceState::Registration {
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
         readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
@@ -214,6 +247,9 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
         readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
@@ -242,6 +278,7 @@ fn launcher_and_service_ownership_decisions() {
     ledger.resources.insert(
         target.services[0].key.clone(),
         OwnedResource::Service {
+            requires_files: Vec::new(),
             name: target.services[0].name.to_string(),
             privilege: Privilege::System,
             previous: ServiceState::Absent,
@@ -266,6 +303,9 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
         readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
@@ -286,14 +326,14 @@ fn e2e_fake_machine_mixed_deltas() {
     assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
     assert_eq!(plan.launchers[0].kind, IntegrationChangeKind::Create);
-    assert_eq!(plan.services[0].kind, IntegrationChangeKind::NoOp);
+    assert_eq!(plan.services[0].kind, IntegrationChangeKind::Conflict);
     assert_eq!(plan.protocols[0].kind, IntegrationChangeKind::Create);
     assert_eq!(plan.file_associations[0].kind, IntegrationChangeKind::NoOp);
 
     assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
     assert_eq!(plan.launchers[0].kind, IntegrationChangeKind::Create);
-    assert_eq!(plan.services[0].kind, IntegrationChangeKind::NoOp);
+    assert_eq!(plan.services[0].kind, IntegrationChangeKind::Conflict);
     assert_eq!(plan.protocols[0].kind, IntegrationChangeKind::Create);
     assert_eq!(plan.file_associations[0].kind, IntegrationChangeKind::NoOp);
 }

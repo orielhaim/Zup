@@ -3,7 +3,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-pub const LOCK_SCHEMA: u32 = 2;
+pub const LOCK_SCHEMA: u32 = 1;
 
 pub const LOCK_PATH: &str = "github-actions.lock.json";
 
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn the_lock_rejects_a_field_it_does_not_know() {
-        let error = serde_json::from_str::<PinLock>(r#"{"schema":2,"actions":{},"surprise":true}"#)
+        let error = serde_json::from_str::<PinLock>(r#"{"schema":1,"actions":{},"surprise":true}"#)
             .expect_err("an unknown field is a lock someone edited by hand");
         assert!(error.to_string().contains("surprise"));
     }

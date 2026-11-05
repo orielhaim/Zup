@@ -155,7 +155,9 @@ Required: `value`. Optional: `component`, `when`, `targets`.
 
 ### `[[services]]`
 
-Required: `id`, `name`, `binary`, `start`. Optional: `display_name`, `arguments`, `lifecycle`, `readiness`, `component`, `when`, `targets`. `start` is `automatic`, `manual`, or `disabled` and controls boot policy independently of installation-time execution.
+Required: `id`, `name`, `binary`, `start`, `execution`. Optional: `display_name`, `arguments`, `lifecycle`, `readiness`, `requires_files`, `component`, `when`, `targets`. `start` is `automatic`, `manual`, or `disabled` and controls boot policy independently of installation-time execution.
+
+`execution` is explicit owned configuration. Windows accepts `{ type = "windows", account = "local_service" }`, `network_service`, or an explicitly selected `local_system`. Managed Windows registrations use an unrestricted service SID. Credential-bearing accounts are not supported. systemd accepts `{ type = "systemd_dynamic_user" }` or `{ type = "systemd_user", user = "account", group = "optional-group" }`. Named accounts must already exist; numeric identities and account provisioning are not supported. Generated units require `NoNewPrivileges=yes`.
 
 `lifecycle = { install = "stopped", change = "preserve" }` is the default. Set `install = "running"` to request startup after a new registration. `change = "preserve"` restores a previously running service after its executable or registration changes and leaves a stopped service stopped. `change = "stopped"` leaves it stopped after a change. Disabled services cannot request startup.
 

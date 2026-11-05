@@ -301,7 +301,17 @@ impl PluginEngine {
             message: sanitize_error(error.to_string()),
         })?;
         run_with_watchdog(&self.engine, &|| false, || {
-            pre.instantiate(&mut store).map(|_| ())
+            let instance = pre.instance_pre().instantiate(&mut store)?;
+            let (_, planner) = instance
+                .get_export(&mut store, None, PLANNER_EXPORT_NAME)
+                .ok_or_else(|| wasmtime::Error::msg("missing planner export"))?;
+            let (_, function) = instance
+                .get_export(&mut store, Some(&planner), PLAN_FUNCTION_NAME)
+                .ok_or_else(|| wasmtime::Error::msg("missing plan export"))?;
+            instance.get_typed_func::<(Context,), (Result<InstallationPlan, PluginError>,)>(
+                &mut store, &function,
+            )?;
+            Ok(())
         })
         .map_err(|error| ContractError::Signature {
             message: sanitize_error(error.to_string()),
@@ -385,7 +395,14 @@ fn plan_output_size(plan: &InstallationPlan) -> usize {
                 .saturating_add(option_string_size(&service.display_name))
                 .saturating_add(string_size(&service.binary))
                 .saturating_add(string_list_size(&service.arguments))
-                .saturating_add(1),
+                .saturating_add(string_list_size(&service.requires_files))
+                .saturating_add(match &service.execution {
+                    crate::ServiceExecution::SystemdUser(user) => 1usize
+                        .saturating_add(string_size(&user.user))
+                        .saturating_add(option_string_size(&user.group)),
+                    _ => 2,
+                })
+                .saturating_add(12),
             ResourceItem::Protocol(protocol) => size
                 .saturating_add(string_size(&protocol.scheme))
                 .saturating_add(string_size(&protocol.executable))

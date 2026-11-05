@@ -49,6 +49,7 @@ fn previous(op: &ServiceOperation) -> Result<ServiceState, ServiceError> {
 
 fn installed(op: &ServiceOperation) -> ServiceState {
     ServiceState::Registration {
+        execution: op.execution.clone(),
         readiness: op.readiness,
         display_name: op.display_name.clone(),
         command: op.command.clone(),
@@ -77,6 +78,7 @@ fn service_info(
     existing: Option<&windows_service::service::ServiceConfig>,
 ) -> Result<ServiceInfo, ServiceError> {
     let ServiceState::Registration {
+        execution,
         display_name,
         command,
         start,
@@ -94,6 +96,12 @@ fn service_info(
             reason: "SCM supports manager readiness only".into(),
         });
     }
+    let zup_core::ServiceExecution::Windows { account } = execution else {
+        return Err(ServiceError::NotExecutable {
+            name: name.into(),
+            reason: "SCM requires an explicit Windows execution identity".into(),
+        });
+    };
     Ok(ServiceInfo {
         name: name.into(),
         display_name: display_name.into(),
@@ -103,52 +111,77 @@ fn service_info(
         executable_path: host_path(&command.executable),
         launch_arguments: command.arguments.iter().map(Into::into).collect(),
         dependencies: existing.map_or_else(Vec::new, |config| config.dependencies.clone()),
-        account_name: existing
-            .is_none()
-            .then(|| "NT AUTHORITY\\LocalService".into()),
+        account_name: Some(
+            match account {
+                zup_core::WindowsServiceAccount::LocalService => "NT AUTHORITY\\LocalService",
+                zup_core::WindowsServiceAccount::NetworkService => "NT AUTHORITY\\NetworkService",
+                zup_core::WindowsServiceAccount::LocalSystem => "LocalSystem",
+            }
+            .into(),
+        ),
         account_password: None,
     })
 }
 
-fn write(name: &str, value: &ServiceState) -> Result<(), ServiceError> {
+fn write(name: &str, value: &ServiceState, expected: &ServiceState) -> Result<(), ServiceError> {
+    let creating = *expected == ServiceState::Absent;
     let manager = ServiceManager::local_computer(
         None::<&str>,
-        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
+        ServiceManagerAccess::CONNECT
+            | if creating {
+                ServiceManagerAccess::CREATE_SERVICE
+            } else {
+                ServiceManagerAccess::empty()
+            },
     )
     .map_err(|error| backend(name, error))?;
-    match value {
-        ServiceState::Absent => {
-            let service = manager
-                .open_service(name, ServiceAccess::DELETE)
-                .map_err(|error| backend(name, error))?;
-            service.delete().map_err(|error| backend(name, error))
-        }
-        ServiceState::Registration { .. } => {
-            let service = manager.open_service(
+    if creating {
+        let info = service_info(name, value, None)?;
+        let service = manager
+            .create_service(
+                &info,
+                ServiceAccess::QUERY_CONFIG | ServiceAccess::CHANGE_CONFIG | ServiceAccess::DELETE,
+            )
+            .map_err(|error| backend(name, error))?;
+        if let Err(error) = service
+            .set_config_service_sid_info(windows_service::service::ServiceSidType::Unrestricted)
+        {
+            return Err(backend(
                 name,
-                ServiceAccess::QUERY_CONFIG | ServiceAccess::CHANGE_CONFIG,
-            );
-            match service {
-                Ok(service) => {
-                    let config = service
-                        .query_config()
-                        .map_err(|error| backend(name, error))?;
-                    let info = service_info(name, value, Some(&config))?;
-                    service
-                        .change_config(&info)
-                        .map_err(|error| backend(name, error))
-                }
-                Err(windows_service::Error::Winapi(error))
-                    if error.raw_os_error() == Some(1060) =>
-                {
-                    let info = service_info(name, value, None)?;
-                    manager
-                        .create_service(&info, ServiceAccess::QUERY_CONFIG)
-                        .map_err(|error| backend(name, error))?;
-                    Ok(())
-                }
-                Err(error) => Err(backend(name, error)),
-            }
+                match service.delete() {
+                    Ok(()) => format!(
+                        "service SID configuration failed: {error}; new registration removed"
+                    ),
+                    Err(cleanup) => format!(
+                        "service SID configuration failed: {error}; registration cleanup failed: {cleanup}; recovery required"
+                    ),
+                },
+            ));
+        }
+        return Ok(());
+    }
+    let access = ServiceAccess::QUERY_CONFIG
+        | match value {
+            ServiceState::Absent => ServiceAccess::DELETE,
+            ServiceState::Registration { .. } => ServiceAccess::CHANGE_CONFIG,
+        };
+    let service = manager
+        .open_service(name, access)
+        .map_err(|error| backend(name, error))?;
+    let target = state_target(expected).ok_or(ServiceError::MissingTarget)?;
+    if state(name, target)? != *expected {
+        return Err(ServiceError::ChangedSincePlanning(name.into()));
+    }
+    match value {
+        ServiceState::Absent => service.delete().map_err(|error| backend(name, error)),
+        ServiceState::Registration { .. } => {
+            let config = service
+                .query_config()
+                .map_err(|error| backend(name, error))?;
+            let info = service_info(name, value, Some(&config))?;
+            service
+                .change_config(&info)
+                .map_err(|error| backend(name, error))
         }
     }
 }
@@ -171,7 +204,7 @@ pub fn apply(op: &ServiceOperation) -> Result<BackendReceipt, ServiceError> {
         return Err(ServiceError::ChangedSincePlanning(op.name.clone()));
     }
     let installed = installed(op);
-    write(&op.name, &installed)?;
+    write(&op.name, &installed, &previous)?;
     Ok(BackendReceipt::Service {
         name: op.name.clone(),
         privilege: op.privilege,
@@ -191,7 +224,7 @@ pub fn rollback(
     if state(name, target)? != *installed {
         return Err(ServiceError::ChangedAfterInstall(name.to_owned()));
     }
-    write(name, previous)
+    write(name, previous, installed)
 }
 
 pub fn reconcile(op: &ServiceOperation) -> Result<NativeReconcileResult, ServiceError> {
@@ -256,6 +289,9 @@ mod tests {
     fn service_reconciliation_is_fail_closed() {
         let previous = ServiceState::Absent;
         let desired = ServiceState::Registration {
+            execution: zup_core::ServiceExecution::Windows {
+                account: zup_core::WindowsServiceAccount::LocalService,
+            },
             readiness: Default::default(),
             display_name: "Zup Test".into(),
             command: CommandSpec::new(
@@ -295,11 +331,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires elevated isolated SCM; run scripts/verify-windows-services.ps1"]
     fn uniquely_named_service_create_upgrade_reconcile_and_drift() {
-        if !crate::transport::is_process_elevated().unwrap() {
-            eprintln!("service mutation assertions require an elevated test process");
-            return;
-        }
+        assert!(crate::transport::is_process_elevated().unwrap());
         let name = format!("zup-test-{}", uuid::Uuid::now_v7().simple());
         let _cleanup = Cleanup(name.clone());
         let id = ServiceId::new(&name).unwrap();
@@ -307,6 +341,10 @@ mod tests {
         let executable =
             TargetPath::new(target_triple, r"C:\Program Files\Zup Test\service.exe").unwrap();
         let mut op = ServiceOperation {
+            execution: zup_core::ServiceExecution::Windows {
+                account: zup_core::WindowsServiceAccount::LocalService,
+            },
+            requires_files: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service { id },
@@ -325,6 +363,12 @@ mod tests {
         };
         assert_eq!(reconcile(&op).unwrap(), NativeReconcileResult::NotApplied);
         let first = apply(&op).unwrap();
+        assert_eq!(state(&name, &target_triple).unwrap(), installed(&op));
+        let mut conflicting = installed(&op);
+        if let ServiceState::Registration { display_name, .. } = &mut conflicting {
+            *display_name = "Unowned replacement".into();
+        }
+        assert!(write(&name, &conflicting, &ServiceState::Absent).is_err());
         assert_eq!(state(&name, &target_triple).unwrap(), installed(&op));
         assert!(matches!(
             reconcile(&op).unwrap(),
@@ -355,7 +399,7 @@ mod tests {
         if let ServiceState::Registration { display_name, .. } = &mut foreign {
             *display_name = "Foreign".into();
         }
-        write(&name, &foreign).unwrap();
+        write(&name, &foreign, &installed).unwrap();
         assert!(rollback(&name, &previous, &installed).is_err());
         assert_eq!(reconcile(&op).unwrap(), NativeReconcileResult::Ambiguous);
     }

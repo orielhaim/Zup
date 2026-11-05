@@ -1,42 +1,53 @@
-# Service lifecycle
+# Services
 
-Service lifecycle implementation is in progress. The current implementation has transaction-managed runtime control for Windows SCM and systemd, including systemd cooperative readiness. It is not the complete production service contract: OpenRC, configurable crash recovery actions, explicit dependency declarations, and configurable execution identities remain unimplemented.
+Zup manages Windows SCM and systemd services. OpenRC, service dependencies, runtime failure policies, and managed writable service directories are not implemented.
 
 ```toml
 [[services]]
 id = "worker"
 name = "Example Worker"
 binary = "${install}/worker"
+execution = { type = "systemd_dynamic_user" }
+requires_files = ["${install}/worker.conf"]
 start = "automatic"
 lifecycle = { install = "running", change = "preserve" }
 ```
 
-`start` controls boot policy. Automatic boot startup does not itself start the service during installation. The lifecycle defaults are `install = "stopped"` and `change = "preserve"`. An unchanged service is not restarted by ordinary repair. Executable replacement and registration changes quiesce an owned running service, then restore its previous running state. Previously stopped services stay stopped. `change = "stopped"` suppresses restoration. Disabled services never start implicitly.
+## Startup and maintenance
 
-The transaction graph stages verified content and persists commit intent before quiescing services. Stop completion is verified before file mutation. Runtime restoration follows file and registration changes and is verified before commit. Compensation stops the new runtime before restoring files and registration, then restores the old runtime. A failed runtime compensation prevents further file rollback; incomplete file compensation prevents restarting the previous runtime.
+`start` controls boot startup: `automatic`, `manual`, or `disabled`. It does not start the service during installation.
 
-`lifecycle.start_timeout_seconds` and `lifecycle.stop_timeout_seconds` each default to 90 and accept values from 1 through 3600. Compensation uses the deadline for the transition it performs: restarting the old runtime uses the start deadline, and stopping the new runtime uses the stop deadline. Removal currently uses 90-second deadlines because the ownership ledger does not retain lifecycle policy.
+Lifecycle defaults are `install = "stopped"` and `change = "preserve"`. Set `install = "running"` to start a new service. Upgrades stop affected running services before replacing files and restore their previous running state afterward. Stopped services remain stopped; unchanged repair avoids restarts. `change = "stopped"` leaves an affected service stopped. Disabled services cannot request startup.
 
-Plugins declare the same lifecycle policy through the typed `ServiceLifecycle` WIT record and SDK `Service::with_lifecycle`. The trusted planner validates plugin deadlines and rejects startup of disabled services. Plugins cannot directly control native services.
+`requires_files` lists declared files consumed by the service, such as configuration or libraries. Changes and removals stop running consumers. Paths must be unique managed files with the same privilege as the service.
 
-Control intent binds the service resource, native name, privilege, installation generation, registration, manager generation, and execution generation. Receipts remain in the journal during rollback. Unknown state, changed registrations, uncertain requests without receipts, and changed execution generations refuse replay and require recovery. Journals retain execution and rollback diagnostics. Recovery-required does not mean arbitrary process side effects were undone.
+Start and stop deadlines default to 90 seconds and accept 1–3600 through `lifecycle.start_timeout_seconds` and `lifecycle.stop_timeout_seconds`. Uninstall currently uses 90 seconds.
 
-systemd uses D-Bus jobs with `fail` job mode, subscribes before submission, correlates `JobRemoved`, and queries native state after completion. Default `readiness = "manager"` uses `Type=exec`. This proves native execution and running state, not application-specific health. Set `readiness = "notify"` for applications that send systemd `READY=1` from their main process. Zup waits for the native startup job and verifies running state and the loaded service type. Exiting before readiness fails the deployment. Windows rejects notify readiness; SCM running state does not prove application-level health.
+## Identity and readiness
 
-Generated systemd units currently configure `TimeoutStartSec=90` and `TimeoutStopSec=90`. systemd handles application-reported timeout extensions through its native notification protocol. Zup's independent lifecycle deadline remains bounded. A timed-out operation whose native job or runtime remains uncertain requires recovery rather than an unsafe retry.
+Windows requires an explicit identity:
 
-Definitions must match the generated bytes, use the canonical source, and have no drop-ins or pending daemon reload. Stop propagation to another unit is refused. System services currently retain the existing root execution model; configurable least-privilege identities and hardening must be completed before claiming production support.
-
-SCM uses `windows-service` status, checkpoints, wait hints, and bounded polling. New registrations use LocalService. Other identities, SCM dependencies, and nonempty failure actions are explicitly refused because they are not yet represented in the ownership contract. Restart Manager exempts only an authorized service instance matched by native service name and process creation time. It does not terminate other blockers. The kernel boot GUID identifies the Windows boot epoch; retrieval uses `NtQuerySystemInformation` with the native layout maintained in [PHNT](https://github.com/winsiderss/phnt/blob/master/ntexapi.h), and fails closed if unavailable. The boot-identity query was verified without elevation. The native control implementation has not yet been verified with an elevated SCM lifecycle test in this environment.
-
-Only changes to the service executable or registration currently cause lifecycle control. Declared configuration files and shared executable dependencies need an explicit resource-dependency model. Transaction-level service dependency ordering exists, but the manifest does not yet expose it. Interrupted service control without a durable receipt remains recovery-required, even if the runtime appears unchanged: a request could still be queued, or a briefly started process could already have exited. Automatic recovery of every interruption boundary is not implemented.
-
-A failed systemd start can supply compensation-only evidence when the declared configuration and manager identity still match, the service is stopped with a recognized native failure result, and no job remains pending. This evidence permits rollback but never startup verification or commit. Recovery re-verifies applied service receipts before executing dependent mutations. Native systemd tests share global manager reload state and run in a single-threaded test group.
-
-The focused systemd suite runs with a real system manager:
-
-```sh
-sudo env ZUP_TEST_REAL_SYSTEMD=1 cargo nextest run -p zup-linux --all-features --test services_systemd
+```toml
+execution = { type = "windows", account = "local_service" }
 ```
 
-References: [systemd D-Bus jobs](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html), [systemd service types](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html), [SCM startup verification](https://learn.microsoft.com/en-us/windows/win32/services/starting-a-service), and [OpenRC service conventions](https://github.com/OpenRC/openrc/blob/master/service-script-guide.md).
+`network_service` and explicitly selected `local_system` are also supported. Registrations use a service SID. Password accounts and existing unmanaged failure actions or SCM dependencies are refused.
+
+systemd accepts `systemd_dynamic_user` or an existing account:
+
+```toml
+execution = { type = "systemd_user", user = "worker", group = "worker" }
+readiness = "notify"
+```
+
+Generated units set `NoNewPrivileges=yes`. Dynamic users inherit systemd's restrictions; applications must provide suitable writable storage themselves.
+
+The default `readiness = "manager"` verifies SCM running state or systemd `Type=exec`; it does not prove application health. systemd `notify` waits for the main process to send `READY=1`. Windows rejects notify readiness. Unit startup and shutdown timeouts are currently fixed at 90 seconds, independently of Zup's deadline.
+
+## Failures and recovery
+
+Only owned services may be changed. Zup stages content and records durable intent before stopping a service. Startup is verified before commit. Rollback stops the new runtime, restores files and registration, then restores the old runtime when safe.
+
+Changed configuration, concurrent manager jobs, unknown state, or insufficient interruption evidence require recovery instead of replay. Preserve the reported journal and diagnostics. Arbitrary process side effects cannot be undone.
+
+Plugins declare the same policies through the [SDK](/reference/plugin-api); they cannot control services directly.

@@ -885,14 +885,7 @@ fn recover_one(
     let mut executor = crate::executor::LinuxFileExecutor::new()
         .with_payload(payload)
         .for_machine();
-    if record.plan.nodes.iter().any(|node| {
-        node.meta.backend.as_ref().is_some_and(|backend| {
-            backend
-                .id
-                .as_str()
-                .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
-        })
-    }) {
+    if crate::service_ops::plan_requires_manager(&record.plan) {
         let manager = crate::systemd::RealSystemd::connect()
             .map_err(|error| IpcError::Transaction(error.to_string()))?;
         executor = executor.with_services(crate::executor::ServiceSupport::isolated(
@@ -1186,14 +1179,7 @@ fn execute_prepared(
         .with_payload(payload)
         .for_machine();
 
-    if prepared.plan.nodes.iter().any(|node| {
-        node.meta.backend.as_ref().is_some_and(|backend| {
-            backend
-                .id
-                .as_str()
-                .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
-        })
-    }) {
+    if crate::service_ops::plan_requires_manager(&prepared.plan) {
         let manager = crate::systemd::RealSystemd::connect()
             .map_err(|error| IpcError::Transaction(error.to_string()))?;
         executor = executor.with_services(crate::executor::ServiceSupport::isolated(

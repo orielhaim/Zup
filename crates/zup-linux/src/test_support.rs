@@ -181,25 +181,20 @@ pub fn validate_rendezvous_for_test(
     crate::worker::validate_rendezvous(socket, invoking_uid)
 }
 
-pub fn run_machine_elevated_for_test(
+pub fn launch_prepared_for_test(
     installer: &Path,
-    state: &Path,
-    action: Operation,
-    install_dir_override: Option<PathBuf>,
+    intent: &zup_protocol::PrepareOperation,
+    plan: &zup_transaction::TransactionPlan,
     launcher: &impl crate::pkexec::PkexecLauncher,
 ) -> Result<LinuxOutcome, ExecError> {
-    crate::elevate::run_machine_elevated(
-        &crate::run::LinuxRunRequest {
-            installer: installer.to_path_buf(),
-            scope: zup_core::SelectedScope::Machine,
-            state_root: Some(state.to_path_buf()),
-            action,
-            selection: zup_runtime::OperationSelection {
-                install_directory: install_dir_override,
-                ..Default::default()
-            },
-        },
+    crate::elevate::drive_elevated(
+        installer,
+        intent,
+        &plan.fingerprint().to_hex(),
+        &plan.target,
         launcher,
+        None,
+        None,
     )
 }
 
@@ -343,6 +338,10 @@ impl SystemdManager for FakeSystemd {
             .get(unit)
             .cloned()
             .unwrap_or(crate::systemd::UnitRuntime {
+                execution: Some(zup_core::ServiceExecution::SystemdUser {
+                    user: "root".into(),
+                    group: None,
+                }),
                 service_type: "exec".into(),
                 pending_job: false,
                 state: zup_plan::ServiceRuntimeState::Stopped,
@@ -367,6 +366,7 @@ impl SystemdManager for FakeSystemd {
         self.runtimes.insert(
             unit.into(),
             crate::systemd::UnitRuntime {
+                execution: current.execution,
                 service_type: current.service_type,
                 pending_job: false,
                 state: if running {

@@ -47,6 +47,7 @@ pub struct UnitInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitRuntime {
+    pub execution: Option<zup_core::ServiceExecution>,
     pub service_type: String,
     pub pending_job: bool,
     pub state: zup_plan::ServiceRuntimeState,
@@ -230,6 +231,26 @@ impl SystemdManager for RealSystemd {
             let sub_state = proxy.sub_state().await.map_err(failed)?;
             let result = service.result().await.map_err(failed)?;
             let service_type = service.type_property().await.map_err(failed)?;
+            let execution = if proxy.load_state().await.map_err(failed)? == "loaded" {
+                if !service.no_new_privileges().await.map_err(failed)? {
+                    return Err(IpcError::SystemdRefused {
+                        unit: unit.into(),
+                        reason: "effective service security lacks NoNewPrivileges".into(),
+                    });
+                }
+                Some(if service.dynamic_user().await.map_err(failed)? {
+                    zup_core::ServiceExecution::SystemdDynamicUser
+                } else {
+                    let user = service.user().await.map_err(failed)?;
+                    let group = service.group().await.map_err(failed)?;
+                    zup_core::ServiceExecution::SystemdUser {
+                        user,
+                        group: (!group.is_empty()).then_some(group),
+                    }
+                })
+            } else {
+                None
+            };
             let invocation = proxy.invocation_id().await.map_err(failed)?;
             let pending_job = proxy.job().await.map_err(failed)?.0 != 0;
             let bus = zbus_systemd::zbus::fdo::DBusProxy::new(&self.connection)
@@ -254,6 +275,7 @@ impl SystemdManager for RealSystemd {
                 _ => Runtime::Unknown,
             };
             Ok(UnitRuntime {
+                execution,
                 service_type,
                 pending_job,
                 state,
