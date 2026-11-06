@@ -130,12 +130,7 @@
     }
   },
   "additionalProperties": false,
-  "required": [
-    "schema",
-    "app",
-    "build",
-    "install"
-  ],
+  "required": ["schema", "app", "build", "install"],
   "examples": [
     {
       "schema": 1,
@@ -185,10 +180,7 @@
           "type": "string"
         },
         "publisher": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "main": {
@@ -203,10 +195,7 @@
           "default": null
         },
         "description": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "icon": {
@@ -221,19 +210,12 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "id",
-        "name",
-        "version"
-      ]
+      "required": ["id", "name", "version"]
     },
     "Template": {
       "description": "A path or command template using zup variables such as ${install} and ${location.user_data}.",
       "type": "string",
-      "examples": [
-        "${install}/app.exe",
-        "${location.programs}/Acme"
-      ]
+      "examples": ["${install}/app.exe", "${location.programs}/Acme"]
     },
     "IconSetting": {
       "description": "An application icon: a path in the project, or a table with `source` and optional `padding`.",
@@ -259,26 +241,17 @@
         },
         "padding": {
           "description": "Fraction of the canvas left empty on each side. `0.10` insets by a tenth.",
-          "type": [
-            "number",
-            "null"
-          ],
+          "type": ["number", "null"],
           "format": "double",
           "default": null
         }
       },
       "additionalProperties": false,
-      "required": [
-        "source"
-      ]
+      "required": ["source"]
     },
     "Frontend": {
       "type": "string",
-      "enum": [
-        "gui",
-        "console",
-        "headless"
-      ]
+      "enum": ["gui", "console", "headless"]
     },
     "Ui": {
       "description": "The preset this application presents, as its author configures it.\n\nThe only customization system an application has. What a preset draws is the\npreset's business, so there is nothing here for an application author to\ndescribe a window: the package is chosen, and its own settings are filled in.",
@@ -323,9 +296,7 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "targets"
-      ]
+      "required": ["targets"]
     },
     "TargetProfile": {
       "description": "Build payload declared for one target profile.\n\n`target` is optional: a profile named for a Zup target, such as\n`[build.targets.windows-x64]`, infers it from its own name. A profile with\nany other name states it explicitly with `target = \"windows-x64\"`.",
@@ -369,19 +340,12 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "source"
-      ]
+      "required": ["source"]
     },
     "Target": {
       "description": "A Zup target such as `windows-x64` or `linux-x64`.",
       "type": "string",
-      "examples": [
-        "windows-x64",
-        "windows-arm64",
-        "linux-x64",
-        "linux-arm64"
-      ]
+      "examples": ["windows-x64", "windows-arm64", "linux-x64", "linux-arm64"]
     },
     "Source": {
       "description": "Payload source for the installer (build-time, not install-time).",
@@ -391,9 +355,7 @@
           "type": "string"
         }
       },
-      "required": [
-        "directory"
-      ]
+      "required": ["directory"]
     },
     "Install": {
       "description": "Installation scope and destination templates.",
@@ -415,18 +377,12 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "scope"
-      ]
+      "required": ["scope"]
     },
     "InstallScope": {
       "description": "Scope an installer may target.",
       "type": "string",
-      "enum": [
-        "user",
-        "machine",
-        "either"
-      ]
+      "enum": ["user", "machine", "either"]
     },
     "InstallDirectory": {
       "description": "Unresolved install-root templates by scope.",
@@ -478,23 +434,15 @@
         },
         "channel": {
           "description": "The release channel this artifact follows.\n\nAn artifact without a channel is labelled with an exact version and always\ninstalls it. An artifact with one installs the channel's current release,\nwhich is a different promise and a different file name.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "output": {
           "description": "The output file name. Derived from the application name when absent.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         }
       },
       "additionalProperties": false,
-      "required": [
-        "targets"
-      ]
+      "required": ["targets"]
     },
     "ArtifactKind": {
       "description": "How much of a target set one artifact file carries.",
@@ -537,17 +485,11 @@
           "type": "string"
         },
         "description": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "component": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "when": {
@@ -575,13 +517,8 @@
           "$ref": "#/$defs/PrerequisiteInstaller",
           "default": {
             "arguments": [],
-            "success_exit_codes": [
-              0
-            ],
-            "reboot_exit_codes": [
-              1641,
-              3010
-            ],
+            "success_exit_codes": [0],
+            "reboot_exit_codes": [1641, 3010],
             "privilege": "system"
           }
         },
@@ -594,30 +531,16 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "id",
-        "name",
-        "requirement",
-        "package"
-      ]
+      "required": ["id", "name", "requirement", "package"]
     },
     "Condition": {
       "description": "A component expression such as component(\"docs\") or !component(\"debug\").",
       "type": "string",
-      "examples": [
-        "component(\"docs\")",
-        "!component(\"debug\")"
-      ]
+      "examples": ["component(\"docs\")", "!component(\"debug\")"]
     },
     "PrerequisiteArchitecture": {
       "type": "string",
-      "enum": [
-        "x86",
-        "x64",
-        "arm64",
-        "current",
-        "any"
-      ]
+      "enum": ["x86", "x64", "arm64", "current", "any"]
     },
     "PrerequisiteRequirement": {
       "description": "The portable semantic condition a prerequisite must satisfy.\n\nEvery variant names a fact the target system can be asked about. Detection\nmechanics, package formats, and registry layout belong to the platform\nprovider, not to this model.",
@@ -633,18 +556,12 @@
               "type": "string"
             },
             "minimum_version": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "default": null
             }
           },
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "id"
-          ]
+          "required": ["kind", "id"]
         },
         {
           "description": "A runtime that must be present, optionally within a version range.",
@@ -658,18 +575,12 @@
               "type": "string"
             },
             "version": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "default": null
             }
           },
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "id"
-          ]
+          "required": ["kind", "id"]
         },
         {
           "description": "An installed package that must be present, optionally within a version range.",
@@ -683,18 +594,12 @@
               "type": "string"
             },
             "version": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "default": null
             }
           },
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "id"
-          ]
+          "required": ["kind", "id"]
         },
         {
           "description": "A file that must exist, optionally with a matching file version.",
@@ -708,18 +613,12 @@
               "$ref": "#/$defs/Template"
             },
             "version": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "default": null
             }
           },
           "additionalProperties": false,
-          "required": [
-            "kind",
-            "path"
-          ]
+          "required": ["kind", "path"]
         }
       ]
     },
@@ -733,9 +632,7 @@
               "const": "detect_only"
             }
           },
-          "required": [
-            "type"
-          ]
+          "required": ["type"]
         },
         {
           "type": "object",
@@ -745,9 +642,7 @@
               "const": "repository"
             }
           },
-          "required": [
-            "type"
-          ]
+          "required": ["type"]
         },
         {
           "type": "object",
@@ -768,12 +663,7 @@
               "minimum": 0
             }
           },
-          "required": [
-            "type",
-            "path",
-            "sha256",
-            "size"
-          ]
+          "required": ["type", "path", "sha256", "size"]
         },
         {
           "type": "object",
@@ -789,10 +679,7 @@
               "type": "string"
             },
             "size": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": ["integer", "null"],
               "format": "uint64",
               "minimum": 0,
               "default": null
@@ -801,12 +688,7 @@
               "type": "string"
             }
           },
-          "required": [
-            "type",
-            "url",
-            "sha256",
-            "filename"
-          ]
+          "required": ["type", "url", "sha256", "filename"]
         }
       ]
     },
@@ -827,9 +709,7 @@
             "type": "integer",
             "format": "int32"
           },
-          "default": [
-            0
-          ]
+          "default": [0]
         },
         "reboot_exit_codes": {
           "type": "array",
@@ -837,10 +717,7 @@
             "type": "integer",
             "format": "int32"
           },
-          "default": [
-            1641,
-            3010
-          ]
+          "default": [1641, 3010]
         },
         "privilege": {
           "$ref": "#/$defs/Privilege",
@@ -879,11 +756,7 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "repository",
-        "channel",
-        "root"
-      ]
+      "required": ["repository", "channel", "root"]
     },
     "Distribution": {
       "description": "Where a published release is hosted.\n\nThe section exists so \"publish there\" and \"fetch from there\" are separate\ndecisions. A project can publish installers to GitHub and still serve\ncontent from a CDN it controls, or publish to both. The only thing this\nsection says is where a *client* looks.",
@@ -895,10 +768,7 @@
         },
         "channel": {
           "description": "The channel the `github` host's stable alias follows.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         }
       },
       "additionalProperties": false
@@ -979,37 +849,23 @@
         },
         "draft": {
           "description": "Leave the release a draft.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": ["boolean", "null"]
         },
         "prerelease": {
           "description": "Mark the release a prerelease.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": ["boolean", "null"]
         },
         "create_tag": {
           "description": "Let the publisher create the tag when it does not exist.\n\nOff by default, and the reason is specific rather than general: a\nprovider that creates a tag from whatever its default branch points at\nwill one day publish a release for code that was never built, and no\namount of downstream verification puts that commit back.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": ["boolean", "null"]
         },
         "replace_conflicts": {
           "description": "Replace a differing asset on a draft release.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": ["boolean", "null"]
         }
       },
       "additionalProperties": false,
-      "required": [
-        "repository"
-      ]
+      "required": ["repository"]
     },
     "GithubWorkflow": {
       "description": "The generated release workflow's settings.\n\nEvery field here is a decision a project makes and the generator only\nreflects. The *matrix* is not one of them: it comes from the resolved target\nprofiles, because a developer should not have to enumerate targets in YAML\nand keep the two in sync.",
@@ -1017,58 +873,37 @@
       "properties": {
         "name": {
           "description": "The workflow's `name:`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "tag_glob": {
           "description": "The tag glob that triggers a release.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "environment": {
           "description": "A GitHub environment to gate the publish phase behind.\n\nOpt-in. Required reviewers, environment secrets, and tag restrictions\nare three clicks on an environment, and reimplementing any of them in\nzup would be a worse version of the same thing.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "attestations": {
           "description": "Whether to generate build-provenance attestations.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": ["boolean", "null"]
         },
         "attest_paths": {
           "description": "Extra globs to attest, relative to the release directory.\n\nEmpty by default. Which files a user runs is the project's decision, so\nthe generator does not guess it; the release manifest is attested either\nway, because it is the document that names every other digest.",
-          "type": [
-            "array",
-            "null"
-          ],
+          "type": ["array", "null"],
           "items": {
             "type": "string"
           }
         },
         "sign": {
           "description": "Commands that sign the composed artifacts.\n\nA list of lines rather than one string, because the generated workflow\nwrites them into a `run:` block and a project needs to see the shape of\nwhat it is authorizing.",
-          "type": [
-            "array",
-            "null"
-          ],
+          "type": ["array", "null"],
           "items": {
             "type": "string"
           }
         },
         "compose_runner": {
           "description": "The runner that composes the final artifacts.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "runners": {
           "description": "Runner labels the project pinned itself, by Zup target.",
@@ -1079,24 +914,15 @@
         },
         "release_dir": {
           "description": "The directory the release is composed in.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "receipt": {
           "description": "Where the publisher writes its receipt.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "action": {
           "description": "The zup action the generated pipeline calls, as `owner/repo@ref`.\n\nDefaults to a floating major ref, because that is what an action ref is\nfor: a project writes it once and dependabot keeps it current. A project\nthat wants the release pipeline pinned to an immutable ref names one here\ninstead, and the generated file shows exactly what it will run.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         }
       },
       "additionalProperties": false
@@ -1107,17 +933,11 @@
       "properties": {
         "prefix": {
           "description": "A prefix followed by the version. `v1.4.0` by default.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "name": {
           "description": "An exact tag, when the project does not derive one from the version.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         }
       },
       "additionalProperties": false
@@ -1133,17 +953,11 @@
         },
         "file": {
           "description": "The file to read, when the policy is `file`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "text": {
           "description": "The text to use, when the policy is `text`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         }
       },
       "additionalProperties": false
@@ -1159,10 +973,7 @@
           "type": "string"
         },
         "description": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "required": {
@@ -1182,10 +993,7 @@
         },
         "group": {
           "description": "The group this component belongs to. Absent means the implicit group.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "targets": {
           "type": "array",
@@ -1196,10 +1004,7 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "id",
-        "name"
-      ]
+      "required": ["id", "name"]
     },
     "Targeted3": {
       "description": "A resource declaration with optional target-profile applicability.",
@@ -1209,16 +1014,10 @@
           "type": "string"
         },
         "label": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "description": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "prominence": {
           "$ref": "#/$defs/ComponentProminence",
@@ -1237,18 +1036,14 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "id"
-      ]
+      "required": ["id"]
     },
     "ComponentProminence": {
       "description": "How clearly a component group should be presented.\n\nThis is about the group as one decision, not about where a preset draws it.\n`Auto` is conservative: a group with nothing optional to choose disappears,\na group that requires an explicit selection is primary, and everything else\nis secondary.",
       "oneOf": [
         {
           "type": "string",
-          "enum": [
-            "auto"
-          ]
+          "enum": ["auto"]
         },
         {
           "description": "The person should see that this decision exists before installing.",
@@ -1288,10 +1083,7 @@
           "type": "string"
         },
         "component": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "when": {
@@ -1314,10 +1106,7 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "id",
-        "source"
-      ]
+      "required": ["id", "source"]
     },
     "Targeted5": {
       "description": "A resource declaration with optional target-profile applicability.",
@@ -1330,10 +1119,7 @@
           "$ref": "#/$defs/Template"
         },
         "component": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "when": {
@@ -1366,10 +1152,7 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "source",
-        "destination"
-      ]
+      "required": ["source", "destination"]
     },
     "Targeted6": {
       "description": "A resource declaration with optional target-profile applicability.",
@@ -1403,10 +1186,7 @@
           "default": null
         },
         "component": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "when": {
@@ -1429,19 +1209,12 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "location",
-        "name",
-        "target"
-      ]
+      "required": ["location", "name", "target"]
     },
     "LauncherLocation": {
       "description": "Portable application launcher location.",
       "type": "string",
-      "enum": [
-        "menu",
-        "desktop"
-      ]
+      "enum": ["menu", "desktop"]
     },
     "Targeted7": {
       "description": "A resource declaration with optional target-profile applicability.",
@@ -1451,10 +1224,7 @@
           "$ref": "#/$defs/Template"
         },
         "component": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "when": {
@@ -1477,14 +1247,18 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "value"
-      ]
+      "required": ["value"]
     },
     "Targeted8": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
+        "failure": {
+          "$ref": "#/$defs/ServiceFailurePolicy",
+          "default": {
+            "type": "none"
+          }
+        },
         "execution": {
           "$ref": "#/$defs/ServiceExecution"
         },
@@ -1495,10 +1269,7 @@
           "type": "string"
         },
         "display_name": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "binary": {
@@ -1535,11 +1306,22 @@
           "maxItems": 256,
           "default": []
         },
+        "requires_services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "requires_components": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
         "component": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "when": {
@@ -1562,13 +1344,123 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "execution",
-        "id",
-        "name",
-        "binary",
-        "start"
+      "required": ["execution", "id", "name", "binary", "start"]
+    },
+    "ServiceFailurePolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": ["type"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "systemd"
+            },
+            "condition": {
+              "$ref": "#/$defs/SystemdRestartCondition"
+            },
+            "delay_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "start_limit_burst": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "start_limit_interval_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "condition",
+            "delay_seconds",
+            "start_limit_burst",
+            "start_limit_interval_seconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "windows"
+            },
+            "delay_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "restart_attempts": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "reset_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "delay_seconds",
+            "restart_attempts",
+            "reset_seconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "openrc"
+            },
+            "delay_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_respawns": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "respawn_period_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "delay_seconds",
+            "max_respawns",
+            "respawn_period_seconds"
+          ]
+        }
       ]
+    },
+    "SystemdRestartCondition": {
+      "type": "string",
+      "enum": ["on_failure", "on_abnormal"]
     },
     "ServiceExecution": {
       "oneOf": [
@@ -1584,10 +1476,7 @@
             }
           },
           "additionalProperties": false,
-          "required": [
-            "type",
-            "account"
-          ]
+          "required": ["type", "account"]
         },
         {
           "type": "object",
@@ -1597,10 +1486,26 @@
               "const": "systemd_dynamic_user"
             }
           },
-          "required": [
-            "type"
-          ],
+          "required": ["type"],
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "openrc_user"
+            },
+            "user": {
+              "type": "string"
+            },
+            "group": {
+              "type": ["string", "null"],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": ["type", "user"]
         },
         {
           "type": "object",
@@ -1613,37 +1518,23 @@
               "type": "string"
             },
             "group": {
-              "type": [
-                "string",
-                "null"
-              ],
+              "type": ["string", "null"],
               "default": null
             }
           },
           "additionalProperties": false,
-          "required": [
-            "type",
-            "user"
-          ]
+          "required": ["type", "user"]
         }
       ]
     },
     "WindowsServiceAccount": {
       "type": "string",
-      "enum": [
-        "local_service",
-        "network_service",
-        "local_system"
-      ]
+      "enum": ["local_service", "network_service", "local_system"]
     },
     "ServiceStart": {
       "description": "Platform-neutral service start policy.",
       "type": "string",
-      "enum": [
-        "automatic",
-        "manual",
-        "disabled"
-      ]
+      "enum": ["automatic", "manual", "disabled"]
     },
     "ServiceLifecycle": {
       "description": "Boot policy remains independent of these deployment-time decisions.",
@@ -1676,24 +1567,15 @@
     },
     "InitialServiceState": {
       "type": "string",
-      "enum": [
-        "stopped",
-        "running"
-      ]
+      "enum": ["stopped", "running"]
     },
     "ChangedServiceState": {
       "type": "string",
-      "enum": [
-        "preserve",
-        "stopped"
-      ]
+      "enum": ["preserve", "stopped"]
     },
     "ServiceReadiness": {
       "type": "string",
-      "enum": [
-        "manager",
-        "notify"
-      ]
+      "enum": ["manager", "notify"]
     },
     "Targeted9": {
       "description": "A resource declaration with optional target-profile applicability.",
@@ -1732,10 +1614,7 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "scheme",
-        "executable"
-      ]
+      "required": ["scheme", "executable"]
     },
     "Targeted10": {
       "description": "A resource declaration with optional target-profile applicability.",
@@ -1748,10 +1627,7 @@
           "type": "string"
         },
         "description": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "default": null
         },
         "executable": {
@@ -1777,11 +1653,7 @@
         }
       },
       "additionalProperties": false,
-      "required": [
-        "extension",
-        "id",
-        "executable"
-      ]
+      "required": ["extension", "id", "executable"]
     }
   }
 }

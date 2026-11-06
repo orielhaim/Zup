@@ -77,9 +77,35 @@ interface planner {
     windows(windows-service-account),
     systemd-dynamic-user,
     systemd-user(systemd-user),
+    openrc-user(systemd-user),
+  }
+
+  enum systemd-restart-condition { on-failure, on-abnormal }
+  record systemd-failure-policy {
+    condition: systemd-restart-condition,
+    delay-seconds: u32,
+    start-limit-burst: u32,
+    start-limit-interval-seconds: u32,
+  }
+  record windows-failure-policy {
+    delay-seconds: u32,
+    restart-attempts: u32,
+    reset-seconds: u32,
+  }
+  record openrc-failure-policy {
+    delay-seconds: u32,
+    max-respawns: u32,
+    respawn-period-seconds: u32,
+  }
+  variant service-failure-policy {
+    none,
+    systemd(systemd-failure-policy),
+    windows(windows-failure-policy),
+    openrc(openrc-failure-policy),
   }
 
   record service {
+    failure: service-failure-policy,
     execution: service-execution,
     id: string,
     name: string,
@@ -90,6 +116,7 @@ interface planner {
     lifecycle: service-lifecycle,
     readiness: service-readiness,
     requires-files: list<string>,
+    requires-services: list<string>,
   }
 
   enum service-readiness {

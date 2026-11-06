@@ -141,6 +141,8 @@ impl InstallLedgerStore {
     ) -> Result<(), LedgerError> {
         plan.validate()
             .map_err(|error| LedgerError::Ownership(error.to_string()))?;
+        crate::transaction_payload::validate_startup_inhibitions(plan)
+            .map_err(LedgerError::Ownership)?;
         let ledger = self.load(app_id, scope)?;
         let retired_ledger_keys = retired_ledger_keys(plan)?;
         let retired =
@@ -451,17 +453,26 @@ impl InstallLedgerStore {
                 payload,
                 &record.target,
             )? {
-                if let OwnedResource::Service { requires_files, .. } = &mut owned
+                if let OwnedResource::Service {
+                    installed,
+                    requires_files,
+                    requires_services,
+                    ..
+                } = &mut owned
                     && matches!(node.kind, NodeKind::BackendOperation { .. })
                 {
                     let backend = node.meta.backend.as_ref().ok_or(LedgerError::Invalid)?;
-                    let crate::transaction_payload::ApplyPayload::Service(service) =
-                        serde_json::from_slice(&backend.payload)
-                            .map_err(|_| LedgerError::Invalid)?
+                    let crate::transaction_payload::ApplyPayload::Service {
+                        operation: service,
+                        ..
+                    } = serde_json::from_slice(&backend.payload)
+                        .map_err(|_| LedgerError::Invalid)?
                     else {
                         return Err(LedgerError::Invalid);
                     };
+                    **installed = service.desired_configuration();
                     *requires_files = service.requires_files;
+                    *requires_services = service.requires_services;
                 }
                 ledger.resources.insert(key, owned);
             }
@@ -577,6 +588,7 @@ fn owned_from_backend_receipt(
             installed,
         } => Some(OwnedResource::Service {
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
             name,
             privilege,
             previous: old
@@ -585,7 +597,7 @@ fn owned_from_backend_receipt(
                     _ => None,
                 })
                 .unwrap_or(previous),
-            installed,
+            installed: Box::new(installed),
         }),
         BackendReceipt::Protocol {
             privilege,

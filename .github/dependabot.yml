@@ -15,11 +15,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: '06:00'
+      time: "06:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
     commit-message:
-      prefix: 'action(deps)'
+      prefix: "action(deps)"
     labels:
       - dependencies
     groups:
@@ -27,14 +27,14 @@ updates:
       # together and a partial toolkit upgrade is a broken one.
       github-toolkit:
         patterns:
-          - '@actions/*'
+          - "@actions/*"
       # Toolchain churn, reviewed as a unit. TypeScript and Biome move often and
       # a partial upgrade of the two is its own small problem.
       dev-toolchain:
         patterns:
-          - 'typescript'
-          - '@biomejs/*'
-          - '@types/*'
+          - "typescript"
+          - "@biomejs/*"
+          - "@types/*"
     ignore:
       # The example plugin is a separate workspace with its own lockfile and its
       # own release cadence.
@@ -48,33 +48,33 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: '06:00'
+      time: "06:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 10
     commit-message:
-      prefix: 'ci(actions)'
+      prefix: "ci(actions)"
     labels:
       - dependencies
     groups:
       actions-checkout:
         patterns:
-          - 'actions/checkout'
+          - "actions/checkout"
       artifact-actions:
         patterns:
-          - 'actions/upload-artifact'
-          - 'actions/download-artifact'
+          - "actions/upload-artifact"
+          - "actions/download-artifact"
       rust-toolchain:
         patterns:
-          - 'dtolnay/rust-toolchain'
-          - 'Swatinem/rust-cache'
-          - 'taiki-e/install-action'
+          - "dtolnay/rust-toolchain"
+          - "Swatinem/rust-cache"
+          - "taiki-e/install-action"
       # The action's own toolchain. Bun builds it; Node 24 runs it. Bumped
       # together, because a Bun that bundles differently from the one CI pinned
       # produces a `check:dist` failure nobody can explain.
       action-toolchain:
         patterns:
-          - 'oven-sh/setup-bun'
-          - 'actions/setup-node'
+          - "oven-sh/setup-bun"
+          - "actions/setup-node"
 
   # The example plugin, which is a Rust project of its own.
   - package-ecosystem: cargo
@@ -82,6 +82,6 @@ updates:
     schedule:
       interval: monthly
     commit-message:
-      prefix: 'example(deps)'
+      prefix: "example(deps)"
     labels:
       - dependencies

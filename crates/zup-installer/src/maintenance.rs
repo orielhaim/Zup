@@ -759,7 +759,7 @@ fn update_available(
 
 #[derive(Debug, Args)]
 pub struct RecoveryArgs {
-    #[arg(long)]
+    #[arg(long = "transaction")]
     pub transaction_id: uuid::Uuid,
     #[arg(long, value_enum)]
     pub scope: Option<Scope>,

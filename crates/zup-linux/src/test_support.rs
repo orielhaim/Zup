@@ -338,6 +338,7 @@ impl SystemdManager for FakeSystemd {
             .get(unit)
             .cloned()
             .unwrap_or(crate::systemd::UnitRuntime {
+                failure: Default::default(),
                 execution: Some(zup_core::ServiceExecution::SystemdUser {
                     user: "root".into(),
                     group: None,
@@ -357,6 +358,7 @@ impl SystemdManager for FakeSystemd {
         unit: &str,
         state: zup_transaction::ServiceTerminalState,
         _timeout: Duration,
+        _controlled_units: &[String],
     ) -> Result<(), IpcError> {
         if let Some(error) = self.fail("control", unit) {
             return Err(error);
@@ -366,6 +368,7 @@ impl SystemdManager for FakeSystemd {
         self.runtimes.insert(
             unit.into(),
             crate::systemd::UnitRuntime {
+                failure: Default::default(),
                 execution: current.execution,
                 service_type: current.service_type,
                 pending_job: false,
@@ -566,8 +569,11 @@ impl SystemdManager for SharedFakeSystemd {
         unit: &str,
         state: zup_transaction::ServiceTerminalState,
         timeout: Duration,
+        controlled_units: &[String],
     ) -> Result<(), IpcError> {
-        self.0.borrow_mut().control(unit, state, timeout)
+        self.0
+            .borrow_mut()
+            .control(unit, state, timeout, controlled_units)
     }
     fn reload(&mut self) -> Result<(), IpcError> {
         self.0.borrow_mut().reload()

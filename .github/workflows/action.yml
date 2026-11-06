@@ -3,7 +3,19 @@ name: action
 on:
   push:
     branches: [master]
+    paths:
+      - "action/**"
+      - "crates/zup/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/action.yml"
   pull_request:
+    paths:
+      - "action/**"
+      - "crates/zup/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/action.yml"
   workflow_dispatch:
 
 permissions:

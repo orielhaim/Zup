@@ -74,11 +74,11 @@ zup plugin build
 
 It runs Cargo for `wasm32-unknown-unknown`, turns the module into a component implementing the plugin world, and writes `dist/configure.wasm`.
 
-| Flag | Meaning |
-| --- | --- |
+| Flag              | Meaning                                                           |
+| ----------------- | ----------------------------------------------------------------- |
 | `--project <dir>` | Build a project somewhere else. Defaults to the current directory |
-| `--profile <p>` | Cargo profile. Defaults to `release` |
-| `--output <file>` | Where to write the component. Defaults to `dist/<name>.wasm` |
+| `--profile <p>`   | Cargo profile. Defaults to `release`                              |
+| `--output <file>` | Where to write the component. Defaults to `dist/<name>.wasm`      |
 
 Zup asks Cargo where its output actually is rather than guessing a path.
 

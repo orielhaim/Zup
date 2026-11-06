@@ -1,0 +1,58 @@
+name: Native service VMs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  openrc:
+    runs-on: [self-hosted, linux, zup-service-vms]
+    timeout-minutes: 120
+    concurrency:
+      group: native-openrc-${{ matrix.arch }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            triple: x86_64-unknown-linux-musl
+            port: 22342
+          - arch: arm64
+            triple: aarch64-unknown-linux-musl
+            port: 22343
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build native service fixtures and fault-enabled runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add '${{ matrix.triple }}'
+          cargo build --locked -p zup -p zup-xtask
+          mkdir -p target/native-services
+          for version in 1 2; do
+            ZUP_TEST_SERVICE_VERSION="$version" cargo zigbuild --locked -p zup-linux --features test-service --bin zup-test-linux-service --target '${{ matrix.triple }}'
+            cp 'target/${{ matrix.triple }}/debug/zup-test-linux-service' "target/native-services/service-v$version"
+          done
+          cargo xtask fixtures runtime --target 'linux-${{ matrix.arch }}-musl'
+      - name: Execute installer lifecycle and process crash matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${ZUP_SERVICE_VM_ROOT:?Dedicated VM inventory is required}"
+          arguments=(
+            --zup "$PWD/target/debug/zup"
+            --runtime "$PWD/target/debug/test-fixtures/fault-runtime/zup-setup-headless-linux-${{ matrix.arch }}-musl"
+            --service-v1 "$PWD/target/native-services/service-v1"
+            --service-v2 "$PWD/target/native-services/service-v2"
+            --ssh-key "$ZUP_SERVICE_VM_ROOT/guest-key"
+            --known-hosts "$ZUP_SERVICE_VM_ROOT/known-hosts"
+            --ssh-port '${{ matrix.port }}'
+            --target 'linux-${{ matrix.arch }}-musl'
+          )
+          python3 -u scripts/verify-service-vm.py "${arguments[@]}" --supervised
+          python3 -u scripts/verify-service-vm.py "${arguments[@]}" --crash-matrix --qmp-socket "$ZUP_SERVICE_VM_ROOT/alpine-${{ matrix.arch }}/qmp.sock"

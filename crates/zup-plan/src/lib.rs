@@ -70,3 +70,5 @@ pub use validation::ContractError;
 
 mod binding;
 pub use binding::{BindingMismatch, DeploymentBinding};
+
+mod service_graph;

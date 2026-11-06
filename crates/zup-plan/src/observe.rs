@@ -126,6 +126,8 @@ pub enum ObservedServiceState {
     Absent,
     InvalidService,
     Service {
+        dependencies: Vec<String>,
+        failure: zup_core::ServiceFailurePolicy,
         execution: zup_core::ServiceExecution,
         display_name: String,
         command: CommandSpec,
@@ -141,6 +143,8 @@ impl ObservedServiceState {
             Self::Absent => Some(crate::ServiceState::Absent),
             Self::InvalidService => None,
             Self::Service {
+                failure,
+                dependencies,
                 execution,
                 display_name,
                 command,
@@ -148,6 +152,8 @@ impl ObservedServiceState {
                 readiness,
                 ..
             } => Some(crate::ServiceState::Registration {
+                failure: *failure,
+                dependencies: dependencies.clone(),
                 execution: execution.clone(),
                 display_name: display_name.clone(),
                 command: command.clone(),

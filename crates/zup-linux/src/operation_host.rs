@@ -121,6 +121,28 @@ impl OperationHost for LinuxOperationHost {
                 .as_ref()
                 .map(|machine| &machine.systemd)
                 .ok_or_else(|| "services need machine scope".to_owned())?;
+            if crate::openrc_native::active() {
+                let machine = self.machine.as_ref().ok_or("services need machine scope")?;
+                let manager = crate::openrc_native::Openrc::connect(machine.roots.clone())?;
+                if let (Some(target), Some(snapshot)) = (target, snapshot.as_mut()) {
+                    snapshot.services = manager.snapshot(target)?;
+                }
+                if let Some(ledger) = ledger {
+                    for (key, owned) in &ledger.resources {
+                        if let zup_plan::OwnedResource::Service {
+                            name, installed, ..
+                        } = owned
+                        {
+                            owned_matches.insert(
+                                key.clone(),
+                                manager.observe_registration(name)?.configuration().as_ref()
+                                    == Some(installed),
+                            );
+                        }
+                    }
+                }
+                return Ok((snapshot, owned_matches));
+            }
             let mut manager = crate::systemd::RealSystemd::connect()
                 .map_err(|error| format!("systemd is unavailable: {error}"))?;
             if let (Some(target), Some(snapshot)) = (target, snapshot.as_mut()) {
@@ -162,6 +184,16 @@ impl OperationHost for LinuxOperationHost {
         execution
             .validate_generation(_ledger)
             .map_err(|error| error.to_string())?;
+        if crate::openrc_native::active()
+            && (!execution.services.is_empty()
+                || execution.removals.iter().any(|removal| {
+                    matches!(removal.owned, zup_plan::OwnedResource::Service { .. })
+                }))
+        {
+            let machine = self.machine.as_ref().ok_or("services need machine scope")?;
+            let mut manager = crate::openrc_native::Openrc::connect(machine.roots.clone())?;
+            return manager.compile(execution, target, _ledger);
+        }
         match &self.machine {
             Some(machine)
                 if !execution.services.is_empty()

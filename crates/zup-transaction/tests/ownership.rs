@@ -289,10 +289,11 @@ fn malformed_ownership_cannot_change_resource_family_or_alias_an_identity() {
         work.key.clone(),
         OwnedResource::Service {
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
             name: "foreign".into(),
             privilege: Privilege::System,
             previous: zup_plan::ServiceState::Absent,
-            installed: zup_plan::ServiceState::Absent,
+            installed: Box::new(zup_plan::ServiceState::Absent),
         },
     );
     assert!(!zup_transaction::validate_ledger_identity(

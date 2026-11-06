@@ -538,7 +538,7 @@ fn plan_services(
         let installed = match owned {
             Some(OwnedResource::Service {
                 name, installed, ..
-            }) if name == desired.name.as_str() => Some(installed),
+            }) if name == desired.name.as_str() => Some(installed.as_ref()),
             _ => None,
         };
         let current = observed.state.configuration();
@@ -563,6 +563,8 @@ fn plan_services(
                     }),
                 ),
                 ObservedServiceState::Service {
+                    failure,
+                    dependencies,
                     execution,
                     display_name,
                     command,
@@ -575,12 +577,12 @@ fn plan_services(
                         .as_ref()
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| desired.name.to_string());
-                    let matches = *display_name == desired_display
+                    let matches = *failure == desired.failure && *dependencies == desired.dependency_names && *display_name == desired_display
                         && *execution == desired.execution
                         && commands_match(command, &desired.command)
                         && *start == desired.start
                         && *readiness == desired.readiness
-                        && owned.is_none_or(|owned| matches!(owned, OwnedResource::Service { requires_files, .. } if requires_files == &desired.requires_files));
+                        && owned.is_none_or(|owned| matches!(owned, OwnedResource::Service { requires_files, requires_services, .. } if requires_files == &desired.requires_files && requires_services == &desired.requires_services));
                     if matches && installed.is_some() {
                         (IntegrationChangeKind::NoOp, None)
                     } else {
@@ -602,9 +604,12 @@ fn plan_services(
         };
 
         out.push(ServiceOperation {
+            failure: desired.failure,
             execution: desired.execution.clone(),
             lifecycle: desired.lifecycle,
             readiness: desired.readiness,
+            requires_services: desired.requires_services.clone(),
+            dependency_names: desired.dependency_names.clone(),
             requires_files: desired.requires_files.clone(),
             key: desired.key.clone(),
             kind,

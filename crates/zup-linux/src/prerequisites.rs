@@ -261,7 +261,7 @@ fn query(executable: &str, arguments: &[&str]) -> Result<std::process::Output> {
     })
 }
 
-fn trusted_executable(executable: &str) -> Result<PathBuf> {
+pub(crate) fn trusted_executable(executable: &str) -> Result<PathBuf> {
     let path = std::fs::canonicalize(executable)?;
     for ancestor in path.ancestors() {
         let metadata = std::fs::symlink_metadata(ancestor)?;
@@ -272,7 +272,7 @@ fn trusted_executable(executable: &str) -> Result<PathBuf> {
             || (ancestor != path && !metadata.is_dir())
         {
             return Err(BootstrapError::ProviderPreflight(format!(
-                "native package executable has untrusted ownership or permissions: {}",
+                "native executable has untrusted ownership or permissions: {}",
                 ancestor.display()
             )));
         }

@@ -59,12 +59,23 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
             name: name.into(),
             reason: "only explicitly modeled credential-free SCM accounts are supported".into(),
         })?;
-    if !config.dependencies.is_empty() {
-        return Err(ScmError::Unsupported {
-            name: name.into(),
-            reason: "SCM dependencies are not yet modeled".into(),
-        });
-    }
+    let dependencies = config
+        .dependencies
+        .iter()
+        .map(|dependency| match dependency {
+            windows_service::service::ServiceDependency::Service(name) => name
+                .to_str()
+                .map(|name| name.to_lowercase())
+                .ok_or_else(|| ScmError::Unsupported {
+                    name: name.to_string_lossy().into_owned(),
+                    reason: "invalid service dependency name".into(),
+                }),
+            _ => Err(ScmError::Unsupported {
+                name: name.into(),
+                reason: "SCM load-order group dependencies are not managed services".into(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if service
         .get_config_service_sid_info()
         .map_err(|error| ScmError::Unreadable {
@@ -78,23 +89,11 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
             reason: "managed services require an unrestricted service SID".into(),
         });
     }
-    let failure = service
-        .get_failure_actions()
-        .map_err(|error| ScmError::Unreadable {
+    let failure =
+        crate::runtime_failure::observe(&service).map_err(|reason| ScmError::Unsupported {
             name: name.into(),
-            reason: error.to_string(),
+            reason,
         })?;
-    if failure.actions.as_ref().is_some_and(|actions| {
-        actions
-            .iter()
-            .any(|action| action.action_type != windows_service::service::ServiceActionType::None)
-    }) {
-        return Err(ScmError::Unsupported {
-            name: name.into(),
-            reason: "SCM failure actions require an explicit supported runtime-failure policy"
-                .into(),
-        });
-    }
     let command_line = config
         .executable_path
         .into_os_string()
@@ -129,6 +128,8 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
         }
     };
     Ok(ObservedServiceState::Service {
+        dependencies,
+        failure,
         execution: zup_core::ServiceExecution::Windows { account },
         readiness: Default::default(),
         display_name,

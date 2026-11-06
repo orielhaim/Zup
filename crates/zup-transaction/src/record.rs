@@ -116,6 +116,7 @@ pub struct NodeStateError {
 pub struct TransactionRecord {
     pub failure: Option<TransactionFailure>,
     pub rollback_failure: Option<TransactionFailure>,
+    pub recovery_failure: Option<TransactionFailure>,
     pub reconciliation: crate::ReconciliationState,
     pub release: Option<zup_core::ReleaseIdentity>,
     pub schema: u32,
@@ -151,6 +152,7 @@ impl TransactionRecord {
         Self {
             failure: None,
             rollback_failure: None,
+            recovery_failure: None,
             reconciliation: crate::ReconciliationState::Pending { failure: None },
             release: None,
             schema: JOURNAL_SCHEMA,
@@ -170,9 +172,13 @@ impl TransactionRecord {
     }
 
     pub fn validate(&self) -> Result<(), CorruptReason> {
-        for failure in [&self.failure, &self.rollback_failure]
-            .into_iter()
-            .flatten()
+        for failure in [
+            &self.failure,
+            &self.rollback_failure,
+            &self.recovery_failure,
+        ]
+        .into_iter()
+        .flatten()
         {
             if failure.message.is_empty()
                 || failure.message.len() > 16384

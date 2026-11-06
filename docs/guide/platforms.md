@@ -62,37 +62,25 @@ A Windows build embeds the package into the runtime template as PE resources —
 
 ## Linux
 
-| Capability | Status |
-| --- | --- |
-| Targets | `linux-x64`, `linux-arm64`, `linux-x64-musl`, `linux-arm64-musl` |
-| Frontends | GNU: `gui`, `console`, `headless`. musl: `console`, `headless`. GUI needs a Wayland or X11 session. |
-| Scope | `user`, `machine`, `either` (`either` needs an explicit `--scope`) |
-| Artifact | one self-contained installer per target (no universal) |
-| Signing | no platform signature; authenticity is the artifact digest and release identity |
-| Machine payload | `/opt/<App>`, `/var/opt` for shared data, `/var/lib/zup` for state |
-| Machine services | systemd system units, machine scope only |
-| User services | not supported |
-| Desktop launchers, menu, protocols, file associations | user scope; desktop launchers follow XDG user directories |
-| Directory PATH entries | user and machine scope, through systemd `environment.d` |
-| Prerequisites | native packages through APT, DNF/RPM, APK, or Pacman; detect-only or repository policy |
-| Plugins | user and machine scope; generated resources follow the same capability and ownership rules as static resources |
-| Authenticated updates | installed GUI, Console, and Headless applications |
+| Capability                                            | Status                                                                                                         |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Targets                                               | `linux-x64`, `linux-arm64`, `linux-x64-musl`, `linux-arm64-musl`                                               |
+| Frontends                                             | GNU: `gui`, `console`, `headless`. musl: `console`, `headless`. GUI needs a Wayland or X11 session.            |
+| Scope                                                 | `user`, `machine`, `either` (`either` needs an explicit `--scope`)                                             |
+| Artifact                                              | one self-contained installer per target (no universal)                                                         |
+| Signing                                               | no platform signature; authenticity is the artifact digest and release identity                                |
+| Machine payload                                       | `/opt/<App>`, `/var/opt` for shared data, `/var/lib/zup` for state                                             |
+| Machine services                                      | systemd or OpenRC, machine scope only                                                                          |
+| User services                                         | not supported                                                                                                  |
+| Desktop launchers, menu, protocols, file associations | user scope; desktop launchers follow XDG user directories                                                      |
+| Directory PATH entries                                | user and machine scope, through systemd `environment.d`                                                        |
+| Prerequisites                                         | native packages through APT, DNF/RPM, APK, or Pacman; detect-only or repository policy                         |
+| Plugins                                               | user and machine scope; generated resources follow the same capability and ownership rules as static resources |
+| Authenticated updates                                 | installed GUI, Console, and Headless applications                                                              |
 
-A Linux build writes one extensionless installer per target (for example `Acme-Setup`).
-Both architectures use the same lifecycle backend. musl runtimes are static;
-the default GPUI preset is not available for musl, so musl GUI builds are refused. Native ARM64 CI runs the lifecycle suite and installers
-composed on Windows. Cross-build templates with
-`cargo xtask toolchain build --target linux-arm64 --profile release`; this needs
-`cargo-zigbuild`, Zig, and the `aarch64-unknown-linux-gnu` Rust target.
-Preset packages need a native binary for each GUI target.
+Linux installers are extensionless executables. GNU GUI requires Wayland or X11 and a preset binary for the target. musl supports Console and Headless only.
 
-## Linux machine scope
-
-Machine installs run through a short-lived privileged worker: the installer plans without authority, requests administrator authorization through `pkexec` at execution time, and the worker re-verifies the package and executes inside `/opt`, `/var/opt`, `/var/lib/zup`, and the owned unit sources. User payload operations never elevate. Installing a shared prerequisite package can separately require polkit authorization. `zup build` never needs authority. Zup never handles an administrator password.
-
-A machine project may declare `[[services]]` or plugin-generated services. Each becomes a systemd system unit owned at `/usr/local/lib/systemd/system/<unit>.service`. Boot policy is separate from deployment-time runtime policy. By default new services remain stopped; `lifecycle.install = "running"` explicitly requests startup. Changes to an owned running service executable or registration stop it before mutation and restore running state afterward, unless disabled or `lifecycle.change = "stopped"`. Stopped services remain stopped. See [service lifecycle](/guide/services) for current implementation limits. The service binary must be a Zup-owned payload executable; anything else is refused. Failed service changes restore prior unit contents and boot policy; incomplete restoration reports recovery required.
-
-`zup check` and `zup build` accept services on any host without systemd. The installing machine needs systemd 240+ only when services are present; `zup doctor` reports that readiness.
+Machine installs use a short-lived privileged worker. User payload operations do not elevate; `zup build` never needs administrator rights. Machine services use the active supported manager, systemd or OpenRC. User services are unsupported. See [services](/guide/services) for policies, identities, and recovery.
 
 ## Desktop shortcuts and directory PATH entries
 
@@ -104,6 +92,4 @@ Start a new login session to propagate changes. Existing processes keep their in
 
 Cross-build musl runtime templates with `cargo xtask toolchain build --target linux-x64-musl --profile dev` or `--target linux-arm64-musl`. Install the corresponding Rust target, `cargo-zigbuild`, and Zig first. GNU and musl descriptors remain distinct, even for static binaries. A dynamic ELF with a GNU interpreter cannot satisfy a musl target, or vice versa. Static ELF does not prove which C library produced it; descriptors bind those bytes to the build target. Plugin AOT fingerprints include the full Rust target triple, so GNU AOT objects cannot be reused for musl.
 
-Run `bash scripts/verify-linux.sh` for native GNU lifecycle validation. `sh scripts/verify-musl.sh` builds the native toolchain and exercises composition, package-manager bootstrap, install, repair, and uninstall inside a disposable Alpine environment. The Linux musl workflow runs it on native x64 and ARM64 hosts. It installs a test system package and is intended for disposable containers.
-
-The PATH format follows [systemd environment.d](https://www.freedesktop.org/software/systemd/man/latest/environment.d.html), including its propagation limits. Desktop lookup follows [xdg-user-dirs](https://www.freedesktop.org/wiki/Software/xdg-user-dirs/); launcher syntax follows the [Desktop Entry Specification](https://specifications.freedesktop.org/desktop-entry/latest-single/). Zup uses the existing `directories` crate for XDG user-directory lookup and the existing desktop-entry renderer, rather than adding another parser. Native version checks delegate to [dpkg](https://manpages.debian.org/unstable/dpkg/dpkg.1.en.html), [RPM](https://rpm-software-management.github.io/rpm/man/rpm.8), [APK](https://gitlab.alpinelinux.org/alpine/apk-tools), and [Pacman](https://man.archlinux.org/man/core/pacman/pacman.8.en).
+See [system integration](/guide/integration) and [prerequisites](/guide/prerequisites) for configuration.

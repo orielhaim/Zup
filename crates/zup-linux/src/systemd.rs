@@ -47,6 +47,7 @@ pub struct UnitInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitRuntime {
+    pub failure: zup_core::ServiceFailurePolicy,
     pub execution: Option<zup_core::ServiceExecution>,
     pub service_type: String,
     pub pending_job: bool,
@@ -75,8 +76,9 @@ pub trait SystemdManager {
         unit: &str,
         state: zup_transaction::ServiceTerminalState,
         timeout: Duration,
+        controlled_units: &[String],
     ) -> Result<(), IpcError> {
-        let _ = (state, timeout);
+        let _ = (state, timeout, controlled_units);
         Err(IpcError::SystemdRefused {
             unit: unit.into(),
             reason: "runtime control is unavailable".into(),
@@ -210,7 +212,9 @@ impl SystemdManager for RealSystemd {
                 .map_err(|e| IpcError::SystemdUnavailable(e.to_string()))?;
             let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
                 .map_err(|e| IpcError::SystemdUnavailable(e.to_string()))?;
-            Ok(format!("{}:{owner}", boot.trim()))
+            let policy =
+                crate::systemd_policy::generation().map_err(IpcError::SystemdUnavailable)?;
+            Ok(format!("{}:{owner}:{policy}", boot.trim()))
         })
     }
     fn runtime(&mut self, unit: &str) -> Result<UnitRuntime, IpcError> {
@@ -251,6 +255,51 @@ impl SystemdManager for RealSystemd {
             } else {
                 None
             };
+            let seconds = |micros: u64| {
+                if micros.is_multiple_of(1_000_000) {
+                    u32::try_from(micros / 1_000_000).ok()
+                } else {
+                    None
+                }
+            };
+            let restart = service.restart().await.map_err(failed)?;
+            let failure = match restart.as_str() {
+                "no" => zup_core::ServiceFailurePolicy::None,
+                "on-failure" | "on-abnormal" => {
+                    let Some(delay_seconds) =
+                        seconds(service.restart_u_sec().await.map_err(failed)?)
+                    else {
+                        return Err(IpcError::SystemdRefused {
+                            unit: unit.into(),
+                            reason: "restart delay must use whole seconds".into(),
+                        });
+                    };
+                    let Some(start_limit_interval_seconds) =
+                        seconds(proxy.start_limit_interval_u_sec().await.map_err(failed)?)
+                    else {
+                        return Err(IpcError::SystemdRefused {
+                            unit: unit.into(),
+                            reason: "start limit interval must use whole seconds".into(),
+                        });
+                    };
+                    zup_core::ServiceFailurePolicy::Systemd {
+                        condition: if restart == "on-failure" {
+                            zup_core::SystemdRestartCondition::OnFailure
+                        } else {
+                            zup_core::SystemdRestartCondition::OnAbnormal
+                        },
+                        delay_seconds,
+                        start_limit_interval_seconds,
+                        start_limit_burst: proxy.start_limit_burst().await.map_err(failed)?,
+                    }
+                }
+                _ => {
+                    return Err(IpcError::SystemdRefused {
+                        unit: unit.into(),
+                        reason: "unmanaged runtime failure policy".into(),
+                    });
+                }
+            };
             let invocation = proxy.invocation_id().await.map_err(failed)?;
             let pending_job = proxy.job().await.map_err(failed)?.0 != 0;
             let bus = zbus_systemd::zbus::fdo::DBusProxy::new(&self.connection)
@@ -275,13 +324,18 @@ impl SystemdManager for RealSystemd {
                 _ => Runtime::Unknown,
             };
             Ok(UnitRuntime {
+                failure,
                 execution,
                 service_type,
                 pending_job,
                 state,
                 sub_state,
                 result,
-                manager_generation: format!("{}:{owner}", boot.trim()),
+                manager_generation: format!(
+                    "{}:{owner}:{}",
+                    boot.trim(),
+                    crate::systemd_policy::generation().map_err(IpcError::SystemdUnavailable)?
+                ),
                 execution_generation: if state == Runtime::Stopped {
                     "stopped".into()
                 } else {
@@ -299,6 +353,7 @@ impl SystemdManager for RealSystemd {
         unit: &str,
         state: zup_transaction::ServiceTerminalState,
         timeout: Duration,
+        controlled_units: &[String],
     ) -> Result<(), IpcError> {
         use futures_util::StreamExt;
         if !self.subscribed {
@@ -323,13 +378,23 @@ impl SystemdManager for RealSystemd {
                     let path = manager.get_unit(unit.into()).await.map_err(failed)?;
                     let proxy = zbus_systemd::systemd1::UnitProxy::new(&self.connection, path).await.map_err(failed)?;
                     for dependents in [proxy.required_by().await, proxy.bound_by().await, proxy.consists_of().await, proxy.propagates_stop_to().await] {
-                        if !dependents.map_err(failed)?.is_empty() {
-                            return Err(IpcError::SystemdRefused { unit: unit.into(), reason: "stopping this unit could stop another unit; dependent lifecycle authorization is required".into() });
+                        for dependent in dependents.map_err(failed)? {
+                            if !controlled_units.contains(&dependent) {
+                                return Err(IpcError::SystemdRefused { unit: unit.into(), reason: format!("stopping this unit could control undeclared dependent {dependent}") });
+                            }
+                            let path = manager.get_unit(dependent.clone()).await.map_err(failed)?;
+                            let dependent = zbus_systemd::systemd1::UnitProxy::new(&self.connection, path).await.map_err(failed)?;
+                            if !matches!(dependent.active_state().await.map_err(failed)?.as_str(), "inactive" | "failed") || dependent.job().await.map_err(failed)?.0 != 0 {
+                                return Err(IpcError::SystemdRefused { unit: unit.into(), reason: "managed dependents must finish shutdown before their dependency".into() });
+                            }
                         }
                     }
                 }
                 let job = match state {
                     zup_transaction::ServiceTerminalState::Running => {
+                        // A deployment start begins a new native retry budget, including
+                        // compensation after a failed replacement exhausted the old one.
+                        manager.reset_failed_unit(unit.into()).await.map_err(failed)?;
                         manager.start_unit(unit.into(), "fail".into()).await
                     }
                     zup_transaction::ServiceTerminalState::Stopped => {
@@ -337,11 +402,24 @@ impl SystemdManager for RealSystemd {
                     }
                 }
                 .map_err(failed)?;
+                zup_transaction::fault_injection::boundary(zup_transaction::fault_injection::Boundary::NativeRequestSubmitted, unit);
                 while let Some(signal) = jobs.next().await {
                     let args = signal.args().map_err(failed)?;
                     if args.job == job && args.unit == unit {
                         if args.result == "done" {
-                            return Ok(());
+                            let path = manager.get_unit(unit.into()).await.map_err(failed)?;
+                            let observed = zbus_systemd::systemd1::UnitProxy::new(&self.connection, path).await.map_err(failed)?;
+                            let mut interval = std::time::Duration::from_millis(20);
+                            loop {
+                                let active = observed.active_state().await.map_err(failed)?;
+                                if observed.job().await.map_err(failed)?.0 == 0
+                                    && matches!(active.as_str(), "active" | "inactive" | "failed")
+                                {
+                                    return Ok(());
+                                }
+                                tokio::time::sleep(interval).await;
+                                interval = (interval * 2).min(std::time::Duration::from_millis(250));
+                            }
                         }
                         return Err(IpcError::SystemdRefused {
                             unit: unit.into(),

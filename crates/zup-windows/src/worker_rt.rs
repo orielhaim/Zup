@@ -341,6 +341,7 @@ impl WorkerSession {
             session_id: self.bootstrap.session_id,
             sequence: 0,
             message: Message::Progress(zup_protocol::ProgressReport {
+                blocked_pids: Vec::new(),
                 phase: zup_core::OperationPhase::Files,
                 kind: zup_protocol::ProgressKind::OperationStarted,
                 detail: "bootstrap plan accepted".into(),
@@ -386,6 +387,7 @@ impl WorkerSession {
             session_id: self.bootstrap.session_id,
             sequence: 0,
             message: Message::Progress(zup_protocol::ProgressReport {
+                blocked_pids: Vec::new(),
                 phase: zup_core::OperationPhase::Files,
                 kind: zup_protocol::ProgressKind::OperationStarted,
                 detail: "plan accepted".into(),
@@ -881,6 +883,7 @@ async fn run_worker_inner(
             session_id: bootstrap.session_id,
             sequence: outgoing,
             message: Message::Progress(ProgressReport {
+                blocked_pids: Vec::new(),
                 phase: zup_core::OperationPhase::Prepare,
                 kind: ProgressKind::OperationStarted,
                 detail: "transaction accepted".into(),
@@ -987,6 +990,10 @@ async fn run_worker_inner(
                 payload_overlay_root.as_deref(),
             );
             let ledgers = crate::ledger::InstallLedgerStore::new(&state_root);
+            zup_transaction::fault_injection::boundary(
+                zup_transaction::fault_injection::Boundary::LedgerPublishBefore,
+                &r.transaction_id.to_string(),
+            );
             let publication = if recovering {
                 ledgers.repair_committed(&r.app_id, scope)
             } else {
@@ -994,6 +1001,10 @@ async fn run_worker_inner(
             };
             let outcome = match publication {
                 Ok(()) => {
+                    zup_transaction::fault_injection::boundary(
+                        zup_transaction::fault_injection::Boundary::LedgerPublished,
+                        &r.transaction_id.to_string(),
+                    );
                     crate::integration::notify_committed_path_change(&r);
                     zup_protocol::WorkerOutcome::Committed
                 }
@@ -1161,6 +1172,7 @@ async fn run_bootstrap_worker(
             session_id: bootstrap.session_id,
             sequence: outgoing,
             message: Message::Progress(ProgressReport {
+                blocked_pids: Vec::new(),
                 phase: zup_core::OperationPhase::Prepare,
                 kind: ProgressKind::OperationStarted,
                 detail: "Checking prerequisites…".into(),
@@ -1532,6 +1544,29 @@ impl CancellationProbe for TokenProbe {
 impl OperationExecutor for WorkerFileExecutor {
     type Error = String;
 
+    fn reconcile_rollback(
+        &mut self,
+        _operation: &TransactionNode,
+        receipt: &OperationReceipt,
+    ) -> Result<zup_transaction::RollbackReconcileResult, String> {
+        match receipt {
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::reconcile_service_rollback(
+                    &mut crate::service_control::ScmLifecycle,
+                    receipt,
+                )
+            }
+            OperationReceipt::Control => Ok(zup_transaction::RollbackReconcileResult::Restored),
+            OperationReceipt::StageFile { .. }
+            | OperationReceipt::CreateFile { .. }
+            | OperationReceipt::ReplaceFile { .. }
+            | OperationReceipt::RemoveFile { .. } => {
+                Ok(zup_transaction::RollbackReconcileResult::Retry)
+            }
+            _ => Ok(zup_transaction::RollbackReconcileResult::Ambiguous),
+        }
+    }
+
     fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error> {
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
@@ -1539,6 +1574,14 @@ impl OperationExecutor for WorkerFileExecutor {
         if !matches!(operation.kind, zup_transaction::NodeKind::Barrier) {
             return Ok(());
         }
+        let _ = self.progress.send(ProgressReport {
+            blocked_pids: Vec::new(),
+            phase: zup_core::OperationPhase::Files,
+            kind: ProgressKind::PreflightStarted,
+            detail: String::new(),
+            completed: None,
+            total: None,
+        });
 
         let blockers = self
             .blocked_paths
@@ -1551,8 +1594,14 @@ impl OperationExecutor for WorkerFileExecutor {
             return Ok(());
         };
         let _ = self.progress.send(ProgressReport {
+            blocked_pids: match &blocked {
+                crate::FilePreflight::Blocked { processes, .. } => {
+                    processes.iter().map(|process| process.pid).collect()
+                }
+                crate::FilePreflight::Ready => Vec::new(),
+            },
             phase: zup_core::OperationPhase::Files,
-            kind: ProgressKind::OperationProgress,
+            kind: ProgressKind::ResourceBlocked,
             detail: format!("blocked: {}", detail.replace('\n', ", ")),
             completed: Some(self.completed_work.min(self.total_work)),
             total: Some(self.total_work),
@@ -1622,6 +1671,7 @@ impl OperationExecutor for WorkerFileExecutor {
             .completed_work
             .saturating_add(zup_runtime::operation_work(operation));
         let _ = self.progress.send(ProgressReport {
+            blocked_pids: Vec::new(),
             phase: zup_runtime::operation_phase(operation),
             kind: ProgressKind::OperationProgress,
             detail: zup_runtime::operation_action(operation).into(),

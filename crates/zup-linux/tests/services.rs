@@ -50,6 +50,7 @@ fn explicit_start_and_upgrade_preserve_runtime_state() {
             &unit,
             zup_transaction::ServiceTerminalState::Stopped,
             std::time::Duration::from_secs(1),
+            &[],
         )
         .unwrap();
     let stopped_upgrade = fixture.plan("3.0.0", ServiceStart::Automatic, vec!["--v3".into()]);
@@ -274,11 +275,14 @@ impl Fixture {
         let destination = binary.clone();
         let (size, sha256) = zup_core::hash_reader(PAYLOAD_BYTES).expect("bytes hash");
         let service = zup_plan::DesiredService {
+            failure: Default::default(),
             execution: zup_core::ServiceExecution::SystemdUser {
                 user: "root".into(),
                 group: None,
             },
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -378,7 +382,7 @@ impl Fixture {
                 OwnedResource::Service { installed, .. } => {
                     snapshot.services.iter().any(|observed| {
                         observed.key == *key
-                            && match (&observed.state, installed) {
+                            && match (&observed.state, installed.as_ref()) {
                                 (
                                     zup_plan::ObservedServiceState::Service {
                                         display_name,
@@ -386,6 +390,8 @@ impl Fixture {
                                         start,
                                         readiness,
                                         execution,
+                                        failure,
+                                        dependencies,
                                         ..
                                     },
                                     zup_plan::ServiceState::Registration {
@@ -394,6 +400,8 @@ impl Fixture {
                                         start: wanted_start,
                                         readiness: wanted_readiness,
                                         execution: wanted_execution,
+                                        failure: wanted_failure,
+                                        dependencies: wanted_dependencies,
                                     },
                                 ) => {
                                     display_name == wanted_display
@@ -401,6 +409,8 @@ impl Fixture {
                                         && start == wanted_start
                                         && readiness == wanted_readiness
                                         && execution == wanted_execution
+                                        && failure == wanted_failure
+                                        && dependencies == wanted_dependencies
                                 }
                                 _ => false,
                             }
@@ -717,13 +727,8 @@ fn install_registers_boot_policy_without_starting() {
     assert!(
         matches!(
             owned,
-            OwnedResource::Service {
-                installed: zup_plan::ServiceState::Registration {
-                    start: ServiceStart::Automatic,
-                    ..
-                },
-                ..
-            }
+            OwnedResource::Service { installed, .. }
+                if matches!(installed.as_ref(), zup_plan::ServiceState::Registration { start: ServiceStart::Automatic, .. })
         ),
         "the ledger owns the portable registration, not systemd state"
     );

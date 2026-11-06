@@ -139,7 +139,9 @@ pub fn render_unit(
         argv: std::iter::once(executable)
             .chain(service.command.arguments.iter().cloned())
             .collect(),
+        dependencies: service.dependency_names.clone(),
         readiness: service.readiness,
+        failure: service.failure,
         execution: service.execution.clone(),
     };
     definition
@@ -151,6 +153,8 @@ pub fn render_unit(
 }
 
 pub struct UnitDefinition {
+    pub failure: zup_core::ServiceFailurePolicy,
+    pub dependencies: Vec<String>,
     pub display_name: String,
     pub argv: Vec<String>,
     pub readiness: zup_core::ServiceReadiness,
@@ -159,6 +163,44 @@ pub struct UnitDefinition {
 
 impl UnitDefinition {
     fn render(&self, target: zup_core::Target) -> Result<Vec<u8>, String> {
+        if self.dependencies.len() > 256
+            || self.dependencies.iter().any(|name| {
+                !name.ends_with(".service")
+                    || name.bytes().any(|byte| {
+                        !byte.is_ascii_alphanumeric() && !matches!(byte, b'-' | b'_' | b'.' | b'\\')
+                    })
+            })
+        {
+            return Err("invalid managed unit dependency".into());
+        }
+        let dependencies = if self.dependencies.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "Requires={}\nAfter={}\n",
+                self.dependencies.join(" "),
+                self.dependencies.join(" ")
+            )
+        };
+        self.failure.validate_for(target).map_err(str::to_owned)?;
+        let (restart, delay, interval, burst) = match self.failure {
+            zup_core::ServiceFailurePolicy::None => ("no", 0, 0, 0),
+            zup_core::ServiceFailurePolicy::Systemd {
+                condition,
+                delay_seconds,
+                start_limit_burst,
+                start_limit_interval_seconds,
+            } => (
+                match condition {
+                    zup_core::SystemdRestartCondition::OnFailure => "on-failure",
+                    zup_core::SystemdRestartCondition::OnAbnormal => "on-abnormal",
+                },
+                delay_seconds,
+                start_limit_interval_seconds,
+                start_limit_burst,
+            ),
+            _ => return Err("systemd requires a systemd runtime failure policy".into()),
+        };
         let description = render_description(&self.display_name)?;
         let (executable, arguments) = self
             .argv
@@ -175,7 +217,8 @@ impl UnitDefinition {
                 }
                 value
             }
-            zup_core::ServiceExecution::Windows { .. } => {
+            zup_core::ServiceExecution::Windows { .. }
+            | zup_core::ServiceExecution::OpenrcUser { .. } => {
                 return Err("Windows execution identity cannot run under systemd".into());
             }
         };
@@ -188,7 +231,7 @@ impl UnitDefinition {
         } else {
             ""
         };
-        Ok(format!("[Unit]\nDescription={description}\n\n[Service]\nType={service_type}\n{notify}{execution}NoNewPrivileges=yes\nExecStart={exec_start}\nTimeoutStartSec=90\nTimeoutStopSec=90\n\n[Install]\nWantedBy={WANTED_BY}\n").into_bytes())
+        Ok(format!("[Unit]\nDescription={description}\n{dependencies}StartLimitIntervalSec={interval}\nStartLimitBurst={burst}\n\n[Service]\nType={service_type}\n{notify}{execution}NoNewPrivileges=yes\nRestart={restart}\nRestartSec={delay}\nExecStart={exec_start}\nTimeoutStartSec=90\nTimeoutStopSec=90\n\n[Install]\nWantedBy={WANTED_BY}\n").into_bytes())
     }
 }
 
@@ -340,6 +383,11 @@ pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefinition, String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "a unit source is UTF-8".to_owned())?;
+    let mut restart = None;
+    let mut restart_delay = None;
+    let mut restart_interval = None;
+    let mut restart_burst = None;
+    let mut dependencies = Vec::new();
     let mut description: Option<String> = None;
     let mut exec_start: Option<String> = None;
     let mut readiness = None;
@@ -369,6 +417,10 @@ pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefiniti
             continue;
         };
         match (section, key.trim()) {
+            ("Service", "Restart") => restart = Some(value.to_owned()),
+            ("Service", "RestartSec") => restart_delay = value.parse::<u32>().ok(),
+            ("Unit", "StartLimitIntervalSec") => restart_interval = value.parse::<u32>().ok(),
+            ("Unit", "StartLimitBurst") => restart_burst = value.parse::<u32>().ok(),
             ("Service", "User") if user.is_none() => user = Some(value.trim().to_owned()),
             ("Service", "Group") if group.is_none() => group = Some(value.trim().to_owned()),
             ("Service", "DynamicUser") if value.trim() == "yes" && !dynamic => dynamic = true,
@@ -384,6 +436,9 @@ pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefiniti
                     "notify" => zup_core::ServiceReadiness::Notify,
                     _ => return Err("unsupported service readiness type".into()),
                 });
+            }
+            ("Unit", "Requires") => {
+                dependencies = value.split_ascii_whitespace().map(str::to_owned).collect();
             }
             ("Unit", "Description") => {
                 description = Some(value.trim().replace("%%", "%"));
@@ -404,7 +459,33 @@ pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefiniti
         (false, Some(user), group) => zup_core::ServiceExecution::SystemdUser { user, group },
         _ => return Err("service execution identity is missing or inconsistent".into()),
     };
+    let failure = match (
+        restart.as_deref(),
+        restart_delay,
+        restart_interval,
+        restart_burst,
+    ) {
+        (Some("no"), Some(0), Some(0), Some(0)) => zup_core::ServiceFailurePolicy::None,
+        (
+            Some(condition @ ("on-failure" | "on-abnormal")),
+            Some(delay_seconds),
+            Some(start_limit_interval_seconds),
+            Some(start_limit_burst),
+        ) => zup_core::ServiceFailurePolicy::Systemd {
+            condition: if condition == "on-failure" {
+                zup_core::SystemdRestartCondition::OnFailure
+            } else {
+                zup_core::SystemdRestartCondition::OnAbnormal
+            },
+            delay_seconds,
+            start_limit_burst,
+            start_limit_interval_seconds,
+        },
+        _ => return Err("runtime failure policy is missing or unsupported".into()),
+    };
     let definition = UnitDefinition {
+        failure,
+        dependencies,
         display_name: description,
         argv: parse_exec_start(&exec_start)?,
         readiness: readiness.ok_or("service type is required")?,
@@ -428,11 +509,14 @@ mod tests {
     ) -> DesiredService<zup_plan::TargetPath> {
         let target = zup_core::Target::parse("linux-x64").unwrap();
         DesiredService {
+            failure: Default::default(),
             execution: zup_core::ServiceExecution::SystemdUser {
                 user: "root".into(),
                 group: None,
             },
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: zup_core::ResourceKey::Service {
@@ -509,8 +593,8 @@ mod tests {
         assert!(text.contains("Type=exec"), "{text}");
         assert!(text.contains("WantedBy=multi-user.target"), "{text}");
         assert!(
-            !text.contains("Restart="),
-            "no speculative directives: {text}"
+            text.contains("Restart=no\nRestartSec=0\n"),
+            "automatic crash recovery is disabled unless declared: {text}"
         );
         assert!(
             text.contains("User=root\nNoNewPrivileges=yes\n"),

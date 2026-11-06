@@ -79,6 +79,47 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
     Ok(written)
 }
 
+pub fn build_fault_runtime(root: &Path, profile: &str, target: &str) -> Result<PathBuf, String> {
+    let target = zup_core::Target::parse(target).map_err(|error| error.to_string())?;
+    let component = zup_toolchain::ToolchainComponent::Runtime {
+        target,
+        frontend: zup_core::Frontend::Headless,
+        online: false,
+    };
+    let host = zup_core::Target::host().map_err(|error| error.to_string())?;
+    let mut args = vec![
+        "-p",
+        INSTALLER_PACKAGE,
+        "--no-default-features",
+        "--features",
+        "headless,test-faults",
+        "--bin",
+        "zup-setup-headless",
+        "--profile",
+        profile,
+    ];
+    let directory = if target == host {
+        args.insert(0, "build");
+        cargo(root, &args)?;
+        target_directory(root, profile)
+    } else {
+        args.extend(["--target", target.rust_triple()]);
+        if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
+            return Err("fault runtimes for Windows require a native Windows build host".into());
+        }
+        zigbuild(root, &args)?;
+        target_directory(root, target.rust_triple()).join(output_directory(profile))
+    };
+    let staged = target_directory(root, profile).join("test-fixtures/fault-runtime");
+    std::fs::create_dir_all(&staged).map_err(|error| error.to_string())?;
+    stage_component(
+        &directory.join(format!("zup-setup-headless{}", target.executable_suffix())),
+        &staged,
+        &component,
+        &version()?,
+    )
+}
+
 #[cfg(windows)]
 fn stage_dispatcher(
     root: &Path,
@@ -785,12 +826,12 @@ mod tests {
             directory.display()
         );
         assert!(
-            directory.starts_with("repo/target/debug"),
+            directory.ends_with("debug/toolchain/0.1.0"),
             "the development profile's directory is `debug`: {}",
             directory.display()
         );
         assert!(
-            staging_directory(root, "release", "0.1.0").starts_with("repo/target/release"),
+            staging_directory(root, "release", "0.1.0").ends_with("release/toolchain/0.1.0"),
             "a release zup does not look beside a debug one"
         );
         assert!(

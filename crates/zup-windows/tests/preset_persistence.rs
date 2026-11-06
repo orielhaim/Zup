@@ -412,13 +412,13 @@ fn the_persisted_window_is_the_runtime_model() {
 }
 
 #[test]
-fn a_ledger_of_a_superseded_format_is_refused() {
+fn a_ledger_with_an_unknown_schema_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
     let store = zup_windows::InstallLedgerStore::new(state_root.path());
     zup_transaction::publish_private(
         &store.path_for(&app_id(), SelectedScope::User),
         &serde_json::to_vec(&serde_json::json!({
-            "schema": 1,
+            "schema": zup_plan::INSTALL_LEDGER_SCHEMA + 1,
             "app_id": "com.zup.test-ui",
             "scope": "user",
             "target": "windows-x64",
@@ -435,6 +435,6 @@ fn a_ledger_of_a_superseded_format_is_refused() {
     let read = store.load(&app_id(), SelectedScope::User);
     assert!(
         read.is_err(),
-        "a record that says nothing about a window is refused rather than read as having none"
+        "an unknown ledger schema must not authorize deployment"
     );
 }

@@ -396,13 +396,16 @@ fn plan_output_size(plan: &InstallationPlan) -> usize {
                 .saturating_add(string_size(&service.binary))
                 .saturating_add(string_list_size(&service.arguments))
                 .saturating_add(string_list_size(&service.requires_files))
+                .saturating_add(string_list_size(&service.requires_services))
                 .saturating_add(match &service.execution {
-                    crate::ServiceExecution::SystemdUser(user) => 1usize
+                    crate::ServiceExecution::SystemdUser(user)
+                    | crate::ServiceExecution::OpenrcUser(user) => 1usize
                         .saturating_add(string_size(&user.user))
                         .saturating_add(option_string_size(&user.group)),
                     _ => 2,
                 })
-                .saturating_add(12),
+                .saturating_add(12)
+                .saturating_add(17),
             ResourceItem::Protocol(protocol) => size
                 .saturating_add(string_size(&protocol.scheme))
                 .saturating_add(string_size(&protocol.executable))

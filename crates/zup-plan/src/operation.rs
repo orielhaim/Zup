@@ -144,6 +144,7 @@ pub struct PathOperation {
 /// One service decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceOperation {
+    pub failure: zup_core::ServiceFailurePolicy,
     pub execution: zup_core::ServiceExecution,
     pub key: ResourceKey,
     pub kind: IntegrationChangeKind,
@@ -155,12 +156,25 @@ pub struct ServiceOperation {
     pub lifecycle: zup_core::ServiceLifecycle,
     pub readiness: zup_core::ServiceReadiness,
     pub requires_files: Vec<crate::TargetPath>,
+    pub requires_services: Vec<zup_core::ServiceId>,
+    pub dependency_names: Vec<String>,
     pub privilege: Privilege,
     pub previous: ObservedServiceState,
     pub conflict: Option<Conflict>,
 }
 
 impl ServiceOperation {
+    pub fn desired_configuration(&self) -> crate::ServiceState {
+        crate::ServiceState::Registration {
+            dependencies: self.dependency_names.clone(),
+            failure: self.failure,
+            execution: self.execution.clone(),
+            readiness: self.readiness,
+            display_name: self.display_name.clone(),
+            command: self.command.clone(),
+            start: self.start,
+        }
+    }
     pub fn affected_by_files(
         &self,
         files: &[FileOperation],

@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use windows::Win32::System::RestartManager::{
-    RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
+    CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources,
+    RmStartSession,
 };
 use windows::core::PCWSTR;
 use zup_core::Target;
@@ -36,7 +37,7 @@ pub(crate) fn preflight_services(
         .filter(|operation| operation.stage == zup_transaction::ServiceControlStage::Quiesce)
     {
         let observed = crate::service_control::ScmLifecycle.observe(operation)?;
-        if observed.configuration != operation.configuration
+        if observed.configuration != operation.before_configuration
             || observed.manager_generation != operation.manager_generation
             || observed.execution_generation != operation.before_execution_generation
             || !operation.before.matches(observed.runtime)
@@ -74,7 +75,7 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
 
     unsafe {
         let mut session: u32 = 0;
-        let mut key = [0u16; 32];
+        let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
         let rc = RmStartSession(&mut session, None, windows::core::PWSTR(key.as_mut_ptr()));
         if rc.0 != 0 {
             return Err(format!("RmStartSession failed ({})", rc.0));
@@ -107,7 +108,7 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
             for _ in 0..3 {
                 let mut processes = vec![RM_PROCESS_INFO::default(); capacity];
                 let mut needed = 0;
-                let mut count = 0;
+                let mut count = processes.len() as u32;
                 let mut reboot = 0;
                 let rc = RmGetList(
                     session,

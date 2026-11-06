@@ -11,14 +11,24 @@ pub fn validate_binding(
         return Err("service resource required".into());
     };
     if operation.privilege != zup_core::Privilege::System
-        || crate::services::unit_name(id).map_err(|e| e.to_string())? != operation.native_name
+        || (if matches!(
+            operation.configuration,
+            zup_plan::ServiceState::Registration {
+                execution: zup_core::ServiceExecution::OpenrcUser { .. },
+                ..
+            }
+        ) {
+            crate::openrc::service_name(id)
+        } else {
+            crate::services::unit_name(id).map_err(|e| e.to_string())?
+        }) != operation.native_name
     {
         return Err("service authority mismatch".into());
     }
     if let Some(zup_plan::OwnedResource::Service { installed, .. }) =
         ledger.and_then(|ledger| ledger.resources.get(&operation.key))
-        && installed == &operation.configuration
-        && installed == &operation.owned_configuration
+        && installed.as_ref() == &operation.configuration
+        && installed.as_ref() == &operation.owned_configuration
     {
         return Ok(());
     }
@@ -32,6 +42,8 @@ pub fn validate_binding(
             continue;
         };
         let installed = zup_plan::ServiceState::Registration {
+            dependencies: service.dependency_names.clone(),
+            failure: service.failure,
             execution: service.execution.clone(),
             display_name: service.display_name.clone(),
             command: service.command.clone(),
@@ -51,6 +63,22 @@ pub fn validate_binding(
 }
 
 impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
+    fn stopped_runtime_is_quiescent(
+        &mut self,
+        operation: &ServiceControlOperation,
+    ) -> Result<bool, String> {
+        let current = self.observe(operation)?;
+        let runtime = self
+            .manager
+            .runtime(&operation.native_name)
+            .map_err(|error| error.to_string())?;
+        Ok(current.configuration == operation.configuration
+            && current.manager_generation == operation.manager_generation
+            && runtime.manager_generation == operation.manager_generation
+            && current.runtime == zup_plan::ServiceRuntimeState::Stopped
+            && runtime.state == zup_plan::ServiceRuntimeState::Stopped
+            && !runtime.pending_job)
+    }
     fn stopped_start_can_be_compensated(
         &mut self,
         operation: &ServiceControlOperation,
@@ -100,6 +128,8 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
             _ => return Err("service registration required".into()),
         };
         let zup_plan::ServiceState::Registration {
+            failure,
+            dependencies,
             execution,
             display_name,
             command,
@@ -110,8 +140,11 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
             unreachable!()
         };
         let service = zup_plan::DesiredService {
+            failure: *failure,
             execution: execution.clone(),
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: dependencies.clone(),
             key: operation.key.clone(),
             id: id.clone(),
             name: zup_core::NonEmptyString::new(&operation.native_name)
@@ -140,7 +173,7 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
         let info = self.manager.load_unit(&unit).map_err(|e| e.to_string())?;
         if info.load_state != "loaded"
             || std::path::Path::new(&info.fragment_path) != canonical
-            || !info.drop_in_paths.is_empty()
+            || crate::systemd_policy::validate(&info.drop_in_paths).is_err()
             || info.need_daemon_reload
         {
             return Err("service fragment changed".into());
@@ -153,7 +186,10 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
             zup_core::ServiceReadiness::Manager => "exec",
             zup_core::ServiceReadiness::Notify => "notify",
         };
-        if runtime.service_type != expected_type || runtime.execution.as_ref() != Some(execution) {
+        if runtime.service_type != expected_type
+            || runtime.execution.as_ref() != Some(execution)
+            || runtime.failure != *failure
+        {
             return Err(
                 "native service readiness or execution identity differs from the authorized configuration".into(),
             );
@@ -186,7 +222,12 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
                 .map_err(|e| e.to_string())?;
         }
         self.manager
-            .control(&operation.native_name, state, operation.timeout_for(state))
+            .control(
+                &operation.native_name,
+                state,
+                operation.timeout_for(state),
+                self.controlled_units,
+            )
             .map_err(|e| e.to_string())
     }
 }

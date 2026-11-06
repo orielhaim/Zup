@@ -1,11 +1,11 @@
 # Services
 
-Zup manages Windows SCM and systemd services. OpenRC, service dependencies, runtime failure policies, and managed writable service directories are not implemented.
+Zup manages owned Windows SCM, systemd, and OpenRC services through its deployment transaction.
 
 ```toml
 [[services]]
 id = "worker"
-name = "Example Worker"
+name = "Worker"
 binary = "${install}/worker"
 execution = { type = "systemd_dynamic_user" }
 requires_files = ["${install}/worker.conf"]
@@ -13,41 +13,57 @@ start = "automatic"
 lifecycle = { install = "running", change = "preserve" }
 ```
 
-## Startup and maintenance
+## Policies
 
-`start` controls boot startup: `automatic`, `manual`, or `disabled`. It does not start the service during installation.
+- `start`: `automatic`, `manual`, or `disabled` controls boot startup only.
+- `lifecycle`: defaults to `install = "stopped"`, `change = "preserve"`. Affected running services stop before mutation and resume afterward. Stopped services stay stopped. Unchanged repair avoids restarts. `change = "stopped"` leaves affected services stopped.
+- `readiness`: `manager` verifies native running state. systemd uses `Type=exec`; `notify` instead waits for the main process to send `READY=1`. SCM and OpenRC reject `notify`. Manager readiness does not establish application health.
+- Start and stop deadlines default to 90 seconds; configure `lifecycle.start_timeout_seconds` and `stop_timeout_seconds` between 1 and 3600.
 
-Lifecycle defaults are `install = "stopped"` and `change = "preserve"`. Set `install = "running"` to start a new service. Upgrades stop affected running services before replacing files and restore their previous running state afterward. Stopped services remain stopped; unchanged repair avoids restarts. `change = "stopped"` leaves an affected service stopped. Disabled services cannot request startup.
+## Dependencies
 
-`requires_files` lists declared files consumed by the service, such as configuration or libraries. Changes and removals stop running consumers. Paths must be unique managed files with the same privilege as the service.
+`requires_files` identifies managed configuration, libraries, assets, and other executables. `requires_components` expands selected components into their managed files. A required component must be selected. Changes stop running consumers before replacing their resources.
 
-Start and stop deadlines default to 90 seconds and accept 1–3600 through `lifecycle.start_timeout_seconds` and `lifecycle.stop_timeout_seconds`. Uninstall currently uses 90 seconds.
+`requires_services = ["database"]` references another service in the installation. Cycles, missing services, cross-manager references, and unavailable prerequisites are refused. Dependents stop first; prerequisites start first. Dependency declarations never authorize control of foreign services. Plugins can declare file and service references through the SDK.
 
-## Identity and readiness
+## Execution identities
 
-Windows requires an explicit identity:
+Choose the native identity explicitly:
 
 ```toml
+# Windows: network_service and explicit local_system are also supported.
 execution = { type = "windows", account = "local_service" }
+
+# systemd: an existing account, or systemd_dynamic_user.
+execution = { type = "systemd_user", user = "worker", group = "worker" }
+
+# OpenRC: an existing account; machine scope only.
+execution = { type = "openrc_user", user = "worker", group = "worker" }
 ```
 
-`network_service` and explicitly selected `local_system` are also supported. Registrations use a service SID. Password accounts and existing unmanaged failure actions or SCM dependencies are refused.
+Windows registrations use a service SID. Password accounts are unsupported. Generated Linux definitions set `NoNewPrivileges`; OpenRC verifies actual process credentials. Machine-service payloads must be protected from untrusted writes. Applications must provision suitable writable storage.
 
-systemd accepts `systemd_dynamic_user` or an existing account:
+## Runtime failure policies
+
+The default is no automatic restart. Native policies remain explicit because their limits have different semantics:
 
 ```toml
-execution = { type = "systemd_user", user = "worker", group = "worker" }
-readiness = "notify"
+# systemd: bounds starts in a rate window, including explicit starts.
+failure = { type = "systemd", condition = "on_failure", delay_seconds = 2, start_limit_burst = 3, start_limit_interval_seconds = 60 }
+
+# SCM: two crash-triggered restarts, then no action; reset after 60 seconds.
+failure = { type = "windows", delay_seconds = 2, restart_attempts = 2, reset_seconds = 60 }
+
+# OpenRC supervise-daemon: bounds respawns in its native period.
+failure = { type = "openrc", delay_seconds = 2, max_respawns = 3, respawn_period_seconds = 60 }
 ```
 
-Generated units set `NoNewPrivileges=yes`. Dynamic users inherit systemd's restrictions; applications must provide suitable writable storage themselves.
+systemd also accepts `condition = "on_abnormal"`. Each explicit deployment start resets its native start-limit budget; automatic retries remain bounded. OpenRC supervision requires a foreground process.
 
-The default `readiness = "manager"` verifies SCM running state or systemd `Type=exec`; it does not prove application health. systemd `notify` waits for the main process to send `READY=1`. Windows rejects notify readiness. Unit startup and shutdown timeouts are currently fixed at 90 seconds, independently of Zup's deadline.
+SCM recovery supports crash-triggered restarts only. Zup disables startup while replacing a restart-enabled service. SCM cannot report or cancel queued recovery actions, so preserving Stopped while reenabling a previously executed service is refused. Retiring its restart policy has the same restriction. A service never started in the current boot can be reenabled safely. Commands, reboot actions, and unsupported manager-policy combinations are rejected.
 
-## Failures and recovery
+## Recovery
 
-Only owned services may be changed. Zup stages content and records durable intent before stopping a service. Startup is verified before commit. Rollback stops the new runtime, restores files and registration, then restores the old runtime when safe.
+Zup stages verified content and records durable intent before shutdown. Startup must verify before commit. Compensation stops the new runtime, restores registration and files, then restores the previous runtime when safe.
 
-Changed configuration, concurrent manager jobs, unknown state, or insufficient interruption evidence require recovery instead of replay. Preserve the reported journal and diagnostics. Arbitrary process side effects cannot be undone.
-
-Plugins declare the same policies through the [SDK](/reference/plugin-api); they cannot control services directly.
+External modifications, concurrent jobs, unknown runtime state, or insufficient interruption evidence require recovery. Keep the reported journal and diagnostics. Process side effects are not reversible. See the [plugin SDK](/reference/plugin-api) for typed declarations; plugins cannot control services directly.

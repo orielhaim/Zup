@@ -267,6 +267,7 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
         lifecycle,
         readiness,
         requires_files,
+        requires_services,
         ..
     } = &proposal.resources[3]
     else {
@@ -281,6 +282,7 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
         }
     );
     assert_eq!(requires_files, &["${install}/configure.txt"]);
+    assert!(requires_services.is_empty());
     assert_eq!(
         *lifecycle,
         zup_core::ServiceLifecycle {

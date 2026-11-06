@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "Transaction graph, durable record, and recovery engine for zup"
 
+[features]
+test-faults = []
+
 [dependencies]
 zup-plan.workspace = true
 jiff.workspace = true

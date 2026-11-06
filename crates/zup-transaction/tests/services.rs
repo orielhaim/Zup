@@ -11,6 +11,8 @@ use zup_transaction::{
 
 fn control(id: &str, stage: ServiceControlStage) -> ServiceControlOperation {
     let configuration = ServiceState::Registration {
+        dependencies: Vec::new(),
+        failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
@@ -25,6 +27,7 @@ fn control(id: &str, stage: ServiceControlStage) -> ServiceControlOperation {
         },
         native_name: id.into(),
         privilege: Privilege::System,
+        before_configuration: configuration.clone(),
         configuration: configuration.clone(),
         owned_configuration: configuration,
         stage,
@@ -65,10 +68,13 @@ fn planned_transitions_and_compensation_use_their_respective_deadlines() {
         unreachable!();
     };
     let service = zup_plan::ServiceOperation {
+        failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
         requires_files: Vec::new(),
+        requires_services: Vec::new(),
+        dependency_names: Vec::new(),
         readiness,
         key: intent.key.clone(),
         kind: zup_plan::IntegrationChangeKind::UpdateOwned,
@@ -84,6 +90,8 @@ fn planned_transitions_and_compensation_use_their_respective_deadlines() {
         },
         privilege: Privilege::System,
         previous: zup_plan::ObservedServiceState::Service {
+            dependencies: Vec::new(),
+            failure: Default::default(),
             execution: zup_core::ServiceExecution::Windows {
                 account: zup_core::WindowsServiceAccount::LocalService,
             },
@@ -97,10 +105,11 @@ fn planned_transitions_and_compensation_use_their_respective_deadlines() {
     };
     let owned = zup_plan::OwnedResource::Service {
         requires_files: Vec::new(),
+        requires_services: Vec::new(),
         name: "worker".into(),
         privilege: Privilege::System,
         previous: ServiceState::Absent,
-        installed: intent.configuration,
+        installed: Box::new(intent.configuration),
     };
     let operations = zup_transaction::plan_service_controls(
         &service,
@@ -426,10 +435,17 @@ struct Manager {
     requests: usize,
     fail_after_request: bool,
     stopped_start_compensatable: bool,
+    quiescent: bool,
     concurrent_execution: Option<String>,
 }
 
 impl NativeServiceManager for Manager {
+    fn stopped_runtime_is_quiescent(
+        &mut self,
+        _: &ServiceControlOperation,
+    ) -> Result<bool, String> {
+        Ok(self.quiescent && self.observation.runtime == ServiceRuntimeState::Stopped)
+    }
     fn stopped_start_can_be_compensated(
         &mut self,
         _: &ServiceControlOperation,
@@ -479,8 +495,36 @@ fn manager(operation: &ServiceControlOperation) -> Manager {
         requests: 0,
         fail_after_request: false,
         stopped_start_compensatable: false,
+        quiescent: true,
         concurrent_execution: None,
     }
+}
+
+#[test]
+fn a_stopped_service_with_a_possible_queued_restart_does_not_release_compensation() {
+    let operation = control("worker", ServiceControlStage::Restore);
+    let receipt = zup_transaction::ServiceControlReceipt {
+        operation: operation.clone(),
+        completion: zup_transaction::ServiceControlCompletion::Reached,
+        execution_generation: "execution-2".into(),
+    };
+    let mut manager = manager(&operation);
+    manager.observation.runtime = ServiceRuntimeState::Stopped;
+    manager.observation.execution_generation = "stopped".into();
+    manager.quiescent = false;
+    assert!(rollback_service_control(&mut manager, &receipt).is_err());
+    assert_eq!(
+        zup_transaction::reconcile_service_rollback(&mut manager, &receipt).unwrap(),
+        zup_transaction::RollbackReconcileResult::Ambiguous
+    );
+    assert_eq!(manager.requests, 0);
+    manager.quiescent = true;
+    assert_eq!(
+        zup_transaction::reconcile_service_rollback(&mut manager, &receipt).unwrap(),
+        zup_transaction::RollbackReconcileResult::Restored
+    );
+    rollback_service_control(&mut manager, &receipt).unwrap();
+    assert_eq!(manager.requests, 0);
 }
 
 #[test]

@@ -346,6 +346,8 @@ pub enum ServiceStart {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Service {
+    #[serde(default)]
+    pub failure: crate::ServiceFailurePolicy,
     pub execution: crate::ServiceExecution,
     pub id: ServiceId,
     pub name: NonEmptyString,
@@ -362,6 +364,10 @@ pub struct Service {
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(length(max = 256)))]
     pub requires_files: Vec<Template>,
+    #[serde(default)]
+    pub requires_services: Vec<ServiceId>,
+    #[serde(default)]
+    pub requires_components: Vec<ComponentId>,
     #[serde(default)]
     pub component: Option<ComponentId>,
     #[serde(default)]

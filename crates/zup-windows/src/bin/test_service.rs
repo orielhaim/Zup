@@ -33,7 +33,14 @@ mod fixture {
 
     fn execute() -> windows_service::Result<()> {
         let name = std::env::args().nth(1).expect("service name");
-        let mode = std::env::args().nth(2).unwrap_or_default();
+        let mode = if std::fs::read(std::env::current_exe().expect("fixture executable"))
+            .expect("fixture contents")
+            .ends_with(b"zup-native-start-failure")
+        {
+            "fail".to_owned()
+        } else {
+            std::env::args().nth(2).unwrap_or_default()
+        };
         let (stop, stopped) = mpsc::channel();
         let handle = service_control_handler::register(name, move |control| match control {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,

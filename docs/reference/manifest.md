@@ -4,39 +4,39 @@ The manifest is strict: unknown fields are rejected.
 
 ## Top level
 
-| Key | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `schema` | yes | - | schema version; current value `1` |
-| `app` | yes | - | application identity |
-| `frontend` | no | `gui` | `gui`, `console`, `headless` |
-| `ui` | no | `{}` | preset package and settings |
-| `build` | yes | - | target and artifact profiles |
-| `install` | yes | - | scope and install root |
-| `prerequisites` | no | `[]` | required software |
-| `updates` | no | - | update repository/channel |
-| `distribution` | no | - | client content host |
-| `publish` | no | - | publishing targets |
-| `components` | no | `[]` | selectable application parts |
-| `component_groups` | no | `[]` | component presentation groups |
-| `plugins` | no | `[]` | planner extensions |
-| `files` | no | `[]` | payload mappings |
-| `launchers` | no | `[]` | menu/desktop launchers |
-| `path` | no | `[]` | PATH entries |
-| `services` | no | `[]` | services |
-| `protocols` | no | `[]` | URI protocols |
-| `file_associations` | no | `[]` | file type registrations |
+| Key                 | Required | Default | Purpose                           |
+| ------------------- | -------- | ------- | --------------------------------- |
+| `schema`            | yes      | -       | schema version; current value `1` |
+| `app`               | yes      | -       | application identity              |
+| `frontend`          | no       | `gui`   | `gui`, `console`, `headless`      |
+| `ui`                | no       | `{}`    | preset package and settings       |
+| `build`             | yes      | -       | target and artifact profiles      |
+| `install`           | yes      | -       | scope and install root            |
+| `prerequisites`     | no       | `[]`    | required software                 |
+| `updates`           | no       | -       | update repository/channel         |
+| `distribution`      | no       | -       | client content host               |
+| `publish`           | no       | -       | publishing targets                |
+| `components`        | no       | `[]`    | selectable application parts      |
+| `component_groups`  | no       | `[]`    | component presentation groups     |
+| `plugins`           | no       | `[]`    | planner extensions                |
+| `files`             | no       | `[]`    | payload mappings                  |
+| `launchers`         | no       | `[]`    | menu/desktop launchers            |
+| `path`              | no       | `[]`    | PATH entries                      |
+| `services`          | no       | `[]`    | services                          |
+| `protocols`         | no       | `[]`    | URI protocols                     |
+| `file_associations` | no       | `[]`    | file type registrations           |
 
 ## `[app]`
 
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `id` | yes | stable application ID |
-| `name` | yes | display name |
-| `version` | yes | application version |
-| `publisher` | no | publisher display name |
-| `main` | no | main application executable/template |
-| `description` | no | user-facing description |
-| `icon` | no | icon path or `{ source, padding }` table |
+| Key           | Required | Meaning                                  |
+| ------------- | -------- | ---------------------------------------- |
+| `id`          | yes      | stable application ID                    |
+| `name`        | yes      | display name                             |
+| `version`     | yes      | application version                      |
+| `publisher`   | no       | publisher display name                   |
+| `main`        | no       | main application executable/template     |
+| `description` | no       | user-facing description                  |
+| `icon`        | no       | icon path or `{ source, padding }` table |
 
 ## Frontends
 
@@ -55,12 +55,12 @@ otherwise.
 
 Every project needs at least one target profile.
 
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `target` | inferred from the profile name when it is a target | `windows-x64`, `linux-x64`, ... |
-| `source` | yes | `{ directory = "..." }` payload source |
-| `frontend` | no | target-specific frontend override |
-| `install` | no | target-specific install override |
+| Key        | Required                                           | Meaning                                |
+| ---------- | -------------------------------------------------- | -------------------------------------- |
+| `target`   | inferred from the profile name when it is a target | `windows-x64`, `linux-x64`, ...        |
+| `source`   | yes                                                | `{ directory = "..." }` payload source |
+| `frontend` | no                                                 | target-specific frontend override      |
+| `install`  | no                                                 | target-specific install override       |
 
 A profile named `windows-x64` needs no `target` field. A profile with any
 other name, such as `production`, sets `target = "windows-x64"`.
@@ -69,21 +69,21 @@ other name, such as `production`, sets `target = "windows-x64"`.
 
 Optional. With no declared artifacts, Zup builds one installer per selected target.
 
-| Key | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `kind` | no | `universal` | `single` or `universal` |
-| `mode` | no | `offline` | `offline` or `thin` |
-| `targets` | yes | - | target profile IDs |
-| `channel` | no | - | follow a release channel |
-| `output` | no | derived | output file name |
+| Key       | Required | Default     | Meaning                  |
+| --------- | -------- | ----------- | ------------------------ |
+| `kind`    | no       | `universal` | `single` or `universal`  |
+| `mode`    | no       | `offline`   | `offline` or `thin`      |
+| `targets` | yes      | -           | target profile IDs       |
+| `channel` | no       | -           | follow a release channel |
+| `output`  | no       | derived     | output file name         |
 
 ## `[install]`
 
-| Key | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `scope` | yes | - | `user`, `machine`, `either` |
-| `directory` | no | empty | user/machine path templates |
-| `allow_directory_override` | no | `false` | allow a custom path on fresh install |
+| Key                        | Required | Default | Meaning                              |
+| -------------------------- | -------- | ------- | ------------------------------------ |
+| `scope`                    | yes      | -       | `user`, `machine`, `either`          |
+| `directory`                | no       | empty   | user/machine path templates          |
+| `allow_directory_override` | no       | `false` | allow a custom path on fresh install |
 
 Example:
 
@@ -99,10 +99,10 @@ machine = "${location.programs}/Acme"
 
 ## `[ui]`
 
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `preset` | no | project-relative `.zupui`; absent uses the bundled preset |
-| `settings` | no | values validated by that preset's schema |
+| Key        | Required | Meaning                                                   |
+| ---------- | -------- | --------------------------------------------------------- |
+| `preset`   | no       | project-relative `.zupui`; absent uses the bundled preset |
+| `settings` | no       | values validated by that preset's schema                  |
 
 See [Presets](/presets/).
 
@@ -110,27 +110,27 @@ See [Presets](/presets/).
 
 `[[components]]`:
 
-| Key | Required | Default |
-| --- | --- | --- |
-| `id` | yes | - |
-| `name` | yes | - |
-| `description` | no | - |
-| `required` | no | `false` |
-| `default` | no | `true` |
-| `requires` | no | `[]` |
-| `group` | no | implicit group |
-| `targets` | no | `[]` = all selected profiles |
+| Key           | Required | Default                      |
+| ------------- | -------- | ---------------------------- |
+| `id`          | yes      | -                            |
+| `name`        | yes      | -                            |
+| `description` | no       | -                            |
+| `required`    | no       | `false`                      |
+| `default`     | no       | `true`                       |
+| `requires`    | no       | `[]`                         |
+| `group`       | no       | implicit group               |
+| `targets`     | no       | `[]` = all selected profiles |
 
 `[[component_groups]]`:
 
-| Key | Required | Default |
-| --- | --- | --- |
-| `id` | yes | - |
-| `label` | no | - |
-| `description` | no | - |
-| `prominence` | no | `auto` |
-| `selection` | no | `defaulted` |
-| `targets` | no | `[]` |
+| Key           | Required | Default     |
+| ------------- | -------- | ----------- |
+| `id`          | yes      | -           |
+| `label`       | no       | -           |
+| `description` | no       | -           |
+| `prominence`  | no       | `auto`      |
+| `selection`   | no       | `defaulted` |
+| `targets`     | no       | `[]`        |
 
 `prominence`: `auto`, `primary`, `secondary`. `selection`: `defaulted`, `explicit`.
 

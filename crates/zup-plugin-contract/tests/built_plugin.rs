@@ -32,11 +32,14 @@ fn a_built_plugin_answers_the_host() {
 }
 
 #[rstest::rstest]
-#[case::windows("windows-x64", false)]
-#[case::linux("linux-x64", true)]
+#[case::windows("windows-x64", false, false)]
+#[case::linux("linux-x64", true, false)]
+#[case::windows_failure("windows-x64", false, true)]
+#[case::linux_failure("linux-x64", true, true)]
 fn sdk_service_policies_survive_component_linking_and_execution(
     #[case] target: &str,
     #[case] notify: bool,
+    #[case] failure: bool,
 ) {
     use zup_plugin_contract::{
         ChangedServiceState, InitialServiceState, ResourceItem, ServiceReadiness,
@@ -52,7 +55,11 @@ fn sdk_service_policies_survive_component_linking_and_execution(
             install_directory: "${location.programs}/Worker".into(),
             install_scope: InstallScope::Machine,
             target: target.into(),
-            selected_components: vec!["service".into()],
+            selected_components: if failure {
+                vec!["service".into(), "failure".into(), "dependencies".into()]
+            } else {
+                vec!["service".into()]
+            },
         })
         .unwrap()
         .unwrap();
@@ -60,7 +67,9 @@ fn sdk_service_policies_survive_component_linking_and_execution(
         .resources
         .iter()
         .find_map(|resource| match resource {
-            ResourceItem::Service(service) => Some(service),
+            ResourceItem::Service(service) if service.id == "com.example.worker.worker" => {
+                Some(service)
+            }
             _ => None,
         })
         .unwrap();
@@ -69,6 +78,40 @@ fn sdk_service_policies_survive_component_linking_and_execution(
     assert_eq!(service.lifecycle.start_timeout_seconds, 17);
     assert_eq!(service.lifecycle.stop_timeout_seconds, 23);
     assert_eq!(service.requires_files, ["${install}/configure.txt"]);
+    assert_eq!(
+        service.requires_services,
+        if failure {
+            vec!["com.example.worker.storage"]
+        } else {
+            Vec::<&str>::new()
+        }
+    );
+    use zup_plugin_contract::{
+        ServiceFailurePolicy, SystemdFailurePolicy, SystemdRestartCondition, WindowsFailurePolicy,
+    };
+    assert!(matches!(
+        (failure, notify, &service.failure),
+        (false, _, ServiceFailurePolicy::None)
+            | (
+                true,
+                true,
+                ServiceFailurePolicy::Systemd(SystemdFailurePolicy {
+                    condition: SystemdRestartCondition::OnFailure,
+                    delay_seconds: 2,
+                    start_limit_burst: 3,
+                    start_limit_interval_seconds: 60,
+                }),
+            )
+            | (
+                true,
+                false,
+                ServiceFailurePolicy::Windows(WindowsFailurePolicy {
+                    delay_seconds: 2,
+                    restart_attempts: 2,
+                    reset_seconds: 60,
+                }),
+            )
+    ));
     assert_eq!(
         service.readiness,
         if notify {

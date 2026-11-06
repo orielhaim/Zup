@@ -23,6 +23,9 @@ mod locations;
 mod lowering;
 #[cfg(target_os = "linux")]
 mod machine;
+mod openrc;
+#[cfg(target_os = "linux")]
+mod openrc_native;
 #[cfg(target_os = "linux")]
 mod operation_host;
 #[cfg(target_os = "linux")]
@@ -51,6 +54,8 @@ mod session_host;
 mod socket;
 #[cfg(target_os = "linux")]
 mod systemd;
+#[cfg(target_os = "linux")]
+mod systemd_policy;
 #[cfg(all(target_os = "linux", feature = "test-support"))]
 #[allow(unsafe_code)]
 pub mod test_support;

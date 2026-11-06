@@ -250,8 +250,27 @@ pub(crate) fn drive_client(
         &mut outgoing,
         Message::Prepare(intent.clone()),
     )?;
+    let prepare_deadline = std::time::Instant::now() + crate::socket::PREPARE_TIMEOUT;
     let prepared = loop {
-        match recv_or_fail(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?.message {
+        if cancellation.is_some_and(|cancel| cancel.is_cancelled()) {
+            send_msg(stream, session, &mut outgoing, Message::Cancel)?;
+            return Err(ExecError::Cancelled);
+        }
+        let remaining = prepare_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ExecError::Worker("worker preparation timed out".into()));
+        }
+        let envelope = match recv_msg(
+            stream,
+            session,
+            &mut incoming,
+            remaining.min(Duration::from_millis(200)),
+        ) {
+            Ok(envelope) => envelope,
+            Err(RecvFail::Timeout) => continue,
+            Err(RecvFail::Failed(error)) => return Err(error),
+        };
+        match envelope.message {
             Message::Prepared(prepared) => break prepared,
             Message::Progress(report) => {
                 emit_progress(&report, events);
@@ -341,9 +360,23 @@ pub(crate) fn drive_client(
                     zup_protocol::WorkerOutcome::Committed => {
                         Ok(LinuxOutcome::Committed { version })
                     }
-                    zup_protocol::WorkerOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
+                    zup_protocol::WorkerOutcome::RolledBack => {
+                        if let (Some(events), Some(message)) = (events, completed.detail) {
+                            let _ = events.send(zup_runtime::RuntimeEvent::Failed {
+                                kind: zup_runtime::FailureKind::Transaction,
+                                message,
+                            });
+                        }
+                        Ok(LinuxOutcome::RolledBack)
+                    }
                     zup_protocol::WorkerOutcome::Cancelled => Err(ExecError::Cancelled),
                     zup_protocol::WorkerOutcome::RecoveryRequired => {
+                        if let (Some(events), Some(message)) = (events, completed.detail) {
+                            let _ = events.send(zup_runtime::RuntimeEvent::Failed {
+                                kind: zup_runtime::FailureKind::RecoveryRequired,
+                                message,
+                            });
+                        }
                         Ok(LinuxOutcome::RecoveryRequired {
                             transaction: completed.transaction_id.to_string(),
                         })
@@ -419,7 +452,7 @@ fn emit_progress(
         ProgressKind::PreflightStarted => zup_runtime::RuntimeEvent::PreflightStarted,
         ProgressKind::ResourceBlocked => zup_runtime::RuntimeEvent::ResourceBlocked {
             detail: report.detail.clone(),
-            pids: Vec::new(),
+            pids: report.blocked_pids.clone(),
         },
         ProgressKind::StagingStarted => zup_runtime::RuntimeEvent::StagingStarted {
             id: report.detail.clone(),

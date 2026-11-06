@@ -18,7 +18,9 @@ path = "src/main.rs"
 # this preset already depends on, so a second copy of either would be a second
 # schema.
 [dependencies]
-zup-sdk = { version = "0.1.0", path = "../../crates/zup-sdk", features = ["preset"] }
+zup-sdk = { version = "0.1.0", path = "../../crates/zup-sdk", features = [
+  "preset",
+] }
 
 [profile.release]
 opt-level = "s"

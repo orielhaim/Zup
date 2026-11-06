@@ -62,7 +62,7 @@ pub fn compile_execution_plan(
     Ok(input)
 }
 
-fn compile_files_only(
+pub(crate) fn compile_files_only(
     execution: &ExecutionPlan,
     target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
 ) -> Result<TransactionInput, PlanError> {
@@ -238,9 +238,10 @@ pub fn compile_machine_execution_plan(
         crate::service_ops::require_exec_baseline(manager).map_err(into_service)?;
     }
 
+    let affected_services = execution.affected_services(ledger);
     for op in &execution.services {
         let owned = ledger.and_then(|ledger| ledger.resources.get(&op.key));
-        let payload_changed = op.affected_by_files(&execution.files, &execution.removals, owned);
+        let payload_changed = affected_services.contains(&op.key);
         if (payload_changed || op.kind != IntegrationChangeKind::NoOp)
             && (owned.is_some()
                 || op.previous == zup_plan::ObservedServiceState::Absent
@@ -417,8 +418,9 @@ pub fn compile_machine_execution_plan(
                         native_name: unit.clone(),
                         privilege: *privilege,
                         stage: zup_transaction::ServiceControlStage::Quiesce,
-                        configuration: installed.clone(),
-                        owned_configuration: installed.clone(),
+                        before_configuration: installed.as_ref().clone(),
+                        configuration: installed.as_ref().clone(),
+                        owned_configuration: installed.as_ref().clone(),
                         before: zup_transaction::ServiceTerminalState::Running,
                         after: zup_transaction::ServiceTerminalState::Stopped,
                         manager_generation: runtime.manager_generation,
@@ -458,6 +460,11 @@ pub fn compile_machine_execution_plan(
         input.backend_operations.push(operation);
     }
 
+    zup_transaction::bind_service_dependencies(&mut input.service_controls, execution, ledger)
+        .map_err(|reason| PlanError::Service {
+            unit: "dependency graph".into(),
+            reason,
+        })?;
     Ok(input)
 }
 
@@ -593,11 +600,14 @@ mod tests {
             executable: true,
         };
         let service = zup_plan::DesiredService {
+            failure: Default::default(),
             execution: zup_core::ServiceExecution::SystemdUser {
                 user: "root".into(),
                 group: None,
             },
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -639,11 +649,14 @@ mod tests {
         kind: IntegrationChangeKind,
     ) -> ServiceOperation {
         ServiceOperation {
+            failure: Default::default(),
             execution: zup_core::ServiceExecution::SystemdUser {
                 user: "root".into(),
                 group: None,
             },
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -931,10 +944,11 @@ mod tests {
                 },
                 zup_plan::OwnedResource::Service {
                     requires_files: Vec::new(),
+                    requires_services: Vec::new(),
                     name: "Tool".to_owned(),
                     privilege: Privilege::System,
                     previous: zup_plan::ServiceState::Absent,
-                    installed: zup_plan::ServiceState::Absent,
+                    installed: Box::new(zup_plan::ServiceState::Absent),
                 },
             );
         }
@@ -995,10 +1009,11 @@ mod tests {
             privilege: Privilege::System,
             owned: zup_plan::OwnedResource::Service {
                 requires_files: Vec::new(),
+                requires_services: Vec::new(),
                 name: "Tool".to_owned(),
                 privilege: Privilege::System,
                 previous: zup_plan::ServiceState::Absent,
-                installed: zup_plan::ServiceState::Absent,
+                installed: Box::new(zup_plan::ServiceState::Absent),
             },
         });
         let mut manager = FakeSystemd::default();

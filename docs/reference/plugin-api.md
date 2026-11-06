@@ -29,14 +29,14 @@ Bindings come from `crates/zup-plugin-abi/wit/zup-plugin.wit`, the canonical `zu
 
 Start with `Plan::new()` and add resources:
 
-| Method | Constructor |
-| --- | --- |
-| `generated_file` | `GeneratedFile::new(destination, bytes)` or `GeneratedFile::text(destination, text)` |
-| `launcher` | `Launcher::menu(name, target)` or `Launcher::desktop(name, target)` |
-| `path_entry` | `Path::new(directory)` |
-| `service` | `Service::new(id, name, binary, execution)` |
-| `protocol` | `Protocol::new(scheme, executable)` |
-| `file_association` | `FileAssociation::new(id, extension, executable)` |
+| Method             | Constructor                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------ |
+| `generated_file`   | `GeneratedFile::new(destination, bytes)` or `GeneratedFile::text(destination, text)` |
+| `launcher`         | `Launcher::menu(name, target)` or `Launcher::desktop(name, target)`                  |
+| `path_entry`       | `Path::new(directory)`                                                               |
+| `service`          | `Service::new(id, name, binary, execution)`                                          |
+| `protocol`         | `Protocol::new(scheme, executable)`                                                  |
+| `file_association` | `FileAssociation::new(id, extension, executable)`                                    |
 
 Resources use `.with_arguments(...)` where supported. Launchers accept `.with_working_directory(...)`; services and file associations accept display names or descriptions. Keep registration IDs stable across application upgrades.
 

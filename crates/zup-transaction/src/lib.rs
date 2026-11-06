@@ -2,6 +2,7 @@
 
 mod coordinator;
 mod executor;
+pub mod fault_injection;
 mod id;
 mod input;
 mod ledger;
@@ -24,7 +25,8 @@ mod service;
 pub use service::{
     NativeServiceManager, ServiceControlCompletion, ServiceControlOperation, ServiceControlReceipt,
     ServiceControlStage, ServiceObservation, ServiceTerminalState, apply_service_control,
-    plan_service_controls, reconcile_service_control, rollback_service_control,
+    bind_service_dependencies, disabled_startup, plan_service_controls, reconcile_service_control,
+    reconcile_service_rollback, requires_startup_inhibition, rollback_service_control,
     verify_service_control,
 };
 mod storage;
@@ -33,7 +35,10 @@ pub use coordinator::{
     OpenTransaction, SettledTransaction, TransactionCoordinator, TransactionError,
     TransactionOutcome, recover,
 };
-pub use executor::{CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult};
+pub use executor::{
+    CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult,
+    RollbackReconcileResult,
+};
 pub use id::{OperationId, TransactionId};
 pub use input::{
     BackendOperation, BackendOperationIntent, FileRemoval, MAX_BACKEND_DEPENDENCIES,

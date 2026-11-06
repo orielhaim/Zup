@@ -45,9 +45,7 @@
     "packages": [
       {
         "variant": "windows-x64",
-        "names": [
-          "Acme-Windows-x64.zup"
-        ],
+        "names": ["Acme-Windows-x64.zup"],
         "size": 18874368,
         "blob_count": 4
       }

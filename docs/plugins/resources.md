@@ -16,14 +16,14 @@ Ok(plan)
 
 `validate()` checks output limits locally; the host always validates the result.
 
-| Method | Constructor |
-| --- | --- |
-| `generated_file` | `GeneratedFile::new(dest, bytes)` or `GeneratedFile::text(dest, str)` |
-| `launcher` | `Launcher::menu(name, target)` or `Launcher::desktop(name, target)` |
-| `path_entry` | `Path::new(dir)` |
-| `service` | `Service::new(id, name, binary, execution)` |
-| `protocol` | `Protocol::new(scheme, exec)` |
-| `file_association` | `FileAssociation::new(id, ext, exec)` |
+| Method             | Constructor                                                           |
+| ------------------ | --------------------------------------------------------------------- |
+| `generated_file`   | `GeneratedFile::new(dest, bytes)` or `GeneratedFile::text(dest, str)` |
+| `launcher`         | `Launcher::menu(name, target)` or `Launcher::desktop(name, target)`   |
+| `path_entry`       | `Path::new(dir)`                                                      |
+| `service`          | `Service::new(id, name, binary, execution)`                           |
+| `protocol`         | `Protocol::new(scheme, exec)`                                         |
+| `file_association` | `FileAssociation::new(id, ext, exec)`                                 |
 
 ## Launchers
 

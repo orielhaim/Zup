@@ -357,14 +357,14 @@ fn repair_owned(
                 observed.state,
                 ObservedServiceState::Service { .. } | ObservedServiceState::InvalidService
             )
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed: ServiceState::Registration { display_name, command, start, readiness, execution }, .. }) if display_name == &op.display_name && command == &op.command && start == &op.start && readiness == &op.readiness && execution == &op.execution)
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed, .. }) if matches!(installed.as_ref(), ServiceState::Registration { display_name, command, start, readiness, execution, dependencies, failure } if display_name == &op.display_name && command == &op.command && start == &op.start && readiness == &op.readiness && execution == &op.execution && dependencies == &op.dependency_names && failure == &op.failure))
         {
             op.kind = IntegrationChangeKind::RepairOwned;
             op.conflict = None;
         }
         if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedServiceState::Absent)
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed: ServiceState::Registration { display_name, command, start, readiness, execution }, .. }) if display_name == &op.display_name && command == &op.command && start == &op.start && readiness == &op.readiness && execution == &op.execution)
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed, .. }) if matches!(installed.as_ref(), ServiceState::Registration { display_name, command, start, readiness, execution, dependencies, failure } if display_name == &op.display_name && command == &op.command && start == &op.start && readiness == &op.readiness && execution == &op.execution && dependencies == &op.dependency_names && failure == &op.failure))
         {
             op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;

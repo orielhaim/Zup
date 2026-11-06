@@ -118,11 +118,11 @@ inside `render` does not help, because the signature is outside its body.
 
 ## The parts
 
-| | |
-| --- | --- |
-| `Preset` | the trait you implement: identity, settings type, `launch` |
-| `PresetContext<S>` | the session, the settings, the assets, the host's description |
-| `Session` | observable installer state in, typed `Action` out |
-| `PresetSettings<S>` | the application's configuration, observable and read-only |
-| `AssetRef` | a settings field that names a file the application provides |
-| `zup_sdk::preset::run::<P>()` | the whole of a preset's `main` |
+|                               |                                                               |
+| ----------------------------- | ------------------------------------------------------------- |
+| `Preset`                      | the trait you implement: identity, settings type, `launch`    |
+| `PresetContext<S>`            | the session, the settings, the assets, the host's description |
+| `Session`                     | observable installer state in, typed `Action` out             |
+| `PresetSettings<S>`           | the application's configuration, observable and read-only     |
+| `AssetRef`                    | a settings field that names a file the application provides   |
+| `zup_sdk::preset::run::<P>()` | the whole of a preset's `main`                                |

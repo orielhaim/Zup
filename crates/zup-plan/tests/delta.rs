@@ -75,10 +75,13 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
             privilege: Privilege::System,
         }],
         services: vec![zup_plan::DesiredService {
+            failure: Default::default(),
             execution: zup_core::ServiceExecution::Windows {
                 account: zup_core::WindowsServiceAccount::LocalService,
             },
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -118,6 +121,8 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
 
 fn exact_service() -> ObservedServiceState {
     ObservedServiceState::Service {
+        dependencies: Vec::new(),
+        failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
@@ -233,6 +238,8 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     let original_service = ServiceState::Registration {
+        dependencies: Vec::new(),
+        failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
@@ -247,6 +254,8 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        dependencies: Vec::new(),
+        failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
@@ -279,10 +288,11 @@ fn launcher_and_service_ownership_decisions() {
         target.services[0].key.clone(),
         OwnedResource::Service {
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
             name: target.services[0].name.to_string(),
             privilege: Privilege::System,
             previous: ServiceState::Absent,
-            installed: original_service,
+            installed: Box::new(original_service),
         },
     );
     let owned = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
@@ -303,6 +313,8 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        dependencies: Vec::new(),
+        failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
@@ -609,4 +621,25 @@ fn observation_headers_cannot_claim_another_resource_or_scope() {
             Err(zup_plan::ExecutionPlanError::SnapshotResourceMismatch { .. })
         ));
     }
+}
+
+#[test]
+fn service_dependency_identity_is_part_of_the_authorized_plan() {
+    let mut desired = sample_target();
+    let mut dependency = desired.services[0].clone();
+    dependency.id = ServiceId::new("storage").unwrap();
+    dependency.key = ResourceKey::Service {
+        id: dependency.id.clone(),
+    };
+    dependency.name = zup_core::NonEmptyString::new("StorageEngine").unwrap();
+    desired.services[0]
+        .requires_services
+        .push(dependency.id.clone());
+    desired.services[0]
+        .dependency_names
+        .push(dependency.name.to_string());
+    desired.services.push(dependency);
+    desired.validate_resolved().unwrap();
+    desired.services[0].dependency_names[0] = "foreign-service".into();
+    assert!(desired.validate_resolved().is_err());
 }

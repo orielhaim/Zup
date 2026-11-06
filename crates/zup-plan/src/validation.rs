@@ -77,10 +77,63 @@ impl<P: Display, L> DesiredState<P, L> {
                 },
             )?;
         }
+        let graph = self
+            .services
+            .iter()
+            .map(|service| {
+                (
+                    service.key.canonical_for(&self.target),
+                    zup_core::service_dependency_keys(&service.requires_services, self.target),
+                )
+            })
+            .collect();
+        zup_core::validate_service_graph(&graph).map_err(ContractError::Capability)?;
         for service in &self.services {
+            let dependencies =
+                zup_core::service_dependency_keys(&service.requires_services, self.target);
+            if service.dependency_names
+                != service
+                    .requires_services
+                    .iter()
+                    .map(|id| {
+                        self.services
+                            .iter()
+                            .find(|dependency| {
+                                ResourceKey::Service {
+                                    id: dependency.id.clone(),
+                                }
+                                .canonical_for(&self.target)
+                                    == ResourceKey::Service { id: id.clone() }
+                                        .canonical_for(&self.target)
+                            })
+                            .map(|dependency| dependency.name.to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                || service.requires_services.len() > 256
+                || dependencies.len() != service.requires_services.len()
+                || dependencies.iter().any(|key| {
+                    !self.services.iter().any(|dependency| {
+                        dependency.key.canonical_for(&self.target) == *key
+                            && dependency.privilege == service.privilege
+                            && matches!(
+                                dependency.execution,
+                                zup_core::ServiceExecution::OpenrcUser { .. }
+                            ) == matches!(
+                                service.execution,
+                                zup_core::ServiceExecution::OpenrcUser { .. }
+                            )
+                    })
+                })
+            {
+                return Err(ContractError::Capability(format!(
+                    "service {} requires unique managed services with the same privilege",
+                    service.id
+                )));
+            }
             service
                 .execution
-                .validate_for(self.target)
+                .validate_policies(service.failure, service.readiness, self.target)
                 .map_err(|reason| ContractError::Capability(reason.into()))?;
             let mut dependencies = BTreeSet::new();
             if service.requires_files.len() > 256 {

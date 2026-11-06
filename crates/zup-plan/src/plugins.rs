@@ -52,6 +52,7 @@ pub enum PluginResource {
         value: String,
     },
     Service {
+        failure: zup_core::ServiceFailurePolicy,
         execution: zup_core::ServiceExecution,
         id: String,
         name: String,
@@ -62,6 +63,7 @@ pub enum PluginResource {
         lifecycle: zup_core::ServiceLifecycle,
         readiness: zup_core::ServiceReadiness,
         requires_files: Vec<String>,
+        requires_services: Vec<String>,
     },
     Protocol {
         scheme: String,
@@ -500,6 +502,7 @@ struct LauncherInput {
 }
 
 struct ServiceInput {
+    failure: zup_core::ServiceFailurePolicy,
     execution: zup_core::ServiceExecution,
     id: String,
     name: String,
@@ -510,6 +513,7 @@ struct ServiceInput {
     lifecycle: zup_core::ServiceLifecycle,
     readiness: zup_core::ServiceReadiness,
     requires_files: Vec<String>,
+    requires_services: Vec<String>,
 }
 
 struct ProtocolInput {
@@ -573,6 +577,7 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
             }
             PluginResource::PathEntry { value } => add_text_size(&mut total, value)?,
             PluginResource::Service {
+                failure,
                 execution,
                 id,
                 name,
@@ -583,7 +588,12 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
                 lifecycle: _,
                 readiness: _,
                 requires_files,
+                requires_services,
             } => {
+                add_text_size(
+                    &mut total,
+                    &serde_json::to_string(failure).expect("failure policy serializes"),
+                )?;
                 add_text_size(
                     &mut total,
                     &serde_json::to_string(execution).expect("service execution serializes"),
@@ -598,7 +608,7 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
                     add_text_size(&mut total, argument)?;
                 }
                 add_text_size(&mut total, service_start_text(*start))?;
-                for path in requires_files {
+                for path in requires_files.iter().chain(requires_services) {
                     add_text_size(&mut total, path)?;
                 }
             }
@@ -733,6 +743,7 @@ pub(crate) fn merge_plugin_proposal(
                 merge.merge_path(&resource_name, value)?;
             }
             PluginResource::Service {
+                failure,
                 execution,
                 id,
                 name,
@@ -743,10 +754,12 @@ pub(crate) fn merge_plugin_proposal(
                 lifecycle,
                 readiness,
                 requires_files,
+                requires_services,
             } => {
                 merge.merge_service(
                     &resource_name,
                     ServiceInput {
+                        failure,
                         execution,
                         id,
                         name,
@@ -757,6 +770,7 @@ pub(crate) fn merge_plugin_proposal(
                         lifecycle,
                         readiness,
                         requires_files,
+                        requires_services,
                     },
                 )?;
             }
@@ -955,6 +969,7 @@ impl MergeContext<'_> {
 
     fn merge_service(&mut self, resource_name: &str, input: ServiceInput) -> Result<(), PlanError> {
         let ServiceInput {
+            failure,
             execution,
             id,
             name,
@@ -965,6 +980,7 @@ impl MergeContext<'_> {
             lifecycle,
             readiness,
             requires_files,
+            requires_services,
         } = input;
         let plugin_id = &self.binding.id;
         let id: ServiceId = parse_id(plugin_id, resource_name, &id, "service id")?;
@@ -981,16 +997,22 @@ impl MergeContext<'_> {
         lifecycle
             .validate(start)
             .and_then(|()| readiness.validate_for(self.plan.target))
-            .and_then(|()| execution.validate_for(self.plan.target))
+            .and_then(|()| execution.validate_policies(failure, readiness, self.plan.target))
             .map_err(|reason| PlanError::PluginResourceRejected {
                 plugin_id: plugin_id.clone(),
                 resource: resource_name.to_owned(),
                 reason: reason.to_owned(),
             })?;
         self.plan.services.push(DesiredService {
+            failure,
             execution,
             lifecycle,
             readiness,
+            dependency_names: Vec::new(),
+            requires_services: requires_services
+                .into_iter()
+                .map(|id| parse_id(plugin_id, resource_name, &id, "required service"))
+                .collect::<Result<_, _>>()?,
             requires_files: requires_files
                 .into_iter()
                 .map(|path| {

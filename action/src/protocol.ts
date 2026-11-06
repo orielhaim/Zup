@@ -37,7 +37,7 @@ import type {
   Status,
   StreamEvent,
   Target,
-} from './protocol.generated.js'
+} from "./protocol.generated.js";
 
 /**
  * The protocol major this action is written against.
@@ -45,7 +45,7 @@ import type {
  * A constant rather than something read from a document: a document cannot tell the
  * consumer which versions it should have been read by.
  */
-export const PROTOCOL_MAJOR = 1
+export const PROTOCOL_MAJOR = 1;
 
 export type {
   Application,
@@ -71,12 +71,12 @@ export type {
   StreamEvent,
   StreamVersion,
   Target,
-} from './protocol.generated.js'
+} from "./protocol.generated.js";
 
-import type { SigningEvidence } from './protocol.generated.js'
+import type { SigningEvidence } from "./protocol.generated.js";
 
 /** A zup operation, as a name rather than a closed set. */
-export type Operation = string
+export type Operation = string;
 
 /** Why a document could not be read. */
 export class ProtocolError extends Error {
@@ -86,32 +86,36 @@ export class ProtocolError extends Error {
   ) {
     super(
       `zup did not emit a readable result: ${reason}. ` +
-        'This is a zup bug rather than a configuration problem: the action expects one ' +
-        'versioned document on stdout and nothing else.',
-    )
-    this.name = 'ProtocolError'
+        "This is a zup bug rather than a configuration problem: the action expects one " +
+        "versioned document on stdout and nothing else.",
+    );
+    this.name = "ProtocolError";
   }
 }
 
 /** Whether a document's protocol is one this consumer reads. */
 export function accepts(protocol: string): boolean {
-  return majorOf(protocol) === PROTOCOL_MAJOR
+  return majorOf(protocol) === PROTOCOL_MAJOR;
 }
 
 function majorOf(protocol: string): number {
-  const major = protocol.split('.')[0]
-  const value = Number(major)
-  return Number.isInteger(value) ? value : Number.NaN
+  const major = protocol.split(".")[0];
+  const value = Number(major);
+  return Number.isInteger(value) ? value : Number.NaN;
 }
 
 /** Whether evidence states that a platform signature covers these bytes. */
-export function coversBytes(evidence: readonly SigningEvidence[] | undefined): boolean {
-  return evidence?.some((entry) => entry.fact === 'signature_covers_bytes') ?? false
+export function coversBytes(
+  evidence: readonly SigningEvidence[] | undefined,
+): boolean {
+  return (
+    evidence?.some((entry) => entry.fact === "signature_covers_bytes") ?? false
+  );
 }
 
 /** Whether the artifact carries a finalized, signed identity. */
 export function isSigned(artifact: Artifact): boolean {
-  return artifact.signing?.state === 'signed'
+  return artifact.signing?.state === "signed";
 }
 
 /**
@@ -121,31 +125,34 @@ export function isSigned(artifact: Artifact): boolean {
  * stdout has a zup bug, and saying so is more useful than guessing which one was
  * meant.
  */
-export function parseResult(stdout: string, expected?: Operation): AutomationResult {
-  const text = stdout.trim()
+export function parseResult(
+  stdout: string,
+  expected?: Operation,
+): AutomationResult {
+  const text = stdout.trim();
   if (text.length === 0) {
-    throw new ProtocolError('stdout was empty', stdout)
+    throw new ProtocolError("stdout was empty", stdout);
   }
-  const value = object(parse(text, stdout), stdout)
-  const protocol = string(value['protocol'], 'protocol', stdout)
+  const value = object(parse(text, stdout), stdout);
+  const protocol = string(value["protocol"], "protocol", stdout);
   if (!accepts(protocol)) {
     throw new ProtocolError(
       `protocol is ${protocol} and this action reads major ${PROTOCOL_MAJOR}`,
       stdout,
-    )
+    );
   }
-  const result = readResult(value, stdout)
+  const result = readResult(value, stdout);
   if (expected !== undefined && result.operation !== expected) {
     throw new ProtocolError(
       `expected a \`${expected}\` result and got \`${result.operation}\``,
       stdout,
-    )
+    );
   }
-  const problem = conformance(result)
+  const problem = conformance(result);
   if (problem !== undefined) {
-    throw new ProtocolError(problem, stdout)
+    throw new ProtocolError(problem, stdout);
   }
-  return result
+  return result;
 }
 
 /**
@@ -157,72 +164,81 @@ export function parseResult(stdout: string, expected?: Operation): AutomationRes
  * still read, rather than ending the run.
  */
 export function parseEvent(line: string): StreamEvent | undefined {
-  const text = line.trim()
-  if (text.length === 0 || !text.startsWith('{')) {
-    return undefined
+  const text = line.trim();
+  if (text.length === 0 || !text.startsWith("{")) {
+    return undefined;
   }
-  let value: unknown
+  let value: unknown;
   try {
-    value = JSON.parse(text)
+    value = JSON.parse(text);
   } catch {
-    return undefined
+    return undefined;
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    return undefined
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
   }
-  const record = value as Record<string, unknown>
-  const type = record['type']
-  if (typeof type !== 'string') {
-    return undefined
+  const record = value as Record<string, unknown>;
+  const type = record["type"];
+  if (typeof type !== "string") {
+    return undefined;
   }
   switch (type) {
-    case 'version':
+    case "version":
       return {
-        type: 'version',
-        protocol: String(record['protocol'] ?? ''),
-        zup: String(record['zup'] ?? ''),
-        operation: String(record['operation'] ?? ''),
-      }
-    case 'phase':
+        type: "version",
+        protocol: String(record["protocol"] ?? ""),
+        zup: String(record["zup"] ?? ""),
+        operation: String(record["operation"] ?? ""),
+      };
+    case "phase":
       return {
-        type: 'phase',
-        phase: String(record['phase'] ?? ''),
-        message: String(record['message'] ?? ''),
-      }
-    case 'progress':
+        type: "phase",
+        phase: String(record["phase"] ?? ""),
+        message: String(record["message"] ?? ""),
+      };
+    case "progress":
       return {
-        type: 'progress',
-        completed: integer(record['completed'], 0),
-        total: integer(record['total'], 0),
-        label: String(record['label'] ?? ''),
-      }
-    case 'diagnostic':
-      return { type: 'diagnostic', diagnostic: readDiagnostic(record['diagnostic']) }
-    case 'artifact':
-      return { type: 'artifact', artifact: readArtifact(record['artifact']) }
-    case 'publication':
-      return { type: 'publication', publication: readPublication(record['publication']) }
-    case 'log':
+        type: "progress",
+        completed: integer(record["completed"], 0),
+        total: integer(record["total"], 0),
+        label: String(record["label"] ?? ""),
+      };
+    case "diagnostic":
       return {
-        type: 'log',
-        level: level(record['level']),
-        message: String(record['message'] ?? ''),
-      }
-    case 'completed':
-      return { type: 'completed', result: readResult(asRecord(record['result']), line) }
+        type: "diagnostic",
+        diagnostic: readDiagnostic(record["diagnostic"]),
+      };
+    case "artifact":
+      return { type: "artifact", artifact: readArtifact(record["artifact"]) };
+    case "publication":
+      return {
+        type: "publication",
+        publication: readPublication(record["publication"]),
+      };
+    case "log":
+      return {
+        type: "log",
+        level: level(record["level"]),
+        message: String(record["message"] ?? ""),
+      };
+    case "completed":
+      return {
+        type: "completed",
+        result: readResult(asRecord(record["result"]), line),
+      };
     default:
       // A message type from a newer zup. Rule 2: keep reading.
-      return undefined
+      return undefined;
   }
 }
 
-function level(value: unknown): 'info' | 'warning' | 'error' {
-  return value === 'warning' || value === 'error' ? value : 'info'
+function level(value: unknown): "info" | "warning" | "error" {
+  return value === "warning" || value === "error" ? value : "info";
 }
 
 function parse(text: string, raw: string): unknown {
   try {
-    return JSON.parse(text)
+    return JSON.parse(text);
   } catch (error) {
     // V8's parse error quotes a snippet of the input, so the message is bounded
     // here rather than at the call site: an error message is not the place to paste
@@ -230,147 +246,158 @@ function parse(text: string, raw: string): unknown {
     throw new ProtocolError(
       `${preview((error as Error).message)}; output began: ${preview(text)}`,
       raw,
-    )
+    );
   }
 }
 
 function object(value: unknown, raw: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ProtocolError('the result was not a JSON object', raw)
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ProtocolError("the result was not a JSON object", raw);
   }
-  return value as Record<string, unknown>
+  return value as Record<string, unknown>;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+  return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
-    : {}
+    : {};
 }
 
-function readResult(value: Record<string, unknown>, raw: string): AutomationResult {
+function readResult(
+  value: Record<string, unknown>,
+  raw: string,
+): AutomationResult {
   return {
-    protocol: String(value['protocol'] ?? ''),
-    operation: string(value['operation'], 'operation', raw),
-    status: status(value['status']),
-    application: readApplication(value['application']),
-    targets: list(value['targets']).map(readTarget),
-    artifacts: list(value['artifacts']).map(readArtifact),
-    release_manifest: optionalString(value['release_manifest']) ?? null,
-    publication: readOptionalPublication(value['publication']),
-    diagnostics: list(value['diagnostics']).map(readDiagnostic),
-    summary: optionalString(value['summary']) ?? null,
-    details: readDetails(value['details']),
-  }
+    protocol: String(value["protocol"] ?? ""),
+    operation: string(value["operation"], "operation", raw),
+    status: status(value["status"]),
+    application: readApplication(value["application"]),
+    targets: list(value["targets"]).map(readTarget),
+    artifacts: list(value["artifacts"]).map(readArtifact),
+    release_manifest: optionalString(value["release_manifest"]) ?? null,
+    publication: readOptionalPublication(value["publication"]),
+    diagnostics: list(value["diagnostics"]).map(readDiagnostic),
+    summary: optionalString(value["summary"]) ?? null,
+    details: readDetails(value["details"]),
+  };
 }
 
 function status(value: unknown): Status {
   // An unreadable status is a failure, not a success: a document that cannot say
   // whether it worked has not worked.
-  return value === 'success' ? 'success' : 'failure'
+  return value === "success" ? "success" : "failure";
 }
 
 function readApplication(value: unknown): Application | null {
   if (value === null || value === undefined) {
-    return null
+    return null;
   }
-  const record = asRecord(value)
+  const record = asRecord(value);
   return {
-    id: String(record['id'] ?? ''),
-    name: String(record['name'] ?? ''),
-    version: String(record['version'] ?? ''),
-  }
+    id: String(record["id"] ?? ""),
+    name: String(record["name"] ?? ""),
+    version: String(record["version"] ?? ""),
+  };
 }
 
 function readTarget(value: unknown): Target {
-  const record = asRecord(value)
-  return { profile: String(record['profile'] ?? ''), target: String(record['target'] ?? '') }
+  const record = asRecord(value);
+  return {
+    profile: String(record["profile"] ?? ""),
+    target: String(record["target"] ?? ""),
+  };
 }
 
 export function readArtifact(value: unknown): Artifact {
-  const record = asRecord(value)
-  const signing = record['signing']
+  const record = asRecord(value);
+  const signing = record["signing"];
   return {
-    path: String(record['path'] ?? ''),
-    digest: readDigest(record['digest']) ?? { algorithm: 'sha256', value: '' },
-    size: number(record['size'], 0),
-    kind: String(record['kind'] ?? 'unknown'),
-    mode: String(record['mode'] ?? 'unknown'),
-    id: optionalString(record['id']) ?? null,
-    target: optionalString(record['target']) ?? null,
-    variants: list(record['variants']).map(String),
+    path: String(record["path"] ?? ""),
+    digest: readDigest(record["digest"]) ?? { algorithm: "sha256", value: "" },
+    size: number(record["size"], 0),
+    kind: String(record["kind"] ?? "unknown"),
+    mode: String(record["mode"] ?? "unknown"),
+    id: optionalString(record["id"]) ?? null,
+    target: optionalString(record["target"]) ?? null,
+    variants: list(record["variants"]).map(String),
     signing:
       signing === null || signing === undefined
         ? null
         : {
-            state: String(asRecord(signing)['state'] ?? 'unknown'),
-            evidence: list(asRecord(signing)['evidence']).map((entry) => {
-              const pair = asRecord(entry)
-              return { fact: String(pair['fact'] ?? ''), value: String(pair['value'] ?? '') }
+            state: String(asRecord(signing)["state"] ?? "unknown"),
+            evidence: list(asRecord(signing)["evidence"]).map((entry) => {
+              const pair = asRecord(entry);
+              return {
+                fact: String(pair["fact"] ?? ""),
+                value: String(pair["value"] ?? ""),
+              };
             }),
           },
-  }
+  };
 }
 
 function readOptionalPublication(value: unknown): Publication | null {
-  return value === null || value === undefined ? null : readPublication(value)
+  return value === null || value === undefined ? null : readPublication(value);
 }
 
 function readPublication(value: unknown): Publication {
-  const record = asRecord(value)
+  const record = asRecord(value);
   return {
-    provider: String(record['provider'] ?? ''),
-    subject: String(record['subject'] ?? ''),
-    tag: String(record['tag'] ?? ''),
-    id: optionalString(record['id']) ?? null,
-    state: String(record['state'] ?? 'unknown'),
-    url: optionalString(record['url']) ?? null,
-    immutable: typeof record['immutable'] === 'boolean' ? record['immutable'] : null,
-    assets: list(record['assets']).map((entry) => {
-      const asset = asRecord(entry)
+    provider: String(record["provider"] ?? ""),
+    subject: String(record["subject"] ?? ""),
+    tag: String(record["tag"] ?? ""),
+    id: optionalString(record["id"]) ?? null,
+    state: String(record["state"] ?? "unknown"),
+    url: optionalString(record["url"]) ?? null,
+    immutable:
+      typeof record["immutable"] === "boolean" ? record["immutable"] : null,
+    assets: list(record["assets"]).map((entry) => {
+      const asset = asRecord(entry);
       return {
-        name: String(asset['name'] ?? ''),
-        size: number(asset['size'], 0),
-        digest: readDigest(asset['digest']),
-        state: String(asset['state'] ?? 'unknown'),
-      }
+        name: String(asset["name"] ?? ""),
+        size: number(asset["size"], 0),
+        digest: readDigest(asset["digest"]),
+        state: String(asset["state"] ?? "unknown"),
+      };
     }),
-    receipt: optionalString(record['receipt']) ?? null,
-  }
+    receipt: optionalString(record["receipt"]) ?? null,
+  };
 }
 
 function readDigest(value: unknown): Digest | null {
   if (value === null || value === undefined) {
-    return null
+    return null;
   }
-  const record = asRecord(value)
+  const record = asRecord(value);
   return {
-    algorithm: String(record['algorithm'] ?? 'sha256'),
-    value: String(record['value'] ?? ''),
-  }
+    algorithm: String(record["algorithm"] ?? "sha256"),
+    value: String(record["value"] ?? ""),
+  };
 }
 
 function readDiagnostic(value: unknown): Diagnostic {
-  const record = asRecord(value)
-  const severity = record['severity']
-  const source = record['source']
+  const record = asRecord(value);
+  const severity = record["severity"];
+  const source = record["source"];
   return {
     // An unknown level is a notice: a diagnostic zup invented a level for must not
     // fail a release that otherwise succeeded.
-    severity: severity === 'error' || severity === 'warning' ? severity : 'notice',
-    code: typeof record['code'] === 'string' ? record['code'] : 'zup.internal',
-    message: String(record['message'] ?? ''),
+    severity:
+      severity === "error" || severity === "warning" ? severity : "notice",
+    code: typeof record["code"] === "string" ? record["code"] : "zup.internal",
+    message: String(record["message"] ?? ""),
     source:
       source === null || source === undefined
         ? null
         : {
-            file: String(asRecord(source)['file'] ?? ''),
-            start_line: optionalNumber(asRecord(source)['start_line']),
-            start_column: optionalNumber(asRecord(source)['start_column']),
-            end_line: optionalNumber(asRecord(source)['end_line']),
-            end_column: optionalNumber(asRecord(source)['end_column']),
+            file: String(asRecord(source)["file"] ?? ""),
+            start_line: optionalNumber(asRecord(source)["start_line"]),
+            start_column: optionalNumber(asRecord(source)["start_column"]),
+            end_line: optionalNumber(asRecord(source)["end_line"]),
+            end_column: optionalNumber(asRecord(source)["end_column"]),
           },
-    help: optionalString(record['help']) ?? null,
-  }
+    help: optionalString(record["help"]) ?? null,
+  };
 }
 
 /**
@@ -385,9 +412,9 @@ function readDiagnostic(value: unknown): Diagnostic {
  */
 function readDetails(value: unknown): Details | null {
   if (value === null || value === undefined) {
-    return null
+    return null;
   }
-  return value as Details
+  return value as Details;
 }
 
 /**
@@ -398,47 +425,54 @@ function readDetails(value: unknown): Details | null {
  * that produces a summary with `-` in it and no error anywhere.
  */
 export function conformance(result: AutomationResult): string | undefined {
-  if (result.status === 'failure' && result.diagnostics.length === 0) {
-    return `\`${result.operation}\` failed without saying why`
+  if (result.status === "failure" && result.diagnostics.length === 0) {
+    return `\`${result.operation}\` failed without saying why`;
   }
-  const error = result.diagnostics.find((diagnostic) => diagnostic.severity === 'error')
-  if (error !== undefined && result.status === 'success') {
-    return `\`${result.operation}\` reports success while carrying the error \`${error.code}\``
+  const error = result.diagnostics.find(
+    (diagnostic) => diagnostic.severity === "error",
+  );
+  if (error !== undefined && result.status === "success") {
+    return `\`${result.operation}\` reports success while carrying the error \`${error.code}\``;
   }
   if (result.details !== null && result.details.kind !== result.operation) {
-    return `\`${result.operation}\` carries the payload of \`${result.details.kind}\``
+    return `\`${result.operation}\` carries the payload of \`${result.details.kind}\``;
   }
-  if (result.publication !== null && result.publication.tag.trim().length === 0) {
-    return `\`${result.operation}\` published something with no tag`
+  if (
+    result.publication !== null &&
+    result.publication.tag.trim().length === 0
+  ) {
+    return `\`${result.operation}\` published something with no tag`;
   }
-  return undefined
+  return undefined;
 }
 
 function string(value: unknown, key: string, raw: string): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new ProtocolError(`the result has no \`${key}\``, raw)
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ProtocolError(`the result has no \`${key}\``, raw);
   }
-  return value
+  return value;
 }
 
 function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function optionalNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function number(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function integer(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isInteger(value) ? value : fallback
+  return typeof value === "number" && Number.isInteger(value)
+    ? value
+    : fallback;
 }
 
 function list(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : []
+  return Array.isArray(value) ? value : [];
 }
 
 /**
@@ -449,9 +483,11 @@ function list(value: unknown): unknown[] {
  * see which document broke and where, short enough that a reader reaches the
  * remedy rather than scrolling.
  */
-const PREVIEW = 80
+const PREVIEW = 80;
 
 function preview(text: string): string {
-  const collapsed = text.replaceAll(/\s+/gu, ' ').trim()
-  return collapsed.length > PREVIEW ? `${collapsed.slice(0, PREVIEW)}…` : collapsed
+  const collapsed = text.replaceAll(/\s+/gu, " ").trim();
+  return collapsed.length > PREVIEW
+    ? `${collapsed.slice(0, PREVIEW)}…`
+    : collapsed;
 }

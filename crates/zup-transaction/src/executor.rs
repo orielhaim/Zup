@@ -17,6 +17,13 @@ pub enum ReconcileResult {
     Ambiguous,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollbackReconcileResult {
+    Restored,
+    Retry,
+    Ambiguous,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OperationReceipt {
@@ -140,6 +147,14 @@ pub trait OperationExecutor {
         operation: &TransactionNode,
         receipt: Option<&OperationReceipt>,
     ) -> Result<ReconcileResult, Self::Error>;
+
+    fn reconcile_rollback(
+        &mut self,
+        _operation: &TransactionNode,
+        _receipt: &OperationReceipt,
+    ) -> Result<RollbackReconcileResult, Self::Error> {
+        Ok(RollbackReconcileResult::Ambiguous)
+    }
 }
 
 pub trait CancellationProbe {

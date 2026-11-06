@@ -17,59 +17,59 @@
  * this file agree - and renaming an input is one edit rather than a search.
  */
 
-import * as core from '@actions/core'
+import * as core from "@actions/core";
 
 /** What this step does. */
 export type Operation =
-  | 'setup'
-  | 'check'
-  | 'build'
-  | 'compose'
-  | 'finalize'
-  | 'attest'
-  | 'publish'
-  | 'release'
+  | "setup"
+  | "check"
+  | "build"
+  | "compose"
+  | "finalize"
+  | "attest"
+  | "publish"
+  | "release";
 
 /** Everything the action was asked to do. */
 export interface Inputs {
-  operation: Operation
+  operation: Operation;
   /** Absolute path to the directory holding `zup.toml`. */
-  projectPath: string
+  projectPath: string;
   /** The zup version to install, or `undefined` for this build's tested default. */
-  zupVersion: string | undefined
+  zupVersion: string | undefined;
   /** An explicit zup executable, which skips installation entirely. */
-  zupPath: string | undefined
+  zupPath: string | undefined;
   /** The release directory, relative to the project. */
-  releaseDir: string
+  releaseDir: string;
   /** Target profiles or triples to build. */
-  targets: string[]
+  targets: string[];
   /** Declared distribution artifacts to compose. */
-  artifacts: string[]
+  artifacts: string[];
   /** The publish credential, absent unless the step was given one. */
-  token: string | undefined
+  token: string | undefined;
   /** Override the repository a release belongs to, as `owner/name`. */
-  repo: string | undefined
-  tag: string | undefined
-  draft: boolean
-  prerelease: boolean
-  dryRun: boolean
-  uploadWorkflowArtifacts: boolean
+  repo: string | undefined;
+  tag: string | undefined;
+  draft: boolean;
+  prerelease: boolean;
+  dryRun: boolean;
+  uploadWorkflowArtifacts: boolean;
   /** The workflow artifact name, or `undefined` to derive one. */
-  workflowArtifactName: string | undefined
-  artifactRetentionDays: number | undefined
-  attest: boolean
+  workflowArtifactName: string | undefined;
+  artifactRetentionDays: number | undefined;
+  attest: boolean;
   /** Whether a release with no signature may still be finalized and published. */
-  allowUnsigned: boolean
+  allowUnsigned: boolean;
   /** Whether revocation may be checked over the network. */
-  onlineRevocation: boolean
+  onlineRevocation: boolean;
   /** Extra subjects to attest, relative to the release directory. */
-  attestPaths: string[]
+  attestPaths: string[];
   /** Whether a dangerous trigger may proceed with a credential. */
-  allowUnsafePublish: boolean
+  allowUnsafePublish: boolean;
   /** Extra arguments, already tokenized. */
-  args: string[]
+  args: string[];
   /** Where the receipt is written, relative to the project. */
-  receipt: string | undefined
+  receipt: string | undefined;
 }
 
 /** A malformed input, with the name and what was expected. */
@@ -79,90 +79,90 @@ export class InputError extends Error {
     reason: string,
     readonly remedy: string,
   ) {
-    super(`\`${input}\` ${reason}. ${remedy}`)
-    this.name = 'InputError'
+    super(`\`${input}\` ${reason}. ${remedy}`);
+    this.name = "InputError";
   }
 }
 
 const OPERATIONS: readonly Operation[] = [
-  'setup',
-  'check',
-  'build',
-  'compose',
-  'finalize',
-  'attest',
-  'publish',
-  'release',
-]
+  "setup",
+  "check",
+  "build",
+  "compose",
+  "finalize",
+  "attest",
+  "publish",
+  "release",
+];
 
 const RAW: Readonly<Record<string, string>> = Object.freeze(
   Object.fromEntries(
     [
-      'operation',
-      'project-path',
-      'zup-version',
-      'zup-path',
-      'release-dir',
-      'target',
-      'artifact',
-      'github-token',
-      'repo',
-      'tag',
-      'draft',
-      'prerelease',
-      'dry-run',
-      'upload-workflow-artifacts',
-      'workflow-artifact-name',
-      'artifact-retention-days',
-      'attest',
-      'attest-paths',
-      'allow-unsafe-publish',
-      'receipt',
-      'args',
+      "operation",
+      "project-path",
+      "zup-version",
+      "zup-path",
+      "release-dir",
+      "target",
+      "artifact",
+      "github-token",
+      "repo",
+      "tag",
+      "draft",
+      "prerelease",
+      "dry-run",
+      "upload-workflow-artifacts",
+      "workflow-artifact-name",
+      "artifact-retention-days",
+      "attest",
+      "attest-paths",
+      "allow-unsafe-publish",
+      "receipt",
+      "args",
     ].map((name) => [name, core.getInput(name)]),
   ),
-)
+);
 
 /** Read every input, refusing anything ambiguous. */
 export function readInputs(): Inputs {
   return {
     operation: readOperation(),
-    projectPath: core.toPlatformPath(text('project-path') ?? '.'),
-    zupVersion: text('zup-version'),
-    zupPath: text('zup-path'),
-    releaseDir: text('release-dir') ?? 'dist',
-    targets: list('target'),
-    artifacts: list('artifact'),
+    projectPath: core.toPlatformPath(text("project-path") ?? "."),
+    zupVersion: text("zup-version"),
+    zupPath: text("zup-path"),
+    releaseDir: text("release-dir") ?? "dist",
+    targets: list("target"),
+    artifacts: list("artifact"),
     token: readToken(),
-    repo: text('repo'),
-    tag: text('tag'),
-    draft: flag('draft'),
-    prerelease: flag('prerelease'),
-    dryRun: flag('dry-run'),
-    uploadWorkflowArtifacts: flag('upload-workflow-artifacts'),
-    workflowArtifactName: text('workflow-artifact-name'),
-    artifactRetentionDays: number('artifact-retention-days'),
-    attest: flag('attest'),
-    allowUnsigned: flag('allow-unsigned'),
-    onlineRevocation: flag('online-revocation'),
-    attestPaths: list('attest-paths'),
-    allowUnsafePublish: flag('allow-unsafe-publish'),
-    args: tokenize(text('args') ?? '', process.platform),
-    receipt: text('receipt'),
-  }
+    repo: text("repo"),
+    tag: text("tag"),
+    draft: flag("draft"),
+    prerelease: flag("prerelease"),
+    dryRun: flag("dry-run"),
+    uploadWorkflowArtifacts: flag("upload-workflow-artifacts"),
+    workflowArtifactName: text("workflow-artifact-name"),
+    artifactRetentionDays: number("artifact-retention-days"),
+    attest: flag("attest"),
+    allowUnsigned: flag("allow-unsigned"),
+    onlineRevocation: flag("online-revocation"),
+    attestPaths: list("attest-paths"),
+    allowUnsafePublish: flag("allow-unsafe-publish"),
+    args: tokenize(text("args") ?? "", process.platform),
+    receipt: text("receipt"),
+  };
 }
 
 function readOperation(): Operation {
-  const raw = text('operation') ?? 'build'
-  const found = OPERATIONS.find((candidate) => candidate === raw)
+  const raw = text("operation") ?? "build";
+  const found = OPERATIONS.find((candidate) => candidate === raw);
   if (!found) {
     throw new InputError(
-      'operation',
+      "operation",
       `is \`${raw}\`, which is not an operation`,
-      `Expected one of: ${OPERATIONS.join(', ')}.`,
-    )
+      `Expected one of: ${OPERATIONS.join(", ")}.`,
+    );
   }
-  return found
+  return found;
 }
 
 /**
@@ -174,20 +174,20 @@ function readOperation(): Operation {
  * later as a confusing 401; it is treated as no token at all.
  */
 function readToken(): string | undefined {
-  const raw = RAW['github-token'] ?? ''
+  const raw = RAW["github-token"] ?? "";
   if (raw.length === 0 || raw.includes(UNINTERPOLATED)) {
-    return undefined
+    return undefined;
   }
-  return raw
+  return raw;
 }
 
 /** The opening of a workflow expression the runner failed to interpolate. */
-const UNINTERPOLATED = '${{'
+const UNINTERPOLATED = "${{";
 
 /** An input's value, or `undefined` when it was left empty. */
 function text(name: string): string | undefined {
-  const value = RAW[name] ?? ''
-  return value.length > 0 ? value : undefined
+  const value = RAW[name] ?? "";
+  return value.length > 0 ? value : undefined;
 }
 
 /**
@@ -198,45 +198,49 @@ function text(name: string): string | undefined {
  * which this action prefers.
  */
 function list(name: string): string[] {
-  const raw = text(name)
+  const raw = text(name);
   if (raw === undefined) {
-    return []
+    return [];
   }
   return raw
     .split(/[\n,]/u)
     .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
+    .filter((entry) => entry.length > 0);
 }
 
 function flag(name: string): boolean {
-  const raw = text(name)
+  const raw = text(name);
   if (raw === undefined) {
-    return false
+    return false;
   }
-  const normalized = raw.trim().toLowerCase()
-  if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
-    return true
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes") {
+    return true;
   }
-  if (normalized === 'false' || normalized === '0' || normalized === 'no') {
-    return false
+  if (normalized === "false" || normalized === "0" || normalized === "no") {
+    return false;
   }
-  throw new InputError(name, `is \`${raw}\`, which is not a boolean`, 'Expected `true` or `false`.')
+  throw new InputError(
+    name,
+    `is \`${raw}\`, which is not a boolean`,
+    "Expected `true` or `false`.",
+  );
 }
 
 function number(name: string): number | undefined {
-  const raw = text(name)
+  const raw = text(name);
   if (raw === undefined) {
-    return undefined
+    return undefined;
   }
-  const value = Number(raw)
+  const value = Number(raw);
   if (!Number.isInteger(value) || value < 1) {
     throw new InputError(
       name,
       `is \`${raw}\`, which is not a whole number of days`,
-      'Expected a number of at least 1.',
-    )
+      "Expected a number of at least 1.",
+    );
   }
-  return value
+  return value;
 }
 
 /**
@@ -253,42 +257,49 @@ function number(name: string): number | undefined {
  * escape - `C:\Program Files\zup\zup.exe` is one argument containing no escapes at
  * all, and treating `\` as an escape there would silently delete it.
  */
-export function tokenize(input: string, platform: NodeJS.Platform = process.platform): string[] {
-  const windows = platform === 'win32'
-  const args: string[] = []
-  let current = ''
+export function tokenize(
+  input: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const windows = platform === "win32";
+  const args: string[] = [];
+  let current = "";
   /** The quote character currently open, or `undefined`. */
-  let open: '"' | "'" | undefined
+  let open: '"' | "'" | undefined;
   /** Whether this argument has begun, which an empty `""` does. */
-  let started = false
+  let started = false;
 
   for (let index = 0; index < input.length; index += 1) {
-    const character = input[index] as string
+    const character = input[index] as string;
 
     // A backslash is an escape on POSIX and data on Windows, except where it
     // precedes a quote - the one case CommandLineToArgvW also treats as an escape,
     // which is what makes a path containing `\"` survive.
-    if (character === '\\') {
-      const next = input[index + 1]
-      const escaping = !windows && open !== "'"
+    if (character === "\\") {
+      const next = input[index + 1];
+      const escaping = !windows && open !== "'";
       if (escaping) {
         if (next === undefined) {
-          throw new InputError('args', 'ends with `\\`', 'Quote the value instead.')
+          throw new InputError(
+            "args",
+            "ends with `\\`",
+            "Quote the value instead.",
+          );
         }
-        current += next
-        index += 1
-        started = true
-        continue
+        current += next;
+        index += 1;
+        started = true;
+        continue;
       }
       if (windows && open === undefined && next === '"') {
-        current += '"'
-        index += 1
-        started = true
-        continue
+        current += '"';
+        index += 1;
+        started = true;
+        continue;
       }
-      current += '\\'
-      started = true
-      continue
+      current += "\\";
+      started = true;
+      continue;
     }
 
     if (character === '"' || character === "'") {
@@ -296,43 +307,47 @@ export function tokenize(input: string, platform: NodeJS.Platform = process.plat
       // treating it as one would break `don't`. Elsewhere a quote of the *other*
       // kind inside an open run is literal: `'say "hi"'` is one argument.
       if (windows && character === "'") {
-        current += character
-        started = true
-        continue
+        current += character;
+        started = true;
+        continue;
       }
       if (open === character) {
-        open = undefined
-        started = true
-        continue
+        open = undefined;
+        started = true;
+        continue;
       }
       if (open === undefined) {
-        open = character
-        started = true
-        continue
+        open = character;
+        started = true;
+        continue;
       }
-      current += character
-      started = true
-      continue
+      current += character;
+      started = true;
+      continue;
     }
 
     if (open !== undefined || !/\s/u.test(character)) {
-      current += character
-      started = true
-      continue
+      current += character;
+      started = true;
+      continue;
     }
 
     if (started) {
-      args.push(current)
-      current = ''
-      started = false
+      args.push(current);
+      current = "";
+      started = false;
     }
   }
 
   if (open !== undefined) {
-    throw new InputError('args', 'has an unclosed quote', 'Close it, or drop the argument.')
+    throw new InputError(
+      "args",
+      "has an unclosed quote",
+      "Close it, or drop the argument.",
+    );
   }
   if (started) {
-    args.push(current)
+    args.push(current);
   }
-  return args
+  return args;
 }

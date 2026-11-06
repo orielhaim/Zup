@@ -618,11 +618,29 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
         }
     }
 
+    let graph = manifest
+        .services
+        .iter()
+        .map(|service| {
+            (
+                zup_core::ResourceKey::Service {
+                    id: service.id.clone(),
+                }
+                .canonical_for(&manifest.target),
+                zup_core::service_dependency_keys(&service.requires_services, manifest.target),
+            )
+        })
+        .collect();
+    zup_core::validate_service_graph(&graph).map_err(|message| ManifestError::Invalid {
+        message,
+        src: None,
+        span: None,
+    })?;
     let mut services = BTreeSet::new();
     for service in &manifest.services {
         service
             .execution
-            .validate_for(manifest.target)
+            .validate_policies(service.failure, service.readiness, manifest.target)
             .map_err(|reason| ManifestError::Invalid {
                 message: format!("service `{}`: {reason}", service.id),
                 src: None,
@@ -703,6 +721,9 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
     }
     for service in &manifest.services {
         check_ref(service.component.as_ref(), &known, "service")?;
+        for component in &service.requires_components {
+            check_ref(Some(component), &known, "service dependency")?;
+        }
         check_condition(service.when.as_ref(), &known, "condition")?;
     }
     for protocol in &manifest.protocols {

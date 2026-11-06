@@ -39,7 +39,13 @@ pub fn apply_managed(node: &TransactionNode) -> Result<OperationReceipt, Integra
             native_apply(key, crate::shortcuts::apply(&op).map_err(drift)?)
         }
         ApplyPayload::Path(op) => apply_path(&key, &op),
-        ApplyPayload::Service(op) => native_apply(key, crate::services::apply(&op).map_err(drift)?),
+        ApplyPayload::Service {
+            operation: op,
+            startup_inhibited,
+        } => native_apply(
+            key,
+            crate::services::apply(&op, startup_inhibited).map_err(drift)?,
+        ),
         ApplyPayload::Protocol(op) => apply_protocol(&key, &op),
         ApplyPayload::FileAssociation(op) => apply_progid(&key, &op),
         ApplyPayload::Extension(op) => apply_extension(&key, &op),
@@ -77,6 +83,7 @@ fn native_owned_receipt(
     key: ResourceKey,
     scope: SelectedScope,
     owned: &OwnedResource,
+    startup_inhibited: bool,
 ) -> Result<BackendReceipt, IntegrationError> {
     let privilege = owned.privilege();
     Ok(match owned {
@@ -108,7 +115,11 @@ fn native_owned_receipt(
             name: name.clone(),
             privilege,
             previous: previous.clone(),
-            installed: installed.clone(),
+            installed: if startup_inhibited {
+                zup_transaction::disabled_startup(installed).ok_or(IntegrationError::Unsupported)?
+            } else {
+                installed.as_ref().clone()
+            },
         },
         OwnedResource::Protocol {
             previous,
@@ -272,8 +283,9 @@ pub fn apply_owned_removal(node: &TransactionNode) -> Result<OperationReceipt, I
             scope,
             key: semantic_key,
             owned,
+            startup_inhibited,
         } => {
-            let original = native_owned_receipt(semantic_key, scope, &owned)?;
+            let original = native_owned_receipt(semantic_key, scope, &owned, startup_inhibited)?;
             rollback_native(&original)?;
             native_apply(key, invert_receipt(original)?)
         }
@@ -323,8 +335,9 @@ pub fn reconcile_owned_removal(
             scope,
             key: semantic_key,
             owned,
+            startup_inhibited,
         } => {
-            let original = native_owned_receipt(semantic_key, scope, &owned)?;
+            let original = native_owned_receipt(semantic_key, scope, &owned, startup_inhibited)?;
             let status = reconcile_native(&original)?;
             if status == ReconcileResult::Applied {
                 Ok(ReconcileResult::AppliedWithReceipt(native_apply(
@@ -690,6 +703,8 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     Ok(compare_removal(&ServiceState::Absent, previous, installed))
                 }
                 Ok(zup_plan::ObservedServiceState::Service {
+                    failure,
+                    dependencies,
                     execution,
                     display_name,
                     command,
@@ -698,6 +713,8 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     ..
                 }) => Ok(compare_removal(
                     &ServiceState::Registration {
+                        failure,
+                        dependencies,
                         execution,
                         readiness,
                         display_name,
@@ -833,7 +850,10 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
                 Ok(ReconcileResult::Ambiguous)
             }
         }
-        ApplyPayload::Service(op) => native_reconcile(key, crate::services::reconcile(&op)),
+        ApplyPayload::Service {
+            operation: op,
+            startup_inhibited,
+        } => native_reconcile(key, crate::services::reconcile(&op, startup_inhibited)),
         ApplyPayload::Protocol(op) => {
             let current =
                 match read_protocol(op.scope, op.scheme.as_str(), op.command.executable.target()) {

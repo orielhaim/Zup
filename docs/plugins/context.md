@@ -2,15 +2,15 @@
 
 `plan` receives one `Context` and nothing else.
 
-| Field | Meaning |
-| --- | --- |
-| `plugin_id` | the plugin binding's own identifier |
-| `app_id` | application id |
-| `app_name` | display name |
-| `app_version` | application version |
-| `install_directory` | resolved install root |
-| `scope` | `Scope::User` or `Scope::Machine` |
-| `target` | Zup target, such as `windows-x64` |
+| Field                 | Meaning                             |
+| --------------------- | ----------------------------------- |
+| `plugin_id`           | the plugin binding's own identifier |
+| `app_id`              | application id                      |
+| `app_name`            | display name                        |
+| `app_version`         | application version                 |
+| `install_directory`   | resolved install root               |
+| `scope`               | `Scope::User` or `Scope::Machine`   |
+| `target`              | Zup target, such as `windows-x64`   |
 | `selected_components` | the component ids a person selected |
 
 ```rust

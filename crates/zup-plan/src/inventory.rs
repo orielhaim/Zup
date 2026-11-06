@@ -161,8 +161,9 @@ pub enum OwnedResource {
         name: String,
         privilege: Privilege,
         requires_files: Vec<crate::TargetPath>,
+        requires_services: Vec<zup_core::ServiceId>,
         previous: ServiceState,
-        installed: ServiceState,
+        installed: Box<ServiceState>,
     },
     Backend {
         id: BackendResourceId,
@@ -256,6 +257,8 @@ pub enum LauncherState {
 pub enum ServiceState {
     Absent,
     Registration {
+        dependencies: Vec<String>,
+        failure: zup_core::ServiceFailurePolicy,
         execution: zup_core::ServiceExecution,
         display_name: String,
         command: CommandSpec,

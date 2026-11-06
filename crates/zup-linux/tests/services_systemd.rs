@@ -112,11 +112,14 @@ fn rendered_units_verify() {
         let target = zup_core::Target::host().expect("a supported Linux host");
         let executable = zup_plan::TargetPath::new(target, binary).expect("a path");
         let service = zup_plan::DesiredService {
+            failure: Default::default(),
             execution: zup_core::ServiceExecution::SystemdUser {
                 user: "root".into(),
                 group: None,
             },
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: zup_core::ResourceKey::Service {
@@ -271,6 +274,7 @@ fn real_systemd_running_upgrade_and_uninstall() {
             &world.unit,
             zup_transaction::ServiceTerminalState::Stopped,
             std::time::Duration::from_secs(30),
+            &[],
         )
         .unwrap();
     std::fs::write(
@@ -294,6 +298,7 @@ fn real_systemd_running_upgrade_and_uninstall() {
             &world.unit,
             zup_transaction::ServiceTerminalState::Running,
             std::time::Duration::from_secs(30),
+            &[],
         )
         .unwrap();
     assert_eq!(
@@ -526,11 +531,14 @@ impl RealWorld {
         let bytes = std::fs::read(self.payload.join("tool")).expect("payload bytes");
         let (size, sha256) = zup_core::hash_reader(bytes.as_slice()).expect("bytes hash");
         let service = zup_plan::DesiredService {
+            failure: Default::default(),
             execution: zup_core::ServiceExecution::SystemdUser {
                 user: "root".into(),
                 group: None,
             },
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
             lifecycle: Default::default(),
             readiness: Default::default(),
             key: ResourceKey::Service {
@@ -634,14 +642,16 @@ impl RealWorld {
                 zup_plan::OwnedResource::Service { installed, .. } => {
                     snapshot.services.iter().any(|observed| {
                         observed.key == *key
-                            && match (&observed.state, installed) {
+                            && match (&observed.state, installed.as_ref()) {
                                 (
                                     zup_plan::ObservedServiceState::Service {
                                         display_name,
                                         command,
                                         start,
                                         readiness,
+                                        failure,
                                         execution,
+                                        dependencies,
                                         ..
                                     },
                                     zup_plan::ServiceState::Registration {
@@ -649,7 +659,9 @@ impl RealWorld {
                                         command: wanted_command,
                                         start: wanted_start,
                                         readiness: wanted_readiness,
+                                        failure: wanted_failure,
                                         execution: wanted_execution,
+                                        dependencies: wanted_dependencies,
                                     },
                                 ) => {
                                     display_name == wanted_display
@@ -657,6 +669,8 @@ impl RealWorld {
                                         && start == wanted_start
                                         && readiness == wanted_readiness
                                         && execution == wanted_execution
+                                        && dependencies == wanted_dependencies
+                                        && failure == wanted_failure
                                 }
                                 _ => false,
                             }
@@ -902,6 +916,7 @@ impl RealWorld {
                 &self.unit,
                 zup_transaction::ServiceTerminalState::Stopped,
                 std::time::Duration::from_secs(30),
+                &[],
             );
         }
         if !self.unit.is_empty() {

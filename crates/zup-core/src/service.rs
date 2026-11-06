@@ -17,6 +17,11 @@ pub enum ServiceExecution {
         account: WindowsServiceAccount,
     },
     SystemdDynamicUser,
+    OpenrcUser {
+        user: String,
+        #[serde(default)]
+        group: Option<String>,
+    },
     SystemdUser {
         user: String,
         #[serde(default)]
@@ -25,11 +30,42 @@ pub enum ServiceExecution {
 }
 
 impl ServiceExecution {
+    pub fn validate_policies(
+        &self,
+        failure: ServiceFailurePolicy,
+        readiness: ServiceReadiness,
+        target: crate::Target,
+    ) -> Result<(), &'static str> {
+        self.validate_for(target)?;
+        failure.validate_for(target)?;
+        readiness.validate_for(target)?;
+        let supported = matches!(
+            (self, failure),
+            (_, ServiceFailurePolicy::None)
+                | (Self::Windows { .. }, ServiceFailurePolicy::Windows { .. })
+                | (
+                    Self::SystemdUser { .. } | Self::SystemdDynamicUser,
+                    ServiceFailurePolicy::Systemd { .. }
+                )
+                | (Self::OpenrcUser { .. }, ServiceFailurePolicy::Openrc { .. })
+        );
+        if !supported {
+            return Err("runtime failure policy does not match the service manager");
+        }
+        if readiness == ServiceReadiness::Notify && matches!(self, Self::OpenrcUser { .. }) {
+            return Err("systemd notification is not an OpenRC readiness protocol");
+        }
+        Ok(())
+    }
+
     pub fn validate_for(&self, target: crate::Target) -> Result<(), &'static str> {
         match (self, target.operating_system()) {
             (Self::Windows { .. }, crate::TargetOperatingSystem::Windows)
             | (Self::SystemdDynamicUser, crate::TargetOperatingSystem::Linux) => Ok(()),
-            (Self::SystemdUser { user, group }, crate::TargetOperatingSystem::Linux) => {
+            (
+                Self::SystemdUser { user, group } | Self::OpenrcUser { user, group },
+                crate::TargetOperatingSystem::Linux,
+            ) => {
                 let valid = |name: &str| {
                     !name.is_empty()
                         && name.len() <= 31
@@ -137,6 +173,87 @@ impl ServiceLifecycle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServiceFailurePolicy {
+    #[default]
+    None,
+    Systemd {
+        condition: SystemdRestartCondition,
+        delay_seconds: u32,
+        start_limit_burst: u32,
+        start_limit_interval_seconds: u32,
+    },
+    Windows {
+        delay_seconds: u32,
+        restart_attempts: u32,
+        reset_seconds: u32,
+    },
+    Openrc {
+        delay_seconds: u32,
+        max_respawns: u32,
+        respawn_period_seconds: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SystemdRestartCondition {
+    OnFailure,
+    OnAbnormal,
+}
+
+impl ServiceFailurePolicy {
+    pub fn validate_for(self, target: crate::Target) -> Result<(), &'static str> {
+        let bounded = |delay, attempts, interval| {
+            (1..=3600).contains(&delay)
+                && (1..=100).contains(&attempts)
+                && (1..=86400).contains(&interval)
+                && delay * attempts < interval
+        };
+        match self {
+            Self::None => Ok(()),
+            Self::Systemd {
+                delay_seconds,
+                start_limit_burst,
+                start_limit_interval_seconds,
+                ..
+            } if target.operating_system() == crate::TargetOperatingSystem::Linux
+                && bounded(
+                    delay_seconds,
+                    start_limit_burst,
+                    start_limit_interval_seconds,
+                ) =>
+            {
+                Ok(())
+            }
+            Self::Windows {
+                delay_seconds,
+                restart_attempts,
+                reset_seconds,
+            } if target.operating_system() == crate::TargetOperatingSystem::Windows
+                && bounded(delay_seconds, restart_attempts, reset_seconds) =>
+            {
+                Ok(())
+            }
+            Self::Openrc {
+                delay_seconds,
+                max_respawns,
+                respawn_period_seconds,
+            } if target.operating_system() == crate::TargetOperatingSystem::Linux
+                && bounded(delay_seconds, max_respawns, respawn_period_seconds) =>
+            {
+                Ok(())
+            }
+            _ => Err(
+                "runtime failure policy requires the matching native manager, 1-100 retries, a 1-3600 second delay and a 1-86400 second interval longer than delay times retries",
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +296,60 @@ mod tests {
             }
             .validate_for(linux)
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    #[rstest::rstest]
+    #[case(1, 3, 60, true)]
+    #[case(0, 3, 60, false)]
+    #[case(5, 3, 15, false)]
+    #[case(1, 0, 60, false)]
+    #[case(1, 101, 600, false)]
+    fn restart_budget_cannot_allow_an_unbounded_loop(
+        #[case] delay: u32,
+        #[case] attempts: u32,
+        #[case] interval: u32,
+        #[case] valid: bool,
+    ) {
+        for policy in [
+            ServiceFailurePolicy::Systemd {
+                condition: SystemdRestartCondition::OnFailure,
+                delay_seconds: delay,
+                start_limit_burst: attempts,
+                start_limit_interval_seconds: interval,
+            },
+            ServiceFailurePolicy::Openrc {
+                delay_seconds: delay,
+                max_respawns: attempts,
+                respawn_period_seconds: interval,
+            },
+        ] {
+            assert_eq!(
+                policy
+                    .validate_for(crate::Target::parse("linux-x64-musl").unwrap())
+                    .is_ok(),
+                valid
+            );
+        }
+        let policy = ServiceFailurePolicy::Windows {
+            delay_seconds: delay,
+            restart_attempts: attempts,
+            reset_seconds: interval,
+        };
+        assert_eq!(
+            policy
+                .validate_for(crate::Target::parse("windows-x64").unwrap())
+                .is_ok(),
+            valid
+        );
+        assert!(
+            policy
+                .validate_for(crate::Target::parse("linux-x64").unwrap())
+                .is_err()
         );
     }
 }

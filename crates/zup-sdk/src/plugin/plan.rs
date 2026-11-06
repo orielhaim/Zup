@@ -2,8 +2,9 @@ use zup_plugin_abi as abi;
 
 pub use super::exports::zup::plugin::planner::{
     ChangedServiceState, FileAssociation, GeneratedFile, InitialServiceState, Launcher,
-    LauncherLocation, Protocol, Service, ServiceExecution, ServiceLifecycle, ServiceReadiness,
-    ServiceStart, SystemdUser, WindowsServiceAccount,
+    LauncherLocation, OpenrcFailurePolicy, Protocol, Service, ServiceExecution,
+    ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart, SystemdFailurePolicy,
+    SystemdRestartCondition, SystemdUser, WindowsFailurePolicy, WindowsServiceAccount,
 };
 use super::exports::zup::plugin::planner::{PathEntry, PluginError, ResourceItem};
 
@@ -101,6 +102,7 @@ impl Service {
         execution: ServiceExecution,
     ) -> Self {
         Self {
+            failure: super::ServiceFailurePolicy::None,
             execution,
             id: id.into(),
             name: name.into(),
@@ -110,6 +112,7 @@ impl Service {
             start: ServiceStart::Manual,
             readiness: ServiceReadiness::Manager,
             requires_files: Vec::new(),
+            requires_services: Vec::new(),
             lifecycle: ServiceLifecycle {
                 install: InitialServiceState::Stopped,
                 change: ChangedServiceState::Preserve,
@@ -136,12 +139,27 @@ impl Service {
     }
 
     #[must_use]
+    pub fn with_required_services(
+        mut self,
+        services: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.requires_services = services.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
     pub fn with_required_files<I, S>(mut self, files: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         self.requires_files = files.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_failure_policy(mut self, failure: super::ServiceFailurePolicy) -> Self {
+        self.failure = failure;
         self
     }
 

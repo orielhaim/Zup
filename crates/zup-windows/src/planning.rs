@@ -306,8 +306,10 @@ fn inspect_owned_matches(
                     .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?
                 {
                     ObservedServiceState::InvalidService => false,
-                    ObservedServiceState::Absent => *installed == ServiceState::Absent,
+                    ObservedServiceState::Absent => **installed == ServiceState::Absent,
                     ObservedServiceState::Service {
+                        failure,
+                        dependencies,
                         execution,
                         display_name,
                         command,
@@ -315,8 +317,10 @@ fn inspect_owned_matches(
                         readiness,
                         ..
                     } => {
-                        *installed
+                        **installed
                             == ServiceState::Registration {
+                                failure,
+                                dependencies,
                                 execution,
                                 readiness,
                                 display_name,

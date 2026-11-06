@@ -142,7 +142,7 @@ pub fn validate_ownership<'a>(
                         ..
                     }) => {
                         *privilege == operation.privilege
-                            && installed == &operation.owned_configuration
+                            && installed.as_ref() == &operation.owned_configuration
                     }
                     None => {
                         operation.owned_configuration == zup_plan::ServiceState::Absent

@@ -9,24 +9,24 @@
  * and `release-manifest` is an output for the cases that need the document.
  */
 
-import type { Phase } from './phases.js'
-import { type Artifact, type AutomationResult, isSigned } from './protocol.js'
-import type { ResolvedTool } from './tool.js'
+import type { Phase } from "./phases.js";
+import { type Artifact, type AutomationResult, isSigned } from "./protocol.js";
+import type { ResolvedTool } from "./tool.js";
 
 /** Everything worth remembering about one action run. */
 export interface Summary {
-  operation: string
-  tool: ResolvedTool
+  operation: string;
+  tool: ResolvedTool;
   /** The workflow steps this step ran. */
-  performed: Phase[]
+  performed: Phase[];
   /** One zup result per phase, in the order they ran. */
-  results: Map<Phase, AutomationResult>
+  results: Map<Phase, AutomationResult>;
   /** The one result the summary is rendered from, or `undefined` if none ran. */
-  result: AutomationResult | undefined
+  result: AutomationResult | undefined;
   /** Whether the step failed, for a failure summary. */
-  failure: { message: string; remedy: string } | undefined
+  failure: { message: string; remedy: string } | undefined;
   /** Whether the publication was a dry run. */
-  dryRun: boolean
+  dryRun: boolean;
 }
 
 /**
@@ -45,26 +45,29 @@ export function mergeResults(
   phases: readonly Phase[],
   results: ReadonlyMap<Phase, AutomationResult>,
 ): AutomationResult | undefined {
-  let merged: AutomationResult | undefined
+  let merged: AutomationResult | undefined;
   for (const phase of phases) {
-    const result = results.get(phase)
+    const result = results.get(phase);
     if (result === undefined) {
-      continue
+      continue;
     }
     if (merged === undefined) {
-      merged = { ...result, operation: '' }
-      continue
+      merged = { ...result, operation: "" };
+      continue;
     }
     // Bound to a `const` so the narrowing survives into the callbacks below: a
     // `let` is not narrowed inside a closure, and the artifact merge is two
     // closures.
-    const previous = merged
+    const previous = merged;
     merged = {
       ...previous,
-      operation: '',
-      status: previous.status === 'success' ? result.status : 'failure',
+      operation: "",
+      status: previous.status === "success" ? result.status : "failure",
       application: result.application ?? previous.application,
-      targets: dedupe([...previous.targets, ...result.targets], (target) => target.profile),
+      targets: dedupe(
+        [...previous.targets, ...result.targets],
+        (target) => target.profile,
+      ),
       artifacts: mergeArtifacts(previous.artifacts, result.artifacts),
       release_manifest: result.release_manifest ?? previous.release_manifest,
       publication: result.publication ?? previous.publication,
@@ -73,20 +76,20 @@ export function mergeResults(
         (diagnostic) => `${diagnostic.code} ${diagnostic.message}`,
       ),
       summary: result.summary ?? previous.summary,
-    }
+    };
   }
-  return merged
+  return merged;
 }
 
 function dedupe<T>(values: readonly T[], key: (value: T) => string): T[] {
-  const seen = new Map<string, T>()
+  const seen = new Map<string, T>();
   for (const value of values) {
-    const identity = key(value)
+    const identity = key(value);
     if (!seen.has(identity)) {
-      seen.set(identity, value)
+      seen.set(identity, value);
     }
   }
-  return [...seen.values()]
+  return [...seen.values()];
 }
 
 /**
@@ -96,89 +99,103 @@ function dedupe<T>(values: readonly T[], key: (value: T) => string): T[] {
  * description with the *published* digests, and a summary that showed the
  * pre-signature ones would show bytes no downloader receives.
  */
-function mergeArtifacts(left: readonly Artifact[], right: readonly Artifact[]): Artifact[] {
-  const byPath = new Map<string, Artifact>()
+function mergeArtifacts(
+  left: readonly Artifact[],
+  right: readonly Artifact[],
+): Artifact[] {
+  const byPath = new Map<string, Artifact>();
   for (const artifact of left) {
-    byPath.set(artifact.path, artifact)
+    byPath.set(artifact.path, artifact);
   }
   for (const artifact of right) {
-    byPath.set(artifact.path, artifact)
+    byPath.set(artifact.path, artifact);
   }
-  return [...byPath.values()]
+  return [...byPath.values()];
 }
 
 /** Render the summary. */
 export function renderSummary(summary: Summary): string {
   if (summary.failure) {
-    return failure(summary)
+    return failure(summary);
   }
-  const lines: string[] = ['## zup', '']
-  const result = summary.result
-  const application = result?.application
+  const lines: string[] = ["## zup", ""];
+  const result = summary.result;
+  const application = result?.application;
 
   lines.push(
-    row('Version', application?.version ?? (result === undefined ? 'not built' : '-')),
     row(
-      'Targets',
-      result !== undefined && result.targets.length > 0
-        ? result.targets.map((target) => target.profile).join(', ')
-        : '-',
+      "Version",
+      application?.version ?? (result === undefined ? "not built" : "-"),
     ),
-    row('Artifacts', String(result?.artifacts.length ?? 0)),
-  )
-  lines.push('')
+    row(
+      "Targets",
+      result !== undefined && result.targets.length > 0
+        ? result.targets.map((target) => target.profile).join(", ")
+        : "-",
+    ),
+    row("Artifacts", String(result?.artifacts.length ?? 0)),
+  );
+  lines.push("");
   lines.push(
     row(
-      'zup CLI',
+      "zup CLI",
       `${summary.tool.version} (${summary.tool.identity.platform}-${summary.tool.identity.arch}, ${summary.tool.source})`,
     ),
-  )
+  );
   if (result !== undefined && result.artifacts.length > 0) {
-    lines.push('')
-    lines.push(artifactTable(result.artifacts))
+    lines.push("");
+    lines.push(artifactTable(result.artifacts));
   }
   if (result?.publication != null) {
-    lines.push('')
-    lines.push(...publicationRows(result.publication))
+    lines.push("");
+    lines.push(...publicationRows(result.publication));
   }
   if (result?.release_manifest != null) {
-    lines.push('')
-    lines.push(row('Release manifest', `\`${result.release_manifest}\``))
+    lines.push("");
+    lines.push(row("Release manifest", `\`${result.release_manifest}\``));
   }
-  return `${lines.join('\n')}\n`
+  return `${lines.join("\n")}\n`;
 }
 
 function row(label: string, value: string): string {
-  return `| ${label} | ${value} |`
+  return `| ${label} | ${value} |`;
 }
 
 /** The artifact table. Digests are truncated: a 64-character hex defeats the column. */
 function artifactTable(artifacts: readonly Artifact[]): string {
-  const lines = ['| Artifact | Size | Signed | SHA-256 |', '| --- | ---: | :---: | --- |']
+  const lines = [
+    "| Artifact | Size | Signed | SHA-256 |",
+    "| --- | ---: | :---: | --- |",
+  ];
   for (const artifact of artifacts) {
     lines.push(
-      `| \`${artifact.path}\` | ${formatBytes(artifact.size)} | ${isSigned(artifact) ? '✓' : '-'} | \`${artifact.digest.value.slice(0, 16)}…\` |`,
-    )
+      `| \`${artifact.path}\` | ${formatBytes(artifact.size)} | ${isSigned(artifact) ? "✓" : "-"} | \`${artifact.digest.value.slice(0, 16)}…\` |`,
+    );
   }
-  return lines.join('\n')
+  return lines.join("\n");
 }
 
-function publicationRows(publication: NonNullable<AutomationResult['publication']>): string[] {
+function publicationRows(
+  publication: NonNullable<AutomationResult["publication"]>,
+): string[] {
   const rows = [
-    row('Release', `\`${publication.tag}\``),
-    row('Repository', publication.subject.length > 0 ? publication.subject : '-'),
-    row('Status', publication.state),
-  ]
+    row("Release", `\`${publication.tag}\``),
+    row(
+      "Repository",
+      publication.subject.length > 0 ? publication.subject : "-",
+    ),
+    row("Status", publication.state),
+  ];
   if (publication.immutable !== null) {
-    rows.push(row('Immutable', publication.immutable ? 'yes' : 'no'))
+    rows.push(row("Immutable", publication.immutable ? "yes" : "no"));
   }
   if (publication.url !== null) {
-    rows.push(row('URL', publication.url))
+    rows.push(row("URL", publication.url));
   }
   if (publication.assets.length > 0) {
-    rows.push(row('Assets', String(publication.assets.length)))
+    rows.push(row("Assets", String(publication.assets.length)));
   }
-  return rows
+  return rows;
 }
 
 /**
@@ -189,42 +206,45 @@ function publicationRows(publication: NonNullable<AutomationResult['publication'
  * developer most needs a record of.
  */
 function failure(summary: Summary): string {
-  const result = summary.result
+  const result = summary.result;
   const lines = [
-    '## zup',
-    '',
+    "## zup",
+    "",
     `**${summary.operation} failed.**`,
-    '',
-    summary.failure?.message ?? 'The step failed without a message.',
-  ]
+    "",
+    summary.failure?.message ?? "The step failed without a message.",
+  ];
   if (summary.failure?.remedy) {
-    lines.push('', summary.failure.remedy)
+    lines.push("", summary.failure.remedy);
   }
   if (result !== undefined && result.artifacts.length > 0) {
-    lines.push('', artifactTable(result.artifacts))
+    lines.push("", artifactTable(result.artifacts));
   }
   if (result?.release_manifest != null) {
-    lines.push('', row('Release manifest', `\`${result.release_manifest}\``))
+    lines.push("", row("Release manifest", `\`${result.release_manifest}\``));
   }
-  lines.push('', row('zup CLI', `${summary.tool.version} (${summary.tool.source})`))
-  return `${lines.join('\n')}\n`
+  lines.push(
+    "",
+    row("zup CLI", `${summary.tool.version} (${summary.tool.source})`),
+  );
+  return `${lines.join("\n")}\n`;
 }
 
 /** Bytes in binary units, so a summary number matches what Explorer shows. */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) {
-    return '-'
+    return "-";
   }
   if (bytes < 1024) {
-    return `${bytes} B`
+    return `${bytes} B`;
   }
-  const units = ['KiB', 'MiB', 'GiB', 'TiB']
-  let value = bytes / 1024
-  let unit = 0
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let unit = 0;
   while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
+    value /= 1024;
+    unit += 1;
   }
-  const rendered = value >= 100 ? value.toFixed(0) : value.toFixed(1)
-  return `${rendered} ${units[unit]}`
+  const rendered = value >= 100 ? value.toFixed(0) : value.toFixed(1);
+  return `${rendered} ${units[unit]}`;
 }

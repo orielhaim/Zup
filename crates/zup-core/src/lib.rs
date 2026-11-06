@@ -8,8 +8,8 @@ mod installer;
 mod model;
 mod service;
 pub use service::{
-    ChangedServiceState, InitialServiceState, ServiceExecution, ServiceLifecycle, ServiceReadiness,
-    WindowsServiceAccount,
+    ChangedServiceState, InitialServiceState, ServiceExecution, ServiceFailurePolicy,
+    ServiceLifecycle, ServiceReadiness, SystemdRestartCondition, WindowsServiceAccount,
 };
 mod path;
 mod prerequisite;
@@ -109,3 +109,6 @@ pub use source_policy::{PortableSourceFilePolicy, SourceFilePolicy};
 
 mod phase;
 pub use phase::OperationPhase;
+
+mod service_graph;
+pub use service_graph::{ServiceGraph, service_dependency_keys, validate_service_graph};

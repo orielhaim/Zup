@@ -764,29 +764,6 @@ impl WindowsRuntimeBackend {
             return Err(SessionError::AuthorizationRequired);
         }
 
-        let mutating_paths = crate::plan_mutating_paths(&request.transaction_plan, &request.target);
-        let blocker_paths = mutating_paths
-            .iter()
-            .map(|path| path.as_path())
-            .collect::<Vec<_>>();
-        let _ = events.send(RuntimeEvent::PreflightStarted);
-        let blocked = crate::preflight(&blocker_paths)
-            .map_err(|error| SessionError::Transaction(format!("resource preflight: {error}")))?;
-        if let Some(detail) = crate::blocked_reason(&blocked) {
-            let _ = events.send(RuntimeEvent::ResourceBlocked {
-                pids: match &blocked {
-                    crate::FilePreflight::Blocked { processes, .. } => {
-                        processes.iter().map(|process| process.pid).collect()
-                    }
-                    crate::FilePreflight::Ready => Vec::new(),
-                },
-                detail: detail.clone(),
-            });
-            return Ok(InstallOutcome::Failed(
-                "blocked by running applications".into(),
-            ));
-        }
-
         if needs_authorization && already_authorized == Some(false) {
             return run_elevated_worker(
                 request,
@@ -1122,7 +1099,11 @@ async fn run_elevated_worker(
                            .map_err(|e| SessionError::Protocol(e.to_string()))?;
                        match message.message {
                        zup_protocol::Message::Progress(progress) => {
-                           if progress.kind == zup_protocol::ProgressKind::OperationProgress {
+                           if progress.kind == zup_protocol::ProgressKind::ResourceBlocked {
+                               let _ = events.send(RuntimeEvent::ResourceBlocked { pids: progress.blocked_pids, detail: progress.detail });
+                           } else if progress.kind == zup_protocol::ProgressKind::PreflightStarted {
+                               let _ = events.send(RuntimeEvent::PreflightStarted);
+                           } else if progress.kind == zup_protocol::ProgressKind::OperationProgress {
                                if let (Some(completed), Some(total)) = (progress.completed, progress.total) {
                                    let _ = events.send(RuntimeEvent::Progress {
         phase: progress.phase,
@@ -1620,6 +1601,9 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
         }
         match &operation.kind {
             zup_transaction::NodeKind::Barrier => {
+                if let Some(events) = &self.events {
+                    let _ = events.send(RuntimeEvent::PreflightStarted);
+                }
                 let blockers = self
                     .blocked_paths
                     .iter()

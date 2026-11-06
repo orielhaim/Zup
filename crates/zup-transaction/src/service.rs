@@ -36,6 +36,7 @@ pub struct ServiceControlOperation {
     pub native_name: String,
     pub privilege: Privilege,
     pub stage: ServiceControlStage,
+    pub before_configuration: ServiceState,
     pub configuration: ServiceState,
     pub owned_configuration: ServiceState,
     pub before: ServiceTerminalState,
@@ -49,13 +50,21 @@ pub struct ServiceControlOperation {
 
 impl ServiceControlOperation {
     pub fn validate(&self) -> Result<(), String> {
-        for state in [&self.configuration, &self.owned_configuration] {
+        for state in [
+            &self.before_configuration,
+            &self.configuration,
+            &self.owned_configuration,
+        ] {
             if let ServiceState::Registration {
-                execution, command, ..
+                execution,
+                command,
+                failure,
+                readiness,
+                ..
             } = state
             {
                 execution
-                    .validate_for(*command.executable.target())
+                    .validate_policies(*failure, *readiness, *command.executable.target())
                     .map_err(str::to_owned)?;
             }
         }
@@ -86,11 +95,40 @@ impl ServiceControlOperation {
         {
             return Err("an unregistered service cannot be quiesced".into());
         }
-        if self.before == self.after
+        let configuration_transition = self.before_configuration != self.configuration;
+        if self.stage == ServiceControlStage::Quiesce
+            && requires_startup_inhibition(&self.configuration)
+        {
+            return Err(
+                "SCM recovery actions require disabled startup before service shutdown".into(),
+            );
+        }
+        if configuration_transition {
+            let (enabled, disabled) = match self.stage {
+                ServiceControlStage::Quiesce => (&self.before_configuration, &self.configuration),
+                ServiceControlStage::Restore => (&self.configuration, &self.before_configuration),
+            };
+            if disabled_startup(enabled).as_ref() != Some(disabled)
+                || !matches!(
+                    enabled,
+                    ServiceState::Registration {
+                        execution: zup_core::ServiceExecution::Windows { .. },
+                        ..
+                    }
+                )
+                || self.privilege != Privilege::System
+            {
+                return Err(
+                    "service control can only inhibit or restore native Windows startup".into(),
+                );
+            }
+        }
+        if (self.before == self.after && !configuration_transition)
             || (self.stage == ServiceControlStage::Quiesce
                 && self.after != ServiceTerminalState::Stopped)
             || (self.stage == ServiceControlStage::Restore
-                && self.after != ServiceTerminalState::Running)
+                && self.after != ServiceTerminalState::Running
+                && !configuration_transition)
         {
             return Err("service control does not describe a lifecycle transition".into());
         }
@@ -123,6 +161,19 @@ impl ServiceControlOperation {
             self.rollback_timeout_seconds.into()
         })
     }
+}
+
+pub fn disabled_startup(state: &ServiceState) -> Option<ServiceState> {
+    let mut disabled = state.clone();
+    let ServiceState::Registration { start, .. } = &mut disabled else {
+        return None;
+    };
+    *start = zup_core::ServiceStart::Disabled;
+    Some(disabled)
+}
+
+pub fn requires_startup_inhibition(state: &ServiceState) -> bool {
+    matches!(state, ServiceState::Registration { failure: zup_core::ServiceFailurePolicy::Windows { .. }, start, .. } if *start != zup_core::ServiceStart::Disabled)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,13 +210,7 @@ pub fn plan_service_controls(
 ) -> Result<Vec<ServiceControlOperation>, String> {
     service.lifecycle.validate(service.start)?;
     use zup_plan::ObservedServiceState;
-    let installed = ServiceState::Registration {
-        execution: service.execution.clone(),
-        readiness: service.readiness,
-        display_name: service.display_name.clone(),
-        command: service.command.clone(),
-        start: service.start,
-    };
+    let installed = service.desired_configuration();
     let previous = service
         .previous
         .configuration()
@@ -176,13 +221,19 @@ pub fn plan_service_controls(
             runtime_state: Some(ServiceRuntimeState::Stopped),
             ..
         }
-    ) || owned.is_some() && previous == ServiceState::Absent
+    ) && !requires_startup_inhibition(&previous)
+        && !requires_startup_inhibition(&installed)
     {
         return Ok(Vec::new());
     }
+    if owned.is_some() && previous == ServiceState::Absent {
+        return Ok(Vec::new());
+    }
     let owned_configuration = match owned {
-        Some(zup_plan::OwnedResource::Service { installed, .. }) if installed == &previous => {
-            installed.clone()
+        Some(zup_plan::OwnedResource::Service { installed, .. })
+            if installed.as_ref() == &previous =>
+        {
+            installed.as_ref().clone()
         }
         None if previous == ServiceState::Absent => ServiceState::Absent,
         None => return Ok(Vec::new()),
@@ -192,29 +243,31 @@ pub fn plan_service_controls(
         return Ok(Vec::new());
     }
     let mut operations = Vec::new();
-    let mut control = |stage, configuration, before, after, before_execution_generation| {
-        operations.push(ServiceControlOperation {
-            key: service.key.clone(),
-            native_name: native_name.clone(),
-            privilege: service.privilege,
-            stage,
-            configuration,
-            owned_configuration: owned_configuration.clone(),
-            before,
-            after,
-            manager_generation: manager_generation.clone(),
-            before_execution_generation,
-            timeout_seconds: match stage {
-                ServiceControlStage::Quiesce => service.lifecycle.stop_timeout_seconds,
-                ServiceControlStage::Restore => service.lifecycle.start_timeout_seconds,
-            },
-            rollback_timeout_seconds: match stage {
-                ServiceControlStage::Quiesce => service.lifecycle.start_timeout_seconds,
-                ServiceControlStage::Restore => service.lifecycle.stop_timeout_seconds,
-            },
-            dependencies: Vec::new(),
-        });
-    };
+    let mut control =
+        |stage, before_configuration, configuration, before, after, before_execution_generation| {
+            operations.push(ServiceControlOperation {
+                key: service.key.clone(),
+                native_name: native_name.clone(),
+                privilege: service.privilege,
+                stage,
+                before_configuration,
+                configuration,
+                owned_configuration: owned_configuration.clone(),
+                before,
+                after,
+                manager_generation: manager_generation.clone(),
+                before_execution_generation,
+                timeout_seconds: match stage {
+                    ServiceControlStage::Quiesce => service.lifecycle.stop_timeout_seconds,
+                    ServiceControlStage::Restore => service.lifecycle.start_timeout_seconds,
+                },
+                rollback_timeout_seconds: match stage {
+                    ServiceControlStage::Quiesce => service.lifecycle.start_timeout_seconds,
+                    ServiceControlStage::Restore => service.lifecycle.stop_timeout_seconds,
+                },
+                dependencies: Vec::new(),
+            });
+        };
     let running = match &service.previous {
         ObservedServiceState::Absent => false,
         ObservedServiceState::Service {
@@ -231,11 +284,26 @@ pub fn plan_service_controls(
             );
         }
     };
-    if running {
+    let inhibited =
+        requires_startup_inhibition(&previous) || requires_startup_inhibition(&installed);
+    if running
+        || inhibited
+            && previous != ServiceState::Absent
+            && disabled_startup(&previous).as_ref() != Some(&previous)
+    {
         control(
             ServiceControlStage::Quiesce,
             previous.clone(),
-            ServiceTerminalState::Running,
+            if inhibited {
+                disabled_startup(&previous).expect("registration")
+            } else {
+                previous.clone()
+            },
+            if running {
+                ServiceTerminalState::Running
+            } else {
+                ServiceTerminalState::Stopped
+            },
             ServiceTerminalState::Stopped,
             execution_generation,
         );
@@ -245,12 +313,23 @@ pub fn plan_service_controls(
     } else {
         running && service.lifecycle.change == zup_core::ChangedServiceState::Preserve
     };
-    if restore && service.start != zup_core::ServiceStart::Disabled {
+    if (restore && service.start != zup_core::ServiceStart::Disabled)
+        || inhibited && service.start != zup_core::ServiceStart::Disabled
+    {
         control(
             ServiceControlStage::Restore,
+            if inhibited {
+                disabled_startup(&installed).expect("registration")
+            } else {
+                installed.clone()
+            },
             installed,
             ServiceTerminalState::Stopped,
-            ServiceTerminalState::Running,
+            if restore {
+                ServiceTerminalState::Running
+            } else {
+                ServiceTerminalState::Stopped
+            },
             "stopped".into(),
         );
     }
@@ -261,6 +340,21 @@ pub fn plan_service_controls(
 }
 
 pub trait NativeServiceManager {
+    fn finish_startup_inhibition(
+        &mut self,
+        operation: &ServiceControlOperation,
+    ) -> Result<(), String> {
+        if operation.before_configuration != operation.configuration {
+            return Err("native startup inhibition is unsupported".into());
+        }
+        Ok(())
+    }
+    fn stopped_runtime_is_quiescent(
+        &mut self,
+        _operation: &ServiceControlOperation,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
     fn stopped_start_can_be_compensated(
         &mut self,
         _operation: &ServiceControlOperation,
@@ -282,9 +376,10 @@ pub trait NativeServiceManager {
 fn check_identity(
     operation: &ServiceControlOperation,
     current: &ServiceObservation,
+    configuration: &ServiceState,
 ) -> Result<(), String> {
     operation.validate()?;
-    if current.configuration != operation.configuration
+    if &current.configuration != configuration
         || current.manager_generation != operation.manager_generation
     {
         return Err(format!(
@@ -300,7 +395,7 @@ pub fn apply_service_control(
     operation: &ServiceControlOperation,
 ) -> Result<crate::OperationReceipt, String> {
     let current = manager.observe(operation)?;
-    check_identity(operation, &current)?;
+    check_identity(operation, &current, &operation.before_configuration)?;
     if !operation.before.matches(current.runtime)
         || operation.before_execution_generation != current.execution_generation
     {
@@ -309,14 +404,27 @@ pub fn apply_service_control(
             operation.native_name
         ));
     }
+    crate::fault_injection::boundary(
+        crate::fault_injection::Boundary::NativeRequestBefore,
+        &operation.native_name,
+    );
     manager.transition(operation, operation.after, &current)?;
+    if operation.stage == ServiceControlStage::Quiesce {
+        manager.finish_startup_inhibition(operation)?;
+    }
     let current = manager.observe(operation)?;
-    check_identity(operation, &current)?;
+    check_identity(operation, &current, &operation.configuration)?;
     if !operation.after.matches(current.runtime) {
         return Err(format!(
             "service `{}` did not reach {:?}",
             operation.native_name, operation.after
         ));
+    }
+    if operation.after == ServiceTerminalState::Stopped
+        && operation.stage == ServiceControlStage::Quiesce
+        && !manager.stopped_runtime_is_quiescent(operation)?
+    {
+        return Err("service stopped but a queued or supervised restart cannot be excluded".into());
     }
     let receipt = crate::OperationReceipt::ServiceControl(Box::new(ServiceControlReceipt {
         operation: operation.clone(),
@@ -335,7 +443,11 @@ pub fn verify_service_control(
         return Err("service startup did not complete; compensation is required".into());
     }
     let current = manager.observe(&receipt.operation)?;
-    check_identity(&receipt.operation, &current)?;
+    check_identity(
+        &receipt.operation,
+        &current,
+        &receipt.operation.configuration,
+    )?;
     if !receipt.operation.after.matches(current.runtime)
         || current.execution_generation != receipt.execution_generation
     {
@@ -352,28 +464,112 @@ pub fn rollback_service_control(
     receipt: &ServiceControlReceipt,
 ) -> Result<(), String> {
     let current = manager.observe(&receipt.operation)?;
-    check_identity(&receipt.operation, &current)?;
+    check_identity(
+        &receipt.operation,
+        &current,
+        &receipt.operation.configuration,
+    )?;
     if receipt.operation.before == ServiceTerminalState::Stopped
         && current.runtime == ServiceRuntimeState::Stopped
     {
+        if receipt.operation.before_configuration == receipt.operation.configuration
+            && !manager.stopped_runtime_is_quiescent(&receipt.operation)?
+        {
+            return Err("service shutdown still permits a queued or supervised restart".into());
+        }
         if receipt.completion == ServiceControlCompletion::CompensationOnly
             && !manager.stopped_start_can_be_compensated(&receipt.operation)?
         {
             return Err("incomplete service startup is no longer safe to compensate".into());
         }
-        return Ok(());
+        if receipt.operation.before_configuration == receipt.operation.configuration {
+            return Ok(());
+        }
+    } else {
+        verify_service_control(manager, receipt)?;
     }
-    verify_service_control(manager, receipt)?;
-    manager.transition(&receipt.operation, receipt.operation.before, &current)?;
+    let mut inverse = receipt.operation.clone();
+    std::mem::swap(
+        &mut inverse.before_configuration,
+        &mut inverse.configuration,
+    );
+    std::mem::swap(&mut inverse.before, &mut inverse.after);
+    std::mem::swap(
+        &mut inverse.timeout_seconds,
+        &mut inverse.rollback_timeout_seconds,
+    );
+    inverse.stage = match inverse.stage {
+        ServiceControlStage::Quiesce => ServiceControlStage::Restore,
+        ServiceControlStage::Restore => ServiceControlStage::Quiesce,
+    };
+    inverse.before_execution_generation = current.execution_generation.clone();
+    if inverse.owned_configuration == ServiceState::Absent {
+        inverse.owned_configuration = receipt.operation.configuration.clone();
+    }
+    manager.transition(&inverse, inverse.after, &current)?;
+    if inverse.stage == ServiceControlStage::Quiesce {
+        manager.finish_startup_inhibition(&inverse)?;
+    }
     let current = manager.observe(&receipt.operation)?;
-    check_identity(&receipt.operation, &current)?;
+    check_identity(
+        &receipt.operation,
+        &current,
+        &receipt.operation.before_configuration,
+    )?;
     if !receipt.operation.before.matches(current.runtime) {
         return Err(format!(
             "service `{}` previous runtime could not be restored",
             receipt.operation.native_name
         ));
     }
+    if inverse.stage == ServiceControlStage::Quiesce
+        && inverse.after == ServiceTerminalState::Stopped
+        && !manager.stopped_runtime_is_quiescent(&inverse)?
+    {
+        return Err("service compensation did not establish quiescence".into());
+    }
     Ok(())
+}
+
+pub fn reconcile_service_rollback(
+    manager: &mut dyn NativeServiceManager,
+    receipt: &ServiceControlReceipt,
+) -> Result<crate::RollbackReconcileResult, String> {
+    let current = manager.observe(&receipt.operation)?;
+    if current.configuration != receipt.operation.configuration {
+        if receipt.operation.before == ServiceTerminalState::Stopped
+            && current.configuration == receipt.operation.before_configuration
+            && current.manager_generation == receipt.operation.manager_generation
+            && current.runtime == ServiceRuntimeState::Stopped
+            && matches!(
+                &current.configuration,
+                ServiceState::Registration {
+                    start: zup_core::ServiceStart::Disabled,
+                    ..
+                }
+            )
+        {
+            return Ok(crate::RollbackReconcileResult::Restored);
+        }
+        return Ok(crate::RollbackReconcileResult::Ambiguous);
+    }
+    check_identity(
+        &receipt.operation,
+        &current,
+        &receipt.operation.configuration,
+    )?;
+    if receipt.operation.before == ServiceTerminalState::Stopped
+        && current.runtime == ServiceRuntimeState::Stopped
+        && receipt.operation.before_configuration == receipt.operation.configuration
+        && manager.stopped_runtime_is_quiescent(&receipt.operation)?
+    {
+        return Ok(crate::RollbackReconcileResult::Restored);
+    }
+    Ok(if verify_service_control(manager, receipt).is_ok() {
+        crate::RollbackReconcileResult::Retry
+    } else {
+        crate::RollbackReconcileResult::Ambiguous
+    })
 }
 
 pub fn reconcile_service_control(
@@ -391,8 +587,45 @@ pub fn reconcile_service_control(
             crate::ReconcileResult::Ambiguous
         });
     }
-    let current = manager.observe(operation)?;
-    check_identity(operation, &current)?;
+    let mut current = manager.observe(operation)?;
+    if operation.before_configuration != operation.configuration
+        && current.configuration == operation.before_configuration
+        && current.manager_generation == operation.manager_generation
+        && operation.before.matches(current.runtime)
+        && current.execution_generation == operation.before_execution_generation
+    {
+        return Ok(crate::ReconcileResult::NotApplied);
+    }
+    if operation.before_configuration != operation.configuration
+        && operation.stage == ServiceControlStage::Quiesce
+        && current.configuration == operation.configuration
+        && current.manager_generation == operation.manager_generation
+        && current.runtime == ServiceRuntimeState::Running
+        && current.execution_generation == operation.before_execution_generation
+    {
+        let mut resume = operation.clone();
+        resume.before_configuration = current.configuration.clone();
+        manager.transition(&resume, ServiceTerminalState::Stopped, &current)?;
+        current = manager.observe(operation)?;
+    }
+    if operation.before_configuration != operation.configuration
+        && operation.stage == ServiceControlStage::Quiesce
+        && current.configuration == operation.configuration
+        && current.manager_generation == operation.manager_generation
+        && current.runtime == ServiceRuntimeState::Stopped
+    {
+        manager.finish_startup_inhibition(operation)?;
+        if manager.stopped_runtime_is_quiescent(operation)? {
+            return Ok(crate::ReconcileResult::AppliedWithReceipt(
+                crate::OperationReceipt::ServiceControl(Box::new(ServiceControlReceipt {
+                    operation: operation.clone(),
+                    completion: ServiceControlCompletion::Reached,
+                    execution_generation: current.execution_generation,
+                })),
+            ));
+        }
+    }
+    check_identity(operation, &current, &operation.configuration)?;
     if operation.stage == ServiceControlStage::Restore
         && current.runtime == ServiceRuntimeState::Stopped
         && manager.stopped_start_can_be_compensated(operation)?
@@ -408,4 +641,61 @@ pub fn reconcile_service_control(
     // A request may still be queued, or a started process may already have exited.
     // Terminal state alone cannot establish that an uncertain request never ran.
     Ok(crate::ReconcileResult::Ambiguous)
+}
+
+pub fn bind_service_dependencies(
+    controls: &mut [ServiceControlOperation],
+    execution: &zup_plan::ExecutionPlan,
+    ledger: Option<&zup_plan::InstallLedger>,
+) -> Result<(), String> {
+    let previous = execution.service_graph(ledger, true);
+    let desired = execution.service_graph(ledger, false);
+    zup_core::validate_service_graph(&previous)?;
+    zup_core::validate_service_graph(&desired)?;
+    let planned: std::collections::BTreeSet<_> = controls
+        .iter()
+        .map(|control| (control.stage, control.key.clone()))
+        .collect();
+    let starts: std::collections::BTreeSet<_> = controls
+        .iter()
+        .filter(|control| {
+            control.stage == ServiceControlStage::Restore
+                && control.after == ServiceTerminalState::Running
+        })
+        .map(|control| control.key.clone())
+        .collect();
+    for control in controls {
+        let graph = match control.stage {
+            ServiceControlStage::Quiesce => &previous,
+            ServiceControlStage::Restore => &desired,
+        };
+        let dependencies = graph.get(&control.key).into_iter().flatten();
+        for dependency in dependencies.clone() {
+            if control.stage == ServiceControlStage::Restore
+                && control.after == ServiceTerminalState::Running
+                && !starts.contains(dependency)
+                && (planned.contains(&(ServiceControlStage::Quiesce, dependency.clone()))
+                    || !execution.services.iter().any(|service| {
+                        service.key == *dependency
+                            && matches!(
+                                service.previous,
+                                zup_plan::ObservedServiceState::Service {
+                                    runtime_state: Some(zup_plan::ServiceRuntimeState::Running),
+                                    ..
+                                }
+                            )
+                    }))
+            {
+                return Err(format!(
+                    "required service {dependency:?} is not running and has no authorized startup"
+                ));
+            }
+        }
+        control.dependencies = dependencies
+            .filter(|key| planned.contains(&(control.stage, (*key).clone())))
+            .cloned()
+            .collect();
+        control.validate()?;
+    }
+    Ok(())
 }

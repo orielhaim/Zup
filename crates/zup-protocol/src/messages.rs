@@ -275,6 +275,8 @@ pub struct ExecuteOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressReport {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_pids: Vec<u32>,
     pub phase: zup_core::OperationPhase,
     pub kind: ProgressKind,
     pub detail: String,

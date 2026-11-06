@@ -32,7 +32,7 @@ pub fn plan_requires_manager(plan: &zup_transaction::TransactionPlan) -> bool {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServicePayload {
     Apply {
-        service: ServiceOperation,
+        service: Box<ServiceOperation>,
         unit: String,
         unit_bytes: Vec<u8>,
 
@@ -46,7 +46,7 @@ pub enum ServicePayload {
     Remove {
         key: ResourceKey,
         unit: String,
-        owned: OwnedResource,
+        owned: Box<OwnedResource>,
     },
 }
 
@@ -195,6 +195,8 @@ pub(crate) fn observe_unit(
     };
 
     let Ok(crate::services::UnitDefinition {
+        failure,
+        dependencies,
         display_name,
         argv,
         readiness,
@@ -224,18 +226,21 @@ pub(crate) fn observe_unit(
     let runtime = manager.runtime(unit).map_err(ExecError::from)?;
     let loaded = manager.load_unit(unit).map_err(ExecError::from)?;
     if loaded.need_daemon_reload
-        || !loaded.drop_in_paths.is_empty()
+        || crate::systemd_policy::validate(&loaded.drop_in_paths).is_err()
         || if start == ServiceStart::Disabled {
             loaded.load_state != "masked" || runtime.state != zup_plan::ServiceRuntimeState::Stopped
         } else {
             loaded.load_state != "loaded"
                 || Path::new(&loaded.fragment_path) != path
                 || runtime.execution.as_ref() != Some(&execution)
+                || runtime.failure != failure
         }
     {
         return Ok(ObservedServiceState::InvalidService);
     }
     Ok(ObservedServiceState::Service {
+        failure,
+        dependencies,
         execution,
         readiness,
         display_name,
