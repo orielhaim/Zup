@@ -28,12 +28,8 @@ updates:
       github-toolkit:
         patterns:
           - "@actions/*"
-      # Toolchain churn, reviewed as a unit. TypeScript and Biome move often and
-      # a partial upgrade of the two is its own small problem.
       dev-toolchain:
         patterns:
-          - "typescript"
-          - "@biomejs/*"
           - "@types/*"
     ignore:
       # The example plugin is a separate workspace with its own lockfile and its

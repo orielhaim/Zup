@@ -9,27 +9,25 @@
   },
   "scripts": {
     "build": "bun run scripts/build.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
-    "biome": "biome check .",
+    "typecheck": "bun check --no-script -p tsconfig.json && bun check --no-script -p tsconfig.test.json",
+    "format:check": "bun fmt --check src tests scripts",
     "test": "bun test",
     "metadata": "node scripts/check-metadata.mjs",
     "verify:runtime": "node scripts/verify-runtime.mjs",
     "local": "local-action . src/main.ts",
-    "check": "bun run typecheck && bun run biome && bun test && bun run build && bun run metadata && bun run verify:runtime",
-    "check:dist": "bun run build && git diff --exit-code -- action/dist"
+    "check:dist": "bun run build && git diff --exit-code -- action/dist",
+    "verify": "bun run typecheck && bun run format:check && bun test && bun run build && bun run metadata && bun run verify:runtime"
   },
   "dependencies": {
-    "@actions/artifact": "6.2.1",
+    "@actions/artifact": "6.3.1",
     "@actions/attest": "3.2.0",
     "@actions/core": "3.0.1",
     "@actions/exec": "3.0.0",
     "@actions/tool-cache": "4.0.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.14",
     "@github/local-action": "7.0.1",
-    "@types/bun": "1.4.2",
-    "@types/node": "24.10.1",
-    "typescript": "7.0.2"
+    "@types/bun": "1.4.4",
+    "@types/node": "24.10.1"
   }
 }

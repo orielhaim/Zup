@@ -54,10 +54,15 @@ const inputTable =
   /const RAW[\s\S]*?Object\.fromEntries\(\s*\[([\s\S]*?)\]\.map/.exec(
     implementation,
   );
+const usedInputs = new Set(
+  [...(inputTable?.[1] ?? "").matchAll(/["']([a-z0-9-]+)["']/g)].map(
+    ([, name]) => name,
+  ),
+);
 if (!inputTable) {
   problems.push("could not find the input table in action/src/inputs.ts");
 } else {
-  for (const [, name] of inputTable[1].matchAll(/'([a-z0-9-]+)'/g)) {
+  for (const name of usedInputs) {
     if (!declaredInputs.has(name)) {
       problems.push(
         `action.yml does not declare the \`${name}\` input the implementation reads`,
@@ -66,15 +71,18 @@ if (!inputTable) {
   }
 }
 for (const name of declaredInputs.keys()) {
-  if (!inputTable?.[1].includes(`'${name}'`)) {
+  if (!usedInputs.has(name)) {
     problems.push(
       `action.yml declares \`${name}\`, which the implementation never reads`,
     );
   }
 }
-for (const [, name] of implementation.matchAll(
-  /setOutput\(\s*'([a-z0-9-]+)'/g,
-)) {
+const usedOutputs = new Set(
+  [...implementation.matchAll(/setOutput\(\s*["']([a-z0-9-]+)["']/g)].map(
+    ([, name]) => name,
+  ),
+);
+for (const name of usedOutputs) {
   if (!declaredOutputs.has(name)) {
     problems.push(
       `action.yml does not declare the \`${name}\` output the implementation sets`,
@@ -82,7 +90,7 @@ for (const [, name] of implementation.matchAll(
   }
 }
 for (const name of declaredOutputs.keys()) {
-  if (!new RegExp(`setOutput\\(\\s*'${name}'`).test(implementation)) {
+  if (!usedOutputs.has(name)) {
     problems.push(
       `action.yml declares the \`${name}\` output, which nothing sets`,
     );
@@ -137,7 +145,9 @@ const workspaceVersion =
 if (!workspaceVersion) {
   problems.push("could not read `[workspace.package] version` from Cargo.toml");
 } else {
-  const declared = /const TESTED_ZUP_VERSION = '([^']+)'/.exec(implementation);
+  const declared = /const TESTED_ZUP_VERSION = ["']([^"']+)["']/.exec(
+    implementation,
+  );
   if (!declared) {
     problems.push(
       "could not find TESTED_ZUP_VERSION in action/src/workflow.ts",
