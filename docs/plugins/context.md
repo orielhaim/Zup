@@ -2,15 +2,15 @@
 
 `plan` receives one `Context` and nothing else.
 
-| Field | Meaning |
-| --- | --- |
-| `plugin_id` | the plugin binding's own identifier |
-| `app_id` | application id |
-| `app_name` | display name |
-| `app_version` | application version |
-| `install_directory` | resolved install root |
-| `scope` | `Scope::User` or `Scope::Machine` |
-| `target` | Zup target, such as `windows-x64` |
+| Field                 | Meaning                             |
+| --------------------- | ----------------------------------- |
+| `plugin_id`           | the plugin binding's own identifier |
+| `app_id`              | application id                      |
+| `app_name`            | display name                        |
+| `app_version`         | application version                 |
+| `install_directory`   | resolved install root               |
+| `scope`               | `Scope::User` or `Scope::Machine`   |
+| `target`              | Zup target, such as `windows-x64`   |
 | `selected_components` | the component ids a person selected |
 
 ```rust
@@ -21,7 +21,7 @@ if context.scope == Scope::Machine {
 }
 ```
 
-`install_directory` is a template. `${install}` and the other location variables
+`install_directory` is a template. Linux installers resolve its location variables to a literal root before invoking a plugin, consistently for installation and maintenance. Build-host previews can still contain location variables. `${install}` and the other location variables
 are resolved by Zup as it writes each resource, which is why a generated file
 declares `"${install}/notes.txt"` rather than a path.
 

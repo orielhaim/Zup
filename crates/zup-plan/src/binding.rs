@@ -103,6 +103,13 @@ impl ExecutionPlan {
                             .unwrap_or(&resource.name)
                             .as_str()
                     || effect.command != resource.command
+                    || effect.lifecycle != resource.lifecycle
+                    || effect.readiness != resource.readiness
+                    || effect.execution != resource.execution
+                    || effect.failure != resource.failure
+                    || effect.requires_files != resource.requires_files
+                    || effect.requires_services != resource.requires_services
+                    || effect.dependency_names != resource.dependency_names
                     || effect.start != resource.start
                     || effect.privilege != resource.privilege
                 {

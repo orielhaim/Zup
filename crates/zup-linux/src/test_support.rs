@@ -46,7 +46,12 @@ impl MachineTestRoots {
         ] {
             std::fs::create_dir_all(directory).expect("an isolated root");
         }
-        let roots = MachineRoots::new(programs, state.clone(), shared_data);
+        let roots = MachineRoots::new(
+            programs,
+            state.clone(),
+            shared_data,
+            base.join("environment.d"),
+        );
         let systemd = crate::machine::SystemdRoots::new(units);
         Self {
             roots,
@@ -176,25 +181,20 @@ pub fn validate_rendezvous_for_test(
     crate::worker::validate_rendezvous(socket, invoking_uid)
 }
 
-pub fn run_machine_elevated_for_test(
+pub fn launch_prepared_for_test(
     installer: &Path,
-    state: &Path,
-    action: Operation,
-    install_dir_override: Option<PathBuf>,
+    intent: &zup_protocol::PrepareOperation,
+    plan: &zup_transaction::TransactionPlan,
     launcher: &impl crate::pkexec::PkexecLauncher,
 ) -> Result<LinuxOutcome, ExecError> {
-    crate::elevate::run_machine_elevated(
-        &crate::run::LinuxRunRequest {
-            installer: installer.to_path_buf(),
-            scope: zup_core::SelectedScope::Machine,
-            state_root: Some(state.to_path_buf()),
-            action,
-            selection: zup_runtime::OperationSelection {
-                install_directory: install_dir_override,
-                ..Default::default()
-            },
-        },
+    crate::elevate::drive_elevated(
+        installer,
+        intent,
+        &plan.fingerprint().to_hex(),
+        &plan.target,
         launcher,
+        None,
+        None,
     )
 }
 
@@ -214,6 +214,7 @@ pub fn recv_envelope_on(
 
 #[derive(Debug, Clone)]
 pub struct FakeSystemd {
+    pub runtimes: BTreeMap<String, crate::systemd::UnitRuntime>,
     units: BTreeMap<String, FakeUnit>,
 
     pub version: String,
@@ -231,6 +232,7 @@ pub struct FakeSystemd {
 impl Default for FakeSystemd {
     fn default() -> Self {
         Self {
+            runtimes: BTreeMap::new(),
             units: BTreeMap::new(),
 
             version: "259".into(),
@@ -323,6 +325,73 @@ impl FakeSystemd {
 }
 
 impl SystemdManager for FakeSystemd {
+    fn generation(&mut self) -> Result<String, IpcError> {
+        Ok("fake-manager".into())
+    }
+
+    fn runtime(&mut self, unit: &str) -> Result<crate::systemd::UnitRuntime, IpcError> {
+        if let Some(error) = self.fail("runtime", unit) {
+            return Err(error);
+        }
+        Ok(self
+            .runtimes
+            .get(unit)
+            .cloned()
+            .unwrap_or(crate::systemd::UnitRuntime {
+                failure: Default::default(),
+                execution: Some(zup_core::ServiceExecution::SystemdUser {
+                    user: "root".into(),
+                    group: None,
+                }),
+                service_type: "exec".into(),
+                pending_job: false,
+                state: zup_plan::ServiceRuntimeState::Stopped,
+                sub_state: "dead".into(),
+                result: "success".into(),
+                manager_generation: "fake-manager".into(),
+                execution_generation: "stopped".into(),
+            }))
+    }
+
+    fn control(
+        &mut self,
+        unit: &str,
+        state: zup_transaction::ServiceTerminalState,
+        _timeout: Duration,
+        _controlled_units: &[String],
+    ) -> Result<(), IpcError> {
+        if let Some(error) = self.fail("control", unit) {
+            return Err(error);
+        }
+        let current = self.runtime(unit)?;
+        let running = state == zup_transaction::ServiceTerminalState::Running;
+        self.runtimes.insert(
+            unit.into(),
+            crate::systemd::UnitRuntime {
+                failure: Default::default(),
+                execution: current.execution,
+                service_type: current.service_type,
+                pending_job: false,
+                state: if running {
+                    zup_plan::ServiceRuntimeState::Running
+                } else {
+                    zup_plan::ServiceRuntimeState::Stopped
+                },
+                sub_state: if running { "running" } else { "dead" }.into(),
+                result: "success".into(),
+                manager_generation: current.manager_generation,
+                execution_generation: if running {
+                    uuid::Uuid::now_v7().to_string()
+                } else {
+                    "stopped".into()
+                },
+            },
+        );
+        if self.lost("control") {
+            return Err(IpcError::SystemdUnavailable("control reply lost".into()));
+        }
+        Ok(())
+    }
     fn reload(&mut self) -> Result<(), IpcError> {
         if let Some(error) = self.fail("reload", "") {
             return Err(error);
@@ -358,6 +427,8 @@ impl SystemdManager for FakeSystemd {
         }
         let entry = self.units.get(unit);
         Ok(UnitInfo {
+            drop_in_paths: Vec::new(),
+            need_daemon_reload: false,
             load_state: entry
                 .map(|entry| entry.load_state.clone())
                 .unwrap_or_else(|| "not-found".to_owned()),
@@ -487,6 +558,23 @@ impl SharedFakeSystemd {
 }
 
 impl SystemdManager for SharedFakeSystemd {
+    fn generation(&mut self) -> Result<String, IpcError> {
+        self.0.borrow_mut().generation()
+    }
+    fn runtime(&mut self, unit: &str) -> Result<crate::systemd::UnitRuntime, IpcError> {
+        self.0.borrow_mut().runtime(unit)
+    }
+    fn control(
+        &mut self,
+        unit: &str,
+        state: zup_transaction::ServiceTerminalState,
+        timeout: Duration,
+        controlled_units: &[String],
+    ) -> Result<(), IpcError> {
+        self.0
+            .borrow_mut()
+            .control(unit, state, timeout, controlled_units)
+    }
     fn reload(&mut self) -> Result<(), IpcError> {
         self.0.borrow_mut().reload()
     }
@@ -668,6 +756,7 @@ pub fn machine_package_bytes(
     version: &str,
     files: &[FixtureFile],
     allow_directory_override: bool,
+    path: &[zup_core::PathEntry],
 ) -> Vec<u8> {
     let target = Target::host().expect("a supported Linux host");
     let payload_dir = scratch.join("payload");
@@ -722,7 +811,7 @@ pub fn machine_package_bytes(
             plugins: Vec::new(),
             files: Vec::new(),
             launchers: Vec::new(),
-            path: Vec::new(),
+            path: path.to_vec(),
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
@@ -754,7 +843,7 @@ pub fn machine_fixture_override(
     files: &[FixtureFile],
     allow_directory_override: bool,
 ) -> PathBuf {
-    let package = machine_package_bytes(scratch, version, files, allow_directory_override);
+    let package = machine_package_bytes(scratch, version, files, allow_directory_override, &[]);
     let output = scratch.join(file_name);
     compose_installer(Path::new(inert_template()), &output, &package);
     output
@@ -891,6 +980,8 @@ pub fn package_bytes_for(
         &[],
         &[],
         &[],
+        &[],
+        &[],
     )
 }
 
@@ -914,6 +1005,8 @@ pub fn gui_package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -
         &[],
         &[],
         &[],
+        &[],
+        &[],
     )
 }
 
@@ -929,6 +1022,8 @@ pub fn package_bytes_full(
     protocols: &[Protocol],
     associations: &[FileAssociation],
     icons: &[FixtureIcon],
+    path: &[zup_core::PathEntry],
+    prerequisites: &[zup_core::Prerequisite],
 ) -> Vec<u8> {
     let target = *target;
     let payload_dir = scratch.join("payload");
@@ -993,13 +1088,13 @@ pub fn package_bytes_full(
                 },
                 allow_directory_override: false,
             },
-            prerequisites: Vec::new(),
+            prerequisites: prerequisites.to_vec(),
             components: Vec::new(),
             component_groups: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),
             launchers: launchers.to_vec(),
-            path: Vec::new(),
+            path: path.to_vec(),
             services: Vec::new(),
             protocols: protocols.to_vec(),
             file_associations: associations.to_vec(),
@@ -1058,6 +1153,8 @@ pub fn compose_integration_fixture(
         protocols,
         associations,
         icons,
+        &[],
+        &[],
     );
     let output = scratch.join(file_name);
     compose_installer(Path::new(inert_template()), &output, &package);

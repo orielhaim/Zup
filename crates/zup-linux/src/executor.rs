@@ -48,6 +48,7 @@ impl FileIntent {
 }
 
 pub struct LinuxFileExecutor {
+    service_units: Vec<String>,
     files: BTreeMap<String, FileOperation>,
     staged_dirs: BTreeMap<String, Vec<String>>,
     payload: Option<Box<dyn PayloadSource>>,
@@ -60,20 +61,39 @@ pub struct LinuxFileExecutor {
 pub struct ServiceSupport {
     roots: crate::locations::MachineRoots,
     systemd: crate::machine::SystemdRoots,
-    manager: Box<dyn crate::systemd::SystemdManager>,
+    manager: Option<Box<dyn crate::systemd::SystemdManager>>,
+    openrc: Option<crate::openrc_native::Openrc>,
     expected_uid: u32,
 }
 
 impl ServiceSupport {
     pub fn production() -> Result<Self, String> {
-        Ok(Self {
-            roots: crate::locations::MachineRoots::production(),
-            systemd: crate::machine::SystemdRoots::production(),
-            manager: Box::new(
-                crate::systemd::RealSystemd::connect().map_err(|error| error.to_string())?,
-            ),
-            expected_uid: rustix::process::geteuid().as_raw(),
-        })
+        Self::for_host(
+            crate::locations::MachineRoots::production(),
+            crate::machine::SystemdRoots::production(),
+        )
+    }
+
+    pub fn for_host(
+        roots: crate::locations::MachineRoots,
+        systemd: crate::machine::SystemdRoots,
+    ) -> Result<Self, String> {
+        if crate::openrc_native::active() {
+            let openrc = crate::openrc_native::Openrc::connect(roots.clone())?;
+            return Ok(Self {
+                roots,
+                systemd,
+                manager: None,
+                openrc: Some(openrc),
+                expected_uid: rustix::process::geteuid().as_raw(),
+            });
+        }
+        Ok(Self::new(
+            roots,
+            systemd,
+            Box::new(crate::systemd::RealSystemd::connect().map_err(|error| error.to_string())?),
+            rustix::process::geteuid().as_raw(),
+        ))
     }
 
     pub fn isolated(
@@ -94,7 +114,8 @@ impl ServiceSupport {
         Self {
             roots,
             systemd,
-            manager,
+            manager: Some(manager),
+            openrc: None,
             expected_uid,
         }
     }
@@ -103,6 +124,7 @@ impl ServiceSupport {
 impl Default for LinuxFileExecutor {
     fn default() -> Self {
         Self {
+            service_units: Vec::new(),
             files: BTreeMap::new(),
             staged_dirs: BTreeMap::new(),
             payload: None,
@@ -161,6 +183,16 @@ impl LinuxFileExecutor {
     }
 
     pub fn register_plan(&mut self, plan: &TransactionPlan) -> Result<(), ExecError> {
+        self.service_units = plan
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                NodeKind::ServiceControl { operation } => Some(operation.native_name.clone()),
+                _ => None,
+            })
+            .collect();
+        self.service_units.sort();
+        self.service_units.dedup();
         for node in &plan.nodes {
             let key = match &node.kind {
                 NodeKind::StageFile { key }
@@ -282,6 +314,9 @@ impl LinuxFileExecutor {
 
     pub fn prepare(&mut self, node: &TransactionNode) -> Result<(), ExecError> {
         match &node.kind {
+            NodeKind::ServiceControl { operation } => operation
+                .validate()
+                .map_err(|reason| ExecError::refused(&operation.native_name, reason)),
             NodeKind::Barrier => Ok(()),
             NodeKind::StageFile { .. } => {
                 let _ = self.file(node.id.as_str())?;
@@ -410,6 +445,11 @@ impl LinuxFileExecutor {
 
     pub fn apply(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
         match &node.kind {
+            NodeKind::ServiceControl { operation } => zup_transaction::apply_service_control(
+                &mut self.native_service_context()?,
+                operation,
+            )
+            .map_err(|reason| ExecError::refused(&operation.native_name, reason)),
             NodeKind::Barrier => Ok(OperationReceipt::Control),
             NodeKind::StageFile { .. } => self.stage_node(node),
             NodeKind::FileMutation { delta, .. } => match delta {
@@ -451,6 +491,11 @@ impl LinuxFileExecutor {
         receipt: &OperationReceipt,
     ) -> Result<(), ExecError> {
         match receipt {
+            OperationReceipt::ServiceControl(receipt) => zup_transaction::verify_service_control(
+                &mut self.native_service_context()?,
+                receipt,
+            )
+            .map_err(|reason| ExecError::refused(&receipt.operation.native_name, reason)),
             OperationReceipt::CreateFile {
                 destination,
                 installed_sha256,
@@ -545,6 +590,11 @@ impl LinuxFileExecutor {
         receipt: &OperationReceipt,
     ) -> Result<(), ExecError> {
         match receipt {
+            OperationReceipt::ServiceControl(receipt) => zup_transaction::rollback_service_control(
+                &mut self.native_service_context()?,
+                receipt,
+            )
+            .map_err(|reason| ExecError::refused(&receipt.operation.native_name, reason)),
             OperationReceipt::CreateFile {
                 destination,
                 installed_sha256,
@@ -899,6 +949,14 @@ impl LinuxFileExecutor {
             return self.reconcile_interrupted(node);
         };
         match receipt {
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::reconcile_service_control(
+                    &mut self.native_service_context()?,
+                    &receipt.operation,
+                    Some(receipt),
+                )
+                .map_err(|reason| ExecError::refused(&receipt.operation.native_name, reason))
+            }
             OperationReceipt::CreateFile {
                 destination,
                 installed_sha256,
@@ -972,6 +1030,12 @@ impl LinuxFileExecutor {
         node: &TransactionNode,
     ) -> Result<ReconcileResult, ExecError> {
         match &node.kind {
+            NodeKind::ServiceControl { operation } => zup_transaction::reconcile_service_control(
+                &mut self.native_service_context()?,
+                operation,
+                None,
+            )
+            .map_err(|reason| ExecError::refused(&operation.native_name, reason)),
             NodeKind::Barrier => Ok(ReconcileResult::Applied),
 
             NodeKind::StageFile { .. } => Ok(ReconcileResult::NotApplied),
@@ -1573,6 +1637,31 @@ fn refresh_request(node: &TransactionNode) -> Result<crate::refresh::RefreshRequ
 impl OperationExecutor for LinuxFileExecutor {
     type Error = ExecError;
 
+    fn reconcile_rollback(
+        &mut self,
+        _operation: &TransactionNode,
+        receipt: &OperationReceipt,
+    ) -> Result<zup_transaction::RollbackReconcileResult, Self::Error> {
+        use zup_transaction::RollbackReconcileResult;
+        if let OperationReceipt::ServiceControl(receipt) = receipt {
+            return zup_transaction::reconcile_service_rollback(
+                &mut self.native_service_context()?,
+                receipt,
+            )
+            .map_err(|reason| ExecError::refused(&receipt.operation.native_name, reason));
+        }
+        Ok(match receipt {
+            // These compensators verify journal-bound paths and both content generations
+            // before each mutation, and accept an already restored destination.
+            OperationReceipt::StageFile { .. }
+            | OperationReceipt::CreateFile { .. }
+            | OperationReceipt::ReplaceFile { .. }
+            | OperationReceipt::RemoveFile { .. } => RollbackReconcileResult::Retry,
+            OperationReceipt::Control => RollbackReconcileResult::Restored,
+            _ => RollbackReconcileResult::Ambiguous,
+        })
+    }
+
     fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error> {
         LinuxFileExecutor::prepare(self, operation)
     }
@@ -2031,6 +2120,7 @@ fn removed_state(
 
 fn receipt_backup_valid(receipt: &OperationReceipt) -> bool {
     match receipt {
+        OperationReceipt::ServiceControl(_) => true,
         OperationReceipt::CreateFile { .. }
         | OperationReceipt::Control
         | OperationReceipt::StageFile { .. }
@@ -2144,6 +2234,29 @@ fn is_service_key(key: &ResourceKey) -> bool {
 }
 
 impl LinuxFileExecutor {
+    fn native_service_context(&mut self) -> Result<NativeServiceContext<'_>, ExecError> {
+        let support = self
+            .services
+            .as_mut()
+            .ok_or_else(|| ExecError::refused("", "service support is unavailable"))?;
+        if let Some(openrc) = &mut support.openrc {
+            return Ok(NativeServiceContext::Openrc(openrc));
+        }
+        Ok(NativeServiceContext::Systemd(
+            crate::service_exec::ServiceContext {
+                controlled_units: &self.service_units,
+                roots: &support.roots,
+                systemd: &support.systemd,
+                manager: support
+                    .manager
+                    .as_mut()
+                    .ok_or_else(|| ExecError::refused("", "systemd support is unavailable"))?
+                    .as_mut(),
+                expected_uid: support.expected_uid,
+            },
+        ))
+    }
+
     fn service_context(&mut self) -> Result<crate::service_exec::ServiceContext<'_>, ExecError> {
         let Some(support) = self.services.as_mut() else {
             return Err(ExecError::PlanDrift {
@@ -2152,9 +2265,16 @@ impl LinuxFileExecutor {
             });
         };
         Ok(crate::service_exec::ServiceContext {
+            controlled_units: &self.service_units,
             roots: &support.roots,
             systemd: &support.systemd,
-            manager: support.manager.as_mut(),
+            manager: support
+                .manager
+                .as_mut()
+                .ok_or_else(|| {
+                    ExecError::refused("", "systemd operation cannot execute on OpenRC")
+                })?
+                .as_mut(),
             expected_uid: support.expected_uid,
         })
     }
@@ -2162,6 +2282,13 @@ impl LinuxFileExecutor {
     fn prepare_service(&mut self, node: &TransactionNode) -> Result<(), ExecError> {
         use crate::service_ops::ServicePayload;
         let payload = crate::service_exec::payload_for(node)?;
+        if let Some(openrc) = self
+            .services
+            .as_ref()
+            .and_then(|support| support.openrc.as_ref())
+        {
+            return openrc.prepare(&payload);
+        }
         match payload {
             ServicePayload::Apply { service, .. } => {
                 let context = self.service_context()?;
@@ -2218,6 +2345,24 @@ impl LinuxFileExecutor {
     fn apply_service(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
         use crate::service_ops::ServicePayload;
         let payload = crate::service_exec::payload_for(node)?;
+        if let Some(openrc) = self
+            .services
+            .as_mut()
+            .and_then(|support| support.openrc.as_mut())
+        {
+            let receipt = openrc.apply(&payload)?;
+            return Ok(OperationReceipt::Backend {
+                key: node
+                    .meta
+                    .backend
+                    .as_ref()
+                    .ok_or_else(|| ExecError::refused("", "missing backend metadata"))?
+                    .key
+                    .clone(),
+                payload: serde_json::to_vec(&receipt)
+                    .map_err(|error| ExecError::refused("", error.to_string()))?,
+            });
+        }
         match payload {
             ServicePayload::Apply { service, .. } => {
                 let backend = node
@@ -2264,6 +2409,13 @@ impl LinuxFileExecutor {
                 path: format!("{key:?}"),
                 reason: "a service receipt does not parse".into(),
             })?;
+        if let Some(openrc) = self
+            .services
+            .as_ref()
+            .and_then(|support| support.openrc.as_ref())
+        {
+            return openrc.verify(&receipt);
+        }
         let mut context = self.service_context()?;
         if receipt.installed_source_sha256.is_none() {
             crate::service_exec::verify_remove_receipt(&receipt, &mut context)?;
@@ -2286,6 +2438,13 @@ impl LinuxFileExecutor {
                 reason: "a service receipt does not parse".into(),
             })?;
         let operation = crate::service_exec::payload_for(node)?;
+        if let Some(openrc) = self
+            .services
+            .as_mut()
+            .and_then(|support| support.openrc.as_mut())
+        {
+            return openrc.rollback(&operation, &receipt);
+        }
         let mut context = self.service_context()?;
         match &operation {
             ServicePayload::Apply { .. } => {
@@ -2338,6 +2497,13 @@ impl LinuxFileExecutor {
                     reason: "a service receipt does not serialize".into(),
                 })
         };
+        if let Some(openrc) = self
+            .services
+            .as_ref()
+            .and_then(|support| support.openrc.as_ref())
+        {
+            return openrc.reconcile(&operation, decoded.as_ref());
+        }
         let mut context = self.service_context()?;
         match &operation {
             ServicePayload::Apply {
@@ -2451,6 +2617,7 @@ fn observe_file(file: &zup_plan::DesiredFile<zup_plan::TargetPath>) -> ObservedF
             Ok(current) => ObservedFileState::File {
                 size: current.size,
                 sha256: current.sha256,
+                executable: Some(current.mode & 0o100 != 0),
             },
             Err(_) => ObservedFileState::NonFile,
         },
@@ -2944,5 +3111,46 @@ mod snapshot_tests {
         let snapshot = snapshot_target(&plan);
 
         assert_eq!(snapshot.files[0].state, ObservedFileState::NonFile);
+    }
+}
+
+enum NativeServiceContext<'a> {
+    Systemd(crate::service_exec::ServiceContext<'a>),
+    Openrc(&'a mut crate::openrc_native::Openrc),
+}
+impl NativeServiceContext<'_> {
+    fn manager(&mut self) -> &mut dyn zup_transaction::NativeServiceManager {
+        match self {
+            Self::Systemd(context) => context,
+            Self::Openrc(manager) => *manager,
+        }
+    }
+}
+impl zup_transaction::NativeServiceManager for NativeServiceContext<'_> {
+    fn stopped_runtime_is_quiescent(
+        &mut self,
+        operation: &zup_transaction::ServiceControlOperation,
+    ) -> Result<bool, String> {
+        self.manager().stopped_runtime_is_quiescent(operation)
+    }
+    fn observe(
+        &mut self,
+        operation: &zup_transaction::ServiceControlOperation,
+    ) -> Result<zup_transaction::ServiceObservation, String> {
+        self.manager().observe(operation)
+    }
+    fn transition(
+        &mut self,
+        operation: &zup_transaction::ServiceControlOperation,
+        state: zup_transaction::ServiceTerminalState,
+        expected: &zup_transaction::ServiceObservation,
+    ) -> Result<(), String> {
+        self.manager().transition(operation, state, expected)
+    }
+    fn stopped_start_can_be_compensated(
+        &mut self,
+        operation: &zup_transaction::ServiceControlOperation,
+    ) -> Result<bool, String> {
+        self.manager().stopped_start_can_be_compensated(operation)
     }
 }

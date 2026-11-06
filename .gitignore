@@ -1,5 +1,6 @@
 /target
 /examples/plugins/configure/target/
+/examples/plugins/configure/dist/
 
 .zup/
 
@@ -8,6 +9,7 @@
 /fixtures/aurora/*.zupui
 
 node_modules/
+__pycache__/
 
 /action/.cache/
 /action/coverage/

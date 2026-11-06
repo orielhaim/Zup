@@ -13,7 +13,7 @@ mod toolchain_fixture;
 
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 
-/// A Linux ABI Zup parses but no backend builds.
+/// A target without a GUI frontend.
 const UNSUPPORTED_TARGET: &str = "linux-x64-musl";
 
 #[cfg(target_arch = "aarch64")]
@@ -222,7 +222,7 @@ fn directory_entries(root: &Path) -> BTreeSet<String> {
 }
 
 fn plugin_component() -> Vec<u8> {
-    include_bytes!("../../../examples/plugins/configure/dist/configure.wasm").to_vec()
+    zup_plugin_abi::test_fixture::component()
 }
 
 #[test]
@@ -605,6 +605,12 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
 
     // An unsupported target. The backend is a finding, and no artifact is produced.
     let project = single_target_project(UNSUPPORTED_TARGET);
+    let source = fs::read_to_string(project.path().join("zup.toml")).unwrap();
+    fs::write(
+        project.path().join("zup.toml"),
+        source.replace("frontend = \"console\"", "frontend = \"gui\""),
+    )
+    .unwrap();
     let runtime = setup_runtime(project.path(), HOST_TARGET);
     let result = run_doctor(
         &project.path().join("zup.toml"),
@@ -615,19 +621,16 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
     assert_eq!(report["ready"], false);
     let rows = checks(&result, "default");
     assert_eq!(report["targets"][0]["target"], UNSUPPORTED_TARGET);
-    // Linux on ARM64 parses but no Linux backend builds it: the finding names
-    // the supported Linux target rather than the host.
     assert_eq!(statuses(&rows, "build_backend"), only("pass"));
     assert_eq!(statuses(&rows, "target_lowering"), only("fail"));
     assert!(
-        message(find(&rows, "target_lowering")).contains("linux-x64"),
+        message(find(&rows, "target_lowering")).contains("frontend"),
         "{}",
         message(find(&rows, "target_lowering"))
     );
     for kind in [
         "manifest_compile",
         "source_payload",
-        "frontend",
         "canonical_target",
         "output_parent",
     ] {

@@ -524,7 +524,20 @@ fn interrupted_rollback_never_rolls_forward() {
     let mut crashed = record.clone();
     let op = first_op(&crashed);
     crashed.phase = TransactionPhase::RollingBack;
-    crashed.nodes.insert(op, NodeState::RollingBack);
+    let node = crashed
+        .plan
+        .nodes
+        .iter()
+        .find(|node| node.id == op)
+        .unwrap();
+    let receipt =
+        zup_transaction::OperationExecutor::apply(&mut FakeExecutor::new(), node).unwrap();
+    crashed.nodes.insert(
+        op,
+        NodeState::RollingBack {
+            receipt: Box::new(receipt),
+        },
+    );
     for barrier in ["ctrl:begin", "ctrl:preflight", "ctrl:commit-intent"] {
         crashed.nodes.insert(
             OperationId::new(barrier),

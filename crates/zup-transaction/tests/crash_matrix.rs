@@ -288,3 +288,109 @@ fn every_crash_point_of_every_plan_shape_recovers() {
     sweep("chain", common::chain_input());
     std::panic::set_hook(hook);
 }
+
+struct InterruptedRollback {
+    inner: FakeExecutor,
+    crash: bool,
+    evidence: zup_transaction::RollbackReconcileResult,
+}
+
+impl OperationExecutor for InterruptedRollback {
+    type Error = String;
+
+    fn prepare(&mut self, node: &TransactionNode) -> Result<(), String> {
+        self.inner.prepare(node)
+    }
+    fn apply(&mut self, node: &TransactionNode) -> Result<OperationReceipt, String> {
+        self.inner.apply(node)
+    }
+    fn verify(&mut self, node: &TransactionNode, receipt: &OperationReceipt) -> Result<(), String> {
+        self.inner.verify(node, receipt)
+    }
+    fn rollback(
+        &mut self,
+        node: &TransactionNode,
+        receipt: &OperationReceipt,
+    ) -> Result<(), String> {
+        if self.crash {
+            panic!("interrupted compensation");
+        }
+        self.inner.rollback(node, receipt)
+    }
+    fn reconcile(
+        &mut self,
+        node: &TransactionNode,
+        receipt: Option<&OperationReceipt>,
+    ) -> Result<zup_transaction::ReconcileResult, String> {
+        self.inner.reconcile(node, receipt)
+    }
+    fn reconcile_rollback(
+        &mut self,
+        _: &TransactionNode,
+        _: &OperationReceipt,
+    ) -> Result<zup_transaction::RollbackReconcileResult, String> {
+        Ok(self.evidence)
+    }
+}
+
+#[rstest::rstest]
+#[case::retry(
+    zup_transaction::RollbackReconcileResult::Retry,
+    TransactionOutcome::RolledBack
+)]
+#[case::restored(
+    zup_transaction::RollbackReconcileResult::Restored,
+    TransactionOutcome::RolledBack
+)]
+#[case::ambiguous(
+    zup_transaction::RollbackReconcileResult::Ambiguous,
+    TransactionOutcome::RecoveryRequired
+)]
+fn interrupted_compensation_retains_receipts_and_requires_explicit_evidence(
+    #[case] evidence: zup_transaction::RollbackReconcileResult,
+    #[case] expected: TransactionOutcome,
+) {
+    let (_directory, store, coordinator, id) = fresh(&sample_input());
+    let mut executor = InterruptedRollback {
+        inner: FakeExecutor::new().fail_on_verify(1),
+        crash: true,
+        evidence,
+    };
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            coordinator.execute(store.load(&id).unwrap(), &mut executor)
+        }))
+        .is_err()
+    );
+    let interrupted = store.load(&id).unwrap();
+    let original_failure = interrupted.failure.clone();
+    let receipts: Vec<_> = interrupted
+        .nodes
+        .values()
+        .filter_map(|state| match state {
+            NodeState::RollingBack { receipt } => Some(receipt.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(!receipts.is_empty());
+    if evidence == zup_transaction::RollbackReconcileResult::Retry {
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                recover(interrupted.clone(), &store, &mut executor)
+            }))
+            .is_err(),
+            "a second crash must leave the same durable compensation intent"
+        );
+        assert_eq!(store.load(&id).unwrap().nodes, interrupted.nodes);
+    }
+    executor.crash = false;
+    let (record, outcome) = recover(store.load(&id).unwrap(), &store, &mut executor).unwrap();
+    assert_eq!(outcome, expected);
+    assert_eq!(record.failure, original_failure);
+    assert_settled(&record, outcome);
+    if expected == TransactionOutcome::RecoveryRequired {
+        for receipt in receipts {
+            assert!(record.nodes.values().any(|state| matches!(state, NodeState::RollingBack { receipt: retained } if retained == &receipt)));
+        }
+    }
+}

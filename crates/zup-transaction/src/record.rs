@@ -67,7 +67,9 @@ pub enum NodeState {
     Verified {
         receipt: Box<crate::executor::OperationReceipt>,
     },
-    RollingBack,
+    RollingBack {
+        receipt: Box<crate::executor::OperationReceipt>,
+    },
     RolledBack,
     Failed,
 }
@@ -82,14 +84,14 @@ impl NodeState {
                 | (Running, Failed)
                 | (Running, Pending)
                 | (Applied { .. }, Verified { .. })
-                | (Applied { .. }, RollingBack)
+                | (Applied { .. }, RollingBack { .. })
                 | (Applied { .. }, RolledBack)
-                | (Verified { .. }, RollingBack)
-                | (RollingBack, RolledBack)
-                | (RollingBack, Failed)
-                | (Failed, RollingBack)
+                | (Verified { .. }, RollingBack { .. })
+                | (RollingBack { .. }, RolledBack)
+                | (RollingBack { .. }, Failed)
+                | (Failed, RollingBack { .. })
                 | (Failed, RolledBack)
-                | (Pending, RollingBack)
+                | (Pending, RollingBack { .. })
                 | (Pending, RolledBack)
         );
         if ok {
@@ -112,6 +114,9 @@ pub struct NodeStateError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionRecord {
+    pub failure: Option<TransactionFailure>,
+    pub rollback_failure: Option<TransactionFailure>,
+    pub recovery_failure: Option<TransactionFailure>,
     pub reconciliation: crate::ReconciliationState,
     pub release: Option<zup_core::ReleaseIdentity>,
     pub schema: u32,
@@ -145,6 +150,9 @@ impl TransactionRecord {
             nodes.insert(node.id.clone(), NodeState::Pending);
         }
         Self {
+            failure: None,
+            rollback_failure: None,
+            recovery_failure: None,
             reconciliation: crate::ReconciliationState::Pending { failure: None },
             release: None,
             schema: JOURNAL_SCHEMA,
@@ -164,6 +172,24 @@ impl TransactionRecord {
     }
 
     pub fn validate(&self) -> Result<(), CorruptReason> {
+        for failure in [
+            &self.failure,
+            &self.rollback_failure,
+            &self.recovery_failure,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if failure.message.is_empty()
+                || failure.message.len() > 16384
+                || failure
+                    .operation
+                    .as_ref()
+                    .is_some_and(|id| !self.nodes.contains_key(id))
+            {
+                return Err(CorruptReason::InvalidPlan);
+            }
+        }
         if self.reconciliation == crate::ReconciliationState::Complete
             && self.phase != TransactionPhase::Committed
         {
@@ -204,7 +230,9 @@ impl TransactionRecord {
             let Some(state) = self.nodes.get(&node.id) else {
                 return Err(CorruptReason::NodeStateMismatch);
             };
-            if let NodeState::Applied { receipt } | NodeState::Verified { receipt } = state
+            if let NodeState::Applied { receipt }
+            | NodeState::Verified { receipt }
+            | NodeState::RollingBack { receipt } = state
                 && (receipt.validate().is_err()
                     || !receipt_matches_node(node, receipt, self.target))
             {
@@ -232,12 +260,19 @@ impl TransactionRecord {
 
     pub fn receipt(&self, id: &OperationId) -> Option<&crate::executor::OperationReceipt> {
         match self.nodes.get(id) {
-            Some(NodeState::Applied { receipt }) | Some(NodeState::Verified { receipt }) => {
-                Some(receipt)
-            }
+            Some(NodeState::Applied { receipt })
+            | Some(NodeState::Verified { receipt })
+            | Some(NodeState::RollingBack { receipt }) => Some(receipt),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransactionFailure {
+    pub operation: Option<OperationId>,
+    pub message: String,
 }
 
 fn phase_accepts(
@@ -368,6 +403,9 @@ fn receipt_matches_node(
         return false;
     }
     match (&node.kind, receipt) {
+        (NodeKind::ServiceControl { operation }, OperationReceipt::ServiceControl(receipt)) => {
+            operation.as_ref() == &receipt.operation
+        }
         (NodeKind::Barrier, OperationReceipt::Control) => true,
         (NodeKind::StageFile { .. }, OperationReceipt::StageFile { .. }) => true,
         (

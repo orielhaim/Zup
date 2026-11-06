@@ -13,6 +13,7 @@ online = ["zup-linux/online"]
 gui = []
 console = ["dep:cliclack", "dep:console", "dep:indicatif"]
 headless = []
+test-faults = ["zup-linux/test-faults", "zup-windows/test-faults"]
 
 [[bin]]
 name = "zup-setup-gui"

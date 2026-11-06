@@ -155,6 +155,7 @@ pub struct TransactionInput {
     pub files: Vec<FileOperation>,
     pub removals: Vec<FileRemoval>,
     pub backend_operations: Vec<BackendOperation>,
+    pub service_controls: Vec<crate::ServiceControlOperation>,
     pub preset: Option<InstalledPreset>,
     /// Committed transaction this plan was prepared against.
     /// `None` means no installation existed.
@@ -172,12 +173,24 @@ impl TransactionInput {
             files: Vec::new(),
             removals: Vec::new(),
             backend_operations: Vec::new(),
+            service_controls: Vec::new(),
             preset: None,
             observed_transaction: None,
         }
     }
 
     pub fn validate(&self) -> Result<(), TransactionInputError> {
+        let mut controls = std::collections::BTreeSet::new();
+        for control in &self.service_controls {
+            control
+                .validate()
+                .map_err(|reason| TransactionInputError::ServiceControl { reason })?;
+            if !controls.insert((&control.key, control.stage)) {
+                return Err(TransactionInputError::DuplicateKey {
+                    resource: TransactionResource::key(&control.key),
+                });
+            }
+        }
         if self
             .install_directory
             .as_ref()
@@ -275,6 +288,8 @@ impl TransactionInput {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TransactionInputError {
+    #[error("invalid service lifecycle intent: {reason}")]
+    ServiceControl { reason: String },
     #[error("backend payload for `{resource}` is {size} bytes; maximum is {max}")]
     PayloadTooLarge {
         resource: TransactionResource,

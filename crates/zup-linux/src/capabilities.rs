@@ -28,7 +28,7 @@ fn linux_target_errors(target: &Target) -> Vec<String> {
     vec![if is_linux_target(target) {
         format!(
             "unsupported backend for target `{target}`: this Zup version builds Linux \
-             installers for `linux-x64` and `linux-arm64`"
+             installers for GNU and musl x64 and ARM64"
         )
     } else {
         format!("unsupported backend for target `{target}`: not a Linux target")
@@ -87,6 +87,23 @@ fn resource_errors(
     if let Some(capabilities) = zup_plan::capabilities(&installer.target) {
         for &scope in scopes {
             errors.extend(capabilities.resource_errors(installer, scope));
+        }
+    }
+    for prerequisite in &installer.prerequisites {
+        if !matches!(
+            prerequisite.requirement,
+            zup_core::PrerequisiteRequirement::NativePackage { .. }
+        ) || !matches!(
+            prerequisite.package,
+            zup_core::PrerequisitePackage::DetectOnly | zup_core::PrerequisitePackage::Repository
+        ) || prerequisite.installer != zup_core::PrerequisiteInstaller::default()
+            || !matches!(
+                prerequisite.target,
+                zup_core::PrerequisiteArchitecture::Current
+                    | zup_core::PrerequisiteArchitecture::Any
+            )
+        {
+            errors.push(format!("Linux prerequisite `{}` requires a native_package requirement, current architecture, detect_only or repository policy, and no artifact installer options", prerequisite.id));
         }
     }
     errors.extend(protocol_errors(&installer.protocols));
@@ -280,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_launchers_and_path_entries_stay_refused() {
+    fn desktop_launchers_and_path_entries_are_supported() {
         let config = config("linux-x64", Frontend::Console, InstallScope::User);
         let mut plan = plan();
         plan.installer.launchers.push(zup_core::Launcher {
@@ -298,19 +315,23 @@ mod tests {
             when: None,
         });
         let errors = linux_capability_errors(&config, &plan);
-        let text = errors.join("\n");
-        assert!(text.contains("desktop launcher"), "{text}");
-        assert!(text.contains("PATH entry"), "{text}");
-        assert!(
-            !text.contains("zup-linux"),
-            "diagnostics name the configuration, never an internal crate: {text}"
-        );
+        assert!(errors.is_empty(), "{errors:?}");
     }
     #[test]
     fn every_unsupported_dimension_is_named() {
         let config = config("linux-x64", Frontend::Console, InstallScope::User);
         let mut plan = plan();
         plan.installer.services.push(zup_core::Service {
+            failure: Default::default(),
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            requires_components: Vec::new(),
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             id: zup_core::ServiceId::new("tool").unwrap(),
             name: zup_core::NonEmptyString::new("Tool").unwrap(),
             display_name: None,
@@ -361,6 +382,16 @@ mod tests {
 
     fn machine_service() -> zup_core::Service {
         zup_core::Service {
+            failure: Default::default(),
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            requires_components: Vec::new(),
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             id: zup_core::ServiceId::new("tool").unwrap(),
             name: zup_core::NonEmptyString::new("Tool").unwrap(),
             display_name: None,
@@ -396,13 +427,12 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_linux_abi_names_the_supported_targets() {
+    fn musl_console_is_supported() {
         let errors = linux_capability_errors(
             &config("linux-x64-musl", Frontend::Console, InstallScope::User),
             &plan(),
         );
-        let text = errors.join("\n");
-        assert!(text.contains("linux-x64"), "{text}");
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]

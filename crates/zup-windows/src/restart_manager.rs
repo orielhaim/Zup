@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use windows::Win32::System::RestartManager::{
-    RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
+    CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources,
+    RmStartSession,
 };
 use windows::core::PCWSTR;
 use zup_core::Target;
@@ -11,10 +12,51 @@ use crate::lowering::host_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockingProcess {
+    pub service_name: Option<String>,
+    pub execution_generation: String,
     pub pid: u32,
     pub name: String,
     pub app_type: i32,
     pub restartable: bool,
+}
+
+pub(crate) fn preflight_services(
+    files: &[&Path],
+    controls: &[zup_transaction::ServiceControlOperation],
+) -> Result<FilePreflight, String> {
+    use zup_transaction::NativeServiceManager;
+    let FilePreflight::Blocked {
+        mut processes,
+        reboot_reason,
+    } = preflight(files)?
+    else {
+        return Ok(FilePreflight::Ready);
+    };
+    for operation in controls
+        .iter()
+        .filter(|operation| operation.stage == zup_transaction::ServiceControlStage::Quiesce)
+    {
+        let observed = crate::service_control::ScmLifecycle.observe(operation)?;
+        if observed.configuration != operation.before_configuration
+            || observed.manager_generation != operation.manager_generation
+            || observed.execution_generation != operation.before_execution_generation
+            || !operation.before.matches(observed.runtime)
+        {
+            return Err("service changed during executable preflight".into());
+        }
+        processes.retain(|process| {
+            process.service_name.as_deref() != Some(operation.native_name.as_str())
+                || process.execution_generation != operation.before_execution_generation
+        });
+    }
+    Ok(if processes.is_empty() && reboot_reason == 0 {
+        FilePreflight::Ready
+    } else {
+        FilePreflight::Blocked {
+            processes,
+            reboot_reason,
+        }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +75,7 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
 
     unsafe {
         let mut session: u32 = 0;
-        let mut key = [0u16; 32];
+        let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
         let rc = RmStartSession(&mut session, None, windows::core::PWSTR(key.as_mut_ptr()));
         if rc.0 != 0 {
             return Err(format!("RmStartSession failed ({})", rc.0));
@@ -66,7 +108,7 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
             for _ in 0..3 {
                 let mut processes = vec![RM_PROCESS_INFO::default(); capacity];
                 let mut needed = 0;
-                let mut count = 0;
+                let mut count = processes.len() as u32;
                 let mut reboot = 0;
                 let rc = RmGetList(
                     session,
@@ -172,6 +214,21 @@ fn blocked_or_ready(processes: Vec<RM_PROCESS_INFO>, reboot_reason: u32) -> File
                 name
             };
             BlockingProcess {
+                service_name: {
+                    let end = process
+                        .strServiceShortName
+                        .iter()
+                        .position(|c| *c == 0)
+                        .unwrap_or(process.strServiceShortName.len());
+                    (end != 0)
+                        .then(|| String::from_utf16_lossy(&process.strServiceShortName[..end]))
+                },
+                execution_generation: format!(
+                    "{}:{}:{}",
+                    process.Process.dwProcessId,
+                    process.Process.ProcessStartTime.dwHighDateTime,
+                    process.Process.ProcessStartTime.dwLowDateTime
+                ),
                 pid: process.Process.dwProcessId,
                 name,
                 app_type: process.ApplicationType.0,

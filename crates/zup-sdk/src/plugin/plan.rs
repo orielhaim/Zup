@@ -1,7 +1,10 @@
 use zup_plugin_abi as abi;
 
 pub use super::exports::zup::plugin::planner::{
-    FileAssociation, GeneratedFile, Launcher, LauncherLocation, Protocol, Service, ServiceStart,
+    ChangedServiceState, FileAssociation, GeneratedFile, InitialServiceState, Launcher,
+    LauncherLocation, OpenrcFailurePolicy, Protocol, Service, ServiceExecution,
+    ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart, SystemdFailurePolicy,
+    SystemdRestartCondition, SystemdUser, WindowsFailurePolicy, WindowsServiceAccount,
 };
 use super::exports::zup::plugin::planner::{PathEntry, PluginError, ResourceItem};
 
@@ -92,14 +95,30 @@ impl Launcher {
 }
 
 impl Service {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, binary: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        binary: impl Into<String>,
+        execution: ServiceExecution,
+    ) -> Self {
         Self {
+            failure: super::ServiceFailurePolicy::None,
+            execution,
             id: id.into(),
             name: name.into(),
             display_name: None,
             binary: binary.into(),
             arguments: Vec::new(),
             start: ServiceStart::Manual,
+            readiness: ServiceReadiness::Manager,
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            lifecycle: ServiceLifecycle {
+                install: InitialServiceState::Stopped,
+                change: ChangedServiceState::Preserve,
+                start_timeout_seconds: 90,
+                stop_timeout_seconds: 90,
+            },
         }
     }
 
@@ -116,6 +135,43 @@ impl Service {
         S: Into<String>,
     {
         self.arguments = arguments.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_required_services(
+        mut self,
+        services: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.requires_services = services.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_required_files<I, S>(mut self, files: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.requires_files = files.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
+    pub fn with_failure_policy(mut self, failure: super::ServiceFailurePolicy) -> Self {
+        self.failure = failure;
+        self
+    }
+
+    #[must_use]
+    pub fn with_readiness(mut self, readiness: ServiceReadiness) -> Self {
+        self.readiness = readiness;
+        self
+    }
+
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: ServiceLifecycle) -> Self {
+        self.lifecycle = lifecycle;
         self
     }
 

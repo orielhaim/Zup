@@ -21,15 +21,19 @@ pub fn operation_phase(node: &zup_transaction::TransactionNode) -> zup_core::Ope
         NodeKind::StageFile { .. }
         | NodeKind::FileMutation { .. }
         | NodeKind::FileRemoval { .. } => OperationPhase::Files,
-        NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
-            OperationPhase::System
-        }
+        NodeKind::ServiceControl { .. }
+        | NodeKind::BackendOperation { .. }
+        | NodeKind::BackendRemoval { .. } => OperationPhase::System,
         NodeKind::Barrier => OperationPhase::Finish,
     }
 }
 
 pub fn operation_action(node: &zup_transaction::TransactionNode) -> &'static str {
     match &node.kind {
+        NodeKind::ServiceControl { operation } => match operation.stage {
+            zup_transaction::ServiceControlStage::Quiesce => "Stopping service…",
+            zup_transaction::ServiceControlStage::Restore => "Starting service…",
+        },
         NodeKind::StageFile { .. } | NodeKind::FileMutation { .. } => "Installing files…",
         NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
             "Updating application settings…"

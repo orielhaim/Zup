@@ -23,17 +23,26 @@ mod locations;
 mod lowering;
 #[cfg(target_os = "linux")]
 mod machine;
+mod openrc;
+#[cfg(target_os = "linux")]
+mod openrc_native;
 #[cfg(target_os = "linux")]
 mod operation_host;
+#[cfg(target_os = "linux")]
+mod package_process;
 #[cfg(target_os = "linux")]
 mod paths;
 #[cfg(target_os = "linux")]
 mod pkexec;
 #[cfg(target_os = "linux")]
+mod prerequisites;
+#[cfg(target_os = "linux")]
 mod refresh;
 mod resolve;
 #[cfg(target_os = "linux")]
 mod run;
+#[cfg(target_os = "linux")]
+mod service_control;
 #[cfg(target_os = "linux")]
 mod service_exec;
 #[cfg(target_os = "linux")]
@@ -45,6 +54,8 @@ mod session_host;
 mod socket;
 #[cfg(target_os = "linux")]
 mod systemd;
+#[cfg(target_os = "linux")]
+mod systemd_policy;
 #[cfg(all(target_os = "linux", feature = "test-support"))]
 #[allow(unsafe_code)]
 pub mod test_support;

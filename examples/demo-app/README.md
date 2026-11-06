@@ -1,179 +1,42 @@
 # Demo App
 
-A small, complete Zup application, for driving by hand.
+A Windows example with required and optional components, user or machine scope, shortcuts, a PATH entry, and installer branding. Read `zup.toml` for its declarations.
 
-It is not a fixture and nothing about it is special. It is an ordinary
-application project in the same format a project outside this repository uses, read
-by the same reader, built by the same build, presented by the same window. If a
-command works here it works in a real project, and if something looks wrong here
-it is wrong for everyone.
+## Run
 
-```
-zup preview        open the installer window over a simulated machine
-zup check          validate this project and everything it will ship
-zup plan           print what installing it would change, without changing it
-zup build          write "Demo App-Setup.exe" beside zup.toml
-```
+From the repository root, build the toolchain once:
 
-## Before the first run
-
-`zup preview` and `zup build` need the binaries Zup composes an installer from.
-Build them once:
-
-```
+```sh
 cargo xtask toolchain build
 ```
 
-That stages the runtime templates, the launchers, and the default preset. It is
-the one build outside this directory, and it is shared by every project.
+From this directory:
 
-## What is in here
-
-```
-zup.toml                  the application
-payload/
-  demo.cmd                the program
-  NOTES.txt               a file the repair flow can restore
-  branding/logo.svg       installed artwork
-  docs/README.txt         installed only by the "Documentation" component
-  samples/greeting.txt    installed only by the "Sample data" component
-```
-
-The manifest is commented, and the comments say why each thing is there rather
-than restating what the line already says. It is worth reading: it is a small but
-complete tour of the format.
-
-One required component and two optional ones, `user` or `machine` scope, a Start
-menu entry, a desktop shortcut, and one directory on `PATH`. Those last three are
-real system changes, which is the point - they are what "Show what will change"
-lists, and what an uninstall has to take back out.
-
-## `zup preview`
-
-The window is the preset Zup ships, because the manifest names no package. The
-first thing the window shows is this application's own name, version, publisher,
-description and components, because the simulated machine is derived from this
-application rather than from a demonstration.
-
-It is safe to leave open. A preview writes nothing outside its own `.zup/`
-directory: no application file, no `PATH` entry, no shortcut, no registry value,
-no uninstall record, and no elevation. A control causes the event an engine would
-have caused and the state machine decides what it means, so every state the window
-can reach is a state a real installation can reach.
-
-Things worth trying:
-
-- **Edit `description` in `zup.toml` while it is open.** The line under the product name
-  changes without the window restarting, and without a build. That is the fastest
-  proof that a data change and a code change are different things.
-- **Edit it into something invalid** - `description = 42`. The session reports the
-  schema's own refusal, naming the setting, and keeps showing the last settings
-  that fitted. A half-finished edit must not cost a working window.
-- **Press the buttons.** Install, Stop, and the state changes are all real
-  behaviour. There is no engine behind them, so an operation waits at "Preparing"
-  until you drive it from the console - see below.
-- **Ctrl+C.** No child process is left behind.
-
-The controls are typed into the session, not clicked:
-
-```
-install | maintenance        which surface this machine shows
-user | machine              who the installation is for
-components <layout>         none | one-optional | many | required-and-optional
-run                         start an installation
-next                        step the running installation along
-blocked <text>              a file in the way
-rollback                    the transaction failed and was undone
-recovery                    the last transaction did not finish
-reboot                      the machine must restart
-busy                        another process is already running one
-checking <text>             the update channel is being asked
-up-to-date <version>        the channel has nothing newer
-available <version>         the channel has a newer release
-update-failed <text>        the channel could not be reached
-drift <a,b>                 a repair found these resources changed
-quit                        stop the preview
-```
-
-## `zup build`, and then really installing it
-
-```
-zup build
-```
-
-Writes `Demo App-Setup.exe` and `zup-release.json` here. Run
-`zup artifact inspect "Demo App-Setup.exe"` to measure the artifact and its payload.
-GUI builds include a native preset; console and headless builds omit it. Build
-profile and target also affect size.
-
-Run the installer, and work through:
-
-- **Scope.** This application offers `user` and `machine`. Machine scope needs
-  elevation; a shell that is not elevated will be told so, which is the honest
-  answer rather than a failure.
-- **Components.** `Demo App` is required; `Documentation` starts off; `Sample data`
-  starts on. Press "Show what will change" - the docs and samples files appear and
-  disappear with their checkboxes.
-- **Install.** Then find it in the Start menu, or run `demo.cmd` from the install
-  directory, or open a new command prompt and run `demo --version`, which only
-  works if the `PATH` entry was taken.
-- **Change** on the maintenance surface re-opens the component choices.
-- **Repair.** Delete a file from the install directory - `NOTES.txt` is the easiest
-  - then press Repair. It comes back.
-- **Uninstall.** Everything goes, including the shortcut and the `PATH` entry.
-  `demo --version` stops working, which is how you know.
-
-Where the installer puts things is in the `Location` line of the window, or in:
-
-```
+```sh
+zup check
+zup preview
 zup plan --scope user
+zup build
+zup artifact inspect "Demo App-Setup.exe"
 ```
 
-## Updating it
+Preview simulates installation without installing application files or changing system integration. Edit the manifest while it is open to test live updates; invalid edits leave the last valid preview running.
 
-Change `version` in `zup.toml` and run `zup build` again, then run the new
-installer over the old installation. That is the modify/replace path rather than
-an update-from-a-channel path: `[updates]` is not configured here, because it
-needs a real repository, channel and trusted root, and a demo with three invented
-values would fail at the point a real application would succeed.
+## Test the installer
 
-The update *buttons* are still there in the maintenance window, and `zup preview`
-can drive them from the console:
+Run `Demo App-Setup.exe`:
 
-```
-available 1.1.0
-up-to-date 1.0.0
-update-failed no route to host
-```
+1. Choose user or machine scope. Machine scope requires elevation.
+2. Toggle Documentation and Sample data and inspect the planned changes.
+3. Install, then check the Start menu, desktop shortcut, and `demo --version` in a new command prompt.
+4. Use Change to modify component selection.
+5. Delete `NOTES.txt` from the install directory and run Repair.
+6. Uninstall and verify that the managed files, shortcuts, and PATH entry are removed.
 
-## Installer branding
+To test an upgrade, change the application version, rebuild with `zup build --force`, and run the new installer. This example does not configure an update repository.
 
-The bundled preset supports a logo, accent colour, appearance, welcome heading
-and description, and compact, standard or wide initial windows. Unknown settings
-are rejected during validation.
+## Branding
 
-```toml
-[ui.settings]
-logo = "payload/branding/logo.svg"
-accent = "#3867d6"
-description = "A tiny application you can install, change, repair and remove."
-initial_window_size = "compact"
-```
+`[ui.settings]` configures the bundled preset's logo, accent, description, and initial window size. Unknown settings fail validation. A logo used by the installer UI is separate from an installed payload file.
 
-A preset logo is verified content read by the installer window. Shipping the same
-file as application payload is a separate choice: payload files are installed,
-repaired and removed through the application lifecycle.
-
-Custom native presets can expose additional settings and declare file settings
-with the SDK's `AssetRef` type. Preview resolves and verifies those assets again
-when the preset package changes.
-
-## Cleaning up
-
-```
-zup build --force
-```
-
-replaces the installer. To remove everything the demo installed, run the
-installer's own Uninstall from the maintenance window - that is the path worth
-exercising, and it is the one that has to take the `PATH` entry back out.
+See the [documentation](../../docs/guide/index.md) for manifest and preset authoring.

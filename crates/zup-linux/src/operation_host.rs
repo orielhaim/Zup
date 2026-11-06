@@ -17,6 +17,12 @@ pub struct LinuxOperationHost {
 }
 
 impl OperationHost for LinuxOperationHost {
+    fn prepare_bootstrap(
+        &self,
+        install: &DesiredState,
+    ) -> Result<Option<zup_runtime::BootstrapRequest>, String> {
+        crate::prerequisites::prepare(install)
+    }
     fn plan_build(
         &self,
         build: &zup_core::TargetBuildPlan,
@@ -32,11 +38,23 @@ impl OperationHost for LinuxOperationHost {
         }
         let carrier = crate::carrier::Carrier::open(&self.installer)
             .map_err(|error| zup_runtime::OperationError::refused("plugin", error))?;
-        let mut executor = zup_plugin_runtime::WasmtimePluginExecutor::load(
+        let executor = zup_plugin_runtime::WasmtimePluginExecutor::load(
             carrier.into_package(),
             &build.installer.target,
         )
         .map_err(|error| zup_runtime::OperationError::refused("plugin", error))?;
+        let mut executor = LinuxPluginExecutor {
+            inner: executor,
+            locations: self
+                .machine
+                .as_ref()
+                .map(|machine| {
+                    crate::locations::LinuxInstallLocationResolver::with_machine_roots(
+                        machine.roots.clone(),
+                    )
+                })
+                .unwrap_or_default(),
+        };
         zup_plan::plan(&planning, request, Some(&mut executor), cancellation)
             .map_err(zup_runtime::OperationError::from)
     }
@@ -103,6 +121,28 @@ impl OperationHost for LinuxOperationHost {
                 .as_ref()
                 .map(|machine| &machine.systemd)
                 .ok_or_else(|| "services need machine scope".to_owned())?;
+            if crate::openrc_native::active() {
+                let machine = self.machine.as_ref().ok_or("services need machine scope")?;
+                let manager = crate::openrc_native::Openrc::connect(machine.roots.clone())?;
+                if let (Some(target), Some(snapshot)) = (target, snapshot.as_mut()) {
+                    snapshot.services = manager.snapshot(target)?;
+                }
+                if let Some(ledger) = ledger {
+                    for (key, owned) in &ledger.resources {
+                        if let zup_plan::OwnedResource::Service {
+                            name, installed, ..
+                        } = owned
+                        {
+                            owned_matches.insert(
+                                key.clone(),
+                                manager.observe_registration(name)?.configuration().as_ref()
+                                    == Some(installed),
+                            );
+                        }
+                    }
+                }
+                return Ok((snapshot, owned_matches));
+            }
             let mut manager = crate::systemd::RealSystemd::connect()
                 .map_err(|error| format!("systemd is unavailable: {error}"))?;
             if let (Some(target), Some(snapshot)) = (target, snapshot.as_mut()) {
@@ -144,6 +184,16 @@ impl OperationHost for LinuxOperationHost {
         execution
             .validate_generation(_ledger)
             .map_err(|error| error.to_string())?;
+        if crate::openrc_native::active()
+            && (!execution.services.is_empty()
+                || execution.removals.iter().any(|removal| {
+                    matches!(removal.owned, zup_plan::OwnedResource::Service { .. })
+                }))
+        {
+            let machine = self.machine.as_ref().ok_or("services need machine scope")?;
+            let mut manager = crate::openrc_native::Openrc::connect(machine.roots.clone())?;
+            return manager.compile(execution, target, _ledger);
+        }
         match &self.machine {
             Some(machine)
                 if !execution.services.is_empty()
@@ -157,6 +207,7 @@ impl OperationHost for LinuxOperationHost {
                     execution,
                     target,
                     crate::input::ServiceCompilation {
+                        ledger: _ledger,
                         roots: &machine.roots,
                         systemd: &machine.systemd,
                         manager: &mut manager,
@@ -252,6 +303,36 @@ impl OperationHost for LinuxOperationHost {
     }
 }
 
+struct LinuxPluginExecutor {
+    inner: zup_plugin_runtime::WasmtimePluginExecutor,
+    locations: crate::locations::LinuxInstallLocationResolver,
+}
+
+impl zup_plan::PluginExecutor for LinuxPluginExecutor {
+    fn target(&self) -> &zup_core::Target {
+        self.inner.target()
+    }
+
+    fn plan(
+        &mut self,
+        binding: &zup_core::PluginBinding,
+        context: &zup_plan::PluginPlanningContext,
+        cancellation: &dyn zup_plan::CancellationQuery,
+    ) -> Result<zup_plan::PluginResourceProposal, zup_plan::PluginFailure> {
+        let root = zup_plan::resolve_template_path(
+            &context.install_directory,
+            &context.target,
+            &self.locations,
+            context.scope,
+        )
+        .map_err(|error| zup_plan::PluginFailure::internal(error.to_string()))?;
+        let mut context = context.clone();
+        context.install_directory = Template::parse(root.as_str())
+            .map_err(|error| zup_plan::PluginFailure::internal(error.to_string()))?;
+        self.inner.plan(binding, &context, cancellation)
+    }
+}
+
 fn attach_ui_runtime(
     target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
     scope: SelectedScope,
@@ -288,10 +369,15 @@ fn attach_ui_runtime(
 
 pub(crate) fn generated_content(
     prepared: &zup_runtime::PreparedOperation,
+    roots: Option<&crate::locations::MachineRoots>,
 ) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let resolver = roots
+        .cloned()
+        .map(crate::locations::LinuxInstallLocationResolver::with_machine_roots)
+        .unwrap_or_default();
     let mut generated = prepared
         .install_plan()
-        .map(crate::integration::generated_map)
+        .map(|plan| crate::integration::generated_map(plan, &resolver))
         .transpose()
         .map_err(|error| error.to_string())?
         .unwrap_or_default();

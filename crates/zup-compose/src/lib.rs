@@ -13,7 +13,7 @@ use zup_pe::{
 
 pub const CARRIER_MAGIC: &[u8; 17] = b"ZUP-LINUX-CARRIER";
 
-pub const CARRIER_VERSION: u32 = 2;
+pub const CARRIER_VERSION: u32 = 1;
 
 pub const CARRIER_FOOTER_LEN: u64 = 121;
 

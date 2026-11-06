@@ -9,7 +9,7 @@ use zup_core::{
     SelectedScope, ServiceStart, Sha256Digest, Target,
 };
 
-pub const INSTALL_LEDGER_SCHEMA: u32 = 2;
+pub const INSTALL_LEDGER_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallLedger {
@@ -126,6 +126,7 @@ pub enum OwnedResource {
         source_relative: RelativePath,
         sha256: Sha256Digest,
         size: u64,
+        executable: bool,
         created_directories: Vec<TargetPath>,
         privilege: Privilege,
     },
@@ -159,8 +160,10 @@ pub enum OwnedResource {
     Service {
         name: String,
         privilege: Privilege,
+        requires_files: Vec<crate::TargetPath>,
+        requires_services: Vec<zup_core::ServiceId>,
         previous: ServiceState,
-        installed: ServiceState,
+        installed: Box<ServiceState>,
     },
     Backend {
         id: BackendResourceId,
@@ -254,9 +257,13 @@ pub enum LauncherState {
 pub enum ServiceState {
     Absent,
     Registration {
+        dependencies: Vec<String>,
+        failure: zup_core::ServiceFailurePolicy,
+        execution: zup_core::ServiceExecution,
         display_name: String,
         command: CommandSpec,
         start: ServiceStart,
+        readiness: zup_core::ServiceReadiness,
     },
 }
 

@@ -187,7 +187,11 @@ fn observe_file(
     }
 
     *bytes_inspected = bytes_inspected.saturating_add(size);
-    Ok(ObservedFileState::File { size, sha256 })
+    Ok(ObservedFileState::File {
+        size,
+        sha256,
+        executable: None,
+    })
 }
 
 fn inspect_launchers(

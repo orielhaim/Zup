@@ -1,11 +1,11 @@
 # Check and preview
 
-| Command | Question |
-| --- | --- |
-| `zup check` | Is the project valid? |
-| `zup doctor` | Can this machine build the selected targets now? |
-| `zup plan` | What would the selected installation change? |
-| `zup preview` | What will the installer window present? |
+| Command       | Question                                         |
+| ------------- | ------------------------------------------------ |
+| `zup check`   | Is the project valid?                            |
+| `zup doctor`  | Can this machine build the selected targets now? |
+| `zup plan`    | What would the selected installation change?     |
+| `zup preview` | What will the installer window present?          |
 
 ```bash
 zup check

@@ -8,7 +8,10 @@ description = "Application icon compilation for zup"
 
 [dependencies]
 base64.workspace = true
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "webp",
+] }
 resvg = { version = "0.49", default-features = false, features = [
   "raster-images",
 ] }

@@ -12,7 +12,12 @@ mod plan;
 pub mod prelude;
 
 pub use api::{Context, Plugin, Scope};
-pub use plan::{Error, FileAssociation, Launcher, Path, Plan, Protocol, Service};
+pub use plan::{
+    ChangedServiceState, Error, FileAssociation, InitialServiceState, Launcher,
+    OpenrcFailurePolicy, Path, Plan, Protocol, Service, ServiceExecution, ServiceFailurePolicy,
+    ServiceLifecycle, ServiceReadiness, ServiceStart, SystemdFailurePolicy,
+    SystemdRestartCondition, SystemdUser, WindowsFailurePolicy, WindowsServiceAccount,
+};
 
 pub use api::__answer;
 

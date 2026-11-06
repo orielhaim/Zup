@@ -21,7 +21,11 @@ pub struct ObservedFile {
 #[serde(rename_all = "snake_case")]
 pub enum ObservedFileState {
     Absent,
-    File { size: u64, sha256: Sha256Digest },
+    File {
+        size: u64,
+        sha256: Sha256Digest,
+        executable: Option<bool>,
+    },
     NonFile,
 }
 
@@ -122,9 +126,13 @@ pub enum ObservedServiceState {
     Absent,
     InvalidService,
     Service {
+        dependencies: Vec<String>,
+        failure: zup_core::ServiceFailurePolicy,
+        execution: zup_core::ServiceExecution,
         display_name: String,
         command: CommandSpec,
         start: ServiceStart,
+        readiness: zup_core::ServiceReadiness,
         runtime_state: Option<ServiceRuntimeState>,
     },
 }
@@ -135,14 +143,22 @@ impl ObservedServiceState {
             Self::Absent => Some(crate::ServiceState::Absent),
             Self::InvalidService => None,
             Self::Service {
+                failure,
+                dependencies,
+                execution,
                 display_name,
                 command,
                 start,
+                readiness,
                 ..
             } => Some(crate::ServiceState::Registration {
+                failure: *failure,
+                dependencies: dependencies.clone(),
+                execution: execution.clone(),
                 display_name: display_name.clone(),
                 command: command.clone(),
                 start: *start,
+                readiness: *readiness,
             }),
         }
     }

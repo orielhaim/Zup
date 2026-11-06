@@ -17,9 +17,17 @@ pub enum ReconcileResult {
     Ambiguous,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollbackReconcileResult {
+    Restored,
+    Retry,
+    Ambiguous,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum OperationReceipt {
+    ServiceControl(Box<crate::ServiceControlReceipt>),
     Control,
     StageFile {
         staged_path: String,
@@ -59,6 +67,20 @@ pub enum OperationReceipt {
 impl OperationReceipt {
     pub fn validate(&self) -> Result<(), String> {
         match self {
+            Self::ServiceControl(receipt) => {
+                receipt.operation.validate()?;
+                if receipt.completion == crate::ServiceControlCompletion::CompensationOnly
+                    && receipt.operation.stage != crate::ServiceControlStage::Restore
+                {
+                    return Err("only an incomplete startup can carry compensation evidence".into());
+                }
+                if receipt.execution_generation.is_empty()
+                    || receipt.execution_generation.len() > 256
+                    || receipt.execution_generation.chars().any(char::is_control)
+                {
+                    return Err("invalid service execution generation".into());
+                }
+            }
             Self::Backend { key, payload } => {
                 if !matches!(key, ResourceKey::Backend { .. }) {
                     return Err("backend receipt key is not a backend resource".into());
@@ -125,6 +147,14 @@ pub trait OperationExecutor {
         operation: &TransactionNode,
         receipt: Option<&OperationReceipt>,
     ) -> Result<ReconcileResult, Self::Error>;
+
+    fn reconcile_rollback(
+        &mut self,
+        _operation: &TransactionNode,
+        _receipt: &OperationReceipt,
+    ) -> Result<RollbackReconcileResult, Self::Error> {
+        Ok(RollbackReconcileResult::Ambiguous)
+    }
 }
 
 pub trait CancellationProbe {

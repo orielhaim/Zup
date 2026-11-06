@@ -32,6 +32,7 @@ fn owned_file(work: &zup_plan::FileOperation) -> OwnedResource {
         sha256: digest(b"old"),
         size: 3,
         created_directories: Vec::new(),
+        executable: false,
         privilege: Privilege::User,
     }
 }
@@ -88,6 +89,7 @@ fn removal_cannot_forget_or_retarget_committed_resources() {
             sha256: removal.sha256,
             size: removal.size,
             created_directories: Vec::new(),
+            executable: false,
             privilege: Privilege::User,
         },
     );
@@ -286,10 +288,12 @@ fn malformed_ownership_cannot_change_resource_family_or_alias_an_identity() {
     installed.resources.insert(
         work.key.clone(),
         OwnedResource::Service {
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
             name: "foreign".into(),
             privilege: Privilege::System,
             previous: zup_plan::ServiceState::Absent,
-            installed: zup_plan::ServiceState::Absent,
+            installed: Box::new(zup_plan::ServiceState::Absent),
         },
     );
     assert!(!zup_transaction::validate_ledger_identity(

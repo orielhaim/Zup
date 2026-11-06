@@ -60,7 +60,7 @@ fact about the code rather than as a fact about a log line.
 
 ```bash
 bun install --frozen-lockfile
-bun run check          # everything, including the Node 24 run
+bun run verify         # everything
 bun run check:dist     # the committed bundle is current
 bun run local          # run the action on this machine
 ```

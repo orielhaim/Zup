@@ -18,7 +18,10 @@ pub enum ScmError {
 pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState, ScmError> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|error| ScmError::Unavailable(error.to_string()))?;
-    let service = match manager.open_service(name, ServiceAccess::QUERY_CONFIG) {
+    let service = match manager.open_service(
+        name,
+        ServiceAccess::QUERY_CONFIG | ServiceAccess::QUERY_STATUS,
+    ) {
         Ok(service) => service,
         Err(windows_service::Error::Winapi(error)) if error.raw_os_error() == Some(1060) => {
             return Ok(ObservedServiceState::Absent);
@@ -42,6 +45,55 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
             reason: "service type".to_owned(),
         });
     }
+    let account = config
+        .account_name
+        .as_ref()
+        .and_then(|value| value.to_str())
+        .and_then(|value| match value.to_ascii_lowercase().as_str() {
+            "nt authority\\localservice" => Some(zup_core::WindowsServiceAccount::LocalService),
+            "nt authority\\networkservice" => Some(zup_core::WindowsServiceAccount::NetworkService),
+            "localsystem" => Some(zup_core::WindowsServiceAccount::LocalSystem),
+            _ => None,
+        })
+        .ok_or_else(|| ScmError::Unsupported {
+            name: name.into(),
+            reason: "only explicitly modeled credential-free SCM accounts are supported".into(),
+        })?;
+    let dependencies = config
+        .dependencies
+        .iter()
+        .map(|dependency| match dependency {
+            windows_service::service::ServiceDependency::Service(name) => name
+                .to_str()
+                .map(|name| name.to_lowercase())
+                .ok_or_else(|| ScmError::Unsupported {
+                    name: name.to_string_lossy().into_owned(),
+                    reason: "invalid service dependency name".into(),
+                }),
+            _ => Err(ScmError::Unsupported {
+                name: name.into(),
+                reason: "SCM load-order group dependencies are not managed services".into(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if service
+        .get_config_service_sid_info()
+        .map_err(|error| ScmError::Unreadable {
+            name: name.into(),
+            reason: error.to_string(),
+        })?
+        != windows_service::service::ServiceSidType::Unrestricted
+    {
+        return Err(ScmError::Unsupported {
+            name: name.into(),
+            reason: "managed services require an unrestricted service SID".into(),
+        });
+    }
+    let failure =
+        crate::runtime_failure::observe(&service).map_err(|reason| ScmError::Unsupported {
+            name: name.into(),
+            reason,
+        })?;
     let command_line = config
         .executable_path
         .into_os_string()
@@ -76,9 +128,21 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
         }
     };
     Ok(ObservedServiceState::Service {
+        dependencies,
+        failure,
+        execution: zup_core::ServiceExecution::Windows { account },
+        readiness: Default::default(),
         display_name,
         command,
         start,
-        runtime_state: None,
+        runtime_state: Some(crate::service_control::runtime(
+            service
+                .query_status()
+                .map_err(|error| ScmError::Unreadable {
+                    name: name.into(),
+                    reason: error.to_string(),
+                })?
+                .current_state,
+        )),
     })
 }

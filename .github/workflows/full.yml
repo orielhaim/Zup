@@ -1,10 +1,6 @@
 name: Full Verification
 
 on:
-  push:
-    branches: [master]
-  schedule:
-    - cron: "0 4 * * 1"
   workflow_dispatch:
     inputs:
       sdk:
@@ -21,7 +17,7 @@ permissions:
 
 concurrency:
   group: full-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -92,9 +88,42 @@ jobs:
       - name: Toolchain
         run: cargo xtask toolchain build
 
+      - name: Build version-matched plugin test fixtures
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo xtask fixtures build
+
       - name: Windows tests
         if: runner.os == 'Windows'
         run: cargo nextest run --profile integration -p zup -p zup-installer -p zup-preview -p zup-windows --all-features --no-fail-fast
+
+      - name: Linux native installer service lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p zup
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          sudo python3 scripts/verify-systemd-service.py \
+            --zup "$PWD/target/debug/zup" \
+            --runtime "$PWD/target/debug/toolchain/$version/zup-setup-headless-linux-x64" \
+            --plugin "$PWD/target/test-fixtures/configure.wasm"
+
+      - name: Windows native SCM lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/verify-windows-services.ps1
+
+      - name: Windows generated installer service lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --locked -p zup
+          if ($LASTEXITCODE -ne 0) { throw 'CLI build failed.' }
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $runtime = "$PWD/target/debug/toolchain/$version/zup-setup-headless-windows-x64.exe"
+          ./scripts/verify-windows-service-installer.ps1 -Zup "$PWD/target/debug/zup.exe" -Runtime $runtime -Service "$PWD/target/debug/zup-test-service.exe"
+          ./scripts/verify-windows-service-installer.ps1 -Zup "$PWD/target/debug/zup.exe" -Runtime $runtime -Service "$PWD/target/debug/zup-test-service.exe" -RecoveryPolicy
 
       - name: Linux tests
         if: runner.os == 'Linux'
@@ -330,3 +359,28 @@ jobs:
         run: |
           tooling/zup.exe schema --output schema/zup.schema.json
           git diff --exit-code -- schema/zup.schema.json
+
+  terminal-arm64:
+    name: terminal ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04-arm, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: terminal-${{ runner.os }}-${{ runner.arch }}-debug0
+          cache-on-failure: false
+
+      - name: Terminal and automation lifecycle
+        run: cargo test -p zup-installer --no-default-features --features console,headless,online --test terminal

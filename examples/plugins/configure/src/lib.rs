@@ -29,7 +29,117 @@ impl Plugin for Configure {
             },
         );
 
-        Ok(Plan::new().generated_file(GeneratedFile::text("${install}/configure.txt", report)))
+        let mut plan =
+            Plan::new().generated_file(GeneratedFile::text("${install}/configure.txt", report));
+        let resources = components.iter().any(|component| component == "resources");
+        if resources {
+            plan = plan
+                .launcher(Launcher::menu("Worker", "${install}/worker"))
+                .path_entry(Path::new("${install}/bin"));
+        }
+        if resources || components.iter().any(|component| component == "service") {
+            if context.scope != Scope::Machine {
+                return Err(Error::unsupported(
+                    "the service component requires machine scope",
+                ));
+            }
+            let linux = context.target.starts_with("linux-");
+            let dependencies = if components
+                .iter()
+                .any(|component| component == "dependencies")
+            {
+                let id = format!("{}.storage", context.app_id);
+                plan = plan.service(
+                    Service::new(
+                        id.clone(),
+                        "Storage",
+                        if linux {
+                            "${install}/worker"
+                        } else {
+                            "${install}/worker.exe"
+                        },
+                        if linux {
+                            ServiceExecution::SystemdDynamicUser
+                        } else {
+                            ServiceExecution::Windows(WindowsServiceAccount::LocalService)
+                        },
+                    )
+                    .with_readiness(if linux {
+                        ServiceReadiness::Notify
+                    } else {
+                        ServiceReadiness::Manager
+                    })
+                    .with_required_files(["${install}/configure.txt"])
+                    .with_lifecycle(ServiceLifecycle {
+                        install: InitialServiceState::Running,
+                        change: ChangedServiceState::Preserve,
+                        start_timeout_seconds: 17,
+                        stop_timeout_seconds: 23,
+                    }),
+                );
+                vec![id]
+            } else {
+                Vec::new()
+            };
+            let failure = if components.iter().any(|component| component == "failure") {
+                if linux {
+                    ServiceFailurePolicy::Systemd(SystemdFailurePolicy {
+                        condition: SystemdRestartCondition::OnFailure,
+                        delay_seconds: 2,
+                        start_limit_burst: 3,
+                        start_limit_interval_seconds: 60,
+                    })
+                } else {
+                    ServiceFailurePolicy::Windows(WindowsFailurePolicy {
+                        delay_seconds: 2,
+                        restart_attempts: 2,
+                        reset_seconds: 60,
+                    })
+                }
+            } else {
+                ServiceFailurePolicy::None
+            };
+            plan = plan.service(
+                Service::new(
+                    format!("{}.worker", context.app_id),
+                    "Worker",
+                    if linux {
+                        "${install}/worker"
+                    } else {
+                        "${install}/worker.exe"
+                    },
+                    if linux {
+                        ServiceExecution::SystemdDynamicUser
+                    } else {
+                        ServiceExecution::Windows(WindowsServiceAccount::LocalService)
+                    },
+                )
+                .with_readiness(if linux {
+                    ServiceReadiness::Notify
+                } else {
+                    ServiceReadiness::Manager
+                })
+                .with_failure_policy(failure)
+                .with_required_services(dependencies)
+                .with_required_files(["${install}/configure.txt"])
+                .with_lifecycle(ServiceLifecycle {
+                    install: InitialServiceState::Running,
+                    change: ChangedServiceState::Preserve,
+                    start_timeout_seconds: 17,
+                    stop_timeout_seconds: 23,
+                }),
+            );
+        }
+        if resources {
+            plan = plan
+                .protocol(Protocol::new("worker", "${install}/worker").with_arguments(["%1"]))
+                .file_association(FileAssociation::new(
+                    "Worker.Document",
+                    ".worker",
+                    "${install}/worker",
+                ));
+        }
+        Ok(plan)
     }
 }
 

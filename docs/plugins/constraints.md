@@ -17,14 +17,14 @@ A refused plugin rejects planning; Zup does not keep a partial set of resources.
 
 ## Resource limits
 
-| Limit | Value |
-| --- | ---: |
-| Resources returned by one plan | 4,096 |
-| Encoded plan | 8 MiB |
-| Fuel per call | 100,000,000 |
-| Wall clock per call | 250 ms |
-| Memory | 32 MiB across at most 4 memories |
-| Host calls | 0 |
-| Plugin error text | 512 bytes |
+| Limit                          |                            Value |
+| ------------------------------ | -------------------------------: |
+| Resources returned by one plan |                            4,096 |
+| Encoded plan                   |                            8 MiB |
+| Fuel per call                  |                      100,000,000 |
+| Wall clock per call            |                           250 ms |
+| Memory                         | 32 MiB across at most 4 memories |
+| Host calls                     |                                0 |
+| Plugin error text              |                        512 bytes |
 
 `Plan::validate()` checks the first of these inside the plugin.

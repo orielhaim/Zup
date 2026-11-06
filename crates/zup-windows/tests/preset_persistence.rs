@@ -214,6 +214,7 @@ fn a_replacement_retires_the_content_the_window_it_replaces_owned() {
                 destination: zup_windows::plain_path_text(&path),
             },
             zup_plan::OwnedResource::File {
+                executable: true,
                 destination: target_path(&path),
                 sha256: digest,
                 size: 1,
@@ -295,6 +296,7 @@ fn dropping_the_window_without_retiring_its_content_is_refused() {
                 destination: zup_windows::plain_path_text(&path),
             },
             zup_plan::OwnedResource::File {
+                executable: true,
                 destination: target_path(&path),
                 sha256: digest,
                 size: 1,
@@ -380,7 +382,7 @@ fn each_scope_keeps_its_own_window_under_its_own_authority() {
 fn the_persisted_window_is_the_runtime_model() {
     let ui = window(b"a preset executable", b"<svg/>");
     let ledger: InstallLedger = serde_json::from_value(serde_json::json!({
-        "schema": 2,
+        "schema": zup_plan::INSTALL_LEDGER_SCHEMA,
         "app_id": "com.zup.test-ui",
         "scope": "user",
         "target": "windows-x64",
@@ -410,13 +412,13 @@ fn the_persisted_window_is_the_runtime_model() {
 }
 
 #[test]
-fn a_ledger_of_a_superseded_format_is_refused() {
+fn a_ledger_with_an_unknown_schema_is_refused() {
     let state_root = tempfile::tempdir().expect("a state root");
     let store = zup_windows::InstallLedgerStore::new(state_root.path());
     zup_transaction::publish_private(
         &store.path_for(&app_id(), SelectedScope::User),
         &serde_json::to_vec(&serde_json::json!({
-            "schema": 1,
+            "schema": zup_plan::INSTALL_LEDGER_SCHEMA + 1,
             "app_id": "com.zup.test-ui",
             "scope": "user",
             "target": "windows-x64",
@@ -433,6 +435,6 @@ fn a_ledger_of_a_superseded_format_is_refused() {
     let read = store.load(&app_id(), SelectedScope::User);
     assert!(
         read.is_err(),
-        "a record that says nothing about a window is refused rather than read as having none"
+        "an unknown ledger schema must not authorize deployment"
     );
 }

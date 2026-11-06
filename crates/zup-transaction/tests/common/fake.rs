@@ -42,6 +42,7 @@ pub struct FakeExecutor {
     pub reconcile_calls: Vec<String>,
     pub fail_prepare_at: Option<usize>,
     pub fail_verify_at: Option<usize>,
+    pub fail_verify_operation: Option<OperationId>,
     pub fail_apply_at: Option<usize>,
     pub fail_rollback_at: Option<usize>,
     pub reconcile_result: ReconcileResult,
@@ -179,6 +180,13 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
                 payload: b"opaque".to_vec(),
             }
         }
+        NodeKind::ServiceControl { operation } => {
+            OperationReceipt::ServiceControl(Box::new(zup_transaction::ServiceControlReceipt {
+                operation: operation.as_ref().clone(),
+                completion: zup_transaction::ServiceControlCompletion::Reached,
+                execution_generation: "fake-execution".into(),
+            }))
+        }
         NodeKind::Barrier => OperationReceipt::Control,
     }
 }
@@ -216,7 +224,9 @@ impl OperationExecutor for FakeExecutor {
         _receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         self.record("verify", operation);
-        if self.fail_verify_at == Some(self.verified.len()) {
+        if self.fail_verify_at == Some(self.verified.len())
+            || self.fail_verify_operation.as_ref() == Some(&operation.id)
+        {
             return Err(format!(
                 "injected verify failure at {}",
                 operation.id.as_str()

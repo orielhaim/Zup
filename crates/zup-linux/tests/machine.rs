@@ -16,9 +16,8 @@ use zup_linux::LinuxOutcome;
 use zup_linux::test_support::{
     MachineTestRoots, compose_installer, drive_client_isolated, inert_template, machine_fixture,
     machine_fixture_override, machine_install_dir, machine_maintenance_path, machine_package_bytes,
-    machine_v1_files, machine_v2_files, plan_for_test, recv_envelope_on,
-    run_machine_elevated_for_test, run_machine_isolated, run_tool, send_envelope_on,
-    serve_worker_isolated, validate_rendezvous_for_test,
+    machine_v1_files, machine_v2_files, plan_for_test, recv_envelope_on, run_machine_isolated,
+    run_tool, send_envelope_on, serve_worker_isolated, validate_rendezvous_for_test,
 };
 use zup_protocol::{
     ExecuteOperation, Message, PROTOCOL_VERSION, PrepareOperation, SessionId, WireEnvelope,
@@ -746,7 +745,7 @@ fn machine_package_substitution_is_detected() {
     compose_installer(
         Path::new(inert_template()),
         &swap,
-        &machine_package_bytes(scratch.path(), "1.0.0", &machine_v2_files(), false),
+        &machine_package_bytes(scratch.path(), "1.0.0", &machine_v2_files(), false, &[]),
     );
     std::fs::rename(&swap, &installer).expect("swap");
     send_envelope_on(
@@ -1439,9 +1438,8 @@ fn machine_launcher_failures_surface_at_once() {
 
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
-    // The elevated client binds machine state to the production namespace
-    // before elevation, so launcher mapping is exercised from there.
-    let production = zup_linux::MachineRoots::production();
+    let (_base, roots) = isolated();
+    let (intent, plan) = plan_for_test(&installer, &roots, Operation::Install, None);
     let cases = [
         (
             "dismissal",
@@ -1466,12 +1464,8 @@ fn machine_launcher_failures_surface_at_once() {
             }),
         };
         let start = std::time::Instant::now();
-        let outcome = run_machine_elevated_for_test(
-            &installer,
-            &production.state,
-            Operation::Install,
-            None,
-            &launcher,
+        let outcome = zup_linux::test_support::launch_prepared_for_test(
+            &installer, &intent, &plan, &launcher,
         );
         let elapsed = start.elapsed();
         assert!(
@@ -1484,4 +1478,48 @@ fn machine_launcher_failures_surface_at_once() {
             "{name}: expected `{expect}` in `{error}`"
         );
     }
+}
+
+#[test]
+fn machine_path_configuration_is_owned_through_the_worker_lifecycle() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().unwrap();
+    let entries = [zup_core::PathEntry {
+        value: Template::parse("${install}").unwrap(),
+        component: None,
+        when: None,
+    }];
+    let package = machine_package_bytes(
+        scratch.path(),
+        "1.0.0",
+        &machine_v1_files(),
+        false,
+        &entries,
+    );
+    let installer = scratch.path().join("path-setup");
+    compose_installer(Path::new(inert_template()), &installer, &package);
+    commit(
+        &roots,
+        &installer,
+        Operation::Apply,
+        None,
+        "machine PATH install",
+    );
+    let config = roots
+        .roots
+        .environment
+        .join("99-zup-machine-com.example.tool.conf");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        text.contains(machine_install_dir(&roots.roots).to_str().unwrap()),
+        "{text}"
+    );
+    commit(
+        &roots,
+        &installer,
+        Operation::Uninstall,
+        None,
+        "machine PATH uninstall",
+    );
+    assert!(!config.exists());
 }

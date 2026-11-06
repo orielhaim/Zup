@@ -254,6 +254,7 @@ value = "${install}/bin"
 targets = ["linux-arm64"]
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "windows-service"
 name = "Windows Service"
 binary = "${install}/service.exe"
@@ -384,6 +385,7 @@ targets = ["missing"]
     "service",
     r#"
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "agent"
 name = "Agent"
 binary = "${install}/service.exe"

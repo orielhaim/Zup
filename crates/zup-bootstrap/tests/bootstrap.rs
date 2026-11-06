@@ -282,3 +282,35 @@ fn crash_recovery_re_detects_running_operation() {
     );
     assert_eq!(state.phase, zup_bootstrap::BootstrapPhase::RecoveryRequired);
 }
+
+#[test]
+fn detect_only_missing_requirements_never_launch_a_provider() {
+    let plan = plan(zup_core::PrerequisitePackage::DetectOnly);
+    let satisfied = Arc::new(Mutex::new(false));
+    let satisfier = FakeSatisfier {
+        satisfied: satisfied.clone(),
+    };
+    let provider = FakeProvider {
+        satisfied: satisfied.clone(),
+        outcome: ProviderOutcome::Succeeded,
+        satisfy_on_success: true,
+    };
+    let mut state = BootstrapState::new(&plan);
+    let operation = &plan.operations[0];
+    assert!(matches!(
+        execute_operation(
+            &plan,
+            operation,
+            &satisfier,
+            &provider,
+            Default::default(),
+            &mut state
+        ),
+        Err(BootstrapError::Requirement(_))
+    ));
+    assert!(!*satisfied.lock().unwrap());
+    assert!(matches!(
+        state.operations[0].state,
+        BootstrapOperationState::Pending
+    ));
+}

@@ -11,9 +11,8 @@
 //!
 //! Architecture always. An operating system only when the format records one: a
 //! PE is a Windows image, an ELF says so when its OSABI is not the System V
-//! default, and a Mach-O only from `LC_BUILD_VERSION`. No format records a vendor
-//! or an ABI, so [`refuse_target`](crate::Executable::refuse_target) never
-//! compares one.
+//! default, and a Mach-O only from `LC_BUILD_VERSION`. Dynamic ELF interpreters
+//! distinguish GNU and musl loaders. Static binaries do not identify a C library.
 //!
 //! This crate reads. Writing a PE that is about to be signed has to reproduce
 //! section alignment, the resource directory and the certificate table exactly,
@@ -203,6 +202,7 @@ pub struct Executable {
     architectures: Architectures,
     program: Option<ProgramKind>,
     operating_system: Option<TargetOperatingSystem>,
+    interpreter: Option<String>,
 }
 
 impl Executable {
@@ -235,6 +235,11 @@ impl Executable {
             architectures: Architectures(architectures),
             program,
             operating_system,
+            interpreter: if format == BinaryFormat::Elf {
+                elf_interpreter(bytes)?
+            } else {
+                None
+            },
         })
     }
 
@@ -264,6 +269,35 @@ impl Executable {
 
     pub fn operating_system(&self) -> Option<TargetOperatingSystem> {
         self.operating_system
+    }
+
+    pub fn interpreter(&self) -> Option<&str> {
+        self.interpreter.as_deref()
+    }
+}
+
+fn elf_interpreter(bytes: &[u8]) -> Result<Option<String>, InspectError> {
+    fn read<H: ProgramHeader<Endian = Endianness>>(
+        headers: &[H],
+        endian: Endianness,
+        bytes: &[u8],
+    ) -> Result<Option<String>, InspectError> {
+        let mut found = None;
+        for header in headers {
+            if let Some(value) = header.interpreter(endian, bytes).map_err(malformed)? {
+                if found.is_some() {
+                    return Err(malformed("multiple ELF interpreters"));
+                }
+                found = Some(std::str::from_utf8(value).map_err(malformed)?.to_owned());
+            }
+        }
+        Ok(found)
+    }
+    let file = File::parse(bytes).map_err(malformed)?;
+    match &file {
+        File::Elf32(image) => read(image.elf_program_headers(), image.endian(), bytes),
+        File::Elf64(image) => read(image.elf_program_headers(), image.endian(), bytes),
+        _ => Ok(None),
     }
 }
 
@@ -421,6 +455,7 @@ fn apple_platform<End: Endian>(
 fn elf_is_program<'data>(file: &File<'data, &'data [u8]>) -> bool {
     match file.kind() {
         ObjectKind::Executable => true,
+        ObjectKind::Dynamic if file.entry() != 0 => true,
         ObjectKind::Dynamic => match file {
             File::Elf32(image) => asks_for_a_loader(image.elf_program_headers()),
             File::Elf64(image) => asks_for_a_loader(image.elf_program_headers()),

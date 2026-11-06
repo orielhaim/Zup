@@ -11,11 +11,11 @@ scope = "user"
 
 Valid scopes:
 
-| Value | Meaning |
-| --- | --- |
-| `user` | Install for the signed-in user |
-| `machine` | Install for the machine |
-| `either` | Let the installer choose between user and machine scope |
+| Value     | Meaning                                                 |
+| --------- | ------------------------------------------------------- |
+| `user`    | Install for the signed-in user                          |
+| `machine` | Install for the machine                                 |
+| `either`  | Let the installer choose between user and machine scope |
 
 Use `either` when the person installing should choose the scope. Thin and offline
 launchers collect that choice before acquisition. Automation must pass
@@ -41,14 +41,14 @@ Only configure the scope paths your project can use.
 
 Paths are templates with `${...}` placeholders. There is no nesting, escaping, or default-value syntax; a `$` that does not start a placeholder is literal.
 
-| Placeholder | Resolves to |
-| --- | --- |
-| `${app.id}`, `${app.name}`, `${app.version}` | application identity |
-| `${install}` | install root for the selected scope |
-| `${location.programs}` | Programs directory |
-| `${location.user_data}` | user application data |
-| `${location.shared_data}` | machine-wide application data |
-| `${location.menu}`, `${location.desktop}` | Start menu, desktop |
+| Placeholder                                  | Resolves to                         |
+| -------------------------------------------- | ----------------------------------- |
+| `${app.id}`, `${app.name}`, `${app.version}` | application identity                |
+| `${install}`                                 | install root for the selected scope |
+| `${location.programs}`                       | Programs directory                  |
+| `${location.user_data}`                      | user application data               |
+| `${location.shared_data}`                    | machine-wide application data       |
+| `${location.menu}`, `${location.desktop}`    | Start menu, desktop                 |
 
 `${app.*}` and `${install}` resolve at build time. `${location.*}` resolves on the target machine. `${install}` cannot appear in `[install.directory]` itself.
 

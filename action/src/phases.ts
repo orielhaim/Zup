@@ -32,20 +32,21 @@
  * fact the table states rather than a gap the code has to notice.
  */
 
-import type { Inputs } from './inputs.js'
-import type { Operation } from './protocol.js'
+import type { Inputs } from "./inputs.js";
+import type { Operation } from "./protocol.js";
 
 /** The workflow steps this action can run. */
-export type Phase = 'check' | 'build' | 'compose' | 'finalize' | 'attest' | 'publish'
+export type Phase =
+  "check" | "build" | "compose" | "finalize" | "attest" | "publish";
 
 /** The release manifest file name zup writes. */
-export const RELEASE_MANIFEST_NAME = 'zup-release.json'
+export const RELEASE_MANIFEST_NAME = "zup-release.json";
 
 /** The signing plan file name zup writes beside the release manifest. */
-export const SIGNING_PLAN_NAME = 'zup-signing.json'
+export const SIGNING_PLAN_NAME = "zup-signing.json";
 
 /** The machine format every phase runs with. */
-export const FORMAT_JSONL = 'jsonl'
+export const FORMAT_JSONL = "jsonl";
 
 /**
  * The zup operation a phase runs, or `undefined` when it runs no zup command.
@@ -57,18 +58,18 @@ export const FORMAT_JSONL = 'jsonl'
  */
 export function operationFor(phase: Phase): Operation | undefined {
   switch (phase) {
-    case 'check':
-      return 'check'
-    case 'build':
-      return 'build'
-    case 'compose':
-      return 'publish.stage'
-    case 'finalize':
-      return 'sign.verify'
-    case 'attest':
-      return undefined
-    case 'publish':
-      return 'publish.github'
+    case "check":
+      return "check";
+    case "build":
+      return "build";
+    case "compose":
+      return "publish.stage";
+    case "finalize":
+      return "sign.verify";
+    case "attest":
+      return undefined;
+    case "publish":
+      return "publish.github";
   }
 }
 
@@ -80,22 +81,22 @@ export function operationFor(phase: Phase): Operation | undefined {
  */
 export function phasesFor(operation: string): Phase[] {
   switch (operation) {
-    case 'check':
-      return ['check']
-    case 'build':
-      return ['build']
-    case 'compose':
-      return ['compose']
-    case 'finalize':
-      return ['finalize']
-    case 'attest':
-      return ['attest']
-    case 'publish':
-      return ['publish']
-    case 'release':
-      return ['build', 'compose', 'finalize', 'attest', 'publish']
+    case "check":
+      return ["check"];
+    case "build":
+      return ["build"];
+    case "compose":
+      return ["compose"];
+    case "finalize":
+      return ["finalize"];
+    case "attest":
+      return ["attest"];
+    case "publish":
+      return ["publish"];
+    case "release":
+      return ["build", "compose", "finalize", "attest", "publish"];
     default:
-      return []
+      return [];
   }
 }
 
@@ -107,82 +108,82 @@ export function phasesFor(operation: string): Phase[] {
  * last so a typed input can be overridden.
  */
 export function argumentsFor(phase: Phase, inputs: Inputs): string[] {
-  return [...phaseArguments(phase, inputs), ...inputs.args]
+  return [...phaseArguments(phase, inputs), ...inputs.args];
 }
 
 function phaseArguments(phase: Phase, inputs: Inputs): string[] {
-  const operation = operationFor(phase)
+  const operation = operationFor(phase);
   if (operation === undefined) {
-    return []
+    return [];
   }
-  return [...commandFor(phase, inputs), '--format', FORMAT_JSONL]
+  return [...commandFor(phase, inputs), "--format", FORMAT_JSONL];
 }
 
 function commandFor(phase: Phase, inputs: Inputs): string[] {
   switch (phase) {
-    case 'check':
+    case "check":
       // No path and no target: `zup check` answers from the project the working
       // directory names, which is the question a check is - whether this project
       // can be built - rather than a question about one target's output.
-      return ['check']
-    case 'build': {
-      const args = ['build']
+      return ["check"];
+    case "build": {
+      const args = ["build"];
       for (const target of inputs.targets) {
-        args.push('--target', target)
+        args.push("--target", target);
       }
       for (const artifact of inputs.artifacts) {
-        args.push('--artifact', artifact)
+        args.push("--artifact", artifact);
       }
-      args.push('--output', inputs.releaseDir)
-      args.push('--release-manifest', releaseManifestPath(inputs.releaseDir))
-      return args
+      args.push("--output", inputs.releaseDir);
+      args.push("--release-manifest", releaseManifestPath(inputs.releaseDir));
+      return args;
     }
-    case 'compose':
+    case "compose":
       return [
-        'publish',
-        'stage',
-        '--output',
+        "publish",
+        "stage",
+        "--output",
         `${inputs.releaseDir}/web`,
-        '--packages',
+        "--packages",
         `${inputs.releaseDir}/packages`,
-        '--release-dir',
+        "--release-dir",
         inputs.releaseDir,
-      ]
-    case 'finalize': {
-      const args = ['sign', 'verify', '--release-dir', inputs.releaseDir]
+      ];
+    case "finalize": {
+      const args = ["sign", "verify", "--release-dir", inputs.releaseDir];
       if (inputs.allowUnsigned) {
-        args.push('--allow-unsigned')
+        args.push("--allow-unsigned");
       }
       if (inputs.onlineRevocation) {
-        args.push('--online-revocation')
+        args.push("--online-revocation");
       }
-      return args
+      return args;
     }
-    case 'publish': {
+    case "publish": {
       const args = [
-        'publish',
-        'github',
-        '--release-dir',
+        "publish",
+        "github",
+        "--release-dir",
         inputs.releaseDir,
-        '--web',
+        "--web",
         `${inputs.releaseDir}/web`,
-        '--packages',
+        "--packages",
         `${inputs.releaseDir}/packages`,
-      ]
+      ];
       if (inputs.receipt !== undefined) {
-        args.push('--receipt', inputs.receipt)
+        args.push("--receipt", inputs.receipt);
       }
       if (inputs.repo !== undefined) {
-        args.push('--repo', inputs.repo)
+        args.push("--repo", inputs.repo);
       }
       if (inputs.tag !== undefined) {
-        args.push('--tag', inputs.tag)
+        args.push("--tag", inputs.tag);
       }
       if (inputs.draft) {
-        args.push('--draft')
+        args.push("--draft");
       }
       if (inputs.prerelease) {
-        args.push('--prerelease')
+        args.push("--prerelease");
       }
       if (inputs.dryRun) {
         // Only here. `zup publish stage` has no `--dry-run`: staging writes into
@@ -190,31 +191,31 @@ function commandFor(phase: Phase, inputs: Inputs): string[] {
         // leave alone because the whole release is disposable. Passing the flag
         // anyway used to be refused by the parser, so a dry-run `release` failed
         // in its second phase.
-        args.push('--dry-run')
+        args.push("--dry-run");
       }
-      return args
+      return args;
     }
-    case 'attest':
-      return []
+    case "attest":
+      return [];
   }
 }
 
 /** The release manifest path, relative to the project. */
 export function releaseManifestPath(releaseDir: string): string {
-  return `${releaseDir}/${RELEASE_MANIFEST_NAME}`
+  return `${releaseDir}/${RELEASE_MANIFEST_NAME}`;
 }
 
 /** The signing plan path, relative to the project. */
 export function signingPlanPath(releaseDir: string): string {
-  return `${releaseDir}/${SIGNING_PLAN_NAME}`
+  return `${releaseDir}/${SIGNING_PLAN_NAME}`;
 }
 
 /** Whether a phase is the one that needs the publish credential. */
 export function needsToken(phase: Phase): boolean {
-  return phase === 'publish'
+  return phase === "publish";
 }
 
 /** Whether a phase produces a release directory worth uploading. */
 export function producesArtifacts(phase: Phase): boolean {
-  return phase === 'build' || phase === 'compose' || phase === 'finalize'
+  return phase === "build" || phase === "compose" || phase === "finalize";
 }

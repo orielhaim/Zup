@@ -46,20 +46,58 @@ pub fn resolve_target(
             }
             service_ids.insert(identity, service.name.to_string());
 
-            let unit =
+            let openrc = matches!(
+                service.execution,
+                zup_core::ServiceExecution::OpenrcUser { .. }
+            );
+            let unit = if openrc {
+                crate::openrc::service_name(&service.id)
+            } else {
                 crate::services::unit_name(&service.id).map_err(|error| PathError::Invalid {
                     kind: "service id",
                     path: service.id.to_string(),
                     reason: error.to_string(),
-                })?;
+                })?
+            };
 
-            let synthetic = zup_plan::DesiredService {
+            let display = service
+                .display_name
+                .as_ref()
+                .unwrap_or(&service.name)
+                .clone();
+            let resolved = zup_plan::DesiredService {
+                failure: service.failure,
+                execution: service.execution.clone(),
+                lifecycle: service.lifecycle,
+                readiness: service.readiness,
+                requires_services: service.requires_services.clone(),
+                dependency_names: service
+                    .requires_services
+                    .iter()
+                    .map(|id| {
+                        if openrc {
+                            Ok(crate::openrc::service_name(id))
+                        } else {
+                            crate::services::unit_name(id).map_err(|error| {
+                                PlanError::ServiceRefused {
+                                    id: id.to_string(),
+                                    reason: error.to_string(),
+                                }
+                            })
+                        }
+                    })
+                    .collect::<Result<_, _>>()?,
+                requires_files: service
+                    .requires_files
+                    .iter()
+                    .map(|path| resolve(path, "service required file"))
+                    .collect::<Result<_, _>>()?,
                 key: ResourceKey::Service {
                     id: service.id.clone(),
                 },
                 id: service.id.clone(),
-                name: service.name.clone(),
-                display_name: service.display_name.clone(),
+                name: zup_core::NonEmptyString::new(&unit).expect("derived unit is nonempty"),
+                display_name: Some(display.clone()),
                 command: zup_plan::CommandSpec::new(
                     binary.clone(),
                     service.command.arguments.clone(),
@@ -67,29 +105,24 @@ pub fn resolve_target(
                 start: service.start,
                 privilege: service.privilege,
             };
-            let display = service
-                .display_name
-                .as_ref()
-                .map(|name| name.to_string())
-                .unwrap_or_else(|| service.name.to_string());
-            crate::services::render_unit(&synthetic, &display).map_err(|error| {
-                PathError::Invalid {
-                    kind: "service command",
-                    path: unit.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
-            services.push(zup_plan::DesiredService {
-                key: ResourceKey::Service {
-                    id: service.id.clone(),
-                },
-                id: service.id.clone(),
-                name: service.name.clone(),
-                display_name: service.display_name.clone(),
-                command: zup_plan::CommandSpec::new(binary, service.command.arguments.clone()),
-                start: service.start,
-                privilege: service.privilege,
-            });
+            if openrc {
+                crate::openrc::render(&unit, &crate::openrc::registration(&resolved)).map_err(
+                    |reason| PathError::Invalid {
+                        kind: "OpenRC service",
+                        path: unit.clone(),
+                        reason,
+                    },
+                )?;
+            } else {
+                crate::services::render_unit(&resolved, display.as_str()).map_err(|error| {
+                    PathError::Invalid {
+                        kind: "service command",
+                        path: unit.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            }
+            services.push(resolved);
         }
     }
 
@@ -103,16 +136,17 @@ pub fn resolve_target(
             },
         ),
     })?;
-    let integration = crate::integration::lower_integration_with(plan, &data_home).map_err(
-        |error| match error {
-            PlanError::Unsupported { reasons } => PlanError::Unsupported { reasons },
-            PlanError::IntegrationUnsupported(reasons) => PlanError::Unsupported { reasons },
-            other => PlanError::InvalidTargetPath {
-                path: String::new(),
-                reason: other.to_string(),
-            },
+    let integration = crate::integration::lower_integration_with_resolver(
+        plan, &data_home, resolver,
+    )
+    .map_err(|error| match error {
+        PlanError::Unsupported { reasons } => PlanError::Unsupported { reasons },
+        PlanError::IntegrationUnsupported(reasons) => PlanError::Unsupported { reasons },
+        other => PlanError::InvalidTargetPath {
+            path: String::new(),
+            reason: other.to_string(),
         },
-    )?;
+    })?;
     for generated in &integration.files {
         files.push(DesiredFile {
             key: generated.key.clone(),
@@ -126,8 +160,11 @@ pub fn resolve_target(
             destination: generated.destination.clone(),
             size: generated.size,
             sha256: generated.sha256,
-            executable: false,
-            privilege: zup_core::Privilege::User,
+            executable: generated.executable,
+            privilege: match scope {
+                SelectedScope::User => zup_core::Privilege::User,
+                SelectedScope::Machine => zup_core::Privilege::System,
+            },
         });
     }
 
@@ -196,7 +233,7 @@ pub fn validate_target_plan(
     if plan.scope != zup_core::SelectedScope::Machine {
         unsupported("service", plan.services.len());
     }
-    unsupported("package-manager prerequisite", plan.prerequisites.len());
+
     unsupported("launcher", plan.launchers.len());
     unsupported("PATH entry", plan.path_entries.len());
     unsupported("URI protocol", plan.protocols.len());
@@ -332,6 +369,16 @@ mod tests {
     fn services_are_refused_with_everything_named() {
         let mut input = plan();
         input.services.push(zup_plan::DesiredService {
+            failure: Default::default(),
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },
@@ -417,6 +464,16 @@ mod tests {
 
     fn machine_service(start: zup_core::ServiceStart) -> zup_plan::DesiredService {
         zup_plan::DesiredService {
+            failure: Default::default(),
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },
@@ -562,6 +619,16 @@ mod tests {
 
     fn target_service(target: &zup_core::Target) -> zup_plan::DesiredService<zup_plan::TargetPath> {
         zup_plan::DesiredService {
+            failure: Default::default(),
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: zup_core::ResourceKey::Service {
                 id: zup_core::ServiceId::new("tool").expect("an id"),
             },

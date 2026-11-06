@@ -1,6 +1,6 @@
 pub const PLUGIN_API_VERSION: &str = "1.0.0";
 
-pub const WASMTIME_VERSION: &str = "50.0.0";
+pub const WASMTIME_VERSION: &str = "50.0.1";
 
 pub const AOT_FORMAT_VERSION: u32 = 1;
 

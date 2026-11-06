@@ -43,6 +43,40 @@ fn with(src: &str) -> String {
     format!("{}\n{}", base(), src.trim_start())
 }
 
+#[rstest]
+#[case::windows("windows-x64", false)]
+#[case::linux("linux-x64", true)]
+fn notify_readiness_is_validated_for_the_target(#[case] target: &str, #[case] supported: bool) {
+    let text = with(
+        r#"
+[[services]]
+execution = { type = "windows", account = "local_service" }
+id = "worker"
+name = "Worker"
+binary = "${install}/worker"
+start = "manual"
+readiness = "notify"
+"#,
+    )
+    .replace("windows-x64", target);
+    let text = if target.starts_with("linux-") {
+        text.replace(
+            r#"execution = { type = "windows", account = "local_service" }"#,
+            r#"execution = { type = "systemd_dynamic_user" }"#,
+        )
+    } else {
+        text
+    };
+    let result = parse_and_compile(&text, target);
+    assert_eq!(result.is_ok(), supported);
+    if let Ok(installer) = result {
+        assert_eq!(
+            installer.services[0].readiness,
+            zup_core::ServiceReadiness::Notify
+        );
+    }
+}
+
 fn compile_selected(manifest: &Manifest) -> Result<Installer, ManifestError> {
     let overrides = TargetOverrides::default();
     let targets = select_targets(manifest, &["windows-x64"], &overrides).unwrap();
@@ -90,12 +124,14 @@ name = "Also core"
 #[case::service(
     r#"
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "svc"
 name = "svc"
 binary = "${install}/svc.exe"
 start = "manual"
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "svc"
 name = "svc2"
 binary = "${install}/svc2.exe"
@@ -273,6 +309,7 @@ component = "tools"
         (
             r#"
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "s"
 name = "s"
 binary = "${install}/s.exe"

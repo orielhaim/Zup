@@ -16,6 +16,7 @@ use crate::services::{render_unit, unit_name};
 use crate::systemd::{SystemdManager, UnitChange};
 
 pub struct ServiceContext<'a> {
+    pub controlled_units: &'a [String],
     pub roots: &'a MachineRoots,
     pub systemd: &'a SystemdRoots,
     pub manager: &'a mut dyn SystemdManager,
@@ -49,6 +50,13 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
             reason: format!("service display name: {error}"),
         })?;
     let synthetic = DesiredService {
+        failure: op.failure,
+        execution: op.execution.clone(),
+        requires_files: Vec::new(),
+        requires_services: Vec::new(),
+        dependency_names: op.dependency_names.clone(),
+        lifecycle: op.lifecycle,
+        readiness: op.readiness,
         key: op.key.clone(),
         id,
         name,
@@ -77,24 +85,41 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
 
 fn render_registration(
     unit: &str,
-    display: &str,
-    command: &CommandSpec,
-    start: ServiceStart,
+    registration: &zup_plan::ServiceState,
     key: &ResourceKey,
     id: &zup_core::ServiceId,
     name: &zup_core::NonEmptyString,
 ) -> Result<Vec<u8>, ExecError> {
+    let zup_plan::ServiceState::Registration {
+        failure,
+        dependencies,
+        execution,
+        display_name: display,
+        command,
+        start,
+        readiness,
+    } = registration
+    else {
+        return Err(ExecError::refused(unit, "service registration required"));
+    };
     let display = zup_core::NonEmptyString::new(display).map_err(|error| ExecError::Refused {
         unit: unit.to_owned(),
         reason: format!("service display name: {error}"),
     })?;
     let synthetic = DesiredService {
+        failure: *failure,
+        execution: execution.clone(),
+        requires_files: Vec::new(),
+        requires_services: Vec::new(),
+        dependency_names: dependencies.clone(),
+        lifecycle: Default::default(),
+        readiness: *readiness,
         key: key.clone(),
         id: id.clone(),
         name: name.clone(),
         display_name: Some(display),
         command: command.clone(),
-        start,
+        start: *start,
         privilege: Privilege::System,
     };
     render_unit(
@@ -189,7 +214,7 @@ fn prepare(
             reason: "a service apply node holds apply intent".into(),
         });
     };
-    if *unit != derived.unit || *unit_bytes != derived.bytes || *service != *op || !binary_owned {
+    if *unit != derived.unit || *unit_bytes != derived.bytes || **service != *op || !binary_owned {
         return Err(ExecError::Refused {
             unit: derived.unit.clone(),
             reason: "a service payload does not match its operation".into(),
@@ -736,12 +761,7 @@ pub fn apply_remove(
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
-    let zup_plan::ServiceState::Registration {
-        display_name,
-        command,
-        start,
-    } = installed
-    else {
+    let zup_plan::ServiceState::Registration { .. } = installed.as_ref() else {
         return Err(ExecError::refused(
             unit,
             "owned service state is a registration",
@@ -751,8 +771,7 @@ pub fn apply_remove(
         unit: unit.to_owned(),
         reason: format!("service name: {error}"),
     })?;
-    let installed_bytes =
-        render_registration(unit, display_name, command, *start, key, id, &service_name)?;
+    let installed_bytes = render_registration(unit, installed, key, id, &service_name)?;
 
     let retired = observe(unit, &canonical, context.manager)?;
     if retired.source.is_none() && retired.policy != "enabled" && retired.policy != "masked" {
@@ -832,12 +851,7 @@ pub fn rollback_remove(
             "a service removal names a service key",
         ));
     };
-    let zup_plan::ServiceState::Registration {
-        display_name,
-        command,
-        start,
-    } = installed
-    else {
+    let zup_plan::ServiceState::Registration { .. } = installed.as_ref() else {
         return Err(ExecError::refused(
             unit,
             "owned service state is a registration",
@@ -859,7 +873,7 @@ pub fn rollback_remove(
         unit: unit.to_owned(),
         reason: format!("service name: {error}"),
     })?;
-    let bytes = render_registration(unit, display_name, command, *start, key, id, &service_name)?;
+    let bytes = render_registration(unit, installed, key, id, &service_name)?;
     write_source(unit, &canonical, &bytes, true)?;
     context.manager.reload().map_err(ExecError::from)?;
     restore_policy(unit, &canonical, &receipt.previous_policy, context.manager)?;
@@ -1024,11 +1038,13 @@ pub fn reconcile_remove(
             }
         }
         None => {
-            let OwnedResource::Service {
-                installed: zup_plan::ServiceState::Registration { start, .. },
-                ..
-            } = owned
-            else {
+            let OwnedResource::Service { installed, .. } = owned else {
+                return Err(ExecError::refused(
+                    unit,
+                    "a removal must own a service registration",
+                ));
+            };
+            let zup_plan::ServiceState::Registration { start, .. } = installed.as_ref() else {
                 return Err(ExecError::refused(
                     unit,
                     "a removal must own a service registration",
@@ -1083,7 +1099,7 @@ pub fn apply_operation(
     let key = crate::service_ops::backend_key_for_unit(unit);
     let id = crate::service_ops::backend_id_for_unit(unit);
     let payload = ServicePayload::Apply {
-        service: op.clone(),
+        service: Box::new(op.clone()),
         unit: unit.to_owned(),
         unit_bytes: unit_bytes.to_vec(),
         binary_owned,
@@ -1114,7 +1130,7 @@ pub fn remove_operation(
     let payload = ServicePayload::Remove {
         key: key.clone(),
         unit: unit.to_owned(),
-        owned: owned.clone(),
+        owned: Box::new(owned.clone()),
     };
     Ok(zup_transaction::BackendOperation {
         key: backend_key,
@@ -1141,6 +1157,16 @@ mod tests {
         start: ServiceStart,
     ) -> ServiceOperation {
         ServiceOperation {
+            failure: Default::default(),
+            execution: zup_core::ServiceExecution::SystemdUser {
+                user: "root".into(),
+                group: None,
+            },
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: zup_core::ServiceId::new(id).unwrap(),
             },
@@ -1195,6 +1221,7 @@ mod tests {
             dir.path().join("opt"),
             dir.path().join("var/lib/zup"),
             dir.path().join("var/opt"),
+            dir.path().join("environment.d"),
         );
         let systemd = SystemdRoots::new(dir.path().join("units"));
         std::fs::create_dir_all(&systemd.unit_dir).unwrap();
@@ -1213,6 +1240,7 @@ mod tests {
             .insert("enable".to_owned(), "the manager restarted".to_owned());
         let uid = rustix::process::getuid().as_raw();
         let mut context = ServiceContext {
+            controlled_units: &[],
             roots: &roots,
             systemd: &systemd,
             manager: &mut manager,
@@ -1238,6 +1266,7 @@ mod tests {
             dir.path().join("opt"),
             dir.path().join("var/lib/zup"),
             dir.path().join("var/opt"),
+            dir.path().join("environment.d"),
         );
         let systemd = SystemdRoots::new(dir.path().join("units"));
         std::fs::create_dir_all(&systemd.unit_dir).unwrap();
@@ -1250,6 +1279,7 @@ mod tests {
         manager.seed(&derived.unit, "enabled-runtime", "/nowhere.service");
         let uid = rustix::process::getuid().as_raw();
         let mut context = ServiceContext {
+            controlled_units: &[],
             roots: &roots,
             systemd: &systemd,
             manager: &mut manager,
@@ -1275,6 +1305,7 @@ mod tests {
                 dir.path().join("opt"),
                 dir.path().join("var/lib/zup"),
                 dir.path().join("var/opt"),
+                dir.path().join("environment.d"),
             );
             let systemd = SystemdRoots::new(dir.path().join("units"));
             std::fs::create_dir_all(&systemd.unit_dir).unwrap();
@@ -1292,6 +1323,7 @@ mod tests {
             );
             let uid = rustix::process::getuid().as_raw();
             let mut context = ServiceContext {
+                controlled_units: &[],
                 roots: &roots,
                 systemd: &systemd,
                 manager: &mut manager,

@@ -17,11 +17,11 @@ source = { directory = "dist" }
 scope = "user"
 ```
 
-| Section | Purpose |
-| --- | --- |
-| `schema` | manifest schema version |
-| `[app]` | application identity (`id`, `name`, `version` required; plus `publisher`, `description`, `main`, `icon`) |
-| `[build.targets.*]` | target profiles |
-| `[install]` | install scope |
+| Section             | Purpose                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------- |
+| `schema`            | manifest schema version                                                                                  |
+| `[app]`             | application identity (`id`, `name`, `version` required; plus `publisher`, `description`, `main`, `icon`) |
+| `[build.targets.*]` | target profiles                                                                                          |
+| `[install]`         | install scope                                                                                            |
 
 Everything else is optional. Unknown keys are rejected; keep the schema directive (`#:schema ...`) at the top so editors validate while you type. For exact fields and defaults, use the [manifest reference](/reference/manifest).

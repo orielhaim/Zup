@@ -350,6 +350,7 @@ fn resolve_prerequisites(
                     total = total.checked_add(*size).ok_or(BuildError::SizeOverflow)?;
                 }
             }
+            PrerequisitePackage::DetectOnly | PrerequisitePackage::Repository => {}
             PrerequisitePackage::Embedded { path, sha256, size } => {
                 let source = project_root.join(path.as_str());
                 let normalized = lexical_normalize(&source);

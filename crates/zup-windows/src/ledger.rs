@@ -141,6 +141,8 @@ impl InstallLedgerStore {
     ) -> Result<(), LedgerError> {
         plan.validate()
             .map_err(|error| LedgerError::Ownership(error.to_string()))?;
+        crate::transaction_payload::validate_startup_inhibitions(plan)
+            .map_err(LedgerError::Ownership)?;
         let ledger = self.load(app_id, scope)?;
         let retired_ledger_keys = retired_ledger_keys(plan)?;
         let retired =
@@ -148,6 +150,14 @@ impl InstallLedgerStore {
                 .map_err(|error| LedgerError::Ownership(error.to_string()))?;
         for node in &plan.nodes {
             match &node.kind {
+                NodeKind::ServiceControl { operation } => {
+                    crate::transaction_payload::validate_service_control(
+                        plan,
+                        operation,
+                        ledger.as_ref(),
+                    )
+                    .map_err(LedgerError::Ownership)?
+                }
                 NodeKind::FileMutation { key, .. } => {
                     if !valid_file_key(key, app_id, app_version, &plan.target) {
                         return Err(LedgerError::Ownership(node.id.to_string()));
@@ -437,12 +447,33 @@ impl InstallLedgerStore {
             let Some(OperationReceipt::Backend { payload, .. }) = record.receipt(&node.id) else {
                 return Err(LedgerError::Invalid);
             };
-            if let Some(owned) = owned_from_backend_receipt(
+            if let Some(mut owned) = owned_from_backend_receipt(
                 &key,
                 ledger.resources.get(&key),
                 payload,
                 &record.target,
             )? {
+                if let OwnedResource::Service {
+                    installed,
+                    requires_files,
+                    requires_services,
+                    ..
+                } = &mut owned
+                    && matches!(node.kind, NodeKind::BackendOperation { .. })
+                {
+                    let backend = node.meta.backend.as_ref().ok_or(LedgerError::Invalid)?;
+                    let crate::transaction_payload::ApplyPayload::Service {
+                        operation: service,
+                        ..
+                    } = serde_json::from_slice(&backend.payload)
+                        .map_err(|_| LedgerError::Invalid)?
+                    else {
+                        return Err(LedgerError::Invalid);
+                    };
+                    **installed = service.desired_configuration();
+                    *requires_files = service.requires_files;
+                    *requires_services = service.requires_services;
+                }
                 ledger.resources.insert(key, owned);
             }
         }
@@ -556,6 +587,8 @@ fn owned_from_backend_receipt(
             previous,
             installed,
         } => Some(OwnedResource::Service {
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
             name,
             privilege,
             previous: old
@@ -564,7 +597,7 @@ fn owned_from_backend_receipt(
                     _ => None,
                 })
                 .unwrap_or(previous),
-            installed,
+            installed: Box::new(installed),
         }),
         BackendReceipt::Protocol {
             privilege,

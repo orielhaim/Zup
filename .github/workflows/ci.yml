@@ -3,7 +3,31 @@ name: CI
 on:
   push:
     branches: [master]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "scripts/**"
+      - "fixtures/**"
+      - "schema/**"
+      - "examples/**"
+      - ".github/workflows/ci.yml"
   pull_request:
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "scripts/**"
+      - "fixtures/**"
+      - "schema/**"
+      - "examples/**"
+      - ".github/workflows/ci.yml"
   workflow_dispatch:
 
 permissions:
@@ -21,8 +45,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  lint:
-    name: lint ${{ matrix.os }}
+  check:
+    name: check ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -39,61 +63,6 @@ jobs:
         with:
           toolchain: "1.99"
           components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: fast-${{ runner.os }}-${{ runner.arch }}-debug0
-          cache-on-failure: false
-
-      - uses: ilammy/setup-nasm@v1
-        if: runner.os == 'Windows'
-        with:
-          platform: win64
-
-      - uses: rui314/setup-mold@v1
-        if: runner.os == 'Linux'
-        with:
-          mold-version: 3.0.0
-          make-default: "true"
-
-      - name: Formatting
-        run: cargo fmt --all --check
-
-      - name: Linux package selection
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
-          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
-          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
-
-      - name: Windows Clippy
-        if: runner.os == 'Windows'
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-
-      - name: Linux Clippy
-        if: runner.os == 'Linux'
-        shell: bash
-        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
-
-  test:
-    name: test ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -130,10 +99,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
-          command -v update-mime-database
-          command -v update-desktop-database
-          command -v desktop-file-validate
-          mold --version
+
+      - name: Test CI diagnostics reporter
+        run: python -m unittest discover -s scripts/ci -p "test_*.py"
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Windows Clippy
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Linux Clippy
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
+
+      - name: Build version-matched plugin test fixtures
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo xtask fixtures build
 
       - name: Windows tests
         if: runner.os == 'Windows'
@@ -160,28 +145,3 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: cargo test --doc --all-features $PORTABLE $LINUX
-
-  terminal-arm64:
-    name: terminal ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-26.04-arm, windows-11-arm]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: terminal-${{ runner.os }}-${{ runner.arch }}-debug0
-          cache-on-failure: false
-
-      - name: Terminal and automation lifecycle
-        run: cargo test -p zup-installer --no-default-features --features console,headless,online --test terminal

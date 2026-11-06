@@ -60,6 +60,10 @@ impl LinuxLedgerStore {
                 .map_err(|error| ExecError::Ownership(error.to_string()))?;
         for node in &plan.nodes {
             match &node.kind {
+                NodeKind::ServiceControl { operation } => {
+                    crate::service_control::validate_binding(plan, operation, ledger.as_ref())
+                        .map_err(|_| ExecError::Ownership(node.id.to_string()))?
+                }
                 NodeKind::FileMutation { key, .. } => {
                     if !valid_file_key(key, app_id, app_version, &plan.target) {
                         return Err(ExecError::Ownership(node.id.to_string()));
@@ -312,7 +316,44 @@ fn validate_service_apply(
         return Err(ExecError::Ownership(node.id.to_string()));
     }
     match ledger.and_then(|ledger| ledger.resources.get(&service.key)) {
-        None | Some(OwnedResource::Service { .. }) => Ok(()),
+        None if service.kind == zup_plan::IntegrationChangeKind::Create
+            && service.previous == ObservedServiceState::Absent =>
+        {
+            Ok(())
+        }
+        Some(OwnedResource::Service {
+            name,
+            privilege,
+            installed,
+            ..
+        }) if name == &service.name && privilege == &service.privilege => {
+            let desired = ServiceState::Registration {
+                dependencies: service.dependency_names.clone(),
+                failure: service.failure,
+                execution: service.execution.clone(),
+                readiness: service.readiness,
+                display_name: service.display_name.clone(),
+                command: service.command.clone(),
+                start: service.start,
+            };
+            let valid = match service.kind {
+                zup_plan::IntegrationChangeKind::UpdateOwned => {
+                    service.previous.configuration().as_ref() == Some(installed)
+                }
+                zup_plan::IntegrationChangeKind::RestoreOwned => {
+                    service.previous == ObservedServiceState::Absent
+                        && &desired == installed.as_ref()
+                }
+                zup_plan::IntegrationChangeKind::RepairOwned => {
+                    service.previous != ObservedServiceState::Absent
+                        && &desired == installed.as_ref()
+                }
+                _ => false,
+            };
+            valid
+                .then_some(())
+                .ok_or_else(|| ExecError::Ownership(node.id.to_string()))
+        }
         _ => Err(ExecError::Ownership(node.id.to_string())),
     }
 }
@@ -372,20 +413,32 @@ fn publish_service_node(
         },
         ObservedServiceState::Absent => ServiceState::Absent,
         ObservedServiceState::Service {
+            failure,
+            dependencies,
+            execution,
             display_name,
             command,
             start,
+            readiness,
             ..
         } => ServiceState::Registration {
+            dependencies: dependencies.clone(),
+            failure: *failure,
+            execution: execution.clone(),
             display_name: display_name.clone(),
             command: command.clone(),
             start: *start,
+            readiness: *readiness,
         },
     };
     let installed = ServiceState::Registration {
+        dependencies: service.dependency_names.clone(),
+        failure: service.failure,
+        execution: service.execution.clone(),
         display_name: service.display_name.clone(),
         command: service.command.clone(),
         start: service.start,
+        readiness: service.readiness,
     };
 
     let _ = service_receipt;
@@ -396,10 +449,12 @@ fn publish_service_node(
     ledger.resources.insert(
         key,
         OwnedResource::Service {
+            requires_services: service.requires_services.clone(),
+            requires_files: service.requires_files.clone(),
             name: service.name.clone(),
             privilege: service.privilege,
             previous: old_previous.unwrap_or(previous),
-            installed,
+            installed: Box::new(installed),
         },
     );
     Ok(())

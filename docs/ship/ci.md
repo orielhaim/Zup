@@ -41,17 +41,8 @@ The action supports separate `setup`, `build`, `compose`, `finalize`, `attest`, 
 
 Prefer the generated workflow when you want Zup to keep the target matrix and release steps synchronized with `zup.toml`.
 
-## Repository verification
+## Repository checks
 
-Pull requests run fast tests and doctests on Windows x64 and Linux x64,
-plus terminal lifecycle tests on both ARM64 hosts. Full Verification runs
-after pushes to `master`, weekly, or on manual dispatch. It runs only the
-staged-toolchain integration cases on the two x64 hosts. It reuses
-their tooling to compose a Linux installer on Windows and a Universal Windows
-installer on Linux, then runs each installer on its target host. Nextest stops
-individual tests after five minutes and publishes failure diagnostics.
+Pull requests run formatting, Clippy, fast tests, and doctests on Windows and Linux. Each OS uses one job to reuse build artifacts. Documentation-only changes do not run Rust CI. The Action workflow runs when its wrapper, CLI, or dependencies change.
 
-Generated SDK project checks and release clean-room verification are opt-in
-through the Full Verification workflow's `sdk` and `release` inputs.
-Size measurements run locally. The Action workflow uses one cached debug
-Windows x64 CLI for its real-tool smoke test.
+Run **Full Verification** manually for native service tests, staged-toolchain integration, ARM64 terminal tests, and cross-built installers. Its `sdk` and `release` inputs enable generated-project and release checks. **Linux musl** and **Native service VMs** are separate manual workflows. The VM workflow requires dedicated Alpine guests.

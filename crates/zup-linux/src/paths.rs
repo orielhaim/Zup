@@ -99,7 +99,9 @@ mod tests {
 
     #[test]
     fn the_user_root_is_created_and_the_machine_root_is_not() {
-        let user = user_state_root().expect("a user state root");
+        use std::os::unix::fs::MetadataExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let user = create_user_root(Some(scratch.path().to_owned())).expect("a user state root");
         assert!(user.is_dir(), "{} should have been created", user.display());
         assert!(
             user.ends_with(STATE_FOLDER),
@@ -107,12 +109,26 @@ mod tests {
             user.display()
         );
 
+        let metadata = || {
+            std::fs::symlink_metadata("/var/lib/zup")
+                .map(|value| {
+                    (
+                        value.dev(),
+                        value.ino(),
+                        value.uid(),
+                        value.gid(),
+                        value.mode(),
+                    )
+                })
+                .map_err(|error| error.kind())
+        };
+        let before = metadata();
         let machine = machine_state_root().expect("a machine state root");
         assert_eq!(machine, Path::new("/var/lib/zup"));
-        assert!(
-            !machine.exists(),
-            "creating the machine root is a privileged act, and this process has not been \
-             given one"
+        assert_eq!(
+            metadata(),
+            before,
+            "resolving machine state must not create or alter it"
         );
     }
 

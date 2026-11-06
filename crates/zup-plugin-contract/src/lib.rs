@@ -7,8 +7,11 @@ mod runtime;
 mod validation;
 
 pub use bindings::exports::zup::plugin::planner::{
-    Context, FileAssociation, GeneratedFile, InstallScope, InstallationPlan, Launcher,
-    LauncherLocation, PathEntry, PluginError, Protocol, ResourceItem, Service, ServiceStart,
+    ChangedServiceState, Context, FileAssociation, GeneratedFile, InitialServiceState,
+    InstallScope, InstallationPlan, Launcher, LauncherLocation, OpenrcFailurePolicy, PathEntry,
+    PluginError, Protocol, ResourceItem, Service, ServiceExecution, ServiceFailurePolicy,
+    ServiceLifecycle, ServiceReadiness, ServiceStart, SystemdFailurePolicy,
+    SystemdRestartCondition, SystemdUser, WindowsFailurePolicy, WindowsServiceAccount,
 };
 pub use config::{EngineError, PluginEngine};
 pub use fingerprint::{EngineFingerprint, engine_fingerprint};

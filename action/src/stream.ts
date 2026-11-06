@@ -25,53 +25,53 @@
 /** Feed a class of stream's bytes to a framer. */
 export interface Framed {
   /** Bytes. Anything a `Buffer` is. */
-  push(chunk: Uint8Array): void
+  push(chunk: Uint8Array): void;
   /** The stream is over: deliver whatever is left. */
-  end(): void
+  end(): void;
 }
 
 /** A framer that yields whole lines, in order, as soon as each is complete. */
 export class LineFramer implements Framed {
-  #decoder = new TextDecoder('utf-8')
-  #buffer = ''
-  #closed = false
+  #decoder = new TextDecoder("utf-8");
+  #buffer = "";
+  #closed = false;
 
   constructor(private readonly emit: (line: string) => void) {}
 
   push(chunk: Uint8Array): void {
     if (this.#closed) {
-      throw new Error('a closed framer does not accept bytes')
+      throw new Error("a closed framer does not accept bytes");
     }
     // `stream: true` is the whole point: a multi-byte character split across two
     // chunks is one character, not two replacement characters.
-    this.#buffer += this.#decoder.decode(chunk, { stream: true })
-    let newline = this.#buffer.indexOf('\n')
+    this.#buffer += this.#decoder.decode(chunk, { stream: true });
+    let newline = this.#buffer.indexOf("\n");
     while (newline !== -1) {
       // `\r` because a Windows child writes CRLF. A bare trailing carriage return
       // would still parse as JSON, so leaving it in would be harmless - and a line
       // reader that cannot say why it strips is one nobody trusts.
-      const line = this.#buffer.slice(0, newline).replace(/\r$/u, '')
-      this.#buffer = this.#buffer.slice(newline + 1)
+      const line = this.#buffer.slice(0, newline).replace(/\r$/u, "");
+      this.#buffer = this.#buffer.slice(newline + 1);
       if (line.trim().length > 0) {
-        this.emit(line)
+        this.emit(line);
       }
-      newline = this.#buffer.indexOf('\n')
+      newline = this.#buffer.indexOf("\n");
     }
   }
 
   end(): void {
     if (this.#closed) {
-      return
+      return;
     }
-    this.#closed = true
+    this.#closed = true;
     // Flush the decoder first: a sequence the process never completed is still
     // bytes on the wire, and a line reader that discards them is a line reader
     // that discards a document.
-    this.#buffer += this.#decoder.decode()
-    const tail = this.#buffer
-    this.#buffer = ''
+    this.#buffer += this.#decoder.decode();
+    const tail = this.#buffer;
+    this.#buffer = "";
     if (tail.trim().length > 0) {
-      this.emit(tail.replace(/\r$/u, ''))
+      this.emit(tail.replace(/\r$/u, ""));
     }
   }
 }
@@ -85,24 +85,24 @@ export class LineFramer implements Framed {
  * prevents is identical.
  */
 export class WholeStream implements Framed {
-  #decoder = new TextDecoder('utf-8')
-  #text = ''
+  #decoder = new TextDecoder("utf-8");
+  #text = "";
 
   constructor(private readonly emit: (text: string) => void) {}
 
   push(chunk: Uint8Array): void {
-    this.#text += this.#decoder.decode(chunk, { stream: true })
+    this.#text += this.#decoder.decode(chunk, { stream: true });
   }
 
   end(): void {
-    this.#text += this.#decoder.decode()
+    this.#text += this.#decoder.decode();
     if (this.#text.length > 0) {
-      this.emit(this.#text)
+      this.emit(this.#text);
     }
   }
 
   /** Everything read so far. Empty until the stream ends. */
   get text(): string {
-    return this.#text
+    return this.#text;
   }
 }

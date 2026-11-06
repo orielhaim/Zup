@@ -139,11 +139,105 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
         },
         ResourceItem::PathEntry(entry) => PluginResource::PathEntry { value: entry.value },
         ResourceItem::Service(service) => PluginResource::Service {
+            failure: match service.failure {
+                zup_plugin_contract::ServiceFailurePolicy::None => {
+                    zup_core::ServiceFailurePolicy::None
+                }
+                zup_plugin_contract::ServiceFailurePolicy::Systemd(policy) => {
+                    zup_core::ServiceFailurePolicy::Systemd {
+                        condition: match policy.condition {
+                            zup_plugin_contract::SystemdRestartCondition::OnFailure => {
+                                zup_core::SystemdRestartCondition::OnFailure
+                            }
+                            zup_plugin_contract::SystemdRestartCondition::OnAbnormal => {
+                                zup_core::SystemdRestartCondition::OnAbnormal
+                            }
+                        },
+                        delay_seconds: policy.delay_seconds,
+                        start_limit_burst: policy.start_limit_burst,
+                        start_limit_interval_seconds: policy.start_limit_interval_seconds,
+                    }
+                }
+                zup_plugin_contract::ServiceFailurePolicy::Windows(policy) => {
+                    zup_core::ServiceFailurePolicy::Windows {
+                        delay_seconds: policy.delay_seconds,
+                        restart_attempts: policy.restart_attempts,
+                        reset_seconds: policy.reset_seconds,
+                    }
+                }
+                zup_plugin_contract::ServiceFailurePolicy::Openrc(policy) => {
+                    zup_core::ServiceFailurePolicy::Openrc {
+                        delay_seconds: policy.delay_seconds,
+                        max_respawns: policy.max_respawns,
+                        respawn_period_seconds: policy.respawn_period_seconds,
+                    }
+                }
+            },
+            execution: match service.execution {
+                zup_plugin_contract::ServiceExecution::Windows(account) => {
+                    zup_core::ServiceExecution::Windows {
+                        account: match account {
+                            zup_plugin_contract::WindowsServiceAccount::LocalService => {
+                                zup_core::WindowsServiceAccount::LocalService
+                            }
+                            zup_plugin_contract::WindowsServiceAccount::NetworkService => {
+                                zup_core::WindowsServiceAccount::NetworkService
+                            }
+                            zup_plugin_contract::WindowsServiceAccount::LocalSystem => {
+                                zup_core::WindowsServiceAccount::LocalSystem
+                            }
+                        },
+                    }
+                }
+                zup_plugin_contract::ServiceExecution::SystemdDynamicUser => {
+                    zup_core::ServiceExecution::SystemdDynamicUser
+                }
+                zup_plugin_contract::ServiceExecution::OpenrcUser(user) => {
+                    zup_core::ServiceExecution::OpenrcUser {
+                        user: user.user,
+                        group: user.group,
+                    }
+                }
+                zup_plugin_contract::ServiceExecution::SystemdUser(user) => {
+                    zup_core::ServiceExecution::SystemdUser {
+                        user: user.user,
+                        group: user.group,
+                    }
+                }
+            },
+            requires_services: service.requires_services.clone(),
+            requires_files: service.requires_files,
+            readiness: match service.readiness {
+                zup_plugin_contract::ServiceReadiness::Manager => {
+                    zup_core::ServiceReadiness::Manager
+                }
+                zup_plugin_contract::ServiceReadiness::Notify => zup_core::ServiceReadiness::Notify,
+            },
             id: service.id,
             name: service.name,
             display_name: service.display_name,
             binary: service.binary,
             arguments: service.arguments,
+            lifecycle: zup_core::ServiceLifecycle {
+                install: match service.lifecycle.install {
+                    zup_plugin_contract::InitialServiceState::Stopped => {
+                        zup_core::InitialServiceState::Stopped
+                    }
+                    zup_plugin_contract::InitialServiceState::Running => {
+                        zup_core::InitialServiceState::Running
+                    }
+                },
+                change: match service.lifecycle.change {
+                    zup_plugin_contract::ChangedServiceState::Preserve => {
+                        zup_core::ChangedServiceState::Preserve
+                    }
+                    zup_plugin_contract::ChangedServiceState::Stopped => {
+                        zup_core::ChangedServiceState::Stopped
+                    }
+                },
+                start_timeout_seconds: service.lifecycle.start_timeout_seconds,
+                stop_timeout_seconds: service.lifecycle.stop_timeout_seconds,
+            },
             start: match service.start {
                 ContractServiceStart::Automatic => ServiceStart::Automatic,
                 ContractServiceStart::Manual => ServiceStart::Manual,

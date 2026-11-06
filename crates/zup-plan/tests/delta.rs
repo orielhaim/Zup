@@ -75,6 +75,15 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
             privilege: Privilege::System,
         }],
         services: vec![zup_plan::DesiredService {
+            failure: Default::default(),
+            execution: zup_core::ServiceExecution::Windows {
+                account: zup_core::WindowsServiceAccount::LocalService,
+            },
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
+            lifecycle: Default::default(),
+            readiness: Default::default(),
             key: ResourceKey::Service {
                 id: ServiceId::new("acme-agent").unwrap(),
             },
@@ -112,11 +121,55 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
 
 fn exact_service() -> ObservedServiceState {
     ObservedServiceState::Service {
+        dependencies: Vec::new(),
+        failure: Default::default(),
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
+        readiness: Default::default(),
         display_name: "Acme Agent".into(),
         command: cmd(r"C:\PF\Acme\acme-agent.exe", &[]),
         start: ServiceStart::Automatic,
         runtime_state: None,
     }
+}
+
+#[rstest::rstest]
+#[case::missing(0)]
+#[case::duplicate(1)]
+#[case::lower_privilege(2)]
+fn service_file_dependencies_must_be_unique_managed_resources_with_matching_authority(
+    #[case] problem: u8,
+) {
+    let mut desired = sample_target();
+    let path = desired.files[0].destination.clone();
+    desired.services[0].requires_files = vec![path.clone()];
+    desired.validate_resolved().unwrap();
+    match problem {
+        0 => desired.services[0].requires_files = vec![tpath(r"C:\PF\Acme\missing.dll")],
+        1 => desired.services[0].requires_files.push(path),
+        2 => desired.files[0].privilege = Privilege::User,
+        _ => unreachable!(),
+    }
+    assert!(matches!(
+        desired.validate_resolved(),
+        Err(zup_plan::ContractError::ServiceFile { .. })
+    ));
+}
+
+#[rstest::rstest]
+#[case::startup(false)]
+#[case::readiness(true)]
+fn execution_cannot_change_the_bound_service_policy(#[case] readiness: bool) {
+    let desired = sample_target();
+    let mut execution = plan_execution(&desired, &snapshot_happy(), None).unwrap();
+    execution.validate_desired(Some(&desired)).unwrap();
+    if readiness {
+        execution.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    } else {
+        execution.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    }
+    assert!(execution.validate_desired(Some(&desired)).is_err());
 }
 
 fn exact_file_association() -> ObservedFileAssociation {
@@ -144,6 +197,7 @@ fn snapshot_happy() -> HostSnapshot {
             key: target.files[0].key.clone(),
             path: target.files[0].destination.clone(),
             state: ObservedFileState::File {
+                executable: None,
                 size: 4,
                 sha256: digest(b"data"),
             },
@@ -184,6 +238,12 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     let original_service = ServiceState::Registration {
+        dependencies: Vec::new(),
+        failure: Default::default(),
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
+        readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
         start: ServiceStart::Manual,
@@ -194,6 +254,12 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        dependencies: Vec::new(),
+        failure: Default::default(),
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
+        readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
         start: ServiceStart::Manual,
@@ -221,10 +287,12 @@ fn launcher_and_service_ownership_decisions() {
     ledger.resources.insert(
         target.services[0].key.clone(),
         OwnedResource::Service {
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
             name: target.services[0].name.to_string(),
             privilege: Privilege::System,
             previous: ServiceState::Absent,
-            installed: original_service,
+            installed: Box::new(original_service),
         },
     );
     let owned = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
@@ -245,6 +313,12 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        dependencies: Vec::new(),
+        failure: Default::default(),
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
+        readiness: Default::default(),
         display_name: "Old Agent".into(),
         command: target.services[0].command.clone(),
         start: ServiceStart::Manual,
@@ -264,14 +338,14 @@ fn e2e_fake_machine_mixed_deltas() {
     assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
     assert_eq!(plan.launchers[0].kind, IntegrationChangeKind::Create);
-    assert_eq!(plan.services[0].kind, IntegrationChangeKind::NoOp);
+    assert_eq!(plan.services[0].kind, IntegrationChangeKind::Conflict);
     assert_eq!(plan.protocols[0].kind, IntegrationChangeKind::Create);
     assert_eq!(plan.file_associations[0].kind, IntegrationChangeKind::NoOp);
 
     assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
     assert_eq!(plan.launchers[0].kind, IntegrationChangeKind::Create);
-    assert_eq!(plan.services[0].kind, IntegrationChangeKind::NoOp);
+    assert_eq!(plan.services[0].kind, IntegrationChangeKind::Conflict);
     assert_eq!(plan.protocols[0].kind, IntegrationChangeKind::Create);
     assert_eq!(plan.file_associations[0].kind, IntegrationChangeKind::NoOp);
 }
@@ -282,6 +356,7 @@ fn files_replace_non_file_conflict() {
     let mut snapshot = snapshot_happy();
 
     snapshot.files[0].state = ObservedFileState::File {
+        executable: None,
         size: 4,
         sha256: digest(b"old!"),
     };
@@ -302,6 +377,7 @@ fn files_replace_non_file_conflict() {
             sha256: digest(b"old!"),
             size: 4,
             created_directories: vec![],
+            executable: false,
             privilege: Privilege::System,
         },
     );
@@ -309,6 +385,7 @@ fn files_replace_non_file_conflict() {
     assert_eq!(plan.files[0].kind, FileOperationKind::Replace);
 
     snapshot.files[0].state = ObservedFileState::File {
+        executable: None,
         size: 4,
         sha256: digest(b"edit"),
     };
@@ -544,4 +621,25 @@ fn observation_headers_cannot_claim_another_resource_or_scope() {
             Err(zup_plan::ExecutionPlanError::SnapshotResourceMismatch { .. })
         ));
     }
+}
+
+#[test]
+fn service_dependency_identity_is_part_of_the_authorized_plan() {
+    let mut desired = sample_target();
+    let mut dependency = desired.services[0].clone();
+    dependency.id = ServiceId::new("storage").unwrap();
+    dependency.key = ResourceKey::Service {
+        id: dependency.id.clone(),
+    };
+    dependency.name = zup_core::NonEmptyString::new("StorageEngine").unwrap();
+    desired.services[0]
+        .requires_services
+        .push(dependency.id.clone());
+    desired.services[0]
+        .dependency_names
+        .push(dependency.name.to_string());
+    desired.services.push(dependency);
+    desired.validate_resolved().unwrap();
+    desired.services[0].dependency_names[0] = "foreign-service".into();
+    assert!(desired.validate_resolved().is_err());
 }

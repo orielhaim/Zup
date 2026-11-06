@@ -591,7 +591,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
 use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use uuid::Uuid;
 
 pub struct SessionLog {
@@ -605,13 +604,16 @@ pub struct SessionLog {
 impl SessionLog {
     pub fn start(request: &RuntimeRequest, operation: &str) -> Option<Self> {
         let session_id = Uuid::now_v7();
-        let directory = std::env::temp_dir().join("zup").join("sessions");
-        std::fs::create_dir_all(&directory).ok()?;
-        let appender =
-            RollingFileAppender::new(Rotation::NEVER, &directory, format!("{session_id}.log"));
-        let (writer, guard) = NonBlockingBuilder::default().lossy(true).finish(appender);
+        let (file, path) = tempfile::Builder::new()
+            .prefix("zup-session-")
+            .suffix(".log")
+            .tempfile()
+            .ok()?
+            .keep()
+            .ok()?;
+        let (writer, guard) = NonBlockingBuilder::default().lossy(true).finish(file);
         let log = Self {
-            path: directory.join(format!("{session_id}.log")),
+            path,
             operation: operation.to_owned(),
             session_id,
             writer: Arc::new(Mutex::new(writer)),

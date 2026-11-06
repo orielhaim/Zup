@@ -79,6 +79,7 @@ fn ledger(files: &[DesiredFile<zup_plan::TargetPath>]) -> InstallLedger {
                 sha256: file.sha256,
                 size: file.size,
                 created_directories: vec![],
+                executable: false,
                 privilege: file.privilege,
             },
         );
@@ -118,6 +119,7 @@ fn upgrade_adds_updates_and_retires_owned_files() {
         &target,
         &[
             ObservedFileState::File {
+                executable: None,
                 size: old_a.size,
                 sha256: old_a.sha256,
             },
@@ -200,6 +202,7 @@ fn repair_restores_missing_and_requires_force_for_digest_drift() {
     let changed = snapshot(
         &target,
         &[ObservedFileState::File {
+            executable: None,
             size: 4,
             sha256: hash_reader(&b"edit"[..]).unwrap().1,
         }],
@@ -234,6 +237,7 @@ fn observations_are_matched_by_identity_for_install_and_repair() {
         &target,
         &[
             ObservedFileState::File {
+                executable: None,
                 size: a.size,
                 sha256: a.sha256,
             },
@@ -343,6 +347,7 @@ fn windows_case_changes_preserve_ownership(
     let observed = snapshot(
         &desired,
         &[ObservedFileState::File {
+            executable: None,
             size: original.size,
             sha256: original.sha256,
         }],
@@ -374,6 +379,15 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
     let mut target = make_target("1.0.0", vec![]);
     target.scope = SelectedScope::Machine;
     target.services.push(DesiredService {
+        failure: Default::default(),
+        execution: zup_core::ServiceExecution::Windows {
+            account: zup_core::WindowsServiceAccount::LocalService,
+        },
+        requires_files: Vec::new(),
+        requires_services: Vec::new(),
+        dependency_names: Vec::new(),
+        lifecycle: Default::default(),
+        readiness: Default::default(),
         key: key.clone(),
         id: id.clone(),
         name: NonEmptyString::new("daemon").unwrap(),
@@ -387,14 +401,22 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
     owned.resources.insert(
         key.clone(),
         OwnedResource::Service {
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
             name: "daemon".into(),
             privilege: Privilege::System,
             previous: ServiceState::Absent,
-            installed: ServiceState::Registration {
+            installed: Box::new(ServiceState::Registration {
+                dependencies: Vec::new(),
+                failure: Default::default(),
+                execution: zup_core::ServiceExecution::Windows {
+                    account: zup_core::WindowsServiceAccount::LocalService,
+                },
+                readiness: Default::default(),
                 display_name: "Daemon".into(),
                 command: command.clone(),
                 start: zup_core::ServiceStart::Automatic,
-            },
+            }),
         },
     );
     let snapshot = HostSnapshot {
@@ -402,6 +424,12 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
             key: key.clone(),
             id,
             state: ObservedServiceState::Service {
+                dependencies: Vec::new(),
+                failure: Default::default(),
+                execution: zup_core::ServiceExecution::Windows {
+                    account: zup_core::WindowsServiceAccount::LocalService,
+                },
+                readiness: Default::default(),
                 display_name: "Administrator edit".into(),
                 command,
                 start: zup_core::ServiceStart::Manual,
@@ -437,4 +465,31 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
     )
     .unwrap();
     assert_ne!(result.services[0].kind, IntegrationChangeKind::RepairOwned);
+}
+
+#[test]
+fn repair_cannot_change_the_committed_execution_policy() {
+    let original = file("a.exe", b"owned");
+    let installed = ledger(std::slice::from_ref(&original));
+    let mut changed = original.clone();
+    changed.executable = true;
+    let target = make_target("1.0.0", vec![changed]);
+    let observed = snapshot(
+        &target,
+        &[ObservedFileState::File {
+            size: original.size,
+            sha256: original.sha256,
+            executable: Some(true),
+        }],
+    );
+    assert!(matches!(
+        plan_lifecycle(
+            LifecycleAction::Repair { force: false },
+            Some(&target),
+            Some(&observed),
+            Some(&installed),
+            &BTreeMap::new()
+        ),
+        Err(zup_plan::LifecycleError::RepairDesiredChanged { .. })
+    ));
 }

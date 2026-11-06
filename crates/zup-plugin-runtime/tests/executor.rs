@@ -24,6 +24,7 @@ const PLUGIN_ID: &str = "helper";
 const VALID_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 
 fn component_for_body(body: &str) -> Vec<u8> {
+    let planner_major = PLUGIN_API_VERSION.split('.').next().unwrap();
     let wat = format!(
         r#"(module
             (type (func (param i32) (result i32)))
@@ -31,10 +32,10 @@ fn component_for_body(body: &str) -> Vec<u8> {
             (type (func (param i32 i32 i32 i32) (result i32)))
             (type (func))
             (memory (export "cm32p2_memory") 1)
-            (func (export "cm32p2|zup:plugin/planner@1|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
+            (func (export "cm32p2|zup:plugin/planner@{planner_major}|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
                 {body}
             )
-            (func (export "cm32p2|zup:plugin/planner@1|plan_post") (param i32))
+            (func (export "cm32p2|zup:plugin/planner@{planner_major}|plan_post") (param i32))
             (func (export "cm32p2_realloc") (param i32 i32 i32 i32) (result i32)
                 local.get 0
             )
@@ -62,6 +63,12 @@ fn component_for_body(body: &str) -> Vec<u8> {
 }
 
 fn fixture(name: &str) -> Vec<u8> {
+    if name == "all" {
+        return PluginEngine::new(HOST_TARGET)
+            .unwrap()
+            .precompile_component(&zup_plugin_abi::test_fixture::component())
+            .unwrap();
+    }
     let body = match name {
         "empty" => {
             r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 0)) (i32.const 1024)"#
@@ -74,9 +81,6 @@ fn fixture(name: &str) -> Vec<u8> {
         }
         "output" => {
             r#"(drop (memory.grow (i32.const 129))) (i32.store (i32.const 1024) (i32.const 1)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 8388609)) (i32.store (i32.const 1036) (i32.const 0)) (i32.store (i32.const 1040) (i32.const 0)) (i32.const 1024)"#
-        }
-        "all" => {
-            r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 6)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 3000)) (i32.store (i32.const 2056) (i32.const 4)) (i32.store (i32.const 2060) (i32.const 4000)) (i32.store (i32.const 2064) (i32.const 3)) (i32.store (i32.const 2100) (i32.const 1)) (i32.store (i32.const 2104) (i32.const 0)) (i32.store (i32.const 2108) (i32.const 3000)) (i32.store (i32.const 2112) (i32.const 4)) (i32.store (i32.const 2116) (i32.const 3064)) (i32.store (i32.const 2120) (i32.const 7)) (i32.store (i32.const 2124) (i32.const 0)) (i32.store (i32.const 2128) (i32.const 0)) (i32.store (i32.const 2132) (i32.const 0)) (i32.store (i32.const 2136) (i32.const 0)) (i32.store (i32.const 2152) (i32.const 2)) (i32.store (i32.const 2156) (i32.const 3000)) (i32.store (i32.const 2160) (i32.const 4)) (i32.store (i32.const 2204) (i32.const 3)) (i32.store (i32.const 2208) (i32.const 3000)) (i32.store (i32.const 2212) (i32.const 4)) (i32.store (i32.const 2216) (i32.const 3064)) (i32.store (i32.const 2220) (i32.const 7)) (i32.store (i32.const 2224) (i32.const 0)) (i32.store (i32.const 2228) (i32.const 0)) (i32.store (i32.const 2232) (i32.const 0)) (i32.store (i32.const 2236) (i32.const 3000)) (i32.store (i32.const 2240) (i32.const 4)) (i32.store (i32.const 2244) (i32.const 0)) (i32.store (i32.const 2248) (i32.const 0)) (i32.store (i32.const 2252) (i32.const 1)) (i32.store (i32.const 2256) (i32.const 4)) (i32.store (i32.const 2260) (i32.const 3000)) (i32.store (i32.const 2264) (i32.const 4)) (i32.store (i32.const 2268) (i32.const 3064)) (i32.store (i32.const 2272) (i32.const 7)) (i32.store (i32.const 2276) (i32.const 0)) (i32.store (i32.const 2280) (i32.const 0)) (i32.store (i32.const 2308) (i32.const 5)) (i32.store (i32.const 2312) (i32.const 3000)) (i32.store (i32.const 2316) (i32.const 4)) (i32.store (i32.const 2320) (i32.const 3064)) (i32.store (i32.const 2324) (i32.const 7)) (i32.store (i32.const 2328) (i32.const 0)) (i32.store (i32.const 2332) (i32.const 0)) (i32.store (i32.const 2336) (i32.const 0)) (i32.store (i32.const 2340) (i32.const 3000)) (i32.store (i32.const 2344) (i32.const 4)) (i32.const 1024)"#
         }
         "configure" => {
             r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 1)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 5000)) (i32.store (i32.const 2056) (i32.const 28)) (i32.store (i32.const 2060) (i32.const 6000)) (i32.store (i32.const 2064) (i32.const 103)) (i32.const 1024)"#
@@ -240,8 +244,11 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
     let bundle = build_package(&fixture("all"), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
+    let mut context = context(&installer);
+    context.scope = SelectedScope::Machine;
+    context.selected_components = vec![ComponentId::new("resources").unwrap()];
     let proposal = executor
-        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
+        .plan(&installer.plugins[0], &context, &NeverCancelled)
         .unwrap();
     assert_eq!(proposal.resources.len(), 6);
     assert!(matches!(
@@ -256,10 +263,35 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
         proposal.resources[2],
         PluginResource::PathEntry { .. }
     ));
-    assert!(matches!(
-        proposal.resources[3],
-        PluginResource::Service { .. }
-    ));
+    let PluginResource::Service {
+        lifecycle,
+        readiness,
+        requires_files,
+        requires_services,
+        ..
+    } = &proposal.resources[3]
+    else {
+        panic!("service resource required");
+    };
+    assert_eq!(
+        *readiness,
+        if host_target().operating_system() == zup_core::TargetOperatingSystem::Linux {
+            zup_core::ServiceReadiness::Notify
+        } else {
+            zup_core::ServiceReadiness::Manager
+        }
+    );
+    assert_eq!(requires_files, &["${install}/configure.txt"]);
+    assert!(requires_services.is_empty());
+    assert_eq!(
+        *lifecycle,
+        zup_core::ServiceLifecycle {
+            install: zup_core::InitialServiceState::Running,
+            change: zup_core::ChangedServiceState::Preserve,
+            start_timeout_seconds: 17,
+            stop_timeout_seconds: 23,
+        }
+    );
     assert!(matches!(
         proposal.resources[4],
         PluginResource::Protocol { .. }

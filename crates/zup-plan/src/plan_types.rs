@@ -55,9 +55,10 @@ impl<P, L> DesiredState<P, L> {
                 } => total
                     .checked_add(*size)
                     .ok_or(crate::ContractError::SizeOverflow),
-                PrerequisitePackage::Remote { .. } | PrerequisitePackage::Embedded { .. } => {
-                    Ok(total)
-                }
+                PrerequisitePackage::Remote { .. }
+                | PrerequisitePackage::Embedded { .. }
+                | PrerequisitePackage::DetectOnly
+                | PrerequisitePackage::Repository => Ok(total),
             })?;
         let resource_count = self.launchers.len()
             + self.path_entries.len()

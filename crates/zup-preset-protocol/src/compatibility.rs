@@ -95,7 +95,7 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::previous(1)]
+    #[case::invalid(0)]
     #[case::future(PRESET_PROTOCOL_VERSION + 1)]
     fn a_different_wire_version_is_its_own_refusal(#[case] protocol: u32) {
         let host = offers(&[]);

@@ -81,6 +81,8 @@ mod scm;
 #[cfg(windows)]
 mod search_path;
 #[cfg(windows)]
+mod service_control;
+#[cfg(windows)]
 mod services;
 #[cfg(windows)]
 mod shell_link;
@@ -238,3 +240,6 @@ pub use worker_rt::{
     WorkerBootstrap, WorkerError, WorkerSession, current_exe, decode_frame, encode_reply,
     format_bootstrap, parse_bootstrap, plan_hash_hex, run_worker, worker_capabilities,
 };
+
+#[cfg(target_os = "windows")]
+mod runtime_failure;

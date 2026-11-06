@@ -82,21 +82,33 @@ pub fn validate_ownership<'a>(
                         }
                         (
                             FileOperationKind::RestoreOwned,
-                            Some(OwnedResource::File { sha256, size, .. }),
+                            Some(OwnedResource::File {
+                                sha256,
+                                size,
+                                executable,
+                                ..
+                            }),
                         ) => {
                             matches!(node.meta.file_precondition, Some(FilePrecondition::Absent))
                                 && node.meta.expected_sha256 == Some(*sha256)
                                 && node.meta.expected_size == Some(*size)
+                                && node.meta.executable == Some(*executable)
                         }
                         (
                             FileOperationKind::RepairOwned,
-                            Some(OwnedResource::File { sha256, size, .. }),
+                            Some(OwnedResource::File {
+                                sha256,
+                                size,
+                                executable,
+                                ..
+                            }),
                         ) => {
                             matches!(
                                 node.meta.file_precondition,
                                 Some(FilePrecondition::Exact { .. })
                             ) && node.meta.expected_sha256 == Some(*sha256)
                                 && node.meta.expected_size == Some(*size)
+                                && node.meta.executable == Some(*executable)
                         }
                         _ => false,
                     }
@@ -122,6 +134,23 @@ pub fn validate_ownership<'a>(
                 }
                 _ => false,
             },
+            NodeKind::ServiceControl { operation } => {
+                match ledger.and_then(|ledger| ledger.resources.get(&operation.key)) {
+                    Some(OwnedResource::Service {
+                        installed,
+                        privilege,
+                        ..
+                    }) => {
+                        *privilege == operation.privilege
+                            && installed.as_ref() == &operation.owned_configuration
+                    }
+                    None => {
+                        operation.owned_configuration == zup_plan::ServiceState::Absent
+                            && operation.stage == crate::ServiceControlStage::Restore
+                    }
+                    _ => false,
+                }
+            }
             NodeKind::BackendOperation { .. }
             | NodeKind::BackendRemoval { .. }
             | NodeKind::Barrier

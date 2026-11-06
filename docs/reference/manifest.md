@@ -4,39 +4,39 @@ The manifest is strict: unknown fields are rejected.
 
 ## Top level
 
-| Key | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `schema` | yes | - | schema version; current value `1` |
-| `app` | yes | - | application identity |
-| `frontend` | no | `gui` | `gui`, `console`, `headless` |
-| `ui` | no | `{}` | preset package and settings |
-| `build` | yes | - | target and artifact profiles |
-| `install` | yes | - | scope and install root |
-| `prerequisites` | no | `[]` | required software |
-| `updates` | no | - | update repository/channel |
-| `distribution` | no | - | client content host |
-| `publish` | no | - | publishing targets |
-| `components` | no | `[]` | selectable application parts |
-| `component_groups` | no | `[]` | component presentation groups |
-| `plugins` | no | `[]` | planner extensions |
-| `files` | no | `[]` | payload mappings |
-| `launchers` | no | `[]` | menu/desktop launchers |
-| `path` | no | `[]` | PATH entries |
-| `services` | no | `[]` | services |
-| `protocols` | no | `[]` | URI protocols |
-| `file_associations` | no | `[]` | file type registrations |
+| Key                 | Required | Default | Purpose                           |
+| ------------------- | -------- | ------- | --------------------------------- |
+| `schema`            | yes      | -       | schema version; current value `1` |
+| `app`               | yes      | -       | application identity              |
+| `frontend`          | no       | `gui`   | `gui`, `console`, `headless`      |
+| `ui`                | no       | `{}`    | preset package and settings       |
+| `build`             | yes      | -       | target and artifact profiles      |
+| `install`           | yes      | -       | scope and install root            |
+| `prerequisites`     | no       | `[]`    | required software                 |
+| `updates`           | no       | -       | update repository/channel         |
+| `distribution`      | no       | -       | client content host               |
+| `publish`           | no       | -       | publishing targets                |
+| `components`        | no       | `[]`    | selectable application parts      |
+| `component_groups`  | no       | `[]`    | component presentation groups     |
+| `plugins`           | no       | `[]`    | planner extensions                |
+| `files`             | no       | `[]`    | payload mappings                  |
+| `launchers`         | no       | `[]`    | menu/desktop launchers            |
+| `path`              | no       | `[]`    | PATH entries                      |
+| `services`          | no       | `[]`    | services                          |
+| `protocols`         | no       | `[]`    | URI protocols                     |
+| `file_associations` | no       | `[]`    | file type registrations           |
 
 ## `[app]`
 
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `id` | yes | stable application ID |
-| `name` | yes | display name |
-| `version` | yes | application version |
-| `publisher` | no | publisher display name |
-| `main` | no | main application executable/template |
-| `description` | no | user-facing description |
-| `icon` | no | icon path or `{ source, padding }` table |
+| Key           | Required | Meaning                                  |
+| ------------- | -------- | ---------------------------------------- |
+| `id`          | yes      | stable application ID                    |
+| `name`        | yes      | display name                             |
+| `version`     | yes      | application version                      |
+| `publisher`   | no       | publisher display name                   |
+| `main`        | no       | main application executable/template     |
+| `description` | no       | user-facing description                  |
+| `icon`        | no       | icon path or `{ source, padding }` table |
 
 ## Frontends
 
@@ -55,12 +55,12 @@ otherwise.
 
 Every project needs at least one target profile.
 
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `target` | inferred from the profile name when it is a target | `windows-x64`, `linux-x64`, ... |
-| `source` | yes | `{ directory = "..." }` payload source |
-| `frontend` | no | target-specific frontend override |
-| `install` | no | target-specific install override |
+| Key        | Required                                           | Meaning                                |
+| ---------- | -------------------------------------------------- | -------------------------------------- |
+| `target`   | inferred from the profile name when it is a target | `windows-x64`, `linux-x64`, ...        |
+| `source`   | yes                                                | `{ directory = "..." }` payload source |
+| `frontend` | no                                                 | target-specific frontend override      |
+| `install`  | no                                                 | target-specific install override       |
 
 A profile named `windows-x64` needs no `target` field. A profile with any
 other name, such as `production`, sets `target = "windows-x64"`.
@@ -69,21 +69,21 @@ other name, such as `production`, sets `target = "windows-x64"`.
 
 Optional. With no declared artifacts, Zup builds one installer per selected target.
 
-| Key | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `kind` | no | `universal` | `single` or `universal` |
-| `mode` | no | `offline` | `offline` or `thin` |
-| `targets` | yes | - | target profile IDs |
-| `channel` | no | - | follow a release channel |
-| `output` | no | derived | output file name |
+| Key       | Required | Default     | Meaning                  |
+| --------- | -------- | ----------- | ------------------------ |
+| `kind`    | no       | `universal` | `single` or `universal`  |
+| `mode`    | no       | `offline`   | `offline` or `thin`      |
+| `targets` | yes      | -           | target profile IDs       |
+| `channel` | no       | -           | follow a release channel |
+| `output`  | no       | derived     | output file name         |
 
 ## `[install]`
 
-| Key | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `scope` | yes | - | `user`, `machine`, `either` |
-| `directory` | no | empty | user/machine path templates |
-| `allow_directory_override` | no | `false` | allow a custom path on fresh install |
+| Key                        | Required | Default | Meaning                              |
+| -------------------------- | -------- | ------- | ------------------------------------ |
+| `scope`                    | yes      | -       | `user`, `machine`, `either`          |
+| `directory`                | no       | empty   | user/machine path templates          |
+| `allow_directory_override` | no       | `false` | allow a custom path on fresh install |
 
 Example:
 
@@ -99,10 +99,10 @@ machine = "${location.programs}/Acme"
 
 ## `[ui]`
 
-| Key | Required | Meaning |
-| --- | --- | --- |
-| `preset` | no | project-relative `.zupui`; absent uses the bundled preset |
-| `settings` | no | values validated by that preset's schema |
+| Key        | Required | Meaning                                                   |
+| ---------- | -------- | --------------------------------------------------------- |
+| `preset`   | no       | project-relative `.zupui`; absent uses the bundled preset |
+| `settings` | no       | values validated by that preset's schema                  |
 
 See [Presets](/presets/).
 
@@ -110,27 +110,27 @@ See [Presets](/presets/).
 
 `[[components]]`:
 
-| Key | Required | Default |
-| --- | --- | --- |
-| `id` | yes | - |
-| `name` | yes | - |
-| `description` | no | - |
-| `required` | no | `false` |
-| `default` | no | `true` |
-| `requires` | no | `[]` |
-| `group` | no | implicit group |
-| `targets` | no | `[]` = all selected profiles |
+| Key           | Required | Default                      |
+| ------------- | -------- | ---------------------------- |
+| `id`          | yes      | -                            |
+| `name`        | yes      | -                            |
+| `description` | no       | -                            |
+| `required`    | no       | `false`                      |
+| `default`     | no       | `true`                       |
+| `requires`    | no       | `[]`                         |
+| `group`       | no       | implicit group               |
+| `targets`     | no       | `[]` = all selected profiles |
 
 `[[component_groups]]`:
 
-| Key | Required | Default |
-| --- | --- | --- |
-| `id` | yes | - |
-| `label` | no | - |
-| `description` | no | - |
-| `prominence` | no | `auto` |
-| `selection` | no | `defaulted` |
-| `targets` | no | `[]` |
+| Key           | Required | Default     |
+| ------------- | -------- | ----------- |
+| `id`          | yes      | -           |
+| `label`       | no       | -           |
+| `description` | no       | -           |
+| `prominence`  | no       | `auto`      |
+| `selection`   | no       | `defaulted` |
+| `targets`     | no       | `[]`        |
 
 `prominence`: `auto`, `primary`, `secondary`. `selection`: `defaulted`, `explicit`.
 
@@ -155,7 +155,17 @@ Required: `value`. Optional: `component`, `when`, `targets`.
 
 ### `[[services]]`
 
-Required: `id`, `name`, `binary`, `start`. Optional: `display_name`, `arguments`, `component`, `when`, `targets`. `start` is `automatic`, `manual`, or `disabled`.
+Required: `id`, `name`, `binary`, `start`, `execution`. Optional: `display_name`, `arguments`, `lifecycle`, `readiness`, `requires_files`, `component`, `when`, `targets`. `start` is `automatic`, `manual`, or `disabled` and controls boot policy independently of installation-time execution.
+
+`execution` is explicit owned configuration. Windows accepts `{ type = "windows", account = "local_service" }`, `network_service`, or an explicitly selected `local_system`. Managed Windows registrations use an unrestricted service SID. Credential-bearing accounts are not supported. systemd accepts `{ type = "systemd_dynamic_user" }` or `{ type = "systemd_user", user = "account", group = "optional-group" }`. Named accounts must already exist; numeric identities and account provisioning are not supported. Generated units require `NoNewPrivileges=yes`.
+
+`lifecycle = { install = "stopped", change = "preserve" }` is the default. Set `install = "running"` to request startup after a new registration. `change = "preserve"` restores a previously running service after its executable or registration changes and leaves a stopped service stopped. `change = "stopped"` leaves it stopped after a change. Disabled services cannot request startup.
+
+See [service lifecycle](/guide/services) for the implemented behavior and current limits.
+
+`lifecycle.start_timeout_seconds` and `lifecycle.stop_timeout_seconds` default to 90 seconds and must each be between 1 and 3600. These control native lifecycle transition deadlines, including compensation in the corresponding direction.
+
+`readiness` defaults to `manager`. Linux systemd also supports `notify`, requiring the main service process to send `READY=1`. Windows rejects `notify`. Readiness is owned configuration and changing it requires a registration update.
 
 ### `[[protocols]]`
 
@@ -183,18 +193,21 @@ Operators: `!`, `&&`, `||`, parentheses.
 
 ## Prerequisites
 
-`[[prerequisites]]` requires `id`, `name`, `requirement`, and `package`.
+`[[prerequisites]]` requires `id`, `name`, `requirement`, and `package`. Linux uses `requirement = { kind = "native_package", id = "package-name", minimum_version = "native-version" }` with `package = { type = "detect_only" }` or `{ type = "repository" }`. The minimum version is optional and uses native package-manager ordering. See [Prerequisites](/guide/prerequisites).
 
 Optional fields: `description`, `component`, `when`, `target`, `installer`, `targets`.
 
 Requirement kinds:
 
+- `native_package` - `id`, optional `minimum_version` (Linux native version)
 - `runtime` - `id`, optional `version`
 - `installed_package` - `id`, optional `version`
 - `file_version` - `path`, optional `version`
 
 Package kinds:
 
+- `detect_only` - detect without installing
+- `repository` - install through the native Linux package manager
 - `embedded` - `path`, `sha256`, `size`
 - `remote` - `url`, `sha256`, `filename`, optional `size`
 

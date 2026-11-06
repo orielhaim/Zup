@@ -9,10 +9,16 @@ publish = false
 
 [features]
 test-launcher = []
+test-faults = ["zup-transaction/test-faults"]
 
 [[bin]]
 name = "zup-test-worker"
 path = "src/bin/test_worker.rs"
+required-features = ["test-launcher"]
+
+[[bin]]
+name = "zup-test-service"
+path = "src/bin/test_service.rs"
 required-features = ["test-launcher"]
 
 # Portable composition: modules without a `cfg(windows)` gate compose Windows
@@ -73,8 +79,11 @@ windows = { version = "0.62", features = [
   "Win32_System_ApplicationInstallationAndServicing",
   "Win32_System_Memory",
   "Win32_System_RestartManager",
+  "Win32_System_Services",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_RemoteDesktop",
 ] }
 
 [build-dependencies]

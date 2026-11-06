@@ -267,6 +267,27 @@ impl PlanPreview {
                         technical_key: Some(format!("{key:?}")),
                     });
                 }
+                zup_transaction::NodeKind::ServiceControl { operation } => {
+                    groups
+                        .entry(ResourceCategory::Services)
+                        .or_default()
+                        .push(PlannedChange {
+                            category: ResourceCategory::Services,
+                            kind: ChangeKind::Update,
+                            label: match operation.stage {
+                                zup_transaction::ServiceControlStage::Quiesce => "Stop service",
+                                zup_transaction::ServiceControlStage::Restore => "Start service",
+                            }
+                            .into(),
+                            location: Some(operation.native_name.clone()),
+                            scope: Some(scope),
+                            requires_authorization: operation.privilege
+                                == zup_core::Privilege::System,
+                            estimated_bytes: 0,
+                            component: None,
+                            technical_key: Some(format!("{:?}", operation.key)),
+                        });
+                }
                 zup_transaction::NodeKind::BackendOperation { key, .. }
                 | zup_transaction::NodeKind::BackendRemoval { key } => {
                     groups

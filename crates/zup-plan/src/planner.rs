@@ -98,6 +98,35 @@ pub fn plan(
         )?;
     }
 
+    let service_names: BTreeMap<_, _> = prepared
+        .plan
+        .services
+        .iter()
+        .map(|service| {
+            (
+                ResourceKey::Service {
+                    id: service.id.clone(),
+                }
+                .canonical_for(&prepared.plan.target),
+                service.name.to_string(),
+            )
+        })
+        .collect();
+    for service in &mut prepared.plan.services {
+        service.dependency_names = service
+            .requires_services
+            .iter()
+            .map(|id| {
+                service_names
+                    .get(
+                        &ResourceKey::Service { id: id.clone() }
+                            .canonical_for(&prepared.plan.target),
+                    )
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect();
+    }
     prepared.plan.canonicalize_keys();
     sort_resources(&mut prepared.plan, &mut generated_files);
     prepared.plan.summary()?;
@@ -266,7 +295,55 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
         ) {
             continue;
         }
+        let mut requires_files = service
+            .requires_files
+            .iter()
+            .map(|path| resolve_template(path, &installer.app, &install_directory))
+            .collect::<Result<Vec<_>, _>>()?;
+        for component in &service.requires_components {
+            if !selected_set.contains(component) {
+                return Err(crate::ContractError::Capability(format!(
+                    "service `{}` requires unselected component `{component}`",
+                    service.id
+                ))
+                .into());
+            }
+            for file in build.files.iter().filter(|file| {
+                file.component.as_ref() == Some(component)
+                    && is_active(
+                        file.component.as_ref(),
+                        file.condition.as_ref(),
+                        &selected_set,
+                    )
+            }) {
+                requires_files.push(resolve_template(
+                    &file.destination,
+                    &installer.app,
+                    &install_directory,
+                )?);
+            }
+        }
+        requires_files.sort_by_key(ToString::to_string);
+        requires_files.dedup();
         services.push(DesiredService {
+            requires_services: service.requires_services.clone(),
+            dependency_names: service
+                .requires_services
+                .iter()
+                .map(|id| {
+                    installer
+                        .services
+                        .iter()
+                        .find(|dependency| dependency.id == *id)
+                        .map(|dependency| dependency.name.to_string())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            failure: service.failure,
+            execution: service.execution.clone(),
+            lifecycle: service.lifecycle,
+            readiness: service.readiness,
+            requires_files,
             key: ResourceKey::Service {
                 id: service.id.clone(),
             },

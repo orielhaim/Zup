@@ -716,8 +716,8 @@ fn prepare_operation(
         }
     }
 
-    let generated =
-        crate::operation_host::generated_content(&prepared).map_err(IpcError::Policy)?;
+    let generated = crate::operation_host::generated_content(&prepared, Some(&roots))
+        .map_err(IpcError::Policy)?;
     let plan = prepared.transaction_plan;
     if plan.nodes.iter().any(|node| {
         matches!(
@@ -885,22 +885,11 @@ fn recover_one(
     let mut executor = crate::executor::LinuxFileExecutor::new()
         .with_payload(payload)
         .for_machine();
-    if record.plan.nodes.iter().any(|node| {
-        node.meta.backend.as_ref().is_some_and(|backend| {
-            backend
-                .id
-                .as_str()
-                .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
-        })
-    }) {
-        let manager = crate::systemd::RealSystemd::connect()
-            .map_err(|error| IpcError::Transaction(error.to_string()))?;
-        executor = executor.with_services(crate::executor::ServiceSupport::isolated(
-            host.roots.clone(),
-            host.systemd.clone(),
-            manager,
-            rustix::process::geteuid().as_raw(),
-        ));
+    if crate::service_ops::plan_requires_manager(&record.plan) {
+        executor = executor.with_services(
+            crate::executor::ServiceSupport::for_host(host.roots.clone(), host.systemd.clone())
+                .map_err(IpcError::Transaction)?,
+        );
     }
     executor
         .register_plan(&record.plan)
@@ -1017,6 +1006,17 @@ fn enforce_machine_file_policy(
             if destination != crate::machine::MachineDestination::MachineState {
                 return Err(IpcError::Policy(
                     "preset content belongs to machine state".into(),
+                ));
+            }
+        }
+        ResourceKey::File { .. }
+            if source
+                .as_str()
+                .starts_with("__zup_generated__/environment/") =>
+        {
+            if destination != crate::machine::MachineDestination::Environment {
+                return Err(IpcError::Policy(
+                    "environment configuration belongs to the environment.d tree".into(),
                 ));
             }
         }
@@ -1140,7 +1140,32 @@ fn settled_name(
             zup_protocol::WorkerOutcome::RecoveryRequired
         }
     };
-    verdict(transaction_id, outcome)
+    let mut result = verdict(transaction_id, outcome);
+    result.detail = settled.record.failure.as_ref().map(|failure| {
+        format!(
+            "{}: {}",
+            failure
+                .operation
+                .as_ref()
+                .map_or_else(|| "transaction".into(), ToString::to_string),
+            failure.message
+        )
+    });
+    if let Some(failure) = &settled.record.rollback_failure {
+        result.detail = Some(format!(
+            "{}; rollback: {}",
+            result.detail.unwrap_or_default(),
+            failure.message
+        ));
+    }
+    if let Some(failure) = &settled.record.recovery_failure {
+        result.detail = Some(format!(
+            "{}; recovery: {}",
+            result.detail.unwrap_or_default(),
+            failure.message
+        ));
+    }
+    result
 }
 
 fn execute_prepared(
@@ -1175,22 +1200,14 @@ fn execute_prepared(
         .with_payload(payload)
         .for_machine();
 
-    if prepared.plan.nodes.iter().any(|node| {
-        node.meta.backend.as_ref().is_some_and(|backend| {
-            backend
-                .id
-                .as_str()
-                .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
-        })
-    }) {
-        let manager = crate::systemd::RealSystemd::connect()
-            .map_err(|error| IpcError::Transaction(error.to_string()))?;
-        executor = executor.with_services(crate::executor::ServiceSupport::isolated(
-            prepared.roots.clone(),
-            prepared.systemd.clone(),
-            manager,
-            rustix::process::geteuid().as_raw(),
-        ));
+    if crate::service_ops::plan_requires_manager(&prepared.plan) {
+        executor = executor.with_services(
+            crate::executor::ServiceSupport::for_host(
+                prepared.roots.clone(),
+                prepared.systemd.clone(),
+            )
+            .map_err(IpcError::Transaction)?,
+        );
     }
     executor
         .register_plan(&prepared.plan)
@@ -1249,6 +1266,7 @@ fn execute_prepared(
         },
         ControlGate::Continue => {
             let _ = channel.send(Message::Progress(ProgressReport {
+                blocked_pids: Vec::new(),
                 phase: zup_core::OperationPhase::Prepare,
                 kind: ProgressKind::OperationStarted,
                 detail: prepared.operation.clone(),
@@ -1258,6 +1276,7 @@ fn execute_prepared(
             if fault == WorkerFault::ProgressDuringExecute {
                 channel.fail_next_send = true;
                 let _ = channel.send(Message::Progress(ProgressReport {
+                    blocked_pids: Vec::new(),
                     phase: zup_core::OperationPhase::Files,
                     kind: ProgressKind::OperationProgress,
                     detail: prepared.operation.clone(),
@@ -1297,6 +1316,7 @@ fn execute_prepared(
     if fault == WorkerFault::DisconnectAfterCommit {
         channel.fail_next_send = true;
         let _ = channel.send(Message::Progress(ProgressReport {
+            blocked_pids: Vec::new(),
             phase: zup_core::OperationPhase::Files,
             kind: ProgressKind::OperationProgress,
             detail: prepared.operation.clone(),
@@ -1325,13 +1345,22 @@ fn execute_prepared(
         tracing::warn!(%error, "committed install left generated content for a later cleanup");
     }
     let ledger_store = crate::ledger::LinuxLedgerStore::new(&prepared.state_root);
+    zup_transaction::fault_injection::boundary(
+        zup_transaction::fault_injection::Boundary::LedgerPublishBefore,
+        &transaction_id.to_string(),
+    );
     match ledger_store.publish_committed(&record, SelectedScope::Machine) {
         Ok(_) => {}
         Err(error) => {
             return Ok(pending_verdict(transaction_id, error.to_string()));
         }
     };
+    zup_transaction::fault_injection::boundary(
+        zup_transaction::fault_injection::Boundary::LedgerPublished,
+        &transaction_id.to_string(),
+    );
     let _ = channel.send(Message::Progress(ProgressReport {
+        blocked_pids: Vec::new(),
         phase: zup_core::OperationPhase::Files,
         kind: ProgressKind::OperationProgress,
         detail: prepared.operation.clone(),
@@ -1367,6 +1396,14 @@ impl GatedExecutor<'_, '_> {
 
 impl zup_transaction::OperationExecutor for GatedExecutor<'_, '_> {
     type Error = crate::error::ExecError;
+
+    fn reconcile_rollback(
+        &mut self,
+        operation: &zup_transaction::TransactionNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<zup_transaction::RollbackReconcileResult, Self::Error> {
+        self.inner.reconcile_rollback(operation, receipt)
+    }
 
     fn prepare(&mut self, operation: &zup_transaction::TransactionNode) -> Result<(), Self::Error> {
         self.note()?;

@@ -21,6 +21,8 @@ wasmtime.workspace = true
 zup-plugin-abi.workspace = true
 
 [dev-dependencies]
+toml.workspace = true
+zup-plugin-abi = { workspace = true, features = ["test-fixture"] }
 rstest.workspace = true
 wit-component.workspace = true
 wit-parser.workspace = true

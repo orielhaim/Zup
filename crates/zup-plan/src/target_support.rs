@@ -54,6 +54,19 @@ impl TargetCapabilities {
         scope: SelectedScope,
     ) -> Vec<String> {
         let mut errors = Vec::new();
+        if installer.target.is_windows()
+            && installer.prerequisites.iter().any(|requirement| {
+                matches!(
+                    requirement.requirement,
+                    zup_core::PrerequisiteRequirement::NativePackage { .. }
+                ) || matches!(
+                    requirement.package,
+                    zup_core::PrerequisitePackage::Repository
+                )
+            })
+        {
+            errors.push("native package requirements and repository installation are supported only on Linux".into());
+        }
         if !self.scopes.supports(scope) {
             errors.push(format!(
                 "target `{}` does not support {scope} installations",
@@ -175,20 +188,26 @@ const LINUX: TargetCapabilities = TargetCapabilities {
     scopes: ScopeSupport::Both,
     services: ScopeSupport::Machine,
     menu: ScopeSupport::User,
-    desktop: ScopeSupport::Unsupported,
+    desktop: ScopeSupport::User,
     protocols: ScopeSupport::User,
     file_associations: ScopeSupport::User,
-    search_path: ScopeSupport::Unsupported,
-    prerequisites: ScopeSupport::Unsupported,
+    search_path: ScopeSupport::Both,
+    prerequisites: ScopeSupport::Both,
     plugins: ScopeSupport::Both,
     artifacts: ArtifactSupport::Native,
     elevation: Elevation::Polkit,
+};
+
+const LINUX_MUSL: TargetCapabilities = TargetCapabilities {
+    frontends: &[Frontend::Console, Frontend::Headless],
+    ..LINUX
 };
 
 pub fn capabilities(target: &Target) -> Option<&'static TargetCapabilities> {
     match *target {
         Target::WINDOWS_X64 | Target::WINDOWS_X86 | Target::WINDOWS_ARM64 => Some(&WINDOWS),
         Target::LINUX_X64 | Target::LINUX_ARM64 => Some(&LINUX),
+        Target::LINUX_X64_MUSL | Target::LINUX_ARM64_MUSL => Some(&LINUX_MUSL),
         _ => None,
     }
 }
@@ -202,7 +221,8 @@ mod tests {
     #[case("linux-x64", Some(ArtifactSupport::Native))]
     #[case("linux-arm64", Some(ArtifactSupport::Native))]
     #[case("windows-arm64", Some(ArtifactSupport::Universal))]
-    #[case("linux-x64-musl", None)]
+    #[case("linux-x64-musl", Some(ArtifactSupport::Native))]
+    #[case("linux-arm64-musl", Some(ArtifactSupport::Native))]
     fn target_support_is_explicit(#[case] target: &str, #[case] expected: Option<ArtifactSupport>) {
         assert_eq!(
             capabilities(&Target::parse(target).unwrap()).map(|caps| caps.artifacts),

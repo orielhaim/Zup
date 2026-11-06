@@ -729,6 +729,7 @@ name = "Service"
 default = false
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "acme-agent"
 name = "acme-agent"
 binary = "${install}/acme-agent.exe"
@@ -777,6 +778,7 @@ destination = "${install}/${app.name}/a.txt"
 value = "${install}/bin/${app.version}"
 
 [[services]]
+execution = { type = "windows", account = "local_service" }
 id = "svc"
 name = "svc"
 binary = "${install}/svc.exe"
@@ -819,6 +821,63 @@ executable = "${install}/a.exe"
             scheme: ProtocolScheme::new("acme").unwrap()
         }
     );
+}
+
+#[rstest]
+#[case::selected(true)]
+#[case::unselected(false)]
+fn service_component_dependencies_expand_to_managed_files_or_refuse_selection(
+    #[case] selected: bool,
+) {
+    let source = with(
+        r#"
+[[components]]
+id = "configuration"
+name = "Configuration"
+default = false
+[[files]]
+source = "worker.exe"
+destination = "${install}"
+executable = true
+[[files]]
+source = "worker.conf"
+destination = "${install}"
+component = "configuration"
+[[services]]
+id = "worker"
+name = "Worker"
+binary = "${install}/worker.exe"
+execution = { type = "windows", account = "local_service" }
+start = "manual"
+requires_components = ["configuration"]
+"#,
+    );
+    let build = build_plan_from(
+        &source,
+        &[
+            ("dist/worker.exe", b"worker"),
+            ("dist/worker.conf", b"configuration"),
+        ],
+    );
+    let mut request = PlanRequest::new(target(), SelectedScope::Machine);
+    if selected {
+        request.components = overrides(&["configuration"], &[]);
+    }
+    let result = plan(&build, &request, None, &zup_plan::NeverCancelled);
+    if selected {
+        let installation = result.unwrap();
+        assert_eq!(installation.plan.services[0].requires_files.len(), 1);
+        assert!(
+            installation.plan.services[0].requires_files[0]
+                .to_string()
+                .ends_with("worker.conf")
+        );
+    } else {
+        assert!(matches!(
+            result,
+            Err(PlanError::Contract(zup_plan::ContractError::Capability(_)))
+        ));
+    }
 }
 
 #[test]

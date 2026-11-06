@@ -20,6 +20,8 @@ fn matrix() -> Vec<MatrixTarget> {
 #[case("linux-x64", "ubuntu-latest")]
 #[case("linux-arm64", "ubuntu-24.04-arm")]
 #[case("windows-x86", "windows-latest")]
+#[case("linux-x64-musl", "ubuntu-latest")]
+#[case("linux-arm64-musl", "ubuntu-latest")]
 fn a_runner_is_derived_from_the_target(#[case] name: &str, #[case] runner: &str) {
     let rendered = generate(
         &WorkflowPolicy::default(),
@@ -281,4 +283,11 @@ fn generation_is_reproducible_and_check_notices_drift() {
     std::fs::write(&path, &first).expect("the file is rewritten");
     let current = zup_publish_github::check(root.path(), &policy, &matrix());
     assert!(current.current, "{}", current.detail);
+}
+
+#[test]
+fn gnu_runners_do_not_claim_native_musl_execution() {
+    for target in [Target::LINUX_X64_MUSL, Target::LINUX_ARM64_MUSL] {
+        assert!(zup_publish_github::native_runner(target).is_none());
+    }
 }

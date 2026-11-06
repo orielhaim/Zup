@@ -5,6 +5,7 @@ use tracing::{info, warn};
 use zup_core::{AppId, SelectedScope};
 
 use crate::executor::{OperationExecutor, OperationReceipt, ReconcileResult};
+use crate::fault_injection::{Boundary, boundary};
 use crate::id::{OperationId, TransactionId};
 use crate::plan::{NodeKind, Phase, TransactionNode, TransactionPlan};
 use crate::record::{NodeState, StoreError, TransactionPhase, TransactionRecord};
@@ -174,6 +175,20 @@ impl<S: TransactionStore> TransactionCoordinator<S> {
                     return Err(error);
                 }
                 warn!(transaction_id = %record.transaction_id, error = %error, "execution failed");
+                let operation = match &error {
+                    TransactionError::Executor { operation, .. } => {
+                        Some(OperationId::new(operation))
+                    }
+                    _ => None,
+                };
+                let message: String = error.to_string().chars().take(4096).collect();
+                commit(&mut record, &self.store, |record| {
+                    record.failure = Some(crate::TransactionFailure {
+                        operation: operation.clone(),
+                        message: message.clone(),
+                    });
+                    Ok(())
+                })?;
                 let outcome = fail(&self.store, &mut record, executor)?;
                 Ok((record, outcome))
             }
@@ -221,6 +236,20 @@ where
                     return Err(error);
                 }
                 warn!(transaction_id = %record.transaction_id, error = %error, "recovery failed");
+                let operation = match &error {
+                    TransactionError::Executor { operation, .. } => {
+                        Some(OperationId::new(operation))
+                    }
+                    _ => None,
+                };
+                let message: String = error.to_string().chars().take(4096).collect();
+                commit(&mut record, store, |record| {
+                    record.recovery_failure = Some(crate::TransactionFailure {
+                        operation: operation.clone(),
+                        message: message.clone(),
+                    });
+                    Ok(())
+                })?;
                 let outcome = fail(store, &mut record, executor)?;
                 Ok((record, outcome))
             }
@@ -285,7 +314,21 @@ where
             }
             cross_barrier(store, record, executor, &node)?;
         } else if matches!(state, NodeState::Pending) {
+            if matches!(&node.kind, NodeKind::ServiceControl { operation } if operation.stage == crate::ServiceControlStage::Restore)
+            {
+                verify_applied(store, record, executor)?;
+            }
             run_mutation(store, record, executor, &node)?;
+        } else if let NodeState::Applied { receipt } = state
+            && matches!(node.kind, NodeKind::ServiceControl { .. })
+        {
+            executor
+                .verify(&node, &receipt)
+                .map_err(|error| TransactionError::Executor {
+                    operation: node.id.to_string(),
+                    message: error.to_string(),
+                })?;
+            commit_node(record, store, &node.id, NodeState::Verified { receipt })?;
         }
     }
     Ok(())
@@ -324,6 +367,7 @@ where
             });
         }
     };
+    boundary(Boundary::ApplyReturned, node.id.as_str());
     commit_node(
         record,
         store,
@@ -372,6 +416,7 @@ where
             });
         }
     };
+    boundary(Boundary::ApplyReturned, node.id.as_str());
     commit_node(
         record,
         store,
@@ -381,6 +426,21 @@ where
         },
     )?;
     info!(operation = %node.id, "node applied");
+    if matches!(node.kind, NodeKind::ServiceControl { .. }) {
+        let Some(NodeState::Applied { receipt }) = record.nodes.get(&node.id) else {
+            unreachable!("applied receipt was just persisted");
+        };
+        let receipt = receipt.clone();
+        boundary(Boundary::VerifyBefore, node.id.as_str());
+        executor
+            .verify(node, &receipt)
+            .map_err(|error| TransactionError::Executor {
+                operation: node.id.to_string(),
+                message: error.to_string(),
+            })?;
+        boundary(Boundary::VerifyReturned, node.id.as_str());
+        commit_node(record, store, &node.id, NodeState::Verified { receipt })?;
+    }
     Ok(())
 }
 
@@ -479,12 +539,21 @@ where
             continue;
         }
         info!(operation = %op_id, "reconciliation");
-        match executor
-            .reconcile(&node, None)
-            .map_err(|error| TransactionError::Executor {
-                operation: op_id.to_string(),
-                message: error.to_string(),
-            })? {
+        let result = match executor.reconcile(&node, None) {
+            Ok(result) => result,
+            Err(error) => {
+                let message: String = error.to_string().chars().take(4096).collect();
+                commit(record, store, |record| {
+                    record.recovery_failure = Some(crate::TransactionFailure {
+                        operation: Some(op_id.clone()),
+                        message: message.clone(),
+                    });
+                    Ok(())
+                })?;
+                ReconcileResult::Ambiguous
+            }
+        };
+        match result {
             ReconcileResult::NotApplied | ReconcileResult::Incomplete => {
                 commit_node(record, store, op_id, NodeState::Pending)?;
             }
@@ -510,6 +579,15 @@ where
             }
             ReconcileResult::Ambiguous => {
                 ambiguous = true;
+                if record.recovery_failure.is_none() {
+                    commit(record, store, |record| {
+                        record.recovery_failure = Some(crate::TransactionFailure {
+                            operation: Some(op_id.clone()),
+                            message: "native effects are uncertain; the original operation receipt is unavailable".into(),
+                        });
+                        Ok(())
+                    })?;
+                }
                 warn!(operation = %op_id, "ambiguous reconciliation");
             }
         }
@@ -529,16 +607,6 @@ fn rollback_after_failure<S: TransactionStore, E: OperationExecutor>(
 where
     E::Error: std::fmt::Display,
 {
-    if record
-        .nodes
-        .values()
-        .any(|state| *state == NodeState::RollingBack)
-    {
-        warn!(transaction_id = %record.transaction_id, "rollback was interrupted");
-        commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
-        return Ok(TransactionOutcome::RecoveryRequired);
-    }
-
     commit_phase(record, store, TransactionPhase::RollingBack)?;
     info!(transaction_id = %record.transaction_id, "rollback started");
 
@@ -557,21 +625,73 @@ where
             }
             continue;
         }
+        let interrupted = matches!(state, NodeState::RollingBack { .. });
         let receipt = match state {
-            NodeState::Applied { receipt } | NodeState::Verified { receipt } => receipt,
+            NodeState::Applied { receipt }
+            | NodeState::Verified { receipt }
+            | NodeState::RollingBack { receipt } => receipt,
             _ => continue,
         };
-        commit_node(record, store, op_id, NodeState::RollingBack)?;
+        if rollback_failed && matches!(node.kind, NodeKind::ServiceControl { .. }) {
+            commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+            return Ok(TransactionOutcome::RecoveryRequired);
+        }
+        if interrupted {
+            match executor.reconcile_rollback(&node, &receipt) {
+                Ok(crate::RollbackReconcileResult::Restored) => {
+                    commit_node(record, store, op_id, NodeState::RolledBack)?;
+                    continue;
+                }
+                Ok(crate::RollbackReconcileResult::Retry) => {}
+                result => {
+                    let message = match result {
+                        Err(error) => error.to_string(),
+                        _ => "interrupted compensation cannot be established from native evidence"
+                            .into(),
+                    };
+                    commit(record, store, |record| {
+                        record.rollback_failure = Some(crate::TransactionFailure {
+                            operation: Some(op_id.clone()),
+                            message: message.chars().take(4096).collect(),
+                        });
+                        Ok(())
+                    })?;
+                    commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+                    return Ok(TransactionOutcome::RecoveryRequired);
+                }
+            }
+        } else {
+            commit_node(
+                record,
+                store,
+                op_id,
+                NodeState::RollingBack {
+                    receipt: receipt.clone(),
+                },
+            )?;
+        }
 
         match executor.rollback(&node, &receipt) {
             Ok(()) => {
+                boundary(Boundary::RollbackReturned, op_id.as_str());
                 commit_node(record, store, op_id, NodeState::RolledBack)?;
                 info!(operation = %op_id, "node rolled back");
             }
             Err(error) => {
                 rollback_failed = true;
-                let _ = commit_node(record, store, op_id, NodeState::Failed);
+                let message: String = error.to_string().chars().take(4096).collect();
+                commit(record, store, |record| {
+                    record.rollback_failure = Some(crate::TransactionFailure {
+                        operation: Some(op_id.clone()),
+                        message: message.clone(),
+                    });
+                    Ok(())
+                })?;
                 warn!(operation = %op_id, error = %error, "rollback failed");
+                if matches!(node.kind, NodeKind::ServiceControl { .. }) {
+                    commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+                    return Ok(TransactionOutcome::RecoveryRequired);
+                }
             }
         }
     }
@@ -609,6 +729,17 @@ fn commit_node<S: TransactionStore>(
     op_id: &OperationId,
     state: NodeState,
 ) -> Result<(), TransactionError> {
+    let point = match state {
+        NodeState::Running => {
+            boundary(Boundary::IntentBefore, op_id.as_str());
+            Some(Boundary::IntentPersisted)
+        }
+        NodeState::Applied { .. } => Some(Boundary::ReceiptPersisted),
+        NodeState::Verified { .. } => Some(Boundary::VerifiedPersisted),
+        NodeState::RollingBack { .. } => Some(Boundary::RollbackIntentPersisted),
+        NodeState::RolledBack => Some(Boundary::RolledBackPersisted),
+        _ => None,
+    };
     commit(record, store, move |fresh| {
         let Some(current) = fresh.nodes.get(op_id) else {
             return Err(format!("missing node {op_id}"));
@@ -622,7 +753,11 @@ fn commit_node<S: TransactionStore>(
             .map_err(|_| format!("node {op_id} cannot enter {state:?} from {current:?}"))?;
         fresh.nodes.insert(op_id.clone(), next);
         Ok(())
-    })
+    })?;
+    if let Some(point) = point {
+        boundary(point, op_id.as_str());
+    }
+    Ok(())
 }
 
 fn commit_phase<S: TransactionStore>(
@@ -630,12 +765,19 @@ fn commit_phase<S: TransactionStore>(
     store: &S,
     next: TransactionPhase,
 ) -> Result<(), TransactionError> {
+    if next == TransactionPhase::Committed {
+        boundary(Boundary::CommitBefore, &record.transaction_id.to_string());
+    }
     commit(record, store, move |fresh| {
         if let Ok(phase) = fresh.phase.transition(next) {
             fresh.phase = phase;
         }
         Ok(())
-    })
+    })?;
+    if next == TransactionPhase::Committed {
+        boundary(Boundary::Committed, &record.transaction_id.to_string());
+    }
+    Ok(())
 }
 
 fn find_node<'a>(

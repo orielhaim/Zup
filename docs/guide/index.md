@@ -12,7 +12,7 @@ Most applications only need the first and fourth parts at the start.
 
 ## Current platform support
 
-Windows and Linux installers build from either host. Linux ships `gui`, `console`, and `headless` runtimes for `linux-x64` and `linux-arm64`. A Linux GUI installer needs a Wayland or X11 session at run time. There is no macOS backend: a macOS target is refused before the payload is read.
+Windows and Linux installers build from either host. Linux ships `gui`, `console`, and `headless` runtimes for GNU `linux-x64` and `linux-arm64`. musl x64 and ARM64 support console and headless runtimes. A Linux GUI installer needs a Wayland or X11 session at run time. There is no macOS backend: a macOS target is refused before the payload is read.
 
 See [Platforms and targets](./platforms) for the exact model.
 

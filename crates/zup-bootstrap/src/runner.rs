@@ -151,6 +151,12 @@ fn execute_operation_with_persist(
             prerequisite_id: operation.id.clone(),
         });
     }
+    if matches!(operation.package, zup_core::PrerequisitePackage::DetectOnly) {
+        return Err(BootstrapError::Requirement(format!(
+            "detect-only prerequisite `{}` is unsatisfied",
+            operation.id
+        )));
+    }
     state.mark(&operation.id, BootstrapOperationState::Running)?;
     state.recompute();
     persist(state)?;
@@ -158,9 +164,8 @@ fn execute_operation_with_persist(
         prerequisite_id: operation.id.clone(),
         requirement: operation.requirement.clone(),
         executable,
+        package: operation.package.clone(),
         arguments: operation.installer.arguments.clone(),
-        expected_digest: operation.package.digest(),
-        expected_size: operation.package.size(),
         success_exit_codes: operation.installer.success_exit_codes.clone(),
         reboot_exit_codes: operation.installer.reboot_exit_codes.clone(),
     }) {

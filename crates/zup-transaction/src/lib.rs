@@ -2,6 +2,7 @@
 
 mod coordinator;
 mod executor;
+pub mod fault_injection;
 mod id;
 mod input;
 mod ledger;
@@ -20,13 +21,24 @@ pub use reconciliation::{
     LedgerPublication, PublicationError, ReconciliationError, ReconciliationState,
     ledger_publication, reconcile_committed, retired_records, settled_records,
 };
+mod service;
+pub use service::{
+    NativeServiceManager, ServiceControlCompletion, ServiceControlOperation, ServiceControlReceipt,
+    ServiceControlStage, ServiceObservation, ServiceTerminalState, apply_service_control,
+    bind_service_dependencies, disabled_startup, plan_service_controls, reconcile_service_control,
+    reconcile_service_rollback, requires_startup_inhibition, rollback_service_control,
+    verify_service_control,
+};
 mod storage;
 
 pub use coordinator::{
     OpenTransaction, SettledTransaction, TransactionCoordinator, TransactionError,
     TransactionOutcome, recover,
 };
-pub use executor::{CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult};
+pub use executor::{
+    CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult,
+    RollbackReconcileResult,
+};
 pub use id::{OperationId, TransactionId};
 pub use input::{
     BackendOperation, BackendOperationIntent, FileRemoval, MAX_BACKEND_DEPENDENCIES,
@@ -42,7 +54,7 @@ pub use private::{
 };
 pub use record::{
     CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, PublishError, StoreError,
-    TransactionPhase, TransactionRecord, VisiblePublish, settle_visible,
+    TransactionFailure, TransactionPhase, TransactionRecord, VisiblePublish, settle_visible,
 };
 pub use storage::{CONTENT_STORE_DIRECTORY, ContentStoreIdentity};
 pub use storage::{FilesystemTransactionStore, JournalVolume, TransactionStore};

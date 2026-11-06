@@ -21,6 +21,7 @@ pub struct MachineRoots {
     pub state: PathBuf,
 
     pub shared_data: PathBuf,
+    pub environment: PathBuf,
 }
 
 impl MachineRoots {
@@ -29,14 +30,21 @@ impl MachineRoots {
             programs: PathBuf::from(MACHINE_PROGRAMS_ROOT),
             state: PathBuf::from(MACHINE_STATE_ROOT),
             shared_data: PathBuf::from(MACHINE_SHARED_DATA_ROOT),
+            environment: PathBuf::from("/usr/local/lib/environment.d"),
         }
     }
 
-    pub fn new(programs: PathBuf, state: PathBuf, shared_data: PathBuf) -> Self {
+    pub fn new(
+        programs: PathBuf,
+        state: PathBuf,
+        shared_data: PathBuf,
+        environment: PathBuf,
+    ) -> Self {
         Self {
             programs,
             state,
             shared_data,
+            environment,
         }
     }
 }
@@ -48,7 +56,7 @@ pub fn user_data_home() -> Result<PathBuf, PathError> {
 }
 
 pub fn user_data_home_in(data_home: Option<&std::path::Path>, home: &std::path::Path) -> PathBuf {
-    match data_home.filter(|dir| !dir.as_os_str().is_empty()) {
+    match data_home.filter(|dir| dir.as_os_str().as_encoded_bytes().starts_with(b"/")) {
         Some(dir) => dir.to_path_buf(),
 
         None => home.join(".local/share"),
@@ -79,6 +87,9 @@ impl Default for LinuxInstallLocationResolver {
 }
 
 impl LinuxInstallLocationResolver {
+    pub(crate) fn environment_directory(&self) -> &std::path::Path {
+        &self.machine.environment
+    }
     pub fn with_machine_roots(machine: MachineRoots) -> Self {
         Self {
             machine,
@@ -113,6 +124,57 @@ impl LinuxInstallLocationResolver {
             None => user_data_home(),
         }
     }
+
+    pub(crate) fn desktop(&self) -> Result<PathBuf, PathError> {
+        let path = match &self.user_home {
+            Some(home) => Some(home.join("Desktop")),
+            None => directories::UserDirs::new().and_then(|dirs| {
+                dirs.desktop_dir()
+                    .filter(|path| *path != dirs.home_dir())
+                    .map(PathBuf::from)
+            }),
+        };
+        path.ok_or(PathError::UnsupportedLocation {
+            location: InstallLocation::Desktop,
+            scope: "user",
+            reason: "the XDG desktop directory is disabled or not configured",
+        })
+    }
+
+    pub(crate) fn config_home(&self) -> Result<PathBuf, PathError> {
+        match &self.user_home {
+            Some(home) => Ok(home.join(".config")),
+            None => Ok(std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .unwrap_or(home_dir()?.join(".config"))),
+        }
+    }
+
+    pub(crate) fn require_environment_generator(&self) -> Result<(), PathError> {
+        #[cfg(target_os = "linux")]
+        if self.user_home.is_none()
+            && ![
+                "/usr/lib/systemd/user-environment-generators/30-systemd-environment-d-generator",
+                "/lib/systemd/user-environment-generators/30-systemd-environment-d-generator",
+            ]
+            .iter()
+            .any(|path| std::path::Path::new(path).is_file())
+        {
+            return Err(PathError::Refused { path: "environment.d".into(), reason: "directory PATH integration requires the systemd environment.d generator; this system does not provide it".into() });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_machine_path(&self, path: &TargetPath) -> Result<(), PathError> {
+        #[cfg(target_os = "linux")]
+        if self.user_home.is_none() && self.machine == MachineRoots::production() {
+            crate::fs::verify_ancestor_trust(&crate::lowering::to_host_path(path)?, 0)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = path;
+        Ok(())
+    }
 }
 
 impl InstallLocationResolver for LinuxInstallLocationResolver {
@@ -140,13 +202,8 @@ impl InstallLocationResolver for LinuxInstallLocationResolver {
                             reason: "there is no machine-wide data root without a privilege mechanism",
                         }));
                     }
-                    InstallLocation::Menu | InstallLocation::Desktop => {
-                        return Err(failed(PathError::UnsupportedLocation {
-                            location,
-                            scope: "user",
-                            reason: "desktop integration is deferred past this phase",
-                        }));
-                    }
+                    InstallLocation::Menu => data_home.join("applications"),
+                    InstallLocation::Desktop => self.desktop().map_err(failed)?,
                 }
             }
 
@@ -182,7 +239,7 @@ impl InstallLocationResolver for LinuxInstallLocationResolver {
 fn home_dir() -> Result<PathBuf, PathError> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .filter(|home| !home.as_os_str().is_empty())
+        .filter(|home| home.as_os_str().as_encoded_bytes().starts_with(b"/"))
         .ok_or(PathError::NoHome)
 }
 
@@ -229,14 +286,14 @@ mod tests {
     }
 
     #[test]
-    fn desktop_and_menu_locations_are_refused() {
-        let resolver = LinuxInstallLocationResolver::default();
+    fn desktop_and_menu_locations_resolve_at_build_time() {
+        let resolver = LinuxInstallLocationResolver::for_build();
         for location in [InstallLocation::Menu, InstallLocation::Desktop] {
             assert!(
                 resolver
                     .resolve(location, SelectedScope::User, &linux_target())
-                    .is_err(),
-                "{location} must be refused, not answered"
+                    .is_ok(),
+                "{location} has a user location"
             );
         }
     }

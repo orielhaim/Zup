@@ -54,4 +54,4 @@ Thin runtimes collect component choices before acquiring selected content. Their
 
 See [automation output](/reference/automation) for JSON and live JSONL results. `--yes` or `--non-interactive` also suppresses Console prompts. Neither flag replaces native authorization.
 
-See [terminal installer measurements](/ship/terminal-size) for dependency choices, distribution sizes, and verification limits.
+See [installer size](/ship/installer-size) to measure your application.

@@ -21,6 +21,22 @@ pub fn validate_ledger_identity(
     app_id: &AppId,
     scope: SelectedScope,
 ) -> bool {
+    let graph = ledger
+        .resources
+        .iter()
+        .filter_map(|(key, owned)| match owned {
+            OwnedResource::Service {
+                requires_services, ..
+            } => Some((
+                key.clone(),
+                zup_core::service_dependency_keys(requires_services, ledger.target),
+            )),
+            _ => None,
+        })
+        .collect();
+    if zup_core::validate_service_graph(&graph).is_err() {
+        return false;
+    }
     let mut identities = BTreeSet::new();
     ledger.schema == INSTALL_LEDGER_SCHEMA
         && ledger.app_id == *app_id
@@ -58,11 +74,19 @@ pub fn validate_ledger_identity(
                 }),
             OwnedResource::PathEntry { value, .. } => matches!(key, ResourceKey::PathEntry { value: identity }
                 if value.target() == &ledger.target && zup_plan::TargetPath::new(ledger.target, identity).is_ok_and(|identity| value == &identity)),
-            OwnedResource::Service { name, previous, installed, .. } =>
+            OwnedResource::Service { name, previous, installed, requires_files, requires_services, privilege } =>
                 matches!(key, ResourceKey::Service { .. }) && !name.is_empty()
+                  && requires_services.len() <= 256
+                  && requires_services.iter().collect::<BTreeSet<_>>().len() == requires_services.len()
+                  && requires_services.iter().all(|id| matches!(ledger.resources.get(&ResourceKey::Service { id: id.clone() }.canonical_for(&ledger.target)), Some(OwnedResource::Service { privilege: dependency_privilege, .. }) if dependency_privilege == privilege))
+                  && requires_files.len() <= 256
+                  && requires_files.iter().collect::<BTreeSet<_>>().len() == requires_files.len()
+                  && requires_files.iter().all(|path| path.target() == &ledger.target
+                      && matches!(ledger.resources.get(&ResourceKey::File { destination: path.to_string() }.canonical_for(&ledger.target)),
+                          Some(OwnedResource::File { destination, privilege: file_privilege, .. }) if destination == path && file_privilege == privilege))
                 && [previous, installed].iter().all(|state| match state {
                     zup_plan::ServiceState::Absent => true,
-                    zup_plan::ServiceState::Registration { command, .. } => command.executable.target() == &ledger.target,
+                    zup_plan::ServiceState::Registration { command, execution, .. } => command.executable.target() == &ledger.target && execution.validate_for(ledger.target).is_ok(),
                 }),
             OwnedResource::Protocol { previous, installed, .. } =>
                 matches!(key, ResourceKey::Protocol { .. }) && [previous, installed].iter().all(|state| match state {
@@ -189,6 +213,7 @@ pub fn project_committed_files(
             key.clone(),
             OwnedResource::File {
                 destination: path(destination)?,
+                executable: node.meta.executable.ok_or(LedgerProjectionError)?,
                 source_relative: node
                     .meta
                     .source_relative

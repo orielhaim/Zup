@@ -21,6 +21,13 @@ pub enum ContractError {
     Target(Target),
     #[error("unsupported deployment: {0}")]
     Capability(String),
+    #[error(
+        "service `{service}` requires `{path}`, which must be a unique managed file with the service's privilege"
+    )]
+    ServiceFile {
+        service: zup_core::ServiceId,
+        path: String,
+    },
 }
 
 impl<P: Display, L> DesiredState<P, L> {
@@ -70,7 +77,87 @@ impl<P: Display, L> DesiredState<P, L> {
                 },
             )?;
         }
+        let graph = self
+            .services
+            .iter()
+            .map(|service| {
+                (
+                    service.key.canonical_for(&self.target),
+                    zup_core::service_dependency_keys(&service.requires_services, self.target),
+                )
+            })
+            .collect();
+        zup_core::validate_service_graph(&graph).map_err(ContractError::Capability)?;
         for service in &self.services {
+            let dependencies =
+                zup_core::service_dependency_keys(&service.requires_services, self.target);
+            if service.dependency_names
+                != service
+                    .requires_services
+                    .iter()
+                    .map(|id| {
+                        self.services
+                            .iter()
+                            .find(|dependency| {
+                                ResourceKey::Service {
+                                    id: dependency.id.clone(),
+                                }
+                                .canonical_for(&self.target)
+                                    == ResourceKey::Service { id: id.clone() }
+                                        .canonical_for(&self.target)
+                            })
+                            .map(|dependency| dependency.name.to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect::<Vec<_>>()
+                || service.requires_services.len() > 256
+                || dependencies.len() != service.requires_services.len()
+                || dependencies.iter().any(|key| {
+                    !self.services.iter().any(|dependency| {
+                        dependency.key.canonical_for(&self.target) == *key
+                            && dependency.privilege == service.privilege
+                            && matches!(
+                                dependency.execution,
+                                zup_core::ServiceExecution::OpenrcUser { .. }
+                            ) == matches!(
+                                service.execution,
+                                zup_core::ServiceExecution::OpenrcUser { .. }
+                            )
+                    })
+                })
+            {
+                return Err(ContractError::Capability(format!(
+                    "service {} requires unique managed services with the same privilege",
+                    service.id
+                )));
+            }
+            service
+                .execution
+                .validate_policies(service.failure, service.readiness, self.target)
+                .map_err(|reason| ContractError::Capability(reason.into()))?;
+            let mut dependencies = BTreeSet::new();
+            if service.requires_files.len() > 256 {
+                return Err(ContractError::Capability(
+                    "a service may require at most 256 managed files".into(),
+                ));
+            }
+            for path in &service.requires_files {
+                let identity = ResourceKey::File {
+                    destination: path.to_string(),
+                }
+                .canonical_for(&self.target);
+                if !dependencies.insert(identity.clone())
+                    || !self.files.iter().any(|file| {
+                        file.key.canonical_for(&self.target) == identity
+                            && file.privilege == service.privilege
+                    })
+                {
+                    return Err(ContractError::ServiceFile {
+                        service: service.id.clone(),
+                        path: path.to_string(),
+                    });
+                }
+            }
             claim(
                 &service.key,
                 ResourceKey::Service {
