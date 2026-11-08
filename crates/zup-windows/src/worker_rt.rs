@@ -1629,7 +1629,7 @@ impl OperationExecutor for WorkerFileExecutor {
         match &operation.kind {
             zup_transaction::NodeKind::BackendOperation { .. }
             | zup_transaction::NodeKind::BackendRemoval { .. } => {
-                crate::integration::verify_managed(receipt).map_err(|e| e.to_string())
+                crate::integration::verify_managed(operation, receipt).map_err(|e| e.to_string())
             }
             zup_transaction::NodeKind::Barrier => Ok(()),
             _ => crate::verify_installed_file(receipt).map_err(|e| e.to_string()),
@@ -1683,7 +1683,7 @@ impl OperationExecutor for WorkerFileExecutor {
 
     fn rollback(
         &mut self,
-        _op: &TransactionNode,
+        op: &TransactionNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         match receipt {
@@ -1698,7 +1698,7 @@ impl OperationExecutor for WorkerFileExecutor {
                 .inner
                 .rollback_transaction_receipt(receipt)
                 .map_err(|e| e.to_string()),
-            _ => crate::integration::rollback_managed(receipt).map_err(|e| e.to_string()),
+            _ => crate::integration::rollback_managed(op, receipt).map_err(|e| e.to_string()),
         }
     }
 

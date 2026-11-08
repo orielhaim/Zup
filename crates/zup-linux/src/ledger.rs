@@ -54,6 +54,9 @@ impl LinuxLedgerStore {
         plan.validate()
             .map_err(|error| ExecError::Ownership(error.to_string()))?;
         let ledger = self.load(app_id, scope)?;
+        zup_transaction::validate_owned_service_inputs(plan, ledger.as_ref())
+            .map_err(ExecError::Ownership)?;
+        crate::service_ops::validate_startup_inhibitions(plan, ledger.as_ref())?;
         let retired_ledger = retired_ledger_keys(plan)?;
         let retired =
             zup_transaction::validate_ownership(plan, scope, ledger.as_ref(), &retired_ledger)
@@ -328,15 +331,20 @@ fn validate_service_apply(
             ..
         }) if name == &service.name && privilege == &service.privilege => {
             let desired = ServiceState::Registration {
+                native_timeouts: service.lifecycle.timeouts_for(&service.execution).native(),
                 dependencies: service.dependency_names.clone(),
                 failure: service.failure,
                 execution: service.execution.clone(),
                 readiness: service.readiness,
                 display_name: service.display_name.clone(),
-                command: service.command.clone(),
+                command: Box::new(service.command.clone()),
                 start: service.start,
             };
             let valid = match service.kind {
+                zup_plan::IntegrationChangeKind::NoOp => {
+                    service.previous.configuration().as_ref() == Some(installed)
+                        && &desired == installed.as_ref()
+                }
                 zup_plan::IntegrationChangeKind::UpdateOwned => {
                     service.previous.configuration().as_ref() == Some(installed)
                 }
@@ -394,7 +402,7 @@ fn publish_service_node(
     }
     let payload = crate::service_ops::decode_payload(&backend.payload)
         .map_err(|_| ExecError::LedgerInvalid)?;
-    let crate::service_ops::ServicePayload::Apply { service, .. } = payload else {
+    let crate::service_ops::ServicePayload::Apply { service, .. } = &payload else {
         return Err(ExecError::LedgerInvalid);
     };
     let Some(receipt) = record.receipt(&node.id) else {
@@ -405,6 +413,10 @@ fn publish_service_node(
     };
     let service_receipt: crate::service_ops::ServiceReceipt =
         serde_json::from_slice(payload).map_err(|_| ExecError::LedgerInvalid)?;
+    crate::service_ops::validate_receipt(
+        &crate::service_exec::payload_for(node)?,
+        &service_receipt,
+    )?;
     let key = service.key.clone();
     let previous = match &service.previous {
         ObservedServiceState::InvalidService => match ledger.resources.get(&service.key) {
@@ -413,6 +425,7 @@ fn publish_service_node(
         },
         ObservedServiceState::Absent => ServiceState::Absent,
         ObservedServiceState::Service {
+            native_timeouts,
             failure,
             dependencies,
             execution,
@@ -422,6 +435,7 @@ fn publish_service_node(
             readiness,
             ..
         } => ServiceState::Registration {
+            native_timeouts: *native_timeouts,
             dependencies: dependencies.clone(),
             failure: *failure,
             execution: execution.clone(),
@@ -431,17 +445,8 @@ fn publish_service_node(
             readiness: *readiness,
         },
     };
-    let installed = ServiceState::Registration {
-        dependencies: service.dependency_names.clone(),
-        failure: service.failure,
-        execution: service.execution.clone(),
-        display_name: service.display_name.clone(),
-        command: service.command.clone(),
-        start: service.start,
-        readiness: service.readiness,
-    };
+    let installed = service.desired_configuration();
 
-    let _ = service_receipt;
     let old_previous = match ledger.resources.get(&key) {
         Some(OwnedResource::Service { previous, .. }) => Some(previous.clone()),
         _ => None,
@@ -449,6 +454,7 @@ fn publish_service_node(
     ledger.resources.insert(
         key,
         OwnedResource::Service {
+            timeouts: service.lifecycle.timeouts_for(&service.execution),
             requires_services: service.requires_services.clone(),
             requires_files: service.requires_files.clone(),
             name: service.name.clone(),

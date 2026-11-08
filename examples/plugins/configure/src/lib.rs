@@ -73,8 +73,19 @@ impl Plugin for Configure {
                     .with_lifecycle(ServiceLifecycle {
                         install: InitialServiceState::Running,
                         change: ChangedServiceState::Preserve,
-                        start_timeout_seconds: 17,
-                        stop_timeout_seconds: 23,
+                        timeouts: Some(if linux {
+                            ServiceTimeouts::Systemd(SystemdTimeouts {
+                                start_timeout_seconds: 17,
+                                stop_grace_seconds: 23,
+                                abort_timeout_seconds: 5,
+                                settle_seconds: 5,
+                            })
+                        } else {
+                            ServiceTimeouts::Windows(WindowsTimeouts {
+                                start_observation_seconds: 17,
+                                stop_observation_seconds: 23,
+                            })
+                        }),
                     }),
                 );
                 vec![id]
@@ -125,8 +136,19 @@ impl Plugin for Configure {
                 .with_lifecycle(ServiceLifecycle {
                     install: InitialServiceState::Running,
                     change: ChangedServiceState::Preserve,
-                    start_timeout_seconds: 17,
-                    stop_timeout_seconds: 23,
+                    timeouts: Some(if linux {
+                        ServiceTimeouts::Systemd(SystemdTimeouts {
+                            start_timeout_seconds: 17,
+                            stop_grace_seconds: 23,
+                            abort_timeout_seconds: 5,
+                            settle_seconds: 5,
+                        })
+                    } else {
+                        ServiceTimeouts::Windows(WindowsTimeouts {
+                            start_observation_seconds: 17,
+                            stop_observation_seconds: 23,
+                        })
+                    }),
                 }),
             );
         }

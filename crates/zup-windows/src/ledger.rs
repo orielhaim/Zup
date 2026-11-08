@@ -141,9 +141,11 @@ impl InstallLedgerStore {
     ) -> Result<(), LedgerError> {
         plan.validate()
             .map_err(|error| LedgerError::Ownership(error.to_string()))?;
-        crate::transaction_payload::validate_startup_inhibitions(plan)
-            .map_err(LedgerError::Ownership)?;
         let ledger = self.load(app_id, scope)?;
+        zup_transaction::validate_owned_service_inputs(plan, ledger.as_ref())
+            .map_err(LedgerError::Ownership)?;
+        crate::transaction_payload::validate_startup_inhibitions(plan, ledger.as_ref())
+            .map_err(LedgerError::Ownership)?;
         let retired_ledger_keys = retired_ledger_keys(plan)?;
         let retired =
             zup_transaction::validate_ownership(plan, scope, ledger.as_ref(), &retired_ledger_keys)
@@ -447,7 +449,14 @@ impl InstallLedgerStore {
             let Some(OperationReceipt::Backend { payload, .. }) = record.receipt(&node.id) else {
                 return Err(LedgerError::Invalid);
             };
+            let receipt = receipt_from_bytes(payload).map_err(|_| LedgerError::Invalid)?;
+            crate::integration::validate_service_receipt(node, &receipt)
+                .map_err(|error| LedgerError::Ownership(error.to_string()))?;
+            if matches!(node.kind, NodeKind::BackendRemoval { .. }) {
+                continue;
+            }
             if let Some(mut owned) = owned_from_backend_receipt(
+                node,
                 &key,
                 ledger.resources.get(&key),
                 payload,
@@ -546,6 +555,7 @@ fn retired_ledger_keys(plan: &TransactionPlan) -> Result<BTreeSet<ResourceKey>, 
 }
 
 fn owned_from_backend_receipt(
+    node: &zup_transaction::TransactionNode,
     key: &ResourceKey,
     old: Option<&OwnedResource>,
     payload: &[u8],
@@ -587,6 +597,15 @@ fn owned_from_backend_receipt(
             previous,
             installed,
         } => Some(OwnedResource::Service {
+            timeouts: {
+                let backend = node.meta.backend.as_ref().ok_or(LedgerError::Invalid)?;
+                let crate::transaction_payload::ApplyPayload::Service { operation, .. } =
+                    serde_json::from_slice(&backend.payload).map_err(|_| LedgerError::Invalid)?
+                else {
+                    return Err(LedgerError::Invalid);
+                };
+                operation.lifecycle.timeouts_for(&operation.execution)
+            },
             requires_files: Vec::new(),
             requires_services: Vec::new(),
             name,

@@ -6,6 +6,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
   openrc:
     runs-on: [self-hosted, linux, zup-service-vms]
@@ -27,6 +32,17 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+          targets: ${{ matrix.triple }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+          cache-key: ${{ matrix.arch }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.24.0
       - name: Build native service fixtures and fault-enabled runtime
         shell: bash
         run: |
@@ -54,5 +70,23 @@ jobs:
             --ssh-port '${{ matrix.port }}'
             --target 'linux-${{ matrix.arch }}-musl'
           )
-          python3 -u scripts/verify-service-vm.py "${arguments[@]}" --supervised
-          python3 -u scripts/verify-service-vm.py "${arguments[@]}" --crash-matrix --qmp-socket "$ZUP_SERVICE_VM_ROOT/alpine-${{ matrix.arch }}/qmp.sock"
+          mkdir -p target/native-service-results
+          python3 -u scripts/verify-openrc-controller.py \
+            --ssh-key "$ZUP_SERVICE_VM_ROOT/guest-key" \
+            --known-hosts "$ZUP_SERVICE_VM_ROOT/known-hosts" \
+            --ssh-port '${{ matrix.port }}' \
+            --service "$PWD/target/native-services/service-v1" \
+            --controller-receipt "${ZUP_OPENRC_BUILD_RECEIPT:-/opt/zup-controller-native/build.json}" \
+            | tee target/native-service-results/controller.log
+          python3 -u scripts/verify-service-vm.py "${arguments[@]}" --supervised \
+            | tee target/native-service-results/lifecycle.log
+          python3 -u scripts/verify-service-vm.py "${arguments[@]}" --supervised --interference-only --qmp-socket "$ZUP_SERVICE_VM_ROOT/alpine-${{ matrix.arch }}/qmp.sock" \
+            | tee target/native-service-results/interference.log
+          python3 -u scripts/verify-service-vm.py "${arguments[@]}" --crash-matrix --qmp-socket "$ZUP_SERVICE_VM_ROOT/alpine-${{ matrix.arch }}/qmp.sock" \
+            | tee target/native-service-results/crash.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: openrc-native-${{ matrix.arch }}
+          path: target/native-service-results
+          if-no-files-found: warn

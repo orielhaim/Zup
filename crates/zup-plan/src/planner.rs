@@ -341,7 +341,7 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
                 .collect(),
             failure: service.failure,
             execution: service.execution.clone(),
-            lifecycle: service.lifecycle,
+            lifecycle: service.lifecycle.resolved(&service.execution),
             readiness: service.readiness,
             requires_files,
             key: ResourceKey::Service {

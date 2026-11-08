@@ -1290,8 +1290,7 @@
           "default": {
             "install": "stopped",
             "change": "preserve",
-            "start_timeout_seconds": 90,
-            "stop_timeout_seconds": 90
+            "timeouts": null
           }
         },
         "readiness": {
@@ -1548,19 +1547,16 @@
           "$ref": "#/$defs/ChangedServiceState",
           "default": "preserve"
         },
-        "start_timeout_seconds": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 1,
-          "maximum": 3600,
-          "default": 90
-        },
-        "stop_timeout_seconds": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 1,
-          "maximum": 3600,
-          "default": 90
+        "timeouts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ServiceTimeouts"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -1572,6 +1568,119 @@
     "ChangedServiceState": {
       "type": "string",
       "enum": ["preserve", "stopped"]
+    },
+    "ServiceTimeouts": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "systemd"
+            },
+            "start_timeout_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "stop_grace_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "abort_timeout_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "settle_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "start_timeout_seconds",
+            "stop_grace_seconds",
+            "abort_timeout_seconds",
+            "settle_seconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "openrc"
+            },
+            "start_timeout_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "stop_grace_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "kill_wait_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "settle_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "start_timeout_seconds",
+            "stop_grace_seconds",
+            "kill_wait_seconds",
+            "settle_seconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "windows"
+            },
+            "start_observation_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "stop_observation_seconds": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1,
+              "maximum": 3600
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "start_observation_seconds",
+            "stop_observation_seconds"
+          ]
+        }
+      ]
     },
     "ServiceReadiness": {
       "type": "string",

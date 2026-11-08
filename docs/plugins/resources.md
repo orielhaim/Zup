@@ -44,8 +44,10 @@ Service::new("acme-agent", "AcmeAgent", "${install}/agent.exe",
     .with_lifecycle(ServiceLifecycle {
         install: InitialServiceState::Running,
         change: ChangedServiceState::Preserve,
-        start_timeout_seconds: 60,
-        stop_timeout_seconds: 30,
+        timeouts: Some(ServiceTimeouts::Windows(WindowsTimeouts {
+            start_observation_seconds: 60,
+            stop_observation_seconds: 30,
+        })),
     })
 ```
 

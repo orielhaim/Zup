@@ -23,11 +23,12 @@ pub use reconciliation::{
 };
 mod service;
 pub use service::{
-    NativeServiceManager, ServiceControlCompletion, ServiceControlOperation, ServiceControlReceipt,
-    ServiceControlStage, ServiceObservation, ServiceTerminalState, apply_service_control,
-    bind_service_dependencies, disabled_startup, plan_service_controls, reconcile_service_control,
-    reconcile_service_rollback, requires_startup_inhibition, rollback_service_control,
-    verify_service_control,
+    NativeServiceManager, ServiceControlCompletion, ServiceControlIntent, ServiceControlOperation,
+    ServiceControlReceipt, ServiceControlStage, ServiceObservation, ServiceTerminalState,
+    apply_service_control, bind_service_dependencies, disabled_startup, plan_service_controls,
+    reconcile_service_control, reconcile_service_rollback, requires_startup_inhibition,
+    rollback_service_control, validate_owned_service_inputs, validate_runtime_preservation,
+    validate_startup_inhibition, verify_service_control,
 };
 mod storage;
 
@@ -53,8 +54,9 @@ pub use private::{
     absent_collision, ensure_dir as ensure_private_dir, publish_full, publish_private, read_private,
 };
 pub use record::{
-    CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, PublishError, StoreError,
-    TransactionFailure, TransactionPhase, TransactionRecord, VisiblePublish, settle_visible,
+    CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, PublishError,
+    RecoveryPhase, StoreError, TransactionFailure, TransactionPhase, TransactionRecord,
+    VisiblePublish, settle_visible,
 };
 pub use storage::{CONTENT_STORE_DIRECTORY, ContentStoreIdentity};
 pub use storage::{FilesystemTransactionStore, JournalVolume, TransactionStore};

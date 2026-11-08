@@ -126,11 +126,12 @@ pub enum ObservedServiceState {
     Absent,
     InvalidService,
     Service {
+        native_timeouts: zup_core::NativeServiceTimeouts,
         dependencies: Vec<String>,
         failure: zup_core::ServiceFailurePolicy,
         execution: zup_core::ServiceExecution,
         display_name: String,
-        command: CommandSpec,
+        command: Box<CommandSpec>,
         start: ServiceStart,
         readiness: zup_core::ServiceReadiness,
         runtime_state: Option<ServiceRuntimeState>,
@@ -143,6 +144,7 @@ impl ObservedServiceState {
             Self::Absent => Some(crate::ServiceState::Absent),
             Self::InvalidService => None,
             Self::Service {
+                native_timeouts,
                 failure,
                 dependencies,
                 execution,
@@ -152,6 +154,7 @@ impl ObservedServiceState {
                 readiness,
                 ..
             } => Some(crate::ServiceState::Registration {
+                native_timeouts: *native_timeouts,
                 failure: *failure,
                 dependencies: dependencies.clone(),
                 execution: execution.clone(),

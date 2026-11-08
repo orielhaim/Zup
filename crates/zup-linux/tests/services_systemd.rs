@@ -15,7 +15,7 @@ use zup_transaction::{
     FilesystemTransactionStore, TransactionCoordinator, TransactionOutcome, compile_transaction,
 };
 
-struct DiagnosticExecutor<'a>(&'a mut LinuxFileExecutor);
+struct DiagnosticExecutor<'a>(&'a mut LinuxFileExecutor, Option<String>);
 
 impl zup_transaction::OperationExecutor for DiagnosticExecutor<'_> {
     type Error = String;
@@ -29,6 +29,26 @@ impl zup_transaction::OperationExecutor for DiagnosticExecutor<'_> {
         &mut self,
         node: &zup_transaction::TransactionNode,
     ) -> Result<zup_transaction::OperationReceipt, String> {
+        if matches!(node.kind, zup_transaction::NodeKind::FileMutation { .. })
+            && let Some(unit) = &self.1
+        {
+            let mut manager = RealSystemd::connect().unwrap();
+            assert!(
+                manager
+                    .control(
+                        unit,
+                        zup_transaction::ServiceTerminalState::Running,
+                        std::time::Duration::from_secs(5),
+                        &[]
+                    )
+                    .is_err(),
+                "payload replacement accepted concurrent activation"
+            );
+            assert_eq!(
+                manager.runtime(unit).unwrap().state,
+                zup_plan::ServiceRuntimeState::Stopped
+            );
+        }
         self.0.apply(node).map_err(|error| {
             eprintln!("apply {}: {error}", node.id);
             error.to_string()
@@ -175,6 +195,16 @@ fn real_systemd_service_lifecycle() {
         PathBuf::from("/dev/null")
     );
     world.remove_foreign_links();
+    let dangling = PathBuf::from("/etc/systemd/system/multi-user.target.wants").join(&world.unit);
+    std::os::unix::fs::symlink(world.source_path(), &dangling).unwrap();
+    world.foreign.push(dangling.clone());
+    assert!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .is_err()
+    );
+    assert_eq!(std::fs::read_link(&dangling).unwrap(), world.source_path());
+    world.remove_foreign_links();
     world.install(ServiceStart::Automatic, "1.0.0");
     world.assert_policy("enabled");
     world.assert_fragment();
@@ -194,6 +224,18 @@ fn real_systemd_service_lifecycle() {
         "a mask keeps the canonical source intact"
     );
     world.assert_inactive("while masked");
+    std::fs::remove_file(world.source_path()).unwrap();
+    RealSystemd::connect().unwrap().reload().unwrap();
+    let repair = world.plan("3.0.0", ServiceStart::Disabled);
+    assert_eq!(
+        world
+            .drive(&repair, zup_plan::LifecycleAction::Repair { force: false })
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    assert!(world.source_path().is_file());
+    world.assert_policy("masked");
+    world.assert_inactive("after restoring a masked definition");
 
     world.plant_foreign_links();
     let refused = world.try_upgrade(ServiceStart::Automatic, "4.0.0");
@@ -220,6 +262,129 @@ fn real_systemd_service_lifecycle() {
     assert!(world.load_ledger().is_none(), "the ledger retires");
 }
 
+#[rstest::rstest]
+#[case::running(true)]
+#[case::stopped(false)]
+fn real_systemd_boot_policy_updates_preserve_execution(#[case] running: bool) {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/bin/sh\nexec /bin/sleep 300\n",
+    )
+    .unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    if running {
+        plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    }
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let mut manager = RealSystemd::connect().unwrap();
+    let before = manager.runtime(&world.unit).unwrap();
+    for (version, policy) in [
+        ("2.0.0", ServiceStart::Automatic),
+        ("3.0.0", ServiceStart::Manual),
+    ] {
+        let update = world.plan(version, policy);
+        assert_eq!(
+            world
+                .drive(&update, zup_plan::LifecycleAction::Upgrade)
+                .unwrap(),
+            TransactionOutcome::Committed
+        );
+        let after = manager.runtime(&world.unit).unwrap();
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.execution_generation, before.execution_generation);
+        assert_eq!(after.manager_generation, before.manager_generation);
+        assert!(!after.pending_job);
+    }
+    world.uninstall();
+}
+
+#[rstest::rstest]
+#[case::metadata(zup_plan::ServiceRegistrationChange::DisplayName)]
+#[case::timeouts(zup_plan::ServiceRegistrationChange::NativeTimeouts)]
+#[case::failure(zup_plan::ServiceRegistrationChange::FailurePolicy)]
+fn real_systemd_live_updates_preserve_execution(
+    #[case] change: zup_plan::ServiceRegistrationChange,
+) {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/bin/sh\nexec /bin/sleep 300\n",
+    )
+    .unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let mut manager = RealSystemd::connect().unwrap();
+    let before = manager.runtime(&world.unit).unwrap();
+    let mut update = world.plan("2.0.0", ServiceStart::Manual);
+    match change {
+        zup_plan::ServiceRegistrationChange::DisplayName => {
+            update.services[0].display_name =
+                Some(zup_core::NonEmptyString::new("Updated service metadata").unwrap())
+        }
+        zup_plan::ServiceRegistrationChange::NativeTimeouts => {
+            update.services[0].lifecycle.timeouts = Some(zup_core::ServiceTimeouts::Systemd {
+                start_timeout_seconds: 7,
+                stop_grace_seconds: 3,
+                abort_timeout_seconds: 2,
+                settle_seconds: 3,
+            })
+        }
+        zup_plan::ServiceRegistrationChange::FailurePolicy => {
+            update.services[0].failure = zup_core::ServiceFailurePolicy::Systemd {
+                condition: zup_core::SystemdRestartCondition::OnFailure,
+                delay_seconds: 1,
+                start_limit_burst: 2,
+                start_limit_interval_seconds: 60,
+            }
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        world
+            .drive(&update, zup_plan::LifecycleAction::Upgrade)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let after = manager.runtime(&world.unit).unwrap();
+    assert_eq!(after.state, zup_plan::ServiceRuntimeState::Running);
+    assert_eq!(after.execution_generation, before.execution_generation);
+    assert_eq!(after.manager_generation, before.manager_generation);
+    assert_eq!(after.failure, update.services[0].failure);
+    assert_eq!(
+        after.native_timeouts,
+        Some(
+            update.services[0]
+                .lifecycle
+                .timeouts_for(&update.services[0].execution)
+                .native()
+        )
+    );
+    assert!(!after.pending_job);
+    world.uninstall();
+}
+
 #[test]
 fn real_systemd_running_upgrade_and_uninstall() {
     if !privileged_available() {
@@ -244,6 +409,7 @@ fn real_systemd_running_upgrade_and_uninstall() {
     let mut manager = RealSystemd::connect().unwrap();
     let before = manager.runtime(&world.unit).unwrap();
     assert_eq!(before.state, zup_plan::ServiceRuntimeState::Running);
+    world.probe_activation = true;
     std::fs::write(
         world.payload.join("tool"),
         b"#!/bin/sh\nexec /bin/sleep 301\n",
@@ -352,8 +518,10 @@ fn real_systemd_failed_exec_restores_previous_payload_and_runtime() {
     world.uninstall();
 }
 
-#[test]
-fn real_systemd_notify_readiness_and_failure_before_ready() {
+#[rstest::rstest]
+#[case::no_restart(false)]
+#[case::bounded_restart(true)]
+fn real_systemd_notify_readiness_and_failure_before_ready(#[case] restart: bool) {
     if !privileged_available() {
         return;
     }
@@ -363,6 +531,14 @@ fn real_systemd_notify_readiness_and_failure_before_ready() {
     std::fs::write(world.payload.join("tool"), original).unwrap();
     let mut plan = world.plan("1.0.0", ServiceStart::Manual);
     plan.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    if restart {
+        plan.services[0].failure = zup_core::ServiceFailurePolicy::Systemd {
+            condition: zup_core::SystemdRestartCondition::OnFailure,
+            delay_seconds: 1,
+            start_limit_burst: 3,
+            start_limit_interval_seconds: 60,
+        };
+    }
     plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
     world.resolve_unit(&plan);
     assert_eq!(
@@ -397,6 +573,7 @@ fn real_systemd_notify_readiness_and_failure_before_ready() {
     .unwrap();
     let mut upgrade = world.plan("2.0.0", ServiceStart::Manual);
     upgrade.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    upgrade.services[0].failure = plan.services[0].failure;
     assert_eq!(
         world
             .drive(&upgrade, zup_plan::LifecycleAction::Upgrade)
@@ -415,12 +592,138 @@ fn real_systemd_notify_readiness_and_failure_before_ready() {
     world.uninstall();
 }
 
+#[rstest::rstest]
+#[case::graceful(1, 3)]
+#[case::escalated(15, 1)]
+fn real_systemd_custom_deadlines_survive_removal(
+    #[case] shutdown_delay: u32,
+    #[case] stop_grace_seconds: u32,
+) {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    let source = format!(
+        "#!/usr/bin/python3\nimport os, signal, socket, time\ndef stop(*args):\n time.sleep({shutdown_delay})\n raise SystemExit(0)\nsignal.signal(signal.SIGTERM, stop)\na = os.environ['NOTIFY_SOCKET']\ns = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)\ns.connect(('\\0' + a[1:]) if a.startswith('@') else a)\ntime.sleep(0.3)\ns.sendall(b'READY=1')\nwhile True: time.sleep(1)\n"
+    );
+    std::fs::write(world.payload.join("tool"), source).unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    plan.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    plan.services[0].lifecycle = zup_core::ServiceLifecycle {
+        install: zup_core::InitialServiceState::Running,
+        timeouts: Some(zup_core::ServiceTimeouts::Systemd {
+            start_timeout_seconds: 2,
+            stop_grace_seconds,
+            abort_timeout_seconds: 2,
+            settle_seconds: 3,
+        }),
+        ..Default::default()
+    };
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let runtime = RealSystemd::connect()
+        .unwrap()
+        .runtime(&world.unit)
+        .unwrap();
+    assert_eq!(
+        runtime.native_timeouts,
+        Some(plan.services[0].lifecycle.timeouts.unwrap().native())
+    );
+    assert_eq!(runtime.state, zup_plan::ServiceRuntimeState::Running);
+    let before = std::time::Instant::now();
+    world.uninstall();
+    assert!(before.elapsed() >= std::time::Duration::from_millis(800));
+    assert!(before.elapsed() < std::time::Duration::from_secs(10));
+    assert!(!world.source.exists());
+}
+
+#[test]
+fn real_systemd_cancellation_during_readiness_restores_previous_runtime() {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    let original = b"#!/usr/bin/python3\nimport time\ntime.sleep(300)\n";
+    std::fs::write(world.payload.join("tool"), original).unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let replacement = b"#!/usr/bin/python3\nimport os, socket, time\na = os.environ['NOTIFY_SOCKET']\ns = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)\ns.connect(('\\0' + a[1:]) if a.startswith('@') else a)\ntime.sleep(2)\ns.sendall(b'READY=1')\ntime.sleep(300)\n";
+    std::fs::write(world.payload.join("tool"), replacement).unwrap();
+    let mut upgrade = world.plan("2.0.0", ServiceStart::Manual);
+    upgrade.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    upgrade.services[0].lifecycle.timeouts = Some(zup_core::ServiceTimeouts::Systemd {
+        start_timeout_seconds: 5,
+        stop_grace_seconds: 2,
+        abort_timeout_seconds: 1,
+        settle_seconds: 2,
+    });
+    let cancellation = zup_runtime::CancellationHandle::new();
+    let cancel = cancellation.clone();
+    let unit = world.unit.clone();
+    let (started, start) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        start
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut manager = RealSystemd::connect().unwrap();
+        loop {
+            let runtime = manager.runtime(&unit).unwrap();
+            if runtime.state == zup_plan::ServiceRuntimeState::StartPending {
+                cancel.cancel();
+                return runtime.execution_generation;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "replacement never entered readiness wait"
+            );
+            std::thread::park_timeout(std::time::Duration::from_millis(20));
+        }
+    });
+    assert_eq!(
+        world
+            .drive_with_cancel(
+                &upgrade,
+                zup_plan::LifecycleAction::Upgrade,
+                &cancellation,
+                Some(started)
+            )
+            .unwrap(),
+        TransactionOutcome::RolledBack
+    );
+    let cancelled_generation = observer.join().unwrap();
+    assert_eq!(std::fs::read(world.program.join("svc")).unwrap(), original);
+    let restored = RealSystemd::connect()
+        .unwrap()
+        .runtime(&world.unit)
+        .unwrap();
+    assert_eq!(restored.state, zup_plan::ServiceRuntimeState::Running);
+    assert_ne!(restored.execution_generation, cancelled_generation);
+    assert!(!restored.pending_job);
+    world.uninstall();
+}
+
 struct RealWorld {
     tag: String,
     program: PathBuf,
     payload: PathBuf,
     state: PathBuf,
     unit: String,
+    probe_activation: bool,
     source: PathBuf,
     foreign: Vec<PathBuf>,
     foreign_dirs: Vec<PathBuf>,
@@ -493,6 +796,509 @@ fn real_systemd_configuration_only_upgrade_quiesces_a_declared_consumer() {
     );
 }
 
+#[test]
+fn ready_service_cannot_commit_changed_managed_input() {
+    if !privileged_available() {
+        return;
+    }
+    let mut world = RealWorld::stage(&uuid::Uuid::now_v7().simple().to_string());
+    let configuration = world.program.join("worker.conf");
+    let source = format!(
+        "#!/usr/bin/python3\nimport os, socket, time\nopen({configuration:?}, 'w').write('changed during startup')\na = os.environ['NOTIFY_SOCKET']\ns = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)\ns.connect(('\\0' + a[1:]) if a.startswith('@') else a)\ns.sendall(b'READY=1')\ntime.sleep(300)\n"
+    );
+    std::fs::write(world.payload.join("tool"), source).unwrap();
+    let bytes = b"authorized configuration";
+    std::fs::write(world.payload.join("worker.conf"), bytes).unwrap();
+    let destination =
+        TargetPath::new(RealWorld::target(), configuration.to_string_lossy()).unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    plan.services[0].requires_files.push(destination.clone());
+    plan.services[0].readiness = zup_core::ServiceReadiness::Notify;
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    plan.files.push(DesiredFile {
+        key: ResourceKey::File {
+            destination: destination.to_string(),
+        },
+        source_relative: zup_core::RelativePath::new("worker.conf").unwrap(),
+        destination,
+        size: bytes.len() as u64,
+        sha256: zup_core::hash_bytes(bytes),
+        privilege: Privilege::System,
+        executable: false,
+    });
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::RecoveryRequired
+    );
+    assert!(
+        world.load_ledger().is_none(),
+        "changed payload must not publish ownership"
+    );
+    assert_eq!(
+        std::fs::read(&configuration).unwrap(),
+        b"changed during startup"
+    );
+    assert_eq!(
+        RealSystemd::connect()
+            .unwrap()
+            .runtime(&world.unit)
+            .unwrap()
+            .state,
+        zup_plan::ServiceRuntimeState::Stopped
+    );
+}
+
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn native_process_scope_remains_populated_after_the_main_process_stops(#[case] masked: bool) {
+    if !privileged_available() {
+        return;
+    }
+    struct Unit(String);
+    impl Drop for Unit {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("systemctl")
+                .args(["unmask", &self.0])
+                .output();
+            let _ = std::process::Command::new("systemctl")
+                .args(["kill", "--kill-who=all", "--signal=KILL", &self.0])
+                .output();
+            let _ = std::process::Command::new("systemctl")
+                .args(["stop", &self.0])
+                .output();
+            let _ = std::process::Command::new("systemctl")
+                .args(["reset-failed", &self.0])
+                .output();
+        }
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    let marker = scratch.path().join("child");
+    let unit = Unit(format!(
+        "zup-scope-{}.service",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let script = "import os, signal, sys, time\nif os.fork() == 0:\n os.setsid()\n signal.signal(signal.SIGTERM, signal.SIG_IGN)\n open(sys.argv[1], 'w').write(str(os.getpid()))\nwhile True: time.sleep(1)\n";
+    let started = std::process::Command::new("systemd-run")
+        .args([
+            "--unit",
+            &unit.0,
+            "--property=Type=exec",
+            "--property=KillMode=process",
+            "--property=NoNewPrivileges=yes",
+            "--property=TimeoutStopSec=2",
+            "/usr/bin/python3",
+            "-c",
+            script,
+        ])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let mut manager = RealSystemd::connect().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "detached fixture child did not start"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(20));
+    }
+    assert!(!manager.process_scope_is_empty(&unit.0).unwrap());
+    assert!(
+        std::process::Command::new("systemctl")
+            .args(["stop", &unit.0])
+            .status()
+            .unwrap()
+            .success()
+    );
+    if masked {
+        manager.mask(&unit.0).unwrap();
+        manager.reload().unwrap();
+    }
+    let active = std::process::Command::new("systemctl")
+        .args(["show", &unit.0, "--property=ActiveState", "--value"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&active.stdout).trim(), "inactive");
+    assert!(
+        !manager.process_scope_is_empty(&unit.0).unwrap(),
+        "inactive does not prove scope quiescence"
+    );
+    assert!(
+        std::process::Command::new("systemctl")
+            .args(["kill", "--kill-who=all", "--signal=KILL", &unit.0])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !manager.process_scope_is_empty(&unit.0).unwrap() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owned fixture scope did not empty"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn native_service_paths_and_arguments_preserve_dollars_and_specifiers() {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    let special = world
+        .program
+        .with_file_name(format!("zup-test-{tag} $literal %u"));
+    std::fs::rename(&world.program, &special).unwrap();
+    world.program = special;
+    std::fs::write(world.payload.join("tool"), b"#!/bin/sh\ndestination=$1\nshift\nprintf '%s\\0' \"$@\" > \"$destination\"\nexec /bin/sleep 120\n").unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    let marker = world.program.join("arguments");
+    let expected = ["$HOME", "$$HOME", "${HOME}", "%u", "a b", ""];
+    plan.services[0].command.arguments = std::iter::once(marker.to_string_lossy().into_owned())
+        .chain(expected.iter().map(|value| (*value).to_owned()))
+        .collect();
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "argument fixture did not execute"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(20));
+    }
+    let expected = expected
+        .iter()
+        .flat_map(|value| value.as_bytes().iter().copied().chain([0]))
+        .collect::<Vec<_>>();
+    assert_eq!(std::fs::read(&marker).unwrap(), expected);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Uninstall)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+}
+
+#[test]
+fn dynamic_identity_is_native_allocated_and_cannot_hide_a_cached_static_account() {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/bin/sh\nexec /bin/sleep 120\n",
+    )
+    .unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Automatic);
+    plan.services[0].execution = zup_core::ServiceExecution::SystemdDynamicUser;
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Running;
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let mut manager = RealSystemd::connect().unwrap();
+    let before = manager.runtime(&world.unit).unwrap();
+    assert_eq!(
+        before.execution,
+        Some(zup_core::ServiceExecution::SystemdDynamicUser)
+    );
+    plan.services[0].start = ServiceStart::Manual;
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Modify)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    assert_eq!(
+        manager.runtime(&world.unit).unwrap().execution_generation,
+        before.execution_generation
+    );
+
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Uninstall)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    plan.services[0].lifecycle.install = zup_core::InitialServiceState::Stopped;
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    assert_eq!(
+        manager.runtime(&world.unit).unwrap().state,
+        zup_plan::ServiceRuntimeState::Stopped
+    );
+
+    let path = world.source_path().to_path_buf();
+    let original = std::fs::read_to_string(&path).unwrap();
+    let foreign = original
+        .lines()
+        .map(|line| {
+            if line.starts_with("User=") {
+                "User=root"
+            } else if line.starts_with("Group=") {
+                "Group=root"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, foreign).unwrap();
+    manager.reload().unwrap();
+    manager.retain_unit(&world.unit).unwrap();
+    let timestamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, &original).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(timestamp))
+        .unwrap();
+    assert!(!manager.load_unit(&world.unit).unwrap().need_daemon_reload);
+    let refused = manager.runtime(&world.unit).is_err();
+    manager.reload().unwrap();
+    assert!(
+        refused,
+        "a cached static account was accepted as dynamic execution"
+    );
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Uninstall)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+}
+
+#[rstest::rstest]
+#[case::account("User=nobody", "User=root")]
+#[case::privileges("NoNewPrivileges=yes", "NoNewPrivileges=no")]
+fn restored_configuration_cannot_hide_previous_process_credentials(
+    #[case] old: &str,
+    #[case] foreign: &str,
+) {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    std::fs::write(
+        world.payload.join("tool"),
+        b"#!/bin/sh\nexec /bin/sleep 120\n",
+    )
+    .unwrap();
+    let mut plan = world.plan("1.0.0", ServiceStart::Manual);
+    plan.services[0].execution = zup_core::ServiceExecution::SystemdUser {
+        user: "nobody".into(),
+        group: None,
+    };
+    world.resolve_unit(&plan);
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Install)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    let path = world.source_path().to_path_buf();
+    let original = std::fs::read_to_string(&path).unwrap();
+    assert!(original.contains(old));
+    std::fs::write(&path, original.replace(old, foreign)).unwrap();
+    let mut manager = RealSystemd::connect().unwrap();
+    manager.reload().unwrap();
+    manager
+        .control(
+            &world.unit,
+            zup_transaction::ServiceTerminalState::Running,
+            std::time::Duration::from_secs(5),
+            &[],
+        )
+        .unwrap();
+    std::fs::write(&path, original).unwrap();
+    manager.reload().unwrap();
+    let refused = manager.runtime(&world.unit).is_err();
+    manager
+        .control(
+            &world.unit,
+            zup_transaction::ServiceTerminalState::Stopped,
+            std::time::Duration::from_secs(5),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        world
+            .drive(&plan, zup_plan::LifecycleAction::Uninstall)
+            .unwrap(),
+        TransactionOutcome::Committed
+    );
+    assert!(
+        refused,
+        "restored registration concealed the running process credentials"
+    );
+}
+
+#[rstest::rstest]
+#[case("ExecStop=/usr/bin/true")]
+#[case("ExecStart=+:/usr/bin/true")]
+#[case("ExecStart=:/usr/bin/true")]
+#[case("AmbientCapabilities=CAP_DAC_OVERRIDE")]
+#[case("KillSignal=SIGKILL")]
+#[case("Environment=LD_PRELOAD=/unmanaged.so")]
+#[case("RootDirectory=/unmanaged")]
+#[case("SuccessExitStatus=42")]
+#[case("RuntimeMaxSec=1")]
+#[case("StartLimitBurst=1")]
+#[case("Requires=unmanaged.service")]
+#[case("Wants=unmanaged.service")]
+#[case("OnFailure=unmanaged.service")]
+#[case("Type=simple")]
+#[case("NotifyAccess=all")]
+#[case("LoadCredential=unmanaged:/unmanaged")]
+#[case("JobTimeoutSec=1")]
+fn native_cached_configuration_cannot_hide_behind_restored_source(#[case] directive: &str) {
+    if !privileged_available() {
+        return;
+    }
+    let tag = uuid::Uuid::now_v7().simple().to_string();
+    let mut world = RealWorld::stage(&tag);
+    let plan = world.plan("1.0.0", ServiceStart::Manual);
+    world.resolve_unit(&plan);
+    world.install(ServiceStart::Manual, "1.0.0");
+    let path = world.source_path().to_path_buf();
+    let original = std::fs::read(&path).unwrap();
+    let mut poisoned = String::from_utf8(original.clone()).unwrap();
+    let key = directive.split_once('=').unwrap().0;
+    let prefix = format!("{key}=");
+    if poisoned.lines().any(|line| line.starts_with(&prefix)) {
+        poisoned = poisoned
+            .lines()
+            .map(|line| {
+                if line.starts_with(&prefix) {
+                    directive
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    } else {
+        let section = if matches!(key, "Requires" | "Wants" | "OnFailure" | "JobTimeoutSec") {
+            "Unit"
+        } else {
+            "Service"
+        };
+        poisoned = poisoned.replace(
+            &format!("[{section}]"),
+            &format!("[{section}]\n{directive}"),
+        );
+    }
+    std::fs::write(&path, poisoned).unwrap();
+    let mut manager = RealSystemd::connect().unwrap();
+    manager.reload().unwrap();
+    manager.retain_unit(&world.unit).unwrap();
+    let timestamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, &original).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(timestamp))
+        .unwrap();
+    assert!(
+        !manager.load_unit(&world.unit).unwrap().need_daemon_reload,
+        "fixture did not retain the poisoned native cache"
+    );
+    let observed = snapshot_services(&plan, &mut manager, &SystemdRoots::production());
+    let refused = observed.is_err()
+        || observed
+            .unwrap()
+            .iter()
+            .all(|entry| entry.state.configuration().is_none());
+    std::fs::write(&path, original).unwrap();
+    manager.reload().unwrap();
+    assert!(refused, "cached foreign service configuration was accepted");
+}
+
+#[test]
+fn production_systemd_authority_binds_the_local_host() {
+    const CHILD_MODE: &str = "ZUP_TEST_SYSTEMD_AUTHORITY";
+    if let Ok(mode) = std::env::var(CHILD_MODE) {
+        let manager = RealSystemd::connect();
+        match mode.as_str() {
+            "bus_override" => assert!(
+                manager.is_ok(),
+                "caller bus override changed host authority"
+            ),
+            "mount_namespace" | "pid_namespace" => {
+                assert!(manager.is_err(), "foreign manager namespace was accepted")
+            }
+            _ => panic!("unknown authority fixture mode"),
+        }
+        return;
+    }
+    if !privileged_available() {
+        return;
+    }
+    let executable = std::env::current_exe().unwrap();
+    for mode in ["bus_override", "mount_namespace", "pid_namespace"] {
+        let mut command = if mode != "bus_override" {
+            let mut command = std::process::Command::new("unshare");
+            command.arg("--mount");
+            if mode == "pid_namespace" {
+                command.args(["--pid", "--fork", "--mount-proc"]);
+            }
+            command.arg(&executable);
+            command
+        } else {
+            std::process::Command::new(&executable)
+        };
+        let output = command
+            .args([
+                "--exact",
+                "production_systemd_authority_binds_the_local_host",
+                "--nocapture",
+            ])
+            .env(CHILD_MODE, mode)
+            .env(
+                "DBUS_SYSTEM_BUS_ADDRESS",
+                "unix:path=/nonexistent-zup-test-bus",
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 impl RealWorld {
     fn stage(tag: &str) -> Self {
         let program = PathBuf::from(format!("/opt/zup-test-{tag}"));
@@ -509,6 +1315,7 @@ impl RealWorld {
             payload,
             state,
             unit: String::new(),
+            probe_activation: false,
             source: PathBuf::new(),
             foreign: Vec::new(),
             foreign_dirs: Vec::new(),
@@ -642,38 +1449,7 @@ impl RealWorld {
                 zup_plan::OwnedResource::Service { installed, .. } => {
                     snapshot.services.iter().any(|observed| {
                         observed.key == *key
-                            && match (&observed.state, installed.as_ref()) {
-                                (
-                                    zup_plan::ObservedServiceState::Service {
-                                        display_name,
-                                        command,
-                                        start,
-                                        readiness,
-                                        failure,
-                                        execution,
-                                        dependencies,
-                                        ..
-                                    },
-                                    zup_plan::ServiceState::Registration {
-                                        display_name: wanted_display,
-                                        command: wanted_command,
-                                        start: wanted_start,
-                                        readiness: wanted_readiness,
-                                        failure: wanted_failure,
-                                        execution: wanted_execution,
-                                        dependencies: wanted_dependencies,
-                                    },
-                                ) => {
-                                    display_name == wanted_display
-                                        && command == wanted_command
-                                        && start == wanted_start
-                                        && readiness == wanted_readiness
-                                        && execution == wanted_execution
-                                        && dependencies == wanted_dependencies
-                                        && failure == wanted_failure
-                                }
-                                _ => false,
-                            }
+                            && observed.state.configuration().as_ref() == Some(installed.as_ref())
                     })
                 }
                 _ => false,
@@ -687,6 +1463,16 @@ impl RealWorld {
         &mut self,
         plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
         action: zup_plan::LifecycleAction,
+    ) -> Result<TransactionOutcome, String> {
+        self.drive_with_cancel(plan, action, &zup_runtime::CancellationHandle::new(), None)
+    }
+
+    fn drive_with_cancel(
+        &mut self,
+        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        action: zup_plan::LifecycleAction,
+        cancellation: &zup_runtime::CancellationHandle,
+        started: Option<std::sync::mpsc::Sender<()>>,
     ) -> Result<TransactionOutcome, String> {
         let ledgers = self.ledgers();
         let ledger = self.load_ledger();
@@ -743,8 +1529,28 @@ impl RealWorld {
             .register_plan(&record.plan)
             .map_err(|error| format!("register: {error}"))?;
         executor.set_transaction_id(record.transaction_id);
+        let starts: std::collections::BTreeSet<_> = record.plan.nodes.iter().filter(|node| {
+            matches!(&node.kind, zup_transaction::NodeKind::ServiceControl { operation } if operation.stage == zup_transaction::ServiceControlStage::Restore)
+        }).map(|node| node.id.to_string()).collect();
+        let mut executor = zup_runtime::EventingExecutor::new(
+            DiagnosticExecutor(
+                &mut executor,
+                self.probe_activation.then(|| self.unit.clone()),
+            ),
+            record.plan.total_work(),
+            cancellation,
+            move |event| {
+                if let zup_runtime::RuntimeEvent::OperationStarted { id } = event
+                    && starts.contains(&id)
+                    && let Some(started) = &started
+                {
+                    let _ = started.send(());
+                }
+            },
+            || "cancelled".to_owned(),
+        );
         let settled = record
-            .execute(&mut DiagnosticExecutor(&mut executor))
+            .execute(&mut executor)
             .map_err(|error| format!("execute: {error}"))?;
         let (record, outcome) = (settled.record, settled.outcome);
         match outcome {

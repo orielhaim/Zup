@@ -75,6 +75,7 @@ fn service_info(
         start,
         readiness,
         failure,
+        native_timeouts,
     } = desired
     else {
         return Err(ServiceError::NotExecutable {
@@ -82,6 +83,9 @@ fn service_info(
             reason: "service registration required".to_owned(),
         });
     };
+    native_timeouts
+        .validate_for(execution)
+        .map_err(|reason| backend(name, reason))?;
     failure
         .validate_for(*command.executable.target())
         .map_err(|reason| ServiceError::NotExecutable {
@@ -228,7 +232,11 @@ pub fn apply(
         return Err(ServiceError::ChangedSincePlanning(op.name.clone()));
     }
     if installed != previous {
-        write(&op.name, &installed, &previous)?;
+        if installed.update_from(&previous).preserves_runtime() {
+            change_live_configuration(&op.name, &previous, &installed)?;
+        } else {
+            write(&op.name, &installed, &previous)?;
+        }
     }
     Ok(BackendReceipt::Service {
         name: op.name.clone(),
@@ -249,7 +257,11 @@ pub fn rollback(
     if state(name, target)? != *installed {
         return Err(ServiceError::ChangedAfterInstall(name.to_owned()));
     }
-    write(name, previous, installed)
+    if previous.update_from(installed).preserves_runtime() {
+        change_live_configuration(name, installed, previous)
+    } else {
+        write(name, previous, installed)
+    }
 }
 
 pub fn reconcile(
@@ -270,7 +282,7 @@ pub fn reconcile(
     ))
 }
 
-fn transaction_states(
+pub(crate) fn transaction_states(
     op: &ServiceOperation,
     startup_inhibited: bool,
 ) -> Result<(ServiceState, ServiceState), ServiceError> {
@@ -285,7 +297,7 @@ fn transaction_states(
     ))
 }
 
-pub(crate) fn change_startup(
+pub(crate) fn change_live_configuration(
     name: &str,
     expected: &ServiceState,
     desired: &ServiceState,
@@ -297,14 +309,33 @@ pub(crate) fn change_startup(
     if state(name, target)? != *expected {
         return Err(ServiceError::ChangedSincePlanning(name.into()));
     }
-    let ServiceState::Registration { start, .. } = desired else {
+    let ServiceState::Registration {
+        start,
+        display_name,
+        ..
+    } = desired
+    else {
         return Err(ServiceError::MissingTarget);
     };
-    let mut only_start = expected.clone();
-    if let ServiceState::Registration { start: value, .. } = &mut only_start {
+    let mut live = expected.clone();
+    let mut startup_type = SERVICE_NO_CHANGE;
+    let mut display = None;
+    if let ServiceState::Registration {
+        start: value,
+        display_name: previous_display,
+        ..
+    } = &mut live
+    {
+        if value != start {
+            startup_type = start_type(*start) as u32;
+        }
         *value = *start;
+        if previous_display != display_name {
+            display = Some(windows::core::HSTRING::from(display_name));
+        }
+        *previous_display = display_name.clone();
     }
-    if &only_start != desired {
+    if &live != desired {
         return Err(ServiceError::ChangedSincePlanning(name.into()));
     }
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
@@ -312,13 +343,12 @@ pub(crate) fn change_startup(
     let service = manager
         .open_service(name, ServiceAccess::CHANGE_CONFIG)
         .map_err(|e| backend(name, e))?;
-    // SAFETY: The borrowed SCM handle stays open; null optional arguments leave every
-    // property except startup mode unchanged.
+    // SAFETY: The SCM handle and optional display string stay alive through the call.
     unsafe {
         ChangeServiceConfigW(
             SC_HANDLE(service.raw_handle()),
             windows::Win32::System::Services::ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
-            SERVICE_START_TYPE(start_type(*start) as u32),
+            SERVICE_START_TYPE(startup_type),
             windows::Win32::System::Services::SERVICE_ERROR(SERVICE_NO_CHANGE),
             None,
             None,
@@ -326,7 +356,11 @@ pub(crate) fn change_startup(
             None,
             None,
             None,
-            None,
+            display
+                .as_ref()
+                .map_or(windows::core::PCWSTR::null(), |value| {
+                    windows::core::PCWSTR(value.as_ptr())
+                }),
         )
     }
     .map_err(|e| backend(name, e))?;
@@ -382,6 +416,7 @@ mod tests {
     fn service_reconciliation_is_fail_closed() {
         let previous = ServiceState::Absent;
         let desired = ServiceState::Registration {
+            native_timeouts: zup_core::NativeServiceTimeouts::Scm,
             dependencies: Vec::new(),
             failure: Default::default(),
             execution: zup_core::ServiceExecution::Windows {
@@ -389,10 +424,10 @@ mod tests {
             },
             readiness: Default::default(),
             display_name: "Zup Test".into(),
-            command: CommandSpec::new(
+            command: Box::new(CommandSpec::new(
                 TargetPath::new(Target::parse("windows-x64").unwrap(), r"C:\Zup\svc.exe").unwrap(),
                 vec![],
-            ),
+            )),
             start: ServiceStart::Disabled,
         };
         assert_eq!(

@@ -18,7 +18,7 @@ use crate::input::{
 };
 use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 
-pub const TRANSACTION_PLAN_SCHEMA: u32 = 1;
+pub const TRANSACTION_PLAN_SCHEMA: u32 = 3;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum TransactionPlanError {
@@ -245,6 +245,8 @@ impl TransactionPlan {
             match &node.kind {
                 NodeKind::ServiceControl { operation } => {
                     operation.validate().map_err(|reason| invalid(&reason))?;
+                    crate::validate_runtime_preservation(self, operation, &[])
+                        .map_err(|reason| invalid(&reason))?;
                     let phase = match operation.stage {
                         crate::ServiceControlStage::Quiesce => Phase::ServiceQuiesce,
                         crate::ServiceControlStage::Restore => Phase::ServiceRestore,

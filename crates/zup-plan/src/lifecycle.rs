@@ -11,7 +11,7 @@ use crate::{
     FilePrecondition, HostSnapshot, InstallLedger, IntegrationChangeKind, LauncherState,
     ObservedExtensionState, ObservedFileAssociationState, ObservedFileState, ObservedLauncherState,
     ObservedProtocolState, ObservedServiceState, OwnedResource, PathOperationKind, ProtocolState,
-    RemovalKind, RemovalOperation, ServiceState, plan_execution,
+    RemovalKind, RemovalOperation, plan_execution,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -357,14 +357,14 @@ fn repair_owned(
                 observed.state,
                 ObservedServiceState::Service { .. } | ObservedServiceState::InvalidService
             )
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed, .. }) if matches!(installed.as_ref(), ServiceState::Registration { display_name, command, start, readiness, execution, dependencies, failure } if display_name == &op.display_name && command == &op.command && start == &op.start && readiness == &op.readiness && execution == &op.execution && dependencies == &op.dependency_names && failure == &op.failure))
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed, .. }) if installed.as_ref() == &op.desired_configuration())
         {
             op.kind = IntegrationChangeKind::RepairOwned;
             op.conflict = None;
         }
         if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedServiceState::Absent)
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed, .. }) if matches!(installed.as_ref(), ServiceState::Registration { display_name, command, start, readiness, execution, dependencies, failure } if display_name == &op.display_name && command == &op.command && start == &op.start && readiness == &op.readiness && execution == &op.execution && dependencies == &op.dependency_names && failure == &op.failure))
+            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed, .. }) if installed.as_ref() == &op.desired_configuration())
         {
             op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;

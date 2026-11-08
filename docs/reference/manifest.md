@@ -163,7 +163,7 @@ Required: `id`, `name`, `binary`, `start`, `execution`. Optional: `display_name`
 
 See [service lifecycle](/guide/services) for the implemented behavior and current limits.
 
-`lifecycle.start_timeout_seconds` and `lifecycle.stop_timeout_seconds` default to 90 seconds and must each be between 1 and 3600. These control native lifecycle transition deadlines, including compensation in the corresponding direction.
+`lifecycle.timeouts` is an optional manager-specific policy with `type = "systemd"`, `"openrc"`, or `"windows"`, matching `execution`. Omission resolves the manager defaults during planning. See [timeout policies](/guide/services#policies) for the fields, native escalation, observation bounds, and compensation behavior. Windows settings bound observation only; SCM does not expose per-service termination deadlines.
 
 `readiness` defaults to `manager`. Linux systemd also supports `notify`, requiring the main service process to send `READY=1`. Windows rejects `notify`. Readiness is owned configuration and changing it requires a registration update.
 

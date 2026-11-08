@@ -44,10 +44,12 @@ function Invoke-Native([string]$Executable, [string[]]$Arguments, [switch]$Allow
     @{ code = $process.ExitCode; output = $output }
 }
 
-function Build-Installer([int]$Version, [string]$Configuration, [switch]$FailStart) {
+function Build-Installer([int]$Version, [string]$Configuration, [switch]$FailStart, [int]$PayloadVersion = 0, [string]$Startup = 'manual', [string]$AppVersion = '', [string]$DisplaySuffix = '', [string]$InitialState = 'running') {
+    if ($PayloadVersion -eq 0) { $PayloadVersion = $Version }
+    if (-not $AppVersion) { $AppVersion = "$Version.0.0" }
     foreach ($name in @('storage', 'api')) {
         $bytes = [IO.File]::ReadAllBytes($Service)
-        $marker = if ($FailStart -and $name -eq 'api') { 'zup-native-start-failure' } else { "fixture-version-$Version" }
+        $marker = if ($FailStart -and $name -eq 'api') { 'zup-native-start-failure' } else { "fixture-version-$PayloadVersion" }
         [IO.File]::WriteAllBytes((Join-Path $dist "$name.exe"), [byte[]]($bytes + [Text.Encoding]::ASCII.GetBytes($marker)))
     }
     [IO.File]::WriteAllText((Join-Path $dist 'shared.conf'), $Configuration, $utf8)
@@ -60,14 +62,15 @@ function Build-Installer([int]$Version, [string]$Configuration, [switch]$FailSta
 [[services]]
 id = "$($names[$name])"
 name = "$($names[$name])"
+display_name = "$($names[$name])$DisplaySuffix"
 binary = "`${install}/$name.exe"
 arguments = ["$($names[$name])"]
 requires_files = ["`${install}/shared.conf"]
 $dependency
 $failure
-start = "manual"
+start = "$Startup"
 execution = { type = "windows", account = "local_service" }
-lifecycle = { install = "running", change = "preserve" }
+lifecycle = { install = "$InitialState", change = "preserve" }
 "@
     }
     $manifest = Join-Path $root 'zup.toml'
@@ -77,7 +80,7 @@ frontend = "headless"
 [app]
 id = "$application"
 name = "Native SCM installer verification"
-version = "$Version.0.0"
+version = "$AppVersion"
 [build.targets.default]
 target = "windows-x64"
 source = { directory = "dist" }
@@ -108,6 +111,8 @@ function Observe {
     foreach ($name in @('storage', 'api')) {
         $serviceState = Get-CimInstance Win32_Service -Filter "Name='$($names[$name])'"
         if (-not $serviceState) { throw "Missing native service $name" }
+        $ticks = if ($serviceState.ProcessId) { (Get-Process -Id $serviceState.ProcessId).StartTime.ToUniversalTime().Ticks } else { 0 }
+        $serviceState | Add-Member -NotePropertyName ExecutionStartTicks -NotePropertyValue $ticks
         $result[$name] = $serviceState
     }
     $result
@@ -122,6 +127,17 @@ function Assert-Running($State) {
 }
 
 try {
+    if ($RecoveryPolicy) {
+        $newStopped = Build-Installer 12 'initial stopped' -PayloadVersion 1 -AppVersion '0.9.0' -InitialState 'stopped'
+        $null = Deploy $newStopped 'install'
+        $installed = $true
+        $lastSetup = $newStopped
+        $created = Observe
+        if ($created.api.State -ne 'Stopped' -or $created.storage.State -ne 'Stopped') { throw 'Protected new registration started unexpectedly.' }
+        $null = Deploy $newStopped 'uninstall'
+        $installed = $false
+        $checks.Add('new_stopped_recovery_policy_registration')
+    }
     $first = Build-Installer 1 'initial'
     $lastSetup = $first
     $installed = $true
@@ -129,6 +145,27 @@ try {
     $before = Observe
     Assert-Running $before
     $checks.Add('install_local_service')
+    foreach ($policy in @(@{ version = 6; startup = 'automatic' }, @{ version = 7; startup = 'manual' })) {
+        $policySetup = Build-Installer $policy.version 'initial' -PayloadVersion 1 -Startup $policy.startup -AppVersion "1.$($policy.version).0"
+        $null = Deploy $policySetup 'upgrade'
+        $lastSetup = $policySetup
+        $preserved = Observe
+        Assert-Running $preserved
+        foreach ($name in @('storage', 'api')) {
+            if ($preserved[$name].ProcessId -ne $before[$name].ProcessId -or $preserved[$name].ExecutionStartTicks -ne $before[$name].ExecutionStartTicks) { throw 'Boot policy update replaced native execution.' }
+        }
+    }
+    $checks.Add('running_boot_policy_preserves_generation')
+    $metadataSetup = Build-Installer 13 'initial' -PayloadVersion 1 -AppVersion '1.8.0' -DisplaySuffix ' updated'
+    $null = Deploy $metadataSetup 'upgrade'
+    $lastSetup = $metadataSetup
+    $metadataState = Observe
+    Assert-Running $metadataState
+    foreach ($name in @('storage', 'api')) {
+        if ($metadataState[$name].DisplayName -ne "$($names[$name]) updated") { throw 'Display name update was not applied.' }
+        if ($metadataState[$name].ProcessId -ne $before[$name].ProcessId -or $metadataState[$name].ExecutionStartTicks -ne $before[$name].ExecutionStartTicks) { throw 'Display name update replaced native execution.' }
+    }
+    $checks.Add('display_name_preserves_generation')
     $second = Build-Installer 2 'updated'
     $null = Deploy $second 'upgrade'
     $lastSetup = $second
@@ -152,6 +189,18 @@ try {
         Stop-Service -Name $names[$name]
         (Get-Service -Name $names[$name]).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
     }
+    $null = Deploy $second 'repair'
+    $checks.Add('stopped_unchanged_repair')
+    if ($RecoveryPolicy) {
+        foreach ($policy in @(@{ version = 10; startup = 'automatic' }, @{ version = 11; startup = 'manual' })) {
+            $policySetup = Build-Installer $policy.version 'updated' -PayloadVersion 2 -Startup $policy.startup -AppVersion "2.$($policy.version).0"
+            $null = Deploy $policySetup 'upgrade'
+            $lastSetup = $policySetup
+            $preserved = Observe
+            if ($preserved.api.State -ne 'Stopped' -or $preserved.storage.State -ne 'Stopped') { throw 'Boot policy update started a stopped service with recovery actions.' }
+        }
+        $checks.Add('stopped_recovery_policy_preserves_state')
+    }
     $fourth = Build-Installer 4 'stopped'
     if ($RecoveryPolicy) {
         $refused = Deploy $fourth 'upgrade' -AllowFailure
@@ -164,6 +213,16 @@ try {
     }
     $stopped = Observe
     if ($stopped.api.State -ne 'Stopped' -or $stopped.storage.State -ne 'Stopped') { throw 'Stopped upgrade started a service.' }
+    if (-not $RecoveryPolicy) {
+        foreach ($policy in @(@{ version = 8; startup = 'automatic' }, @{ version = 9; startup = 'manual' })) {
+            $policySetup = Build-Installer $policy.version 'stopped' -PayloadVersion 4 -Startup $policy.startup -AppVersion "4.$($policy.version).0"
+            $null = Deploy $policySetup 'upgrade'
+            $lastSetup = $policySetup
+            $preserved = Observe
+            if ($preserved.api.State -ne 'Stopped' -or $preserved.storage.State -ne 'Stopped') { throw 'Boot policy update started a stopped service.' }
+        }
+        $checks.Add('stopped_boot_policy_preserves_state')
+    }
     $null = Deploy $lastSetup 'uninstall'
     $installed = $false
     foreach ($name in @('storage', 'api')) {

@@ -172,6 +172,7 @@ impl From<zup_runtime::OperationError> for Failure {
         let message = error.to_string();
         let outcome = match error {
             zup_runtime::OperationError::Cancelled => ProcessOutcome::Cancelled,
+            zup_runtime::OperationError::RecoveryRequired(_) => ProcessOutcome::RecoveryRequired,
             zup_runtime::OperationError::Downgrade { .. } => ProcessOutcome::Configuration,
             zup_runtime::OperationError::Refused { stage, .. } => match stage {
                 "scope" | "selection" | "capabilities" | "plan" | "resolve" => {

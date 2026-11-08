@@ -371,22 +371,85 @@ pub fn reconcile_owned_removal(
     }
 }
 
-pub fn rollback_managed(receipt: &OperationReceipt) -> Result<(), IntegrationError> {
+pub fn rollback_managed(
+    node: &TransactionNode,
+    receipt: &OperationReceipt,
+) -> Result<(), IntegrationError> {
     let OperationReceipt::Backend { payload, .. } = receipt else {
         return Err(IntegrationError::Unsupported);
     };
     let receipt =
         receipt_from_bytes(payload).map_err(|error| IntegrationError::Drift(error.to_string()))?;
+    validate_service_receipt(node, &receipt)?;
     rollback_native(&receipt)
 }
 
-pub(crate) fn verify_managed(receipt: &OperationReceipt) -> Result<(), IntegrationError> {
+pub(crate) fn verify_managed(
+    node: &TransactionNode,
+    receipt: &OperationReceipt,
+) -> Result<(), IntegrationError> {
     let OperationReceipt::Backend { payload, .. } = receipt else {
         return Err(IntegrationError::Unsupported);
     };
     let receipt =
         receipt_from_bytes(payload).map_err(|error| IntegrationError::Drift(error.to_string()))?;
+    validate_service_receipt(node, &receipt)?;
     verify_native(&receipt)
+}
+
+pub(crate) fn validate_service_receipt(
+    node: &TransactionNode,
+    receipt: &BackendReceipt,
+) -> Result<(), IntegrationError> {
+    let backend = node
+        .meta
+        .backend
+        .as_ref()
+        .ok_or(IntegrationError::Unsupported)?;
+    let expected = match backend.intent {
+        zup_transaction::BackendOperationIntent::Apply => {
+            match decode::<ApplyPayload>(&backend.payload).map_err(drift)? {
+                ApplyPayload::Service {
+                    operation,
+                    startup_inhibited,
+                } => {
+                    let (previous, installed) =
+                        crate::services::transaction_states(&operation, startup_inhibited)
+                            .map_err(drift)?;
+                    Some(BackendReceipt::Service {
+                        name: operation.name,
+                        privilege: operation.privilege,
+                        previous,
+                        installed,
+                    })
+                }
+                _ => None,
+            }
+        }
+        zup_transaction::BackendOperationIntent::Remove => {
+            match decode::<RemovePayload>(&backend.payload).map_err(drift)? {
+                RemovePayload::Owned {
+                    scope,
+                    key,
+                    owned,
+                    startup_inhibited,
+                } if matches!(owned.as_ref(), OwnedResource::Service { .. }) => Some(
+                    invert_receipt(native_owned_receipt(key, scope, &owned, startup_inhibited)?)?,
+                ),
+                _ => None,
+            }
+        }
+    };
+    if expected
+        .as_ref()
+        .is_some_and(|expected| expected != receipt)
+        || (expected.is_none() && matches!(receipt, BackendReceipt::Service { .. }))
+    {
+        return Err(IntegrationError::Drift(
+            "service receipt differs from its authorized operation".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn verify_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
@@ -703,6 +766,7 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     Ok(compare_removal(&ServiceState::Absent, previous, installed))
                 }
                 Ok(zup_plan::ObservedServiceState::Service {
+                    native_timeouts,
                     failure,
                     dependencies,
                     execution,
@@ -713,6 +777,7 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
                     ..
                 }) => Ok(compare_removal(
                     &ServiceState::Registration {
+                        native_timeouts,
                         failure,
                         dependencies,
                         execution,
@@ -1796,12 +1861,77 @@ mod tests {
         let _ = windows_registry::CURRENT_USER.remove_tree(key_path);
     }
 
+    #[rstest::rstest]
+    #[case("name")]
+    #[case("installed")]
+    #[case("previous")]
+    #[case("privilege")]
+    fn service_receipt_is_bound_to_authorized_configuration(#[case] tamper: &str) {
+        let (app, apps) = fixture();
+        let mut node = backend_apply_node(&app, apps);
+        let operation = zup_plan::ServiceOperation {
+            key: ResourceKey::Service {
+                id: zup_core::ServiceId::new("receipt-test").unwrap(),
+            },
+            id: "receipt-test".into(),
+            name: "receipt-test".into(),
+            display_name: "Receipt test".into(),
+            command: zup_plan::CommandSpec::new(
+                zup_plan::TargetPath::new(Target::WINDOWS_X64, r"C:\Zup\service.exe").unwrap(),
+                Vec::new(),
+            ),
+            execution: zup_core::ServiceExecution::Windows {
+                account: zup_core::WindowsServiceAccount::LocalService,
+            },
+            start: zup_core::ServiceStart::Manual,
+            readiness: Default::default(),
+            failure: Default::default(),
+            lifecycle: Default::default(),
+            privilege: Privilege::System,
+            kind: zup_plan::IntegrationChangeKind::Create,
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            dependency_names: Vec::new(),
+            previous: zup_plan::ObservedServiceState::Absent,
+            conflict: None,
+        };
+        let mut receipt = BackendReceipt::Service {
+            name: operation.name.clone(),
+            privilege: operation.privilege,
+            previous: ServiceState::Absent,
+            installed: operation.desired_configuration(),
+        };
+        node.meta.backend.as_mut().unwrap().payload = encode(&ApplyPayload::Service {
+            operation,
+            startup_inhibited: false,
+        })
+        .unwrap();
+        validate_service_receipt(&node, &receipt).unwrap();
+        let BackendReceipt::Service {
+            name,
+            privilege,
+            previous,
+            installed,
+        } = &mut receipt
+        else {
+            unreachable!()
+        };
+        match tamper {
+            "name" => *name = "another-service".into(),
+            "installed" => *installed = ServiceState::Absent,
+            "previous" => *previous = installed.clone(),
+            "privilege" => *privilege = Privilege::User,
+            _ => unreachable!(),
+        }
+        assert!(validate_service_receipt(&node, &receipt).is_err());
+    }
+
     #[test]
     fn backend_apply_verification_follows_the_installed_state() {
         let (app_id, operation) = fixture();
         let node = backend_apply_node(&app_id, operation.clone());
         let receipt = apply_managed(&node).expect("apply");
-        verify_managed(&receipt).expect("the live registration is the installed state");
+        verify_managed(&node, &receipt).expect("the live registration is the installed state");
 
         windows_registry::CURRENT_USER
             .create(&operation.key_path)
@@ -1809,7 +1939,7 @@ mod tests {
             .set_string("DisplayName", "someone else")
             .expect("drift");
         assert!(
-            verify_managed(&receipt).is_err(),
+            verify_managed(&node, &receipt).is_err(),
             "a drifted registration must not verify"
         );
         cleanup(&operation.key_path);
@@ -1823,7 +1953,7 @@ mod tests {
 
         let remove = backend_remove_node(&app_id, &operation);
         let removed = apply_owned_removal(&remove).expect("remove");
-        verify_managed(&removed).expect("the removed state is the installed state");
+        verify_managed(&remove, &removed).expect("the removed state is the installed state");
         assert!(
             read_apps_features(operation.scope, operation.key_path.as_str())
                 .expect("read")
@@ -1831,7 +1961,7 @@ mod tests {
             "the registration is gone"
         );
         assert!(
-            verify_managed(&applied).is_err(),
+            verify_managed(&apply, &applied).is_err(),
             "the apply receipt no longer describes the host"
         );
         cleanup(&operation.key_path);

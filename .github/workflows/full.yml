@@ -1,6 +1,10 @@
 name: Full Verification
 
 on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 4 * * 1"
   workflow_dispatch:
     inputs:
       sdk:
@@ -359,28 +363,3 @@ jobs:
         run: |
           tooling/zup.exe schema --output schema/zup.schema.json
           git diff --exit-code -- schema/zup.schema.json
-
-  terminal-arm64:
-    name: terminal ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-26.04-arm, windows-11-arm]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: terminal-${{ runner.os }}-${{ runner.arch }}-debug0
-          cache-on-failure: false
-
-      - name: Terminal and automation lifecycle
-        run: cargo test -p zup-installer --no-default-features --features console,headless,online --test terminal

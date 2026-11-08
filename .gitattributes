@@ -24,3 +24,5 @@ fixtures/automation/** -text
 fixtures/cross-matrix/payload/** -text
 scripts/verify-linux.sh text eol=lf
 scripts/verify-musl.sh text eol=lf
+# The native source lock verifies the patch's exact bytes.
+native/openrc/*.patch -text

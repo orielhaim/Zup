@@ -103,7 +103,8 @@ impl ExecutionPlan {
                             .unwrap_or(&resource.name)
                             .as_str()
                     || effect.command != resource.command
-                    || effect.lifecycle != resource.lifecycle
+                    || effect.lifecycle.resolved(&effect.execution)
+                        != resource.lifecycle.resolved(&resource.execution)
                     || effect.readiness != resource.readiness
                     || effect.execution != resource.execution
                     || effect.failure != resource.failure

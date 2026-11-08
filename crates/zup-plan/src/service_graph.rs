@@ -11,7 +11,10 @@ impl crate::ExecutionPlan {
             .services
             .iter()
             .filter(|service| {
-                service.previous.configuration().as_ref() != Some(&service.desired_configuration())
+                (service.previous.configuration().as_ref()
+                    != Some(&service.desired_configuration())
+                    && (!service.preserves_runtime()
+                        || service.lifecycle.change == zup_core::ChangedServiceState::Stopped))
                     || service.affected_by_files(
                         &self.files,
                         &self.removals,

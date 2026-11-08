@@ -1,7 +1,5 @@
 use zup_core::{Privilege, ResourceKey, ServiceStart};
-use zup_plan::{
-    CommandSpec, DesiredService, ObservedServiceState, OwnedResource, ServiceOperation,
-};
+use zup_plan::{CommandSpec, ObservedServiceState, OwnedResource, ServiceOperation};
 
 use crate::error::ExecError;
 use crate::fs::{EntryKind, OwnedDirectory};
@@ -12,7 +10,7 @@ use crate::service_ops::{
     load_path_dirs, policy_for_state, refuse_source_symlink, validate_changes,
     validate_executable_live,
 };
-use crate::services::{render_unit, unit_name};
+use crate::services::unit_name;
 use crate::systemd::{SystemdManager, UnitChange};
 
 pub struct ServiceContext<'a> {
@@ -40,35 +38,7 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
         unit: op.name.clone(),
         reason: error.to_string(),
     })?;
-    let name = zup_core::NonEmptyString::new(&op.name).map_err(|error| ExecError::Refused {
-        unit: unit.clone(),
-        reason: format!("service name: {error}"),
-    })?;
-    let display =
-        zup_core::NonEmptyString::new(&op.display_name).map_err(|error| ExecError::Refused {
-            unit: unit.clone(),
-            reason: format!("service display name: {error}"),
-        })?;
-    let synthetic = DesiredService {
-        failure: op.failure,
-        execution: op.execution.clone(),
-        requires_files: Vec::new(),
-        requires_services: Vec::new(),
-        dependency_names: op.dependency_names.clone(),
-        lifecycle: op.lifecycle,
-        readiness: op.readiness,
-        key: op.key.clone(),
-        id,
-        name,
-        display_name: Some(display),
-        command: op.command.clone(),
-        start: op.start,
-        privilege: op.privilege,
-    };
-    let bytes = render_unit(&synthetic, &op.display_name).map_err(|error| ExecError::Refused {
-        unit: unit.clone(),
-        reason: error.to_string(),
-    })?;
+    let bytes = render_registration(&unit, &op.desired_configuration())?;
     if bytes.len() > crate::service_ops::MAX_UNIT_BYTES {
         return Err(ExecError::Refused {
             unit,
@@ -83,53 +53,12 @@ fn derive_operation(op: &ServiceOperation) -> Result<Derived, ExecError> {
     })
 }
 
-fn render_registration(
+pub(crate) fn render_registration(
     unit: &str,
     registration: &zup_plan::ServiceState,
-    key: &ResourceKey,
-    id: &zup_core::ServiceId,
-    name: &zup_core::NonEmptyString,
 ) -> Result<Vec<u8>, ExecError> {
-    let zup_plan::ServiceState::Registration {
-        failure,
-        dependencies,
-        execution,
-        display_name: display,
-        command,
-        start,
-        readiness,
-    } = registration
-    else {
-        return Err(ExecError::refused(unit, "service registration required"));
-    };
-    let display = zup_core::NonEmptyString::new(display).map_err(|error| ExecError::Refused {
-        unit: unit.to_owned(),
-        reason: format!("service display name: {error}"),
-    })?;
-    let synthetic = DesiredService {
-        failure: *failure,
-        execution: execution.clone(),
-        requires_files: Vec::new(),
-        requires_services: Vec::new(),
-        dependency_names: dependencies.clone(),
-        lifecycle: Default::default(),
-        readiness: *readiness,
-        key: key.clone(),
-        id: id.clone(),
-        name: name.clone(),
-        display_name: Some(display),
-        command: command.clone(),
-        start: *start,
-        privilege: Privilege::System,
-    };
-    render_unit(
-        &synthetic,
-        synthetic.display_name.as_ref().expect("just set").as_str(),
-    )
-    .map_err(|error| ExecError::Refused {
-        unit: unit.to_owned(),
-        reason: error.to_string(),
-    })
+    crate::services::render_registration(unit, registration)
+        .map_err(|reason| ExecError::refused(unit, reason))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,55 +120,32 @@ fn check_unchanged(
     Ok(())
 }
 
-fn prepare(
-    op: &ServiceOperation,
-    payload_bytes: &[u8],
-) -> Result<(Derived, ServicePayload), ExecError> {
-    let derived = derive_operation(op)?;
-    let payload: ServicePayload =
-        crate::service_ops::decode_payload(payload_bytes).map_err(|error| ExecError::Refused {
-            unit: derived.unit.clone(),
-            reason: error.to_string(),
-        })?;
+pub fn apply(
+    payload: &ServicePayload,
+    context: &mut ServiceContext<'_>,
+) -> Result<ServiceReceipt, ExecError> {
     let ServicePayload::Apply {
-        service,
+        service: op,
         unit,
         unit_bytes,
         binary_owned,
-        ..
-    } = &payload
-    else {
-        return Err(ExecError::Refused {
-            unit: derived.unit.clone(),
-            reason: "a service apply node holds apply intent".into(),
-        });
-    };
-    if *unit != derived.unit || *unit_bytes != derived.bytes || **service != *op || !binary_owned {
-        return Err(ExecError::Refused {
-            unit: derived.unit.clone(),
-            reason: "a service payload does not match its operation".into(),
-        });
-    }
-    Ok((derived, payload))
-}
-
-pub fn apply(
-    op: &ServiceOperation,
-    payload_bytes: &[u8],
-    context: &mut ServiceContext<'_>,
-) -> Result<ServiceReceipt, ExecError> {
-    let (derived, payload) = prepare(op, payload_bytes)?;
-    let ServicePayload::Apply {
         previous_policy: planned_policy,
         previous_source: planned_source,
         ..
-    } = &payload
+    } = payload
     else {
-        return Err(ExecError::Refused {
-            unit: derived.unit.clone(),
-            reason: "a service apply node holds apply intent".into(),
-        });
+        return Err(ExecError::refused(
+            "",
+            "a service apply node holds apply intent",
+        ));
     };
+    let derived = derive_operation(op)?;
+    if *unit != derived.unit || *unit_bytes != derived.bytes || !binary_owned {
+        return Err(ExecError::refused(
+            unit,
+            "a service payload does not match its operation",
+        ));
+    }
     let planned_policy = planned_policy.clone();
     let planned_source = planned_source.as_deref();
     let canonical = authorize_systemd_unit(&derived.unit, context.systemd).map_err(|error| {
@@ -273,6 +179,9 @@ pub fn apply(
 
     let wanted_digest = hex(&digest_of(&derived.bytes).0);
     let wanted_policy = desired_policy(derived.start).to_owned();
+    if op.previous == ObservedServiceState::InvalidService {
+        require_stopped(&derived.unit, context.manager)?;
+    }
     if before.source.map(|(d, _)| hex(&d)) == Some(wanted_digest.clone())
         && before.policy == wanted_policy
     {
@@ -290,6 +199,13 @@ pub fn apply(
     check_unchanged_resume(&derived, &before, planned_source, &planned_policy)?;
     let must_be_absent = before.source.is_none();
 
+    if must_be_absent && derived.start == ServiceStart::Disabled {
+        let changes = context
+            .manager
+            .mask(&derived.unit)
+            .map_err(ExecError::from)?;
+        validate_changes(&derived.unit, &changes)?;
+    }
     write_source(&derived.unit, &canonical, &derived.bytes, must_be_absent)?;
     let mutated = apply_reload_policy_verify(&derived, &canonical, context);
     if let Err(error) = mutated {
@@ -410,7 +326,7 @@ fn write_source(
     Ok(())
 }
 
-fn apply_policy(
+pub(crate) fn apply_policy(
     unit: &str,
     canonical: &std::path::Path,
     start: ServiceStart,
@@ -622,6 +538,9 @@ pub fn rollback_apply(
         });
     };
     let derived = derive_operation(op)?;
+    if op.previous == ObservedServiceState::InvalidService {
+        require_stopped(&derived.unit, context.manager)?;
+    }
     if receipt.unit != derived.unit || *payload_unit != derived.unit {
         return Err(ExecError::refused(
             &derived.unit,
@@ -659,6 +578,20 @@ pub fn rollback_apply(
         previous_policy,
         context,
     )?;
+    if op.previous == ObservedServiceState::InvalidService {
+        require_stopped(&derived.unit, context.manager)?;
+    }
+    Ok(())
+}
+
+fn require_stopped(unit: &str, manager: &mut dyn SystemdManager) -> Result<(), ExecError> {
+    let runtime = manager.runtime(unit).map_err(ExecError::from)?;
+    if runtime.state != zup_plan::ServiceRuntimeState::Stopped || runtime.pending_job {
+        return Err(ExecError::refused(
+            unit,
+            "registration repair requires a stopped runtime without pending jobs",
+        ));
+    }
     Ok(())
 }
 
@@ -727,10 +660,7 @@ pub fn apply_remove(
     owned: &OwnedResource,
     context: &mut ServiceContext<'_>,
 ) -> Result<ServiceReceipt, ExecError> {
-    let OwnedResource::Service {
-        name, installed, ..
-    } = owned
-    else {
+    let OwnedResource::Service { installed, .. } = owned else {
         return Err(ExecError::refused(
             unit,
             "a service removal names a service",
@@ -761,17 +691,14 @@ pub fn apply_remove(
             unit: unit.to_owned(),
             reason: error.to_string(),
         })?;
-    let zup_plan::ServiceState::Registration { .. } = installed.as_ref() else {
+    let zup_plan::ServiceState::Registration { start, .. } = installed.as_ref() else {
         return Err(ExecError::refused(
             unit,
             "owned service state is a registration",
         ));
     };
-    let service_name = zup_core::NonEmptyString::new(name).map_err(|error| ExecError::Refused {
-        unit: unit.to_owned(),
-        reason: format!("service name: {error}"),
-    })?;
-    let installed_bytes = render_registration(unit, installed, key, id, &service_name)?;
+    let installed_bytes = render_registration(unit, installed)?;
+    let previous_policy = desired_policy(*start).to_owned();
 
     let retired = observe(unit, &canonical, context.manager)?;
     if retired.source.is_none() && retired.policy != "enabled" && retired.policy != "masked" {
@@ -779,11 +706,22 @@ pub fn apply_remove(
             unit: unit.to_owned(),
             previous_source_sha256: Some(hex(&digest_of(&installed_bytes).0)),
             installed_source_sha256: None,
-            previous_policy: retired.policy.clone(),
+            previous_policy: previous_policy.clone(),
             installed_policy: retired.policy,
             reloaded: true,
             changes: Vec::new(),
         });
+    }
+
+    if retired
+        .source
+        .as_ref()
+        .is_some_and(|(hash, _)| *hash != digest_of(&installed_bytes).0)
+    {
+        return Err(ExecError::refused(
+            unit,
+            "the service source differs from its owner",
+        ));
     }
 
     refuse_foreign_integration(unit, &canonical)?;
@@ -792,6 +730,7 @@ pub fn apply_remove(
         .manager
         .unit_file_state(unit)
         .map_err(ExecError::from)?;
+    remove_file_no_follow(unit, &canonical)?;
     if state == "masked" || state == "masked-runtime" {
         changes.extend(context.manager.unmask(unit).map_err(ExecError::from)?);
     }
@@ -803,7 +742,6 @@ pub fn apply_remove(
                 .map_err(ExecError::from)?,
         );
     }
-    remove_file_no_follow(unit, &canonical)?;
     context.manager.reload().map_err(ExecError::from)?;
     let after = observe(unit, &canonical, context.manager)?;
     if after.source.is_some() {
@@ -822,7 +760,7 @@ pub fn apply_remove(
         unit: unit.to_owned(),
         previous_source_sha256: Some(hex(&digest_of(&installed_bytes).0)),
         installed_source_sha256: None,
-        previous_policy: state,
+        previous_policy,
         installed_policy: after.policy,
         reloaded: true,
         changes,
@@ -836,10 +774,7 @@ pub fn rollback_remove(
     receipt: &ServiceReceipt,
     context: &mut ServiceContext<'_>,
 ) -> Result<(), ExecError> {
-    let OwnedResource::Service {
-        name, installed, ..
-    } = owned
-    else {
+    let OwnedResource::Service { installed, .. } = owned else {
         return Err(ExecError::refused(
             unit,
             "a service removal names a service",
@@ -851,6 +786,12 @@ pub fn rollback_remove(
             "a service removal names a service key",
         ));
     };
+    if unit_name(id).map_err(|error| ExecError::refused(unit, error.to_string()))? != unit {
+        return Err(ExecError::refused(
+            unit,
+            "service removal identity mismatch",
+        ));
+    }
     let zup_plan::ServiceState::Registration { .. } = installed.as_ref() else {
         return Err(ExecError::refused(
             unit,
@@ -869,11 +810,10 @@ pub fn rollback_remove(
             reason: "the service changed after removal".into(),
         });
     }
-    let service_name = zup_core::NonEmptyString::new(name).map_err(|error| ExecError::Refused {
-        unit: unit.to_owned(),
-        reason: format!("service name: {error}"),
-    })?;
-    let bytes = render_registration(unit, installed, key, id, &service_name)?;
+    let bytes = render_registration(unit, installed)?;
+    if receipt.previous_policy == "masked" {
+        restore_policy(unit, &canonical, &receipt.previous_policy, context.manager)?;
+    }
     write_source(unit, &canonical, &bytes, true)?;
     context.manager.reload().map_err(ExecError::from)?;
     restore_policy(unit, &canonical, &receipt.previous_policy, context.manager)?;
@@ -1098,8 +1038,11 @@ pub fn apply_operation(
 ) -> Result<zup_transaction::BackendOperation, ExecError> {
     let key = crate::service_ops::backend_key_for_unit(unit);
     let id = crate::service_ops::backend_id_for_unit(unit);
+    let mut service = op.clone();
+    service.lifecycle = service.lifecycle.resolved(&service.execution);
     let payload = ServicePayload::Apply {
-        service: Box::new(op.clone()),
+        service: Box::new(service),
+        startup_inhibited: false,
         unit: unit.to_owned(),
         unit_bytes: unit_bytes.to_vec(),
         binary_owned,
@@ -1131,6 +1074,7 @@ pub fn remove_operation(
         key: key.clone(),
         unit: unit.to_owned(),
         owned: Box::new(owned.clone()),
+        startup_inhibited: false,
     };
     Ok(zup_transaction::BackendOperation {
         key: backend_key,
@@ -1213,6 +1157,49 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case("unit")]
+    #[case("source")]
+    #[case("before_image")]
+    #[case("policy")]
+    fn service_receipts_cannot_substitute_another_registration(#[case] tamper: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let (executable, _) = isolated_binary(&dir);
+        let op = operation_at("tool", &executable, ServiceStart::Automatic);
+        let derived = derive_operation(&op).unwrap();
+        let payload = ServicePayload::Apply {
+            service: Box::new(op),
+            startup_inhibited: false,
+            unit: derived.unit.clone(),
+            unit_bytes: derived.bytes.clone(),
+            binary_owned: true,
+            previous_policy: "disabled".into(),
+            previous_source: None,
+        };
+        let mut receipt = ServiceReceipt {
+            unit: derived.unit,
+            previous_source_sha256: None,
+            installed_source_sha256: Some(zup_core::hash_bytes(&derived.bytes).to_hex()),
+            previous_policy: "disabled".into(),
+            installed_policy: "enabled".into(),
+            reloaded: true,
+            changes: Vec::new(),
+        };
+        crate::service_ops::validate_receipt(&payload, &receipt).unwrap();
+        match tamper {
+            "unit" => receipt.unit = "zup-foreign.service".into(),
+            "source" => {
+                receipt.installed_source_sha256 = Some(zup_core::hash_bytes(b"old source").to_hex())
+            }
+            "before_image" => {
+                receipt.previous_source_sha256 = receipt.installed_source_sha256.clone()
+            }
+            "policy" => receipt.installed_policy = "disabled".into(),
+            _ => unreachable!(),
+        }
+        assert!(crate::service_ops::validate_receipt(&payload, &receipt).is_err());
+    }
+
     #[test]
     fn an_enable_failure_compensates() {
         let dir = tempfile::tempdir().unwrap();
@@ -1246,7 +1233,13 @@ mod tests {
             manager: &mut manager,
             expected_uid: uid,
         };
-        assert!(apply(&op, &node_payload, &mut context).is_err());
+        assert!(
+            apply(
+                &crate::service_ops::decode_payload(&node_payload).unwrap(),
+                &mut context
+            )
+            .is_err()
+        );
         assert!(
             !systemd.unit_dir.join(&derived.unit).exists(),
             "the compensated source is gone"
@@ -1285,7 +1278,13 @@ mod tests {
             manager: &mut manager,
             expected_uid: uid,
         };
-        assert!(apply(&op, &node_payload, &mut context).is_err());
+        assert!(
+            apply(
+                &crate::service_ops::decode_payload(&node_payload).unwrap(),
+                &mut context
+            )
+            .is_err()
+        );
         assert!(
             !systemd.unit_dir.join(&derived.unit).exists(),
             "nothing was written before the refusal"
@@ -1329,7 +1328,11 @@ mod tests {
                 manager: &mut manager,
                 expected_uid: uid,
             };
-            let receipt = apply(&op, &node_payload, &mut context).expect("a service applies");
+            let receipt = apply(
+                &crate::service_ops::decode_payload(&node_payload).unwrap(),
+                &mut context,
+            )
+            .expect("a service applies");
             assert_eq!(receipt.installed_policy, expected);
             assert!(receipt.reloaded);
             assert_eq!(
@@ -1341,6 +1344,34 @@ mod tests {
             let mode = std::fs::metadata(&source).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o644, "unit sources install 0644");
             verify_receipt(&receipt, &mut context).expect("the receipt verifies");
+            let owned = OwnedResource::Service {
+                timeouts: op.lifecycle.timeouts_for(&op.execution),
+                name: op.name.clone(),
+                privilege: op.privilege,
+                requires_files: Vec::new(),
+                requires_services: Vec::new(),
+                previous: zup_plan::ServiceState::Absent,
+                installed: Box::new(op.desired_configuration()),
+            };
+            apply_remove(&op.key, &derived.unit, &owned, &mut context).unwrap();
+            let retired = apply_remove(&op.key, &derived.unit, &owned, &mut context).unwrap();
+            crate::service_ops::validate_receipt(
+                &ServicePayload::Remove {
+                    key: op.key.clone(),
+                    unit: derived.unit.clone(),
+                    owned: Box::new(owned.clone()),
+                    startup_inhibited: false,
+                },
+                &retired,
+            )
+            .unwrap();
+            assert_eq!(retired.previous_policy, expected);
+            rollback_remove(&op.key, &derived.unit, &owned, &retired, &mut context).unwrap();
+            assert_eq!(
+                context.manager.unit_file_state(&derived.unit).unwrap(),
+                expected
+            );
+            assert_eq!(std::fs::read(&source).unwrap(), derived.bytes);
         }
     }
 

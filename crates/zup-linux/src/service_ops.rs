@@ -33,6 +33,7 @@ pub fn plan_requires_manager(plan: &zup_transaction::TransactionPlan) -> bool {
 pub enum ServicePayload {
     Apply {
         service: Box<ServiceOperation>,
+        startup_inhibited: bool,
         unit: String,
         unit_bytes: Vec<u8>,
 
@@ -47,7 +48,42 @@ pub enum ServicePayload {
         key: ResourceKey,
         unit: String,
         owned: Box<OwnedResource>,
+        startup_inhibited: bool,
     },
+}
+
+impl ServicePayload {
+    pub fn execution_payload(&self) -> Result<Self, ExecError> {
+        let mut payload = self.clone();
+        match &mut payload {
+            Self::Apply {
+                service,
+                startup_inhibited,
+                ..
+            } if *startup_inhibited => {
+                service.start = ServiceStart::Disabled;
+                if let ObservedServiceState::Service { start, .. } = &mut service.previous {
+                    *start = ServiceStart::Disabled;
+                }
+                *startup_inhibited = false;
+            }
+            Self::Remove {
+                owned,
+                startup_inhibited,
+                unit,
+                ..
+            } if *startup_inhibited => {
+                let OwnedResource::Service { installed, .. } = owned.as_mut() else {
+                    return Err(ExecError::refused(unit, "service ownership required"));
+                };
+                **installed = zup_transaction::disabled_startup(installed)
+                    .ok_or_else(|| ExecError::refused(unit, "service registration required"))?;
+                *startup_inhibited = false;
+            }
+            _ => {}
+        }
+        Ok(payload)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -61,9 +97,319 @@ pub struct ServiceReceipt {
     pub changes: Vec<UnitChange>,
 }
 
+pub fn validate_receipt(
+    payload: &ServicePayload,
+    receipt: &ServiceReceipt,
+) -> Result<(), ExecError> {
+    let execution = payload.execution_payload()?;
+    let payload = &execution;
+    let (unit, previous, installed, previous_policy, installed_policy) = match payload {
+        ServicePayload::Apply {
+            service,
+            unit,
+            unit_bytes,
+            previous_source,
+            previous_policy,
+            ..
+        } => {
+            let policy = if matches!(
+                service.execution,
+                zup_core::ServiceExecution::OpenrcUser { .. }
+            ) {
+                if service.start == ServiceStart::Automatic {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            } else {
+                desired_policy(service.start)
+            };
+            (
+                unit,
+                previous_source.clone(),
+                Some(unit_bytes.as_slice()),
+                Some(previous_policy.as_str()),
+                Some(policy),
+            )
+        }
+        ServicePayload::Remove {
+            key, unit, owned, ..
+        } => {
+            let OwnedResource::Service { installed, .. } = owned.as_ref() else {
+                return Err(ExecError::refused(unit, "service ownership required"));
+            };
+            let ResourceKey::Service { .. } = key else {
+                return Err(ExecError::refused(unit, "service identity required"));
+            };
+            let zup_plan::ServiceState::Registration {
+                execution, start, ..
+            } = installed.as_ref()
+            else {
+                return Err(ExecError::refused(unit, "service registration required"));
+            };
+            let openrc = matches!(execution, zup_core::ServiceExecution::OpenrcUser { .. });
+            let bytes = if openrc {
+                crate::openrc::render(unit, installed)
+                    .map_err(|reason| ExecError::refused(unit, reason))?
+            } else {
+                crate::service_exec::render_registration(unit, installed)?
+            };
+            if !openrc && !matches!(receipt.installed_policy.as_str(), "disabled" | "not-found") {
+                return Err(ExecError::refused(
+                    unit,
+                    "service removal receipt has an invalid policy",
+                ));
+            }
+            let previous_policy = if openrc {
+                if *start == ServiceStart::Automatic {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            } else {
+                desired_policy(*start)
+            };
+            (
+                unit,
+                Some(bytes),
+                None,
+                Some(previous_policy),
+                openrc.then_some("disabled"),
+            )
+        }
+    };
+    if receipt.unit != *unit
+        || receipt.previous_source_sha256
+            != previous
+                .as_ref()
+                .map(|bytes| zup_core::hash_bytes(bytes).to_hex())
+        || receipt.installed_source_sha256
+            != installed.map(|bytes| zup_core::hash_bytes(bytes).to_hex())
+        || previous_policy.is_some_and(|policy| receipt.previous_policy != policy)
+        || installed_policy.is_some_and(|policy| receipt.installed_policy != policy)
+    {
+        return Err(ExecError::refused(
+            unit,
+            "service receipt differs from its authorized operation",
+        ));
+    }
+    Ok(())
+}
+
 pub fn backend_id_for_unit(unit: &str) -> BackendResourceId {
     BackendResourceId::new(format!("{SERVICE_BACKEND_PREFIX}{unit}"))
         .expect("a service backend id is non-empty")
+}
+
+pub fn bind_startup_inhibition(
+    input: &mut zup_transaction::TransactionInput,
+) -> Result<(), ExecError> {
+    for backend in &mut input.backend_operations {
+        if !backend.id.as_str().starts_with(SERVICE_BACKEND_PREFIX) {
+            continue;
+        }
+        let mut payload = decode_payload(&backend.payload)?;
+        let key = ledger_key_for_payload(&payload);
+        let guarded = input.service_controls.iter().any(|control| {
+            control.key == key && control.before_configuration != control.configuration
+        });
+        if !guarded {
+            continue;
+        }
+        match &mut payload {
+            ServicePayload::Apply {
+                service,
+                startup_inhibited,
+                unit,
+                unit_bytes,
+                previous_policy,
+                previous_source,
+                ..
+            } => {
+                let render = |state: &zup_plan::ServiceState| {
+                    if matches!(
+                        service.execution,
+                        zup_core::ServiceExecution::OpenrcUser { .. }
+                    ) {
+                        crate::openrc::render(unit, state)
+                            .map_err(|reason| ExecError::refused(unit, reason))
+                    } else {
+                        crate::service_exec::render_registration(unit, state)
+                    }
+                };
+                let openrc = matches!(
+                    service.execution,
+                    zup_core::ServiceExecution::OpenrcUser { .. }
+                );
+                *unit_bytes = render(
+                    &zup_transaction::disabled_startup(&service.desired_configuration())
+                        .expect("registration"),
+                )?;
+                if previous_source.is_some() {
+                    let before = service.previous.configuration().ok_or_else(|| {
+                        ExecError::refused(
+                            unit,
+                            "activation inhibition requires a recognized registration",
+                        )
+                    })?;
+                    if previous_source.as_deref() != Some(render(&before)?.as_slice()) {
+                        return Err(ExecError::refused(
+                            unit,
+                            "service source changed before activation inhibition",
+                        ));
+                    }
+                    *previous_source = Some(render(
+                        &zup_transaction::disabled_startup(&before).expect("registration"),
+                    )?);
+                    *previous_policy = if openrc { "disabled" } else { "masked" }.into();
+                }
+                *startup_inhibited = true;
+            }
+            ServicePayload::Remove {
+                startup_inhibited, ..
+            } => *startup_inhibited = true,
+        }
+        backend.payload = encode_payload(&payload)?;
+    }
+    Ok(())
+}
+
+pub fn validate_startup_inhibitions(
+    plan: &zup_transaction::TransactionPlan,
+    ledger: Option<&zup_plan::InstallLedger>,
+) -> Result<(), ExecError> {
+    for node in &plan.nodes {
+        let Some(backend) = &node.meta.backend else {
+            continue;
+        };
+        if !backend.id.as_str().starts_with(SERVICE_BACKEND_PREFIX) {
+            continue;
+        }
+        let payload = decode_payload(&backend.payload)?;
+        let key = ledger_key_for_payload(&payload);
+        let mut protected = match ledger.and_then(|ledger| ledger.resources.get(&key)) {
+            Some(OwnedResource::Service {
+                requires_files,
+                installed,
+                ..
+            }) => {
+                let mut files = requires_files.clone();
+                if let zup_plan::ServiceState::Registration { command, .. } = installed.as_ref() {
+                    files.push(command.executable.clone());
+                }
+                files
+            }
+            _ => Vec::new(),
+        };
+        let (unit, previous, desired, guarded) = match &payload {
+            ServicePayload::Apply {
+                service,
+                unit,
+                startup_inhibited,
+                ..
+            } => {
+                protected.extend(service.requires_files.clone());
+                protected.push(service.command.executable.clone());
+                let previous = service.previous.configuration().or_else(|| {
+                    let desired = service.desired_configuration();
+                    let owned = ledger.and_then(|ledger| ledger.resources.get(&key));
+                    (service.kind == zup_plan::IntegrationChangeKind::RepairOwned
+                        && matches!(owned, Some(OwnedResource::Service { installed, .. }) if **installed == desired)
+                        && plan.nodes.iter().any(|node| matches!(&node.kind,
+                            zup_transaction::NodeKind::ServiceControl { operation }
+                            if operation.key == key && operation.intent == zup_transaction::ServiceControlIntent::Reobserve
+                                && operation.configuration == desired)))
+                        .then_some(desired)
+                }).ok_or_else(|| ExecError::refused(unit, "service registration required"))?;
+                (
+                    unit,
+                    previous,
+                    service.desired_configuration(),
+                    *startup_inhibited,
+                )
+            }
+            ServicePayload::Remove {
+                unit,
+                owned,
+                startup_inhibited,
+                ..
+            } => {
+                let OwnedResource::Service { installed, .. } = owned.as_ref() else {
+                    return Err(ExecError::refused(unit, "service ownership required"));
+                };
+                (
+                    unit,
+                    installed.as_ref().clone(),
+                    zup_plan::ServiceState::Absent,
+                    *startup_inhibited,
+                )
+            }
+        };
+        zup_transaction::validate_startup_inhibition(
+            plan, &key, &previous, &desired, &protected, guarded,
+        )
+        .map_err(|reason| ExecError::refused(unit, reason))?;
+        if guarded
+            && let ServicePayload::Apply {
+                unit_bytes,
+                previous_source,
+                previous_policy,
+                ..
+            } = &payload
+        {
+            let render = |state: &zup_plan::ServiceState| {
+                if matches!(
+                    state,
+                    zup_plan::ServiceState::Registration {
+                        execution: zup_core::ServiceExecution::OpenrcUser { .. },
+                        ..
+                    }
+                ) {
+                    crate::openrc::render(unit, state)
+                        .map_err(|reason| ExecError::refused(unit, reason))
+                } else {
+                    crate::service_exec::render_registration(unit, state)
+                }
+            };
+            if *unit_bytes
+                != render(&zup_transaction::disabled_startup(&desired).expect("registration"))?
+            {
+                return Err(ExecError::refused(
+                    unit,
+                    "inhibited service payload differs from its registration",
+                ));
+            }
+            if previous != zup_plan::ServiceState::Absent {
+                let expected =
+                    render(&zup_transaction::disabled_startup(&previous).expect("registration"))?;
+                let policy = if matches!(
+                    previous,
+                    zup_plan::ServiceState::Registration {
+                        execution: zup_core::ServiceExecution::OpenrcUser { .. },
+                        ..
+                    }
+                ) {
+                    "disabled"
+                } else {
+                    "masked"
+                };
+                if previous_source.as_deref() != Some(expected.as_slice())
+                    || previous_policy != policy
+                {
+                    return Err(ExecError::refused(
+                        unit,
+                        "inhibited service before-image differs from its registration",
+                    ));
+                }
+            } else if previous_source.is_some() {
+                return Err(ExecError::refused(
+                    unit,
+                    "new service has an unexpected before-image",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn backend_key_for_unit(unit: &str) -> ResourceKey {
@@ -80,6 +426,18 @@ pub fn ledger_key_for_payload(payload: &ServicePayload) -> ResourceKey {
 }
 
 fn validate_payload(payload: &ServicePayload) -> Result<(), ExecError> {
+    if let ServicePayload::Apply { service, unit, .. } = payload {
+        if service.lifecycle.timeouts.is_none() {
+            return Err(ExecError::refused(
+                unit,
+                "native service intent requires resolved timeouts",
+            ));
+        }
+        service
+            .lifecycle
+            .validate(service.start, &service.execution)
+            .map_err(|reason| ExecError::refused(unit, reason))?;
+    }
     if let ServicePayload::Apply {
         unit_bytes,
         previous_source,
@@ -151,7 +509,7 @@ pub fn require_exec_baseline(manager: &mut dyn SystemdManager) -> Result<u32, Ex
         Some(major) => Err(ExecError::refused(
             "",
             format!(
-                "systemd {major} is older than the minimum {} for `Type=exec` service units",
+                "systemd {major} is older than the minimum {} for managed service units",
                 crate::services::MINIMUM_SYSTEMD_VERSION,
             ),
         )),
@@ -195,13 +553,14 @@ pub(crate) fn observe_unit(
     };
 
     let Ok(crate::services::UnitDefinition {
+        native_timeouts,
         failure,
         dependencies,
         display_name,
         argv,
         readiness,
         execution,
-    }) = parse_unit(&bytes, target)
+    }) = parse_unit(&bytes, target, unit)
     else {
         return Ok(ObservedServiceState::InvalidService);
     };
@@ -225,26 +584,46 @@ pub(crate) fn observe_unit(
     };
     let runtime = manager.runtime(unit).map_err(ExecError::from)?;
     let loaded = manager.load_unit(unit).map_err(ExecError::from)?;
-    if loaded.need_daemon_reload
+    if runtime.argv.as_ref().is_some_and(|loaded| *loaded != argv)
+        || (runtime.argv.is_none() && runtime.state != zup_plan::ServiceRuntimeState::Stopped)
+        || loaded.need_daemon_reload
         || crate::systemd_policy::validate(&loaded.drop_in_paths).is_err()
         || if start == ServiceStart::Disabled {
-            loaded.load_state != "masked" || runtime.state != zup_plan::ServiceRuntimeState::Stopped
+            state_text != "masked"
+                || (runtime.state == zup_plan::ServiceRuntimeState::Stopped
+                    && loaded.load_state != "masked"
+                    && loaded.fragment_path != "/dev/null")
         } else {
             loaded.load_state != "loaded"
                 || Path::new(&loaded.fragment_path) != path
+                || runtime.argv.as_ref() != Some(&argv)
                 || runtime.execution.as_ref() != Some(&execution)
                 || runtime.failure != failure
+                || runtime.native_timeouts != Some(native_timeouts)
+                || runtime.service_type
+                    != match readiness {
+                        zup_core::ServiceReadiness::Manager => "exec",
+                        zup_core::ServiceReadiness::Notify => "notify",
+                    }
+                || runtime
+                    .dependencies
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != dependencies
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
         }
     {
         return Ok(ObservedServiceState::InvalidService);
     }
     Ok(ObservedServiceState::Service {
+        native_timeouts,
         failure,
         dependencies,
         execution,
         readiness,
         display_name,
-        command,
+        command: Box::new(command),
         start,
         runtime_state: Some(if runtime.pending_job {
             zup_plan::ServiceRuntimeState::Unknown
@@ -356,13 +735,14 @@ pub fn check_collisions(
                 | zup_plan::IntegrationChangeKind::RepairOwned
                 | zup_plan::IntegrationChangeKind::NoOp
                 | zup_plan::IntegrationChangeKind::Drift
-        ) && matches!(
+        ) && (matches!(
             service.previous,
             ObservedServiceState::Service {
                 start: ServiceStart::Disabled,
                 ..
             }
-        )
+        ) || service.kind == zup_plan::IntegrationChangeKind::RestoreOwned
+            && service.start == ServiceStart::Disabled)
     });
     for dir in dirs {
         let candidate = dir.join(unit);
@@ -400,6 +780,68 @@ pub fn check_collisions(
                     unit,
                     format!("unit `{unit}` is shadowed at `{}`", candidate.display()),
                 ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_missing_source_residue(
+    unit: &str,
+    canonical: &Path,
+    owned: Option<&OwnedResource>,
+) -> Result<(), ExecError> {
+    let startup = match owned {
+        Some(OwnedResource::Service { installed, .. }) => match installed.as_ref() {
+            zup_plan::ServiceState::Registration { start, .. } => Some(*start),
+            _ => None,
+        },
+        _ => None,
+    };
+    validate_missing_source_residue_at(
+        unit,
+        canonical,
+        startup,
+        &admin_override_dir(),
+        Path::new("/run/systemd/system"),
+    )
+}
+
+fn validate_missing_source_residue_at(
+    unit: &str,
+    canonical: &Path,
+    startup: Option<ServiceStart>,
+    persistent: &Path,
+    runtime: &Path,
+) -> Result<(), ExecError> {
+    for (path, permitted_target) in [
+        (
+            persistent.join(unit),
+            (startup == Some(ServiceStart::Disabled)).then_some(Path::new("/dev/null")),
+        ),
+        (
+            persistent.join("multi-user.target.wants").join(unit),
+            (startup == Some(ServiceStart::Automatic)).then_some(canonical),
+        ),
+        (runtime.join(unit), None),
+        (runtime.join("multi-user.target.wants").join(unit), None),
+    ] {
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(crate::error::PathError::io(&path, error).into()),
+            Ok(metadata) => {
+                if !metadata.file_type().is_symlink()
+                    || permitted_target.is_none()
+                    || std::fs::read_link(&path)
+                        .map_err(|error| crate::error::PathError::io(&path, error))?
+                        .as_path()
+                        != permitted_target.expect("checked target")
+                {
+                    return Err(ExecError::conflict(
+                        unit,
+                        format!("unowned native service residue at `{}`", path.display()),
+                    ));
+                }
             }
         }
     }
@@ -568,6 +1010,42 @@ pub fn validate_changes(unit: &str, changes: &[UnitChange]) -> Result<(), ExecEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[rstest::rstest]
+    #[case(None, false, false)]
+    #[case(Some(ServiceStart::Automatic), false, true)]
+    #[case(Some(ServiceStart::Manual), false, false)]
+    #[case(Some(ServiceStart::Disabled), true, true)]
+    #[case(Some(ServiceStart::Automatic), true, false)]
+    fn missing_sources_do_not_transfer_native_residue_ownership(
+        #[case] startup: Option<ServiceStart>,
+        #[case] mask: bool,
+        #[case] accepted: bool,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let persistent = root.path().join("etc");
+        let runtime = root.path().join("run");
+        let canonical = root.path().join("vendor/zup-owned.service");
+        let unit = "zup-owned.service";
+        let path = if mask {
+            persistent.join(unit)
+        } else {
+            persistent.join("multi-user.target.wants").join(unit)
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let target = if mask {
+            Path::new("/dev/null")
+        } else {
+            canonical.as_path()
+        };
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        assert_eq!(
+            validate_missing_source_residue_at(unit, &canonical, startup, &persistent, &runtime)
+                .is_ok(),
+            accepted
+        );
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+    }
 
     fn isolated() -> (tempfile::TempDir, MachineRoots, SystemdRoots) {
         let base = tempfile::tempdir().expect("an isolated base");

@@ -75,8 +75,33 @@ fn sdk_service_policies_survive_component_linking_and_execution(
         .unwrap();
     assert_eq!(service.lifecycle.install, InitialServiceState::Running);
     assert_eq!(service.lifecycle.change, ChangedServiceState::Preserve);
-    assert_eq!(service.lifecycle.start_timeout_seconds, 17);
-    assert_eq!(service.lifecycle.stop_timeout_seconds, 23);
+    match service.lifecycle.timeouts.as_ref().unwrap() {
+        zup_plugin_contract::ServiceTimeouts::Systemd(value) => {
+            assert!(notify);
+            assert_eq!(
+                (
+                    value.start_timeout_seconds,
+                    value.stop_grace_seconds,
+                    value.abort_timeout_seconds,
+                    value.settle_seconds
+                ),
+                (17, 23, 5, 5)
+            );
+        }
+        zup_plugin_contract::ServiceTimeouts::Windows(value) => {
+            assert!(!notify);
+            assert_eq!(
+                (
+                    value.start_observation_seconds,
+                    value.stop_observation_seconds
+                ),
+                (17, 23)
+            );
+        }
+        zup_plugin_contract::ServiceTimeouts::Openrc(_) => {
+            panic!("fixture declares SCM or systemd")
+        }
+    }
     assert_eq!(service.requires_files, ["${install}/configure.txt"]);
     assert_eq!(
         service.requires_services,

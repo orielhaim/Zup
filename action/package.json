@@ -10,7 +10,7 @@
   "scripts": {
     "build": "bun run scripts/build.mjs",
     "typecheck": "bun check --no-script -p tsconfig.json && bun check --no-script -p tsconfig.test.json",
-    "format:check": "bun fmt --check src tests scripts",
+    "format:check": "bun fmt --no-script --check src tests scripts",
     "test": "bun test",
     "metadata": "node scripts/check-metadata.mjs",
     "verify:runtime": "node scripts/verify-runtime.mjs",

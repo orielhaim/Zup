@@ -127,7 +127,7 @@ fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
     );
     assert_eq!(
         first.to_hex(),
-        "af50c16678a94eda7cd960c61a3e40c00321446da2ec460118c7b9527799350b"
+        "5471845db0c00da202cf2a2dd495db31dd8b93b6a3b5aae0c1afebe45813ba97"
     );
 }
 

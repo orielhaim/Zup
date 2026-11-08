@@ -1026,19 +1026,18 @@ fn machine_state_symlink_is_refused() {
 }
 
 #[test]
-fn machine_interrupted_transaction_recovers_first() {
+fn machine_interrupted_transaction_requires_explicit_recovery() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
 
-    let (intent, plan) = plan_for_test(&installer, &roots, Operation::Install, None);
-    let _ = intent;
+    let (mut intent, plan) = plan_for_test(&installer, &roots, Operation::Install, None);
     let coordinator = zup_transaction::TransactionCoordinator::new(
         zup_transaction::FilesystemTransactionStore::private_at(&roots.state),
     );
     let app = app_id();
     let version = semver::Version::parse("1.0.0").expect("a version");
-    coordinator
+    let interrupted = coordinator
         .begin(app.clone(), SelectedScope::Machine, version, plan)
         .expect("a journal begins")
         .preserve();
@@ -1050,12 +1049,50 @@ fn machine_interrupted_transaction_recovers_first() {
         "nothing published yet"
     );
 
+    let refused = run_machine_isolated(&installer, &roots, Operation::Apply, None);
+    assert!(
+        matches!(refused, Err(zup_linux::ExecError::RecoveryRequired(_))),
+        "an unsettled installation accepted a new operation: {refused:?}"
+    );
+    assert!(!machine_install_dir(&roots.roots).join("tool").exists());
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&roots.state);
+    assert_eq!(
+        zup_transaction::TransactionStore::load(&store, &interrupted.transaction_id)
+            .unwrap()
+            .phase,
+        zup_transaction::TransactionPhase::Prepared
+    );
+
+    intent.operation = privileged_operation::RECOVER.into();
+    intent.recovery_id = Some(interrupted.transaction_id.as_uuid());
+    intent.expected_plan_digest = None;
+    let uid = rustix::process::getuid().as_raw();
+    let session = SessionId::new_v7();
+    let (mut client, mut worker) = UnixStream::pair().unwrap();
+    let worker_roots = roots.roots.clone();
+    let worker_installer = installer.clone();
+    let handle = std::thread::spawn(move || {
+        serve_worker_isolated(
+            &mut worker,
+            &worker_roots,
+            uid,
+            std::process::id(),
+            session,
+            &worker_installer,
+        )
+    });
+    let recovered =
+        drive_client_isolated(&mut client, session, &intent, "", &linux_target()).unwrap();
+    handle.join().unwrap().unwrap();
+    assert!(matches!(recovered, LinuxOutcome::RolledBack));
+    assert!(!machine_install_dir(&roots.roots).join("tool").exists());
+
     commit(
         &roots,
         &installer,
         Operation::Apply,
         None,
-        "recovery then apply commits: {outcome:?}",
+        "apply after explicit recovery commits: {outcome:?}",
     );
     assert_eq!(
         run_tool(

@@ -235,8 +235,30 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
                         zup_core::ChangedServiceState::Stopped
                     }
                 },
-                start_timeout_seconds: service.lifecycle.start_timeout_seconds,
-                stop_timeout_seconds: service.lifecycle.stop_timeout_seconds,
+                timeouts: service.lifecycle.timeouts.map(|timeouts| match timeouts {
+                    zup_plugin_contract::ServiceTimeouts::Systemd(value) => {
+                        zup_core::ServiceTimeouts::Systemd {
+                            start_timeout_seconds: value.start_timeout_seconds,
+                            abort_timeout_seconds: value.abort_timeout_seconds,
+                            stop_grace_seconds: value.stop_grace_seconds,
+                            settle_seconds: value.settle_seconds,
+                        }
+                    }
+                    zup_plugin_contract::ServiceTimeouts::Openrc(value) => {
+                        zup_core::ServiceTimeouts::Openrc {
+                            start_timeout_seconds: value.start_timeout_seconds,
+                            stop_grace_seconds: value.stop_grace_seconds,
+                            kill_wait_seconds: value.kill_wait_seconds,
+                            settle_seconds: value.settle_seconds,
+                        }
+                    }
+                    zup_plugin_contract::ServiceTimeouts::Windows(value) => {
+                        zup_core::ServiceTimeouts::Windows {
+                            start_observation_seconds: value.start_observation_seconds,
+                            stop_observation_seconds: value.stop_observation_seconds,
+                        }
+                    }
+                }),
             },
             start: match service.start {
                 ContractServiceStart::Automatic => ServiceStart::Automatic,

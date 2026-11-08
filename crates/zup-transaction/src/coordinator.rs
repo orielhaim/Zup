@@ -8,7 +8,7 @@ use crate::executor::{OperationExecutor, OperationReceipt, ReconcileResult};
 use crate::fault_injection::{Boundary, boundary};
 use crate::id::{OperationId, TransactionId};
 use crate::plan::{NodeKind, Phase, TransactionNode, TransactionPlan};
-use crate::record::{NodeState, StoreError, TransactionPhase, TransactionRecord};
+use crate::record::{NodeState, RecoveryPhase, StoreError, TransactionPhase, TransactionRecord};
 use crate::storage::TransactionStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,20 +211,25 @@ where
 
     if matches!(
         record.phase,
-        TransactionPhase::Committed
-            | TransactionPhase::RolledBack
-            | TransactionPhase::RecoveryRequired
+        TransactionPhase::Committed | TransactionPhase::RolledBack
     ) {
         let outcome = settled(record.phase);
         return Ok((record, outcome));
     }
 
+    if let TransactionPhase::RecoveryRequired { resume } = record.phase {
+        commit_phase(&mut record, store, resume.into())?;
+    }
     reconcile_running(&mut record, store, executor)?;
-    if record.phase == TransactionPhase::RecoveryRequired {
+    if matches!(record.phase, TransactionPhase::RecoveryRequired { .. }) {
         return Ok((record, TransactionOutcome::RecoveryRequired));
     }
 
     match record.phase {
+        TransactionPhase::Applying if record.failure.is_some() => {
+            let outcome = rollback_after_failure(store, &mut record, executor)?;
+            Ok((record, outcome))
+        }
         TransactionPhase::Applying => match drive(store, &mut record, executor) {
             Ok(()) => {
                 commit_phase(&mut record, store, TransactionPhase::Committed)?;
@@ -282,7 +287,7 @@ fn fail<S: TransactionStore, E: OperationExecutor>(
 where
     E::Error: std::fmt::Display,
 {
-    if record.phase == TransactionPhase::RecoveryRequired {
+    if matches!(record.phase, TransactionPhase::RecoveryRequired { .. }) {
         return Ok(TransactionOutcome::RecoveryRequired);
     }
     rollback_after_failure(store, record, executor)
@@ -310,13 +315,13 @@ where
                 continue;
             }
             if node.phase == Phase::Verify {
-                verify_applied(store, record, executor)?;
+                verify_applied(store, record, executor, VerificationPass::Commit)?;
             }
             cross_barrier(store, record, executor, &node)?;
         } else if matches!(state, NodeState::Pending) {
             if matches!(&node.kind, NodeKind::ServiceControl { operation } if operation.stage == crate::ServiceControlStage::Restore)
             {
-                verify_applied(store, record, executor)?;
+                verify_applied(store, record, executor, VerificationPass::BeforeRestore)?;
             }
             run_mutation(store, record, executor, &node)?;
         } else if let NodeState::Applied { receipt } = state
@@ -478,18 +483,35 @@ where
                 },
             )?;
         }
-        Ok(ReconcileResult::Incomplete | ReconcileResult::Ambiguous) | Err(_) => {
-            commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+        Err(error) => {
+            let message = error.to_string().chars().take(4096).collect::<String>();
+            commit(record, store, |record| {
+                record.recovery_failure = Some(crate::TransactionFailure {
+                    operation: Some(op_id.clone()),
+                    message: message.clone(),
+                });
+                Ok(())
+            })?;
+            require_recovery(record, store)?;
+        }
+        Ok(ReconcileResult::Incomplete | ReconcileResult::Ambiguous) => {
+            require_recovery(record, store)?;
         }
     }
     Ok(())
 }
 
-/// so recovery never re-runs a completed verification.
+#[derive(PartialEq, Eq)]
+enum VerificationPass {
+    BeforeRestore,
+    Commit,
+}
+
 fn verify_applied<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
     executor: &mut E,
+    pass: VerificationPass,
 ) -> Result<(), TransactionError>
 where
     E::Error: std::fmt::Display,
@@ -500,8 +522,17 @@ where
         if !node.kind.requires_verification() {
             continue;
         }
-        let receipt = match record.nodes.get(op_id) {
-            Some(NodeState::Applied { receipt }) => receipt.clone(),
+        let (receipt, already_verified) = match record.nodes.get(op_id) {
+            Some(NodeState::Applied { receipt }) => (receipt.clone(), false),
+            Some(NodeState::Verified { receipt })
+                if pass == VerificationPass::Commit
+                    && matches!(
+                        node.kind,
+                        NodeKind::FileMutation { .. } | NodeKind::FileRemoval { .. }
+                    ) =>
+            {
+                (receipt.clone(), true)
+            }
             _ => continue,
         };
         executor
@@ -510,7 +541,9 @@ where
                 operation: op_id.to_string(),
                 message: error.to_string(),
             })?;
-        commit_node(record, store, op_id, NodeState::Verified { receipt })?;
+        if !already_verified {
+            commit_node(record, store, op_id, NodeState::Verified { receipt })?;
+        }
         info!(operation = %op_id, "node verified");
     }
     Ok(())
@@ -594,7 +627,7 @@ where
     }
 
     if ambiguous {
-        commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+        require_recovery(record, store)?;
     }
     Ok(())
 }
@@ -633,7 +666,7 @@ where
             _ => continue,
         };
         if rollback_failed && matches!(node.kind, NodeKind::ServiceControl { .. }) {
-            commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+            require_recovery(record, store)?;
             return Ok(TransactionOutcome::RecoveryRequired);
         }
         if interrupted {
@@ -656,7 +689,7 @@ where
                         });
                         Ok(())
                     })?;
-                    commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+                    require_recovery(record, store)?;
                     return Ok(TransactionOutcome::RecoveryRequired);
                 }
             }
@@ -689,7 +722,7 @@ where
                 })?;
                 warn!(operation = %op_id, error = %error, "rollback failed");
                 if matches!(node.kind, NodeKind::ServiceControl { .. }) {
-                    commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+                    require_recovery(record, store)?;
                     return Ok(TransactionOutcome::RecoveryRequired);
                 }
             }
@@ -697,12 +730,30 @@ where
     }
 
     if rollback_failed {
-        commit_phase(record, store, TransactionPhase::RecoveryRequired)?;
+        require_recovery(record, store)?;
         return Ok(TransactionOutcome::RecoveryRequired);
     }
 
     commit_phase(record, store, TransactionPhase::RolledBack)?;
     Ok(TransactionOutcome::RolledBack)
+}
+
+fn require_recovery<S: TransactionStore>(
+    record: &mut TransactionRecord,
+    store: &S,
+) -> Result<(), TransactionError> {
+    let resume = match record.phase {
+        TransactionPhase::Prepared => RecoveryPhase::Prepared,
+        TransactionPhase::Applying => RecoveryPhase::Applying,
+        TransactionPhase::RollingBack => RecoveryPhase::RollingBack,
+        TransactionPhase::RecoveryRequired { .. } => return Ok(()),
+        _ => {
+            return Err(TransactionError::InvalidState(
+                "a completed transaction cannot require native recovery".into(),
+            ));
+        }
+    };
+    commit_phase(record, store, TransactionPhase::RecoveryRequired { resume })
 }
 
 fn commit<S: TransactionStore>(

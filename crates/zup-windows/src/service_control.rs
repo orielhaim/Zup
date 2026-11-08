@@ -117,16 +117,33 @@ pub fn runtime(state: ServiceState) -> zup_plan::ServiceRuntimeState {
     }
 }
 
-fn execution_generation(pid: u32) -> Result<String, String> {
+#[derive(Debug, thiserror::Error)]
+enum GenerationError {
+    #[error("SCM process exited during observation")]
+    Exited,
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+fn execution_generation(pid: u32) -> Result<String, GenerationError> {
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     // SAFETY: Query-only access; Owned closes the process handle.
     let handle = unsafe {
         windows::core::Owned::new(
-            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-                .map_err(|e| format!("{e}: {e:?}"))?,
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(|error| {
+                if error.code()
+                    == windows::core::HRESULT::from_win32(
+                        windows::Win32::Foundation::ERROR_INVALID_PARAMETER.0,
+                    )
+                {
+                    GenerationError::Exited
+                } else {
+                    GenerationError::Unavailable(format!("{error}: {error:?}"))
+                }
+            })?,
         )
     };
-    process_generation(pid, *handle)
+    process_generation(pid, *handle).map_err(GenerationError::Unavailable)
 }
 
 fn process_generation(
@@ -148,15 +165,75 @@ fn process_generation(
 }
 
 fn status_generation(status: &windows_service::service::ServiceStatus) -> Result<String, String> {
+    status_generation_snapshot(status).map_err(|error| error.to_string())
+}
+
+fn status_generation_snapshot(
+    status: &windows_service::service::ServiceStatus,
+) -> Result<String, GenerationError> {
     match status.current_state {
         ServiceState::Stopped => Ok("stopped".into()),
         ServiceState::StartPending | ServiceState::StopPending => Ok("pending".into()),
-        _ => execution_generation(
-            status
-                .process_id
-                .filter(|pid| *pid != 0)
-                .ok_or("SCM did not provide a valid running process identity")?,
-        ),
+        _ => execution_generation(status.process_id.filter(|pid| *pid != 0).ok_or_else(|| {
+            GenerationError::Unavailable(
+                "SCM did not provide a valid running process identity".into(),
+            )
+        })?),
+    }
+}
+
+fn service_processes_exited(operation: &ServiceControlOperation) -> Result<bool, String> {
+    let zup_plan::ServiceState::Registration { command, .. } = &operation.configuration else {
+        return Err("service process verification requires registration".into());
+    };
+    let executable = crate::lowering::host_path(&command.executable);
+    if crate::restart_manager::preflight(&[&executable])?
+        != crate::restart_manager::FilePreflight::Ready
+    {
+        return Ok(false);
+    }
+    if operation.before_execution_generation == "stopped" {
+        return Ok(true);
+    }
+    let parts = operation
+        .before_execution_generation
+        .split(':')
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "invalid authorized SCM process generation")?;
+    let [pid, high, low] = parts.as_slice() else {
+        return Err("invalid authorized SCM process generation".into());
+    };
+    let pid = *pid;
+    if pid == 0 || format!("{pid}:{high}:{low}") != operation.before_execution_generation {
+        return Err("invalid authorized SCM process generation".into());
+    }
+    use windows::Win32::{
+        Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            WaitForSingleObject,
+        },
+    };
+    // SAFETY: The query handle binds creation time and exit state to one process object.
+    unsafe {
+        let handle = match OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        ) {
+            Ok(handle) => windows::core::Owned::new(handle),
+            Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(true),
+            Err(error) => return Err(error.to_string()),
+        };
+        if process_generation(pid, *handle)? != operation.before_execution_generation {
+            return Ok(true);
+        }
+        match WaitForSingleObject(*handle, 0) {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err("SCM process exit could not be established".into()),
+        }
     }
 }
 
@@ -177,7 +254,7 @@ impl NativeServiceManager for ScmLifecycle {
         ) {
             return Err("SCM inhibition must leave startup disabled".into());
         }
-        if !self.stopped_runtime_is_quiescent(operation)? {
+        if !self.stopped_runtime_is_quiescent(operation, &operation.configuration)? {
             return Err("SCM startup inhibition or stopped state changed".into());
         }
         Ok(())
@@ -192,7 +269,7 @@ impl NativeServiceManager for ScmLifecycle {
                 start: zup_core::ServiceStart::Disabled,
                 ..
             }
-        ) && !self.stopped_runtime_is_quiescent(operation)?
+        ) && !self.stopped_runtime_is_quiescent(operation, &operation.configuration)?
         {
             return Ok(false);
         }
@@ -200,17 +277,19 @@ impl NativeServiceManager for ScmLifecycle {
             .query_status()
             .map_err(|error| format!("{error}: {error:?}"))?;
         Ok(status.current_state == ServiceState::Stopped
+            && service_processes_exited(operation)?
             && match status.exit_code {
-                windows_service::service::ServiceExitCode::Win32(code) => code != 0 && code != 1077,
+                windows_service::service::ServiceExitCode::Win32(code) => code != 0,
                 windows_service::service::ServiceExitCode::ServiceSpecific(_) => true,
             })
     }
     fn stopped_runtime_is_quiescent(
         &mut self,
         operation: &ServiceControlOperation,
+        configuration: &zup_plan::ServiceState,
     ) -> Result<bool, String> {
         if !matches!(
-            operation.configuration,
+            configuration,
             zup_plan::ServiceState::Registration {
                 failure: zup_core::ServiceFailurePolicy::None,
                 ..
@@ -222,9 +301,10 @@ impl NativeServiceManager for ScmLifecycle {
             return Ok(false);
         }
         let current = self.observe(operation)?;
-        Ok(current.configuration == operation.configuration
+        Ok(&current.configuration == configuration
             && current.manager_generation == operation.manager_generation
-            && current.runtime == zup_plan::ServiceRuntimeState::Stopped)
+            && current.runtime == zup_plan::ServiceRuntimeState::Stopped
+            && service_processes_exited(operation)?)
     }
     fn observe(
         &mut self,
@@ -239,15 +319,33 @@ impl NativeServiceManager for ScmLifecycle {
         let configuration = registration
             .configuration()
             .ok_or("unrecognized SCM registration")?;
-        let status = open(&operation.native_name, ServiceAccess::QUERY_STATUS)?
-            .query_status()
-            .map_err(|e| format!("{e}: {e:?}"))?;
-        Ok(ServiceObservation {
-            configuration,
-            runtime: runtime(status.current_state),
-            manager_generation: manager_generation()?,
-            execution_generation: status_generation(&status)?,
-        })
+        let service = open(&operation.native_name, ServiceAccess::QUERY_STATUS)?;
+        let deadline = Instant::now() + operation.timeout_for(operation.after);
+        loop {
+            let status = service.query_status().map_err(|error| error.to_string())?;
+            match status_generation_snapshot(&status) {
+                Ok(execution_generation) => {
+                    let checked = service.query_status().map_err(|error| error.to_string())?;
+                    if checked.current_state == status.current_state
+                        && checked.process_id == status.process_id
+                    {
+                        return Ok(ServiceObservation {
+                            configuration,
+                            runtime: runtime(status.current_state),
+                            manager_generation: manager_generation()?,
+                            execution_generation,
+                        });
+                    }
+                }
+                Err(GenerationError::Exited) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err("SCM process did not stabilize during identity observation".into());
+            }
+            std::thread::park_timeout(Duration::from_millis(20).min(deadline - now));
+        }
     }
 
     fn transition(
@@ -255,7 +353,18 @@ impl NativeServiceManager for ScmLifecycle {
         operation: &ServiceControlOperation,
         desired: ServiceTerminalState,
         expected: &ServiceObservation,
-    ) -> Result<(), String> {
+        deadline: Instant,
+    ) -> Result<ServiceObservation, String> {
+        let within_deadline = || {
+            if Instant::now() < deadline {
+                Ok(())
+            } else {
+                Err(format!(
+                    "service `{}` transition timed out",
+                    operation.native_name
+                ))
+            }
+        };
         operation.validate()?;
         let current = self.observe(operation)?;
         if &current != expected
@@ -264,6 +373,59 @@ impl NativeServiceManager for ScmLifecycle {
         {
             return Err("service changed immediately before SCM control".into());
         }
+        let process = if desired == ServiceTerminalState::Stopped
+            && expected.runtime == zup_plan::ServiceRuntimeState::Running
+        {
+            use windows::Win32::System::Threading::{
+                OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            };
+            let status = open(&operation.native_name, ServiceAccess::QUERY_STATUS)?
+                .query_status()
+                .map_err(|error| error.to_string())?;
+            let pid = status
+                .process_id
+                .ok_or("running service process identity is unavailable")?;
+            // SAFETY: Owned retains a query-capable process handle until shutdown verification completes.
+            let handle = unsafe {
+                windows::core::Owned::new(
+                    OpenProcess(
+                        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                        false,
+                        pid,
+                    )
+                    .map_err(|error| error.to_string())?,
+                )
+            };
+            if status.current_state != ServiceState::Running
+                || process_generation(pid, *handle)? != expected.execution_generation
+            {
+                return Err("service process changed before shutdown".into());
+            }
+            Some(handle)
+        } else {
+            None
+        };
+        let settled = || {
+            within_deadline()?;
+            if let Some(process) = &process {
+                use windows::Win32::{
+                    Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject,
+                };
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or("service process exit deadline expired")?;
+                let milliseconds = u32::try_from(remaining.as_millis().max(1))
+                    .map_err(|_| "invalid process wait deadline")?;
+                // SAFETY: The retained handle has synchronization access and the wait is bounded.
+                if unsafe { WaitForSingleObject(**process, milliseconds) } != WAIT_OBJECT_0 {
+                    return Err(
+                        "service reported Stopped but its process did not exit before the deadline"
+                            .into(),
+                    );
+                }
+            }
+            within_deadline()
+        };
         if operation.before_configuration != operation.configuration {
             if desired == ServiceTerminalState::Stopped
                 && !matches!(
@@ -274,9 +436,13 @@ impl NativeServiceManager for ScmLifecycle {
                     }
                 )
             {
-                require_safe_stopped_startup_restore(&operation.native_name)?;
+                require_safe_stopped_startup_restore(
+                    &operation.native_name,
+                    &operation.owned_configuration,
+                )?;
             }
-            crate::services::change_startup(
+            within_deadline()?;
+            crate::services::change_live_configuration(
                 &operation.native_name,
                 &operation.before_configuration,
                 &operation.configuration,
@@ -305,7 +471,8 @@ impl NativeServiceManager for ScmLifecycle {
                 && released.manager_generation == operation.manager_generation
                 && released.runtime == zup_plan::ServiceRuntimeState::Running
             {
-                return Ok(());
+                within_deadline()?;
+                return Ok(released);
             }
             return Err("service changed after restoring startup configuration".into());
         }
@@ -315,8 +482,10 @@ impl NativeServiceManager for ScmLifecycle {
             return Err("service execution changed immediately before SCM control".into());
         }
         if desired.matches(runtime(status.current_state)) {
-            return Ok(());
+            settled()?;
+            return self.observe(operation);
         }
+        within_deadline()?;
         match desired {
             ServiceTerminalState::Stopped => {
                 service.stop().map_err(|e| format!("{e}: {e:?}"))?;
@@ -335,14 +504,15 @@ impl NativeServiceManager for ScmLifecycle {
             zup_transaction::fault_injection::Boundary::NativeRequestSubmitted,
             &operation.native_name,
         );
-        let deadline = Instant::now() + operation.timeout_for(desired);
         let mut progress = Instant::now();
         let mut checkpoint = status.checkpoint;
         let mut pending_seen = false;
         loop {
             let status = service.query_status().map_err(|e| format!("{e}: {e:?}"))?;
+            within_deadline()?;
             if desired.matches(runtime(status.current_state)) {
-                return Ok(());
+                settled()?;
+                return self.observe(operation);
             }
             let pending = matches!(
                 status.current_state,
@@ -386,16 +556,25 @@ impl NativeServiceManager for ScmLifecycle {
     }
 }
 
-pub(crate) fn require_safe_stopped_startup_restore(name: &str) -> Result<(), String> {
+pub(crate) fn require_safe_stopped_startup_restore(
+    name: &str,
+    previous: &zup_plan::ServiceState,
+) -> Result<(), String> {
     let status = open(name, ServiceAccess::QUERY_STATUS)?
         .query_status()
         .map_err(|error| error.to_string())?;
     if status.current_state == ServiceState::Stopped
-        && status.exit_code == windows_service::service::ServiceExitCode::Win32(1077)
+        && !matches!(
+            previous,
+            zup_plan::ServiceState::Registration {
+                failure: zup_core::ServiceFailurePolicy::Windows { .. },
+                ..
+            }
+        )
     {
         return Ok(());
     }
-    Err("SCM does not expose pending recovery actions; a previously executed service cannot safely be reenabled while preserving Stopped. Startup remains disabled; explicit administrator reconciliation is required".into())
+    Err("SCM does not expose pending recovery actions; an existing service with a recovery policy cannot safely be reenabled while preserving Stopped. Startup remains disabled; explicit administrator reconciliation is required".into())
 }
 
 #[cfg(test)]
@@ -450,16 +629,17 @@ mod tests {
                 std::fs::create_dir(&directory).expect("elevated Program Files directory");
                 let executable = directory.join("service.exe");
                 let configuration = zup_plan::ServiceState::Registration {
+                    native_timeouts: zup_core::NativeServiceTimeouts::Scm,
                     dependencies,
                     failure,
                     execution: zup_core::ServiceExecution::Windows { account },
                     readiness: zup_core::ServiceReadiness::Manager,
                     display_name: name.clone(),
-                    command: zup_plan::CommandSpec::new(
+                    command: Box::new(zup_plan::CommandSpec::new(
                         zup_plan::TargetPath::new(target, crate::plain_path_text(&executable))
                             .unwrap(),
                         vec![name.clone(), mode.into()],
-                    ),
+                    )),
                     start: zup_core::ServiceStart::Manual,
                 };
                 let mut fixture = Self {
@@ -477,6 +657,7 @@ mod tests {
                     command,
                     start,
                     readiness,
+                    ..
                 } = fixture.configuration.clone()
                 else {
                     unreachable!()
@@ -486,7 +667,7 @@ mod tests {
                         failure,
                         execution,
                         display_name,
-                        command,
+                        command: *command,
                         start,
                         readiness,
                         key: zup_core::ResourceKey::Service {
@@ -521,6 +702,7 @@ mod tests {
 
             fn start(&self, timeout_seconds: u32) -> ServiceControlOperation {
                 ServiceControlOperation {
+                    intent: zup_transaction::ServiceControlIntent::Transition,
                     key: zup_core::ResourceKey::Service {
                         id: zup_core::ServiceId::new(&self.name).unwrap(),
                     },
@@ -534,8 +716,10 @@ mod tests {
                     after: ServiceTerminalState::Running,
                     manager_generation: manager_generation().unwrap(),
                     before_execution_generation: "stopped".into(),
-                    timeout_seconds,
-                    rollback_timeout_seconds: 5,
+                    timeouts: zup_core::ServiceTimeouts::Windows {
+                        start_observation_seconds: timeout_seconds,
+                        stop_observation_seconds: 5,
+                    },
                     dependencies: vec![],
                 }
             }
@@ -706,16 +890,24 @@ mod tests {
         }
 
         #[rstest::rstest]
-        #[case(false, false)]
-        #[case(false, true)]
-        #[case(true, true)]
+        #[case::running(false, false, false)]
+        #[case::stopped_without_execution(false, true, false)]
+        #[case::queued_restart(true, true, false)]
+        #[case::application_reports_never_started(false, true, true)]
         #[ignore = "requires elevated isolated SCM; run scripts/verify-windows-services.ps1"]
         fn startup_inhibition_protects_payloads_and_refuses_ambiguous_release(
             #[case] queued: bool,
             #[case] initially_stopped: bool,
+            #[case] reports_never_started: bool,
         ) {
             let fixture = Fixture::new(
-                if queued { "crash" } else { "normal" },
+                if reports_never_started {
+                    "reported-never-started"
+                } else if queued {
+                    "crash"
+                } else {
+                    "normal"
+                },
                 zup_core::WindowsServiceAccount::LocalService,
                 zup_core::ServiceFailurePolicy::Windows {
                     delay_seconds: 2,
@@ -725,7 +917,19 @@ mod tests {
                 Vec::new(),
             );
             let start = fixture.start(8);
-            if !initially_stopped || queued {
+            if reports_never_started {
+                assert!(apply_service_control(&mut ScmLifecycle, &start).is_err());
+                assert_eq!(
+                    fixture
+                        .service
+                        .as_ref()
+                        .unwrap()
+                        .query_status()
+                        .unwrap()
+                        .exit_code,
+                    windows_service::service::ServiceExitCode::Win32(1077)
+                );
+            } else if !initially_stopped || queued {
                 apply_service_control(&mut ScmLifecycle, &start).unwrap();
             }
             if queued {
@@ -755,7 +959,11 @@ mod tests {
                 panic!("shutdown receipt")
             };
             verify_service_control(&mut ScmLifecycle, &stopped).unwrap();
-            assert!(ScmLifecycle.stopped_runtime_is_quiescent(&stop).unwrap());
+            assert!(
+                ScmLifecycle
+                    .stopped_runtime_is_quiescent(&stop, &stop.configuration)
+                    .unwrap()
+            );
             let mut release = start.clone();
             release.before_configuration = stop.configuration.clone();
             release.after = if initially_stopped {
@@ -763,13 +971,17 @@ mod tests {
             } else {
                 ServiceTerminalState::Running
             };
-            if queued {
+            if initially_stopped {
                 assert!(
                     apply_service_control(&mut ScmLifecycle, &release)
                         .unwrap_err()
                         .contains("pending recovery actions")
                 );
-                assert!(ScmLifecycle.stopped_runtime_is_quiescent(&stop).unwrap());
+                assert!(
+                    ScmLifecycle
+                        .stopped_runtime_is_quiescent(&stop, &stop.configuration)
+                        .unwrap()
+                );
                 return;
             }
             let zup_transaction::OperationReceipt::ServiceControl(released) =
@@ -794,6 +1006,137 @@ mod tests {
 
         #[test]
         #[ignore = "requires elevated isolated SCM; run scripts/verify-windows-services.ps1"]
+        fn stopped_receipts_wait_for_the_native_process_to_exit() {
+            use windows::Win32::{
+                Foundation::WAIT_OBJECT_0,
+                System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+            };
+            let fixture = Fixture::new(
+                "linger-stop",
+                zup_core::WindowsServiceAccount::LocalService,
+                Default::default(),
+                Vec::new(),
+            );
+            let mut stop = fixture.start(5);
+            let zup_transaction::OperationReceipt::ServiceControl(started) =
+                apply_service_control(&mut ScmLifecycle, &stop).unwrap()
+            else {
+                unreachable!()
+            };
+            let pid = open(&fixture.name, ServiceAccess::QUERY_STATUS)
+                .unwrap()
+                .query_status()
+                .unwrap()
+                .process_id
+                .unwrap();
+            // SAFETY: Owned retains a synchronization handle to the service process.
+            let process = unsafe {
+                windows::core::Owned::new(OpenProcess(PROCESS_SYNCHRONIZE, false, pid).unwrap())
+            };
+            stop.stage = ServiceControlStage::Quiesce;
+            stop.before = ServiceTerminalState::Running;
+            stop.after = ServiceTerminalState::Stopped;
+            stop.before_execution_generation = started.execution_generation;
+            let receipt = apply_service_control(&mut ScmLifecycle, &stop).unwrap();
+            let zup_transaction::OperationReceipt::ServiceControl(stopped) = receipt else {
+                unreachable!()
+            };
+            verify_service_control(&mut ScmLifecycle, &stopped).unwrap();
+            // SAFETY: The retained process handle has synchronization access.
+            assert_eq!(unsafe { WaitForSingleObject(*process, 0) }, WAIT_OBJECT_0);
+        }
+
+        #[test]
+        #[ignore = "requires elevated isolated SCM; run scripts/verify-windows-services.ps1"]
+        fn lost_stop_receipts_do_not_release_a_process_that_reported_stopped() {
+            use windows::Win32::{
+                Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+                System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+            };
+            struct Release(std::path::PathBuf);
+            impl Drop for Release {
+                fn drop(&mut self) {
+                    let _ = std::fs::write(&self.0, b"exit");
+                }
+            }
+            let fixture = Fixture::new(
+                "linger-stop-gated",
+                zup_core::WindowsServiceAccount::LocalService,
+                Default::default(),
+                Vec::new(),
+            );
+            let release = Release(fixture.directory.join("service.exit"));
+            let mut operation = fixture.start(5);
+            let zup_transaction::OperationReceipt::ServiceControl(started) =
+                apply_service_control(&mut ScmLifecycle, &operation).unwrap()
+            else {
+                unreachable!()
+            };
+            let pid = fixture
+                .service
+                .as_ref()
+                .unwrap()
+                .query_status()
+                .unwrap()
+                .process_id
+                .unwrap();
+            // SAFETY: Owned keeps the original process object available after SCM clears its PID.
+            let process = unsafe {
+                windows::core::Owned::new(OpenProcess(PROCESS_SYNCHRONIZE, false, pid).unwrap())
+            };
+            operation.stage = ServiceControlStage::Quiesce;
+            operation.before = ServiceTerminalState::Running;
+            operation.after = ServiceTerminalState::Stopped;
+            operation.before_execution_generation = started.execution_generation;
+            operation.configuration =
+                zup_transaction::disabled_startup(&fixture.configuration).unwrap();
+            crate::services::change_live_configuration(
+                &fixture.name,
+                &fixture.configuration,
+                &operation.configuration,
+            )
+            .unwrap();
+            fixture.service.as_ref().unwrap().stop().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while fixture
+                .service
+                .as_ref()
+                .unwrap()
+                .query_status()
+                .unwrap()
+                .current_state
+                != ServiceState::Stopped
+            {
+                assert!(Instant::now() < deadline, "fixture did not report Stopped");
+                std::thread::park_timeout(Duration::from_millis(20));
+            }
+            // SAFETY: The retained handle has synchronization access.
+            assert_eq!(unsafe { WaitForSingleObject(*process, 0) }, WAIT_TIMEOUT);
+            assert!(
+                !ScmLifecycle
+                    .stopped_runtime_is_quiescent(&operation, &operation.configuration)
+                    .unwrap()
+            );
+            assert!(matches!(
+                zup_transaction::reconcile_service_control(&mut ScmLifecycle, &operation, None),
+                Err(_) | Ok(zup_transaction::ReconcileResult::Ambiguous)
+            ));
+            drop(release);
+            // SAFETY: Wait only observes the retained process; it cannot terminate it.
+            assert_eq!(
+                unsafe { WaitForSingleObject(*process, 10000) },
+                WAIT_OBJECT_0
+            );
+            assert!(matches!(
+                zup_transaction::reconcile_service_control(&mut ScmLifecycle, &operation, None)
+                    .unwrap(),
+                zup_transaction::ReconcileResult::AppliedWithReceipt(_)
+            ));
+            std::fs::remove_file(fixture.directory.join("service.exit")).unwrap();
+        }
+
+        #[test]
+        #[ignore = "requires elevated isolated SCM; run scripts/verify-windows-services.ps1"]
         fn failed_starts_and_pending_deadlines_never_produce_success_receipts() {
             let failed = Fixture::new(
                 "fail",
@@ -809,6 +1152,71 @@ mod tests {
                 Vec::new(),
             );
             assert!(apply_service_control(&mut ScmLifecycle, &slow.start(1)).is_err());
+            let slow_stop = Fixture::new(
+                "slow-stop",
+                zup_core::WindowsServiceAccount::LocalService,
+                Default::default(),
+                Vec::new(),
+            );
+            let mut stop = slow_stop.start(5);
+            let receipt = apply_service_control(&mut ScmLifecycle, &stop).unwrap();
+            let zup_transaction::OperationReceipt::ServiceControl(receipt) = receipt else {
+                unreachable!()
+            };
+            let pid = open(&slow_stop.name, ServiceAccess::QUERY_STATUS)
+                .unwrap()
+                .query_status()
+                .unwrap()
+                .process_id
+                .unwrap();
+            use windows::Win32::{
+                Foundation::WAIT_TIMEOUT,
+                System::Threading::{
+                    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                    WaitForSingleObject,
+                },
+            };
+            // SAFETY: Owned retains the running process for query and wait operations.
+            let process = unsafe {
+                windows::core::Owned::new(
+                    OpenProcess(
+                        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                        false,
+                        pid,
+                    )
+                    .unwrap(),
+                )
+            };
+            assert_eq!(
+                process_generation(pid, *process).unwrap(),
+                receipt.execution_generation
+            );
+            stop.stage = ServiceControlStage::Quiesce;
+            stop.before = ServiceTerminalState::Running;
+            stop.after = ServiceTerminalState::Stopped;
+            stop.before_execution_generation = receipt.execution_generation.clone();
+            stop.timeouts = zup_core::ServiceTimeouts::Windows {
+                start_observation_seconds: 5,
+                stop_observation_seconds: 1,
+            };
+            assert!(apply_service_control(&mut ScmLifecycle, &stop).is_err());
+            let pending = ScmLifecycle.observe(&stop).unwrap();
+            assert_eq!(pending.runtime, zup_plan::ServiceRuntimeState::StopPending);
+            // SAFETY: The retained process handle has synchronization access.
+            assert_eq!(unsafe { WaitForSingleObject(*process, 0) }, WAIT_TIMEOUT);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if ScmLifecycle.observe(&stop).unwrap().runtime
+                    == zup_plan::ServiceRuntimeState::Stopped
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture did not finish its own shutdown"
+                );
+                std::thread::park_timeout(Duration::from_millis(20));
+            }
         }
 
         struct NativeTransaction {

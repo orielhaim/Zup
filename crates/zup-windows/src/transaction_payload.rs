@@ -389,6 +389,12 @@ pub(crate) fn validate_backend_node(
                     operation: op,
                     startup_inhibited,
                 } => {
+                    if op.lifecycle.timeouts.is_none() {
+                        return Err("native service intent requires resolved timeouts".into());
+                    }
+                    op.lifecycle
+                        .validate(op.start, &op.execution)
+                        .map_err(str::to_owned)?;
                     if op.previous.configuration().as_ref().is_some_and(|state| {
                         matches!(
                             state,
@@ -399,7 +405,12 @@ pub(crate) fn validate_backend_node(
                         )
                     }) && !matches!(op.failure, zup_core::ServiceFailurePolicy::Windows { .. })
                     {
-                        crate::service_control::require_safe_stopped_startup_restore(&op.name)?;
+                        crate::service_control::require_safe_stopped_startup_restore(
+                            &op.name,
+                            &op.previous
+                                .configuration()
+                                .ok_or("service registration required")?,
+                        )?;
                     }
                     if startup_inhibited
                         && !op
@@ -420,21 +431,14 @@ pub(crate) fn validate_backend_node(
                         None => None,
                         _ => return Err("service ownership address mismatch".into()),
                     };
+                    let desired = op.desired_configuration();
                     let previous = crate::integration::observed_service(op.previous)
                         .map_err(|error| error.to_string())?;
                     validate_transition(
                         op.kind,
                         &previous,
                         installed,
-                        &zup_plan::ServiceState::Registration {
-                            dependencies: op.dependency_names,
-                            failure: op.failure,
-                            execution: op.execution,
-                            readiness: op.readiness,
-                            display_name: op.display_name,
-                            command: op.command,
-                            start: op.start,
-                        },
+                        &desired,
                         &zup_plan::ServiceState::Absent,
                     )
                 }
@@ -545,23 +549,45 @@ pub(crate) fn validate_service_control(
     operation: &zup_transaction::ServiceControlOperation,
     ledger: Option<&InstallLedger>,
 ) -> Result<(), String> {
+    let mut protected_files = match ledger.and_then(|ledger| ledger.resources.get(&operation.key)) {
+        Some(OwnedResource::Service { requires_files, .. }) => requires_files.clone(),
+        _ => Vec::new(),
+    };
+    for node in &plan.nodes {
+        if let Some(backend) = &node.meta.backend
+            && let Ok(ApplyPayload::Service {
+                operation: service, ..
+            }) = decode(&backend.payload)
+            && service.key == operation.key
+        {
+            protected_files.extend(service.requires_files);
+        }
+    }
+    zup_transaction::validate_runtime_preservation(plan, operation, &protected_files)?;
     let owned = ledger.and_then(|ledger| ledger.resources.get(&operation.key));
     if let Some(OwnedResource::Service {
-        name, installed, ..
+        name,
+        installed,
+        timeouts,
+        ..
     }) = owned
     {
         if operation.before_configuration != operation.configuration
             && operation.stage == zup_transaction::ServiceControlStage::Restore
             && operation.after == zup_transaction::ServiceTerminalState::Stopped
         {
-            crate::service_control::require_safe_stopped_startup_restore(&operation.native_name)?;
+            crate::service_control::require_safe_stopped_startup_restore(
+                &operation.native_name,
+                &operation.owned_configuration,
+            )?;
         }
         if name != &operation.native_name || installed.as_ref() != &operation.owned_configuration {
             return Err("service control ownership address mismatch".into());
         }
-        if operation.configuration == **installed
-            || operation.before_configuration == **installed
-                && operation.stage == zup_transaction::ServiceControlStage::Quiesce
+        if *timeouts == operation.timeouts
+            && (operation.configuration == **installed
+                || operation.before_configuration == **installed
+                    && operation.stage == zup_transaction::ServiceControlStage::Quiesce)
         {
             return Ok(());
         }
@@ -579,18 +605,25 @@ pub(crate) fn validate_service_control(
         else {
             continue;
         };
-        let installed = zup_plan::ServiceState::Registration {
-            dependencies: service.dependency_names.clone(),
-            failure: service.failure,
-            execution: service.execution.clone(),
-            readiness: service.readiness,
-            display_name: service.display_name.clone(),
-            command: service.command.clone(),
-            start: service.start,
-        };
+        let installed = service.desired_configuration();
+        let repairing_live_configuration = operation.intent
+            == zup_transaction::ServiceControlIntent::Preserve
+            && operation.stage == zup_transaction::ServiceControlStage::Quiesce
+            && service.kind == IntegrationChangeKind::RepairOwned
+            && service.previous.configuration().as_ref() == Some(&operation.configuration)
+            && installed == operation.owned_configuration;
         if service.key == operation.key
+            && operation.timeouts
+                == if operation.stage == zup_transaction::ServiceControlStage::Quiesce {
+                    match owned {
+                        Some(OwnedResource::Service { timeouts, .. }) => *timeouts,
+                        _ => service.lifecycle.timeouts_for(&service.execution),
+                    }
+                } else {
+                    service.lifecycle.timeouts_for(&service.execution)
+                }
             && service.name == operation.native_name
-            && installed == operation.configuration
+            && (installed == operation.configuration || repairing_live_configuration)
             && (owned.is_some()
                 || service.kind == IntegrationChangeKind::Create
                     && service.previous == zup_plan::ObservedServiceState::Absent)
@@ -603,80 +636,73 @@ pub(crate) fn validate_service_control(
 
 pub(crate) fn validate_startup_inhibitions(
     plan: &zup_transaction::TransactionPlan,
+    ledger: Option<&zup_plan::InstallLedger>,
 ) -> Result<(), String> {
-    let control_exists = |key: &ResourceKey,
-                          stage,
-                          before: &zup_plan::ServiceState,
-                          after: &zup_plan::ServiceState| {
-        plan.nodes.iter().any(|node| matches!(&node.kind, zup_transaction::NodeKind::ServiceControl { operation } if &operation.key == key && operation.stage == stage && &operation.before_configuration == before && &operation.configuration == after))
-    };
     for node in &plan.nodes {
         let Some(backend) = &node.meta.backend else {
             continue;
         };
+        let mut protected = Vec::new();
         let (key, previous, desired, guarded) = match backend.intent {
             BackendOperationIntent::Apply => {
-                match decode::<ApplyPayload>(&backend.payload).map_err(|e| e.to_string())? {
+                match decode::<ApplyPayload>(&backend.payload).map_err(|error| error.to_string())? {
                     ApplyPayload::Service {
                         operation,
                         startup_inhibited,
-                    } => (
-                        operation.key.clone(),
-                        operation
-                            .previous
-                            .configuration()
-                            .ok_or("service registration required")?,
-                        operation.desired_configuration(),
-                        startup_inhibited,
-                    ),
+                    } => {
+                        protected.extend(operation.requires_files.clone());
+                        protected.push(operation.command.executable.clone());
+                        (
+                            operation.key.clone(),
+                            operation
+                                .previous
+                                .configuration()
+                                .ok_or("service registration required")?,
+                            operation.desired_configuration(),
+                            startup_inhibited,
+                        )
+                    }
                     _ => continue,
                 }
             }
-            BackendOperationIntent::Remove => {
-                match decode::<RemovePayload>(&backend.payload).map_err(|e| e.to_string())? {
-                    RemovePayload::Owned {
-                        key,
-                        owned,
-                        startup_inhibited,
+            BackendOperationIntent::Remove => match decode::<RemovePayload>(&backend.payload)
+                .map_err(|error| error.to_string())?
+            {
+                RemovePayload::Owned {
+                    key,
+                    owned,
+                    startup_inhibited,
+                    ..
+                } => match *owned {
+                    OwnedResource::Service {
+                        installed,
+                        requires_files,
                         ..
-                    } => match *owned {
-                        OwnedResource::Service { installed, .. } => (
+                    } => {
+                        protected.extend(requires_files);
+                        (
                             key,
                             *installed,
                             zup_plan::ServiceState::Absent,
                             startup_inhibited,
-                        ),
-                        _ => continue,
-                    },
+                        )
+                    }
                     _ => continue,
-                }
-            }
+                },
+                _ => continue,
+            },
         };
-        if !guarded {
-            continue;
-        }
-        if let Some(disabled) = zup_transaction::disabled_startup(&previous)
-            && previous != disabled
-            && !control_exists(
-                &key,
-                zup_transaction::ServiceControlStage::Quiesce,
-                &previous,
-                &disabled,
-            )
+        if let Some(OwnedResource::Service { requires_files, .. }) =
+            ledger.and_then(|ledger| ledger.resources.get(&key))
         {
-            return Err("startup inhibition is missing its authorized shutdown node".into());
+            protected.extend(requires_files.clone());
         }
-        if let Some(disabled) = zup_transaction::disabled_startup(&desired)
-            && desired != disabled
-            && !control_exists(
-                &key,
-                zup_transaction::ServiceControlStage::Restore,
-                &disabled,
-                &desired,
-            )
-        {
-            return Err("startup inhibition is missing its authorized restoration node".into());
+        if let zup_plan::ServiceState::Registration { command, .. } = &previous {
+            protected.push(command.executable.clone());
         }
+        zup_transaction::validate_startup_inhibition(
+            plan, &key, &previous, &desired, &protected, guarded,
+        )?;
     }
     Ok(())
 }
@@ -800,11 +826,13 @@ pub(crate) fn compile_execution_plan(
             name,
             installed,
             privilege,
+            timeouts,
             ..
         } = &removal.owned
         {
             use zup_transaction::NativeServiceManager;
             let mut control = zup_transaction::ServiceControlOperation {
+                intent: zup_transaction::ServiceControlIntent::Transition,
                 key: removal.key.clone(),
                 native_name: name.clone(),
                 privilege: *privilege,
@@ -817,8 +845,7 @@ pub(crate) fn compile_execution_plan(
                 manager_generation: crate::service_control::manager_generation()
                     .map_err(TransactionPayloadError::Identity)?,
                 before_execution_generation: "probe".into(),
-                timeout_seconds: 90,
-                rollback_timeout_seconds: 90,
+                timeouts: *timeouts,
                 dependencies: Vec::new(),
             };
             let current = crate::service_control::ScmLifecycle
@@ -830,22 +857,16 @@ pub(crate) fn compile_execution_plan(
                 ));
             }
             match current.runtime {
-                zup_plan::ServiceRuntimeState::Running => {
+                zup_plan::ServiceRuntimeState::Running | zup_plan::ServiceRuntimeState::Stopped => {
+                    control.before = if current.runtime == zup_plan::ServiceRuntimeState::Running {
+                        zup_transaction::ServiceTerminalState::Running
+                    } else {
+                        zup_transaction::ServiceTerminalState::Stopped
+                    };
                     control.before_execution_generation = current.execution_generation;
-                    if zup_transaction::requires_startup_inhibition(installed) {
-                        control.configuration =
-                            zup_transaction::disabled_startup(installed).expect("registration");
-                    }
+                    control.configuration =
+                        zup_transaction::disabled_startup(installed).expect("registration");
                     input.service_controls.push(control);
-                }
-                zup_plan::ServiceRuntimeState::Stopped => {
-                    if zup_transaction::requires_startup_inhibition(installed) {
-                        control.before = zup_transaction::ServiceTerminalState::Stopped;
-                        control.before_execution_generation = current.execution_generation;
-                        control.configuration =
-                            zup_transaction::disabled_startup(installed).expect("registration");
-                        input.service_controls.push(control);
-                    }
                 }
                 _ => {
                     return Err(TransactionPayloadError::Identity(
@@ -935,7 +956,11 @@ pub(crate) fn compile_execution_plan(
         let payload_changed = affected_services.contains(&service.key);
         let affected = payload_changed
             || service.previous.configuration().as_ref() != Some(&service.desired_configuration());
+        let preserving = !payload_changed
+            && service.preserves_runtime()
+            && service.lifecycle.change == zup_core::ChangedServiceState::Preserve;
         let startup_inhibited = affected
+            && !preserving
             && (service
                 .previous
                 .configuration()
@@ -959,6 +984,7 @@ pub(crate) fn compile_execution_plan(
                     TransactionPayloadError::NotExecutable("service registration".into())
                 })?;
                 let probe = zup_transaction::ServiceControlOperation {
+                    intent: zup_transaction::ServiceControlIntent::Transition,
                     key: service.key.clone(),
                     native_name: service.name.clone(),
                     privilege: service.privilege,
@@ -970,8 +996,10 @@ pub(crate) fn compile_execution_plan(
                     after: zup_transaction::ServiceTerminalState::Stopped,
                     manager_generation: generation.clone(),
                     before_execution_generation: "probe".into(),
-                    timeout_seconds: 90,
-                    rollback_timeout_seconds: 90,
+                    timeouts: match ledger.and_then(|ledger| ledger.resources.get(&service.key)) {
+                        Some(OwnedResource::Service { timeouts, .. }) => *timeouts,
+                        _ => service.lifecycle.timeouts_for(&service.execution),
+                    },
                     dependencies: Vec::new(),
                 };
                 crate::service_control::ScmLifecycle
@@ -1019,8 +1047,11 @@ pub(crate) fn compile_execution_plan(
                     && previous != zup_plan::ServiceState::Absent
                     && service.start != zup_core::ServiceStart::Disabled
             {
-                crate::service_control::require_safe_stopped_startup_restore(&service.name)
-                    .map_err(TransactionPayloadError::Identity)?;
+                crate::service_control::require_safe_stopped_startup_restore(
+                    &service.name,
+                    &previous,
+                )
+                .map_err(TransactionPayloadError::Identity)?;
             }
         }
         if service.kind == IntegrationChangeKind::NoOp && !startup_inhibited {
@@ -1033,6 +1064,7 @@ pub(crate) fn compile_execution_plan(
             return Err(TransactionPayloadError::NotExecutable("service".into()));
         }
         let mut native_service = service.clone();
+        native_service.lifecycle = native_service.lifecycle.resolved(&native_service.execution);
         if native_service.kind == IntegrationChangeKind::NoOp {
             native_service.kind = IntegrationChangeKind::UpdateOwned;
         }

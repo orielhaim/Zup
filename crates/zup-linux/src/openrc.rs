@@ -1,6 +1,18 @@
 use zup_core::{ServiceExecution, ServiceFailurePolicy, ServiceReadiness};
 use zup_plan::{DesiredService, ServiceState, TargetPath};
 
+#[cfg(target_os = "linux")]
+pub fn validate_executable(bytes: &[u8], target: &zup_core::Target) -> Result<(), String> {
+    let executable = zup_binary::Executable::from_bytes(bytes)
+        .map_err(|error| format!("OpenRC requires a native ELF service executable: {error}"))?;
+    if executable.format() != zup_binary::BinaryFormat::Elf {
+        return Err("OpenRC requires a native ELF service executable".into());
+    }
+    executable
+        .refuse_target(target)
+        .map_err(|error| error.to_string())
+}
+
 pub fn service_name(id: &zup_core::ServiceId) -> String {
     let encoded: String = id
         .as_str()
@@ -19,6 +31,7 @@ fn quote(value: &str) -> Result<String, String> {
 
 pub fn registration(service: &DesiredService<TargetPath>) -> ServiceState {
     ServiceState::Registration {
+        native_timeouts: service.lifecycle.timeouts_for(&service.execution).native(),
         execution: service.execution.clone(),
         failure: service.failure,
         dependencies: service.dependency_names.clone(),
@@ -27,7 +40,7 @@ pub fn registration(service: &DesiredService<TargetPath>) -> ServiceState {
             .as_ref()
             .unwrap_or(&service.name)
             .to_string(),
-        command: service.command.clone(),
+        command: Box::new(service.command.clone()),
         start: service.start,
         readiness: service.readiness,
     }
@@ -35,12 +48,13 @@ pub fn registration(service: &DesiredService<TargetPath>) -> ServiceState {
 
 pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
     let ServiceState::Registration {
+        native_timeouts,
         execution,
         failure,
         dependencies,
         display_name,
         command,
-        start: _,
+        start,
         readiness,
     } = state
     else {
@@ -52,6 +66,17 @@ pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
     execution
         .validate_for(*command.executable.target())
         .map_err(str::to_owned)?;
+    native_timeouts
+        .validate_for(execution)
+        .map_err(str::to_owned)?;
+    let zup_core::NativeServiceTimeouts::Openrc {
+        start_timeout_seconds,
+        stop_grace_seconds,
+        kill_wait_seconds,
+    } = native_timeouts
+    else {
+        return Err("OpenRC requires native retry settings".into());
+    };
     failure
         .validate_for(*command.executable.target())
         .map_err(str::to_owned)?;
@@ -88,31 +113,23 @@ pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
     )?;
     let metadata =
         zup_core::base64_encode(&serde_json::to_vec(state).map_err(|error| error.to_string())?);
-    let generation_hook = r#"start_post() {
-    local pid stat
-    read -r pid < "$pidfile" || return 1
-    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-    stat=$(cat "/proc/$pid/stat") || return 1
-    stat=${stat##*) }
-    set -- $stat
-    [ "$#" -ge 20 ] || return 1
-    shift 19
-    service_set_value zup_resource "$RC_SVCNAME" || return 1
-    service_set_value zup_pid "$pid" || return 1
-    service_set_value zup_start_ticks "$1"
-}
-"#;
     let supervisor = match failure {
-        ServiceFailurePolicy::None => "supervisor=''\ncommand_background=yes\n".to_owned(),
+        ServiceFailurePolicy::None => {
+            "supervise_daemon_args='--pidfd-control --no-respawn --respawn-delay-step 0'\n"
+                .to_owned()
+        }
         ServiceFailurePolicy::Openrc {
             delay_seconds,
             max_respawns,
             respawn_period_seconds,
         } => format!(
-            "supervisor=supervise-daemon\nrespawn_delay={delay_seconds}\nrespawn_max={max_respawns}\nrespawn_period={respawn_period_seconds}\n"
+            "supervise_daemon_args='--pidfd-control --respawn-delay-step 0'\nrespawn_delay={delay_seconds}\nrespawn_max={max_respawns}\nrespawn_period={respawn_period_seconds}\n"
         ),
         _ => return Err("OpenRC requires its native respawn policy".into()),
     };
+    let supervisor = format!(
+        "{supervisor}supervise_daemon_args=\"$supervise_daemon_args --start-timeout {start_timeout_seconds}\"\n"
+    );
     let dependency = if dependencies.is_empty() {
         String::new()
     } else {
@@ -125,7 +142,22 @@ pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
                 .join(" ")
         )
     };
-    Ok(format!("#!/sbin/openrc-run\n# zup-registration={metadata}\ndescription={}\ncommand={executable}\ncommand_args={arguments}\ncommand_args_foreground=''\ncommand_user={user}\npidfile='/run/{name}.pid'\nretry='TERM/30/KILL/5'\nstopgroup=yes\numask=027\nno_new_privs=yes\n{supervisor}{dependency}{generation_hook}", quote(display_name)?).into_bytes())
+    let shutdown_wait = stop_grace_seconds + kill_wait_seconds + 5;
+    let shutdown = format!(
+        "stop() {{ supervise-daemon \"$RC_SVCNAME\" --shutdown --shutdown-timeout {shutdown_wait}; }}\n"
+    );
+    let activation = if *start == zup_core::ServiceStart::Disabled {
+        "start_pre() { return 1; }\n"
+    } else {
+        r#"start_pre() {
+    local membership
+    mountinfo -q -f '^cgroup2$' /sys/fs/cgroup || return 1
+    read -r membership < /proc/self/cgroup || return 1
+    [ "$membership" = "0::/openrc.$RC_SVCNAME" ]
+}
+"#
+    };
+    Ok(format!("#!/sbin/openrc-run\n# zup-registration={metadata}\ndescription={}\ncommand={executable}\ncommand_args={arguments}\ncommand_args_foreground=''\ncommand_user={user}\npidfile='/run/{name}.pid'\nretry='TERM/{stop_grace_seconds}/KILL/{kill_wait_seconds}'\nstopgroup=yes\nrc_cgroup_mode=unified\nrc_cgroup_cleanup=NO\numask=027\nno_new_privs=yes\nsupervisor=supervise-daemon\n{supervisor}{dependency}{activation}{shutdown}", quote(display_name)?).into_bytes())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -171,6 +203,11 @@ mod tests {
 
     fn state() -> ServiceState {
         ServiceState::Registration {
+            native_timeouts: zup_core::NativeServiceTimeouts::Openrc {
+                start_timeout_seconds: 90,
+                stop_grace_seconds: 90,
+                kill_wait_seconds: 5,
+            },
             execution: ServiceExecution::OpenrcUser {
                 user: "nobody".into(),
                 group: Some("nobody".into()),
@@ -178,14 +215,14 @@ mod tests {
             failure: ServiceFailurePolicy::None,
             dependencies: vec![service_name(&zup_core::ServiceId::new("database").unwrap())],
             display_name: "Application".into(),
-            command: zup_plan::CommandSpec::new(
+            command: Box::new(zup_plan::CommandSpec::new(
                 TargetPath::new(
                     zup_core::Target::parse("linux-x64-musl").unwrap(),
                     "/opt/application/service",
                 )
                 .unwrap(),
                 vec!["literal '$() `id` ; argument".into()],
-            ),
+            )),
             start: zup_core::ServiceStart::Automatic,
             readiness: ServiceReadiness::Manager,
         }

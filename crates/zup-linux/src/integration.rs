@@ -318,7 +318,13 @@ fn objects_dir(
 /// Rollback, ledger reconciliation, and a prepared journal do not.
 #[cfg(target_os = "linux")]
 pub fn phase_keeps_generated(phase: zup_transaction::TransactionPhase) -> bool {
-    phase == zup_transaction::TransactionPhase::Applying
+    matches!(
+        phase,
+        zup_transaction::TransactionPhase::Applying
+            | zup_transaction::TransactionPhase::RecoveryRequired {
+                resume: zup_transaction::RecoveryPhase::Applying
+            }
+    )
 }
 
 /// Publishes each blob under its digest inside this application scope.

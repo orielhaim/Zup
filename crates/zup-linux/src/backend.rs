@@ -125,12 +125,6 @@ impl LinuxRuntimeBackend {
                     recovery_transaction: None,
                 });
             }
-            zup_transaction::TransactionPhase::RecoveryRequired => {
-                return Ok(ExecutionReport {
-                    outcome: InstallOutcome::RecoveryRequired,
-                    recovery_transaction: Some(record.transaction_id.to_string()),
-                });
-            }
             _ => {}
         }
         let generated = if crate::integration::phase_keeps_generated(record.phase) {
@@ -396,7 +390,7 @@ impl LinuxRuntimeBackend {
                 &crate::locations::MachineRoots::production(),
                 control,
             )
-            .map_err(|error| SessionError::Transaction(error.to_string()))?;
+            .map_err(execution_error)?;
             return Ok(match outcome {
                 LinuxOutcome::Committed { .. } => ExecutionReport {
                     outcome: InstallOutcome::Committed,

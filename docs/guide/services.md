@@ -15,10 +15,27 @@ lifecycle = { install = "running", change = "preserve" }
 
 ## Policies
 
-- `start`: `automatic`, `manual`, or `disabled` controls boot startup only.
+- `start`: `automatic` enables boot startup, `manual` allows explicit startup, and `disabled` refuses native activation. Installation-time startup is requested separately through `lifecycle.install`.
+- Display-name updates and transitions between `automatic` and `manual` preserve execution when runtime inputs stay unchanged. systemd failure-policy and timeout updates also preserve execution. Identity, command, readiness, and service-dependency changes require replacement. OpenRC retry and supervision changes require replacement; SCM failure-policy changes quiesce the service to protect against queued recovery actions. The transaction checks the same native execution generation around every live update; external restarts fail verification.
 - `lifecycle`: defaults to `install = "stopped"`, `change = "preserve"`. Affected running services stop before mutation and resume afterward. Stopped services stay stopped. Unchanged repair avoids restarts. `change = "stopped"` leaves affected services stopped.
-- `readiness`: `manager` verifies native running state. systemd uses `Type=exec`; `notify` instead waits for the main process to send `READY=1`. SCM and OpenRC reject `notify`. Manager readiness does not establish application health.
-- Start and stop deadlines default to 90 seconds; configure `lifecycle.start_timeout_seconds` and `stop_timeout_seconds` between 1 and 3600.
+- `readiness`: `manager` verifies native running state. systemd uses `Type=exec`; `notify` instead waits for the main process to send `READY=1`. SCM and OpenRC reject `notify`. Manager readiness does not establish application health. systemd commands disable environment expansion and escape specifiers so paths and arguments remain literal. Zup verifies the manager's loaded command and execution flags and refuses additional executable lifecycle hooks, even when the on-disk definition matches.
+- `lifecycle.timeouts` selects an explicit manager policy. Its type must match `execution`. Each component is 1–3600 seconds; each complete observation budget must not exceed 3600 seconds.
+
+| Timeout policy | Defaults                                                                                                   | Native execution and Zup observation                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `systemd`      | `start_timeout_seconds = 90`, `stop_grace_seconds = 90`, `abort_timeout_seconds = 5`, `settle_seconds = 5` | Generates `TimeoutStartSec`, `TimeoutStopSec`, and `TimeoutAbortSec`. Start observation includes the native timeout and settlement. Stop observation includes grace, the bounded abort phase when a system policy requests it, and settlement. Notification can extend native manager timeouts; Zup's observation budget remains fixed. Requires systemd 254 or later to verify effective restart and execution policies. |
+| `openrc`       | `start_timeout_seconds = 90`, `stop_grace_seconds = 90`, `kill_wait_seconds = 5`, `settle_seconds = 5`     | Bounds native exec handoff and generates `TERM/90/KILL/5` using the configured values. A failed or expired handoff suppresses respawn and stops the pinned child. Start observation includes handoff and settlement; stop observation includes the entire retry schedule and settlement. OpenRC has process readiness only.                                                                                               |
+| `windows`      | `start_observation_seconds = 90`, `stop_observation_seconds = 90`                                          | Bounds Zup's observation. SCM owns service startup and shutdown; these settings cannot force termination. Checkpoints and wait hints never extend the absolute deadline.                                                                                                                                                                                                                                                  |
+
+For example, `lifecycle = { timeouts = { type = "openrc", start_timeout_seconds = 20, stop_grace_seconds = 45, kill_wait_seconds = 5, settle_seconds = 5 } }` allows 45 seconds for graceful shutdown before OpenRC escalates, then bounds confirmation of termination.
+
+The installation ledger saves the resolved policy. Quiesce and removal use the installed policy; restore uses the replacement policy. Compensation uses the policy for the runtime it controls. An OpenRC supervisor keeps the retry schedule captured when it started, so changing that schedule requires replacement of the runtime.
+
+Affected services cannot activate during payload replacement, including services that were already stopped. The transaction persists a systemd mask, an OpenRC disabled start guard, or SCM Disabled startup and verifies shutdown before changing files. Systemd stops under the installed timeout policy before reloading its mask. Registration updates retain the inhibitor until all payload mutations verify. Compensation closes activation before restoring files and releases it only after restoring the previous registration. These inhibitors survive reboot.
+
+Repairing a damaged systemd definition requires an explicitly authorized owned repair, a stopped runtime without pending jobs, unchanged runtime inputs, and a final native reobservation. A damaged definition cannot authorize executable replacement or service startup.
+
+Systemd notification can extend native manager timeouts with `EXTEND_TIMEOUT_USEC`; it cannot extend Zup's readiness deadline. A late readiness notification never produces a successful start receipt. If a manager request or runtime cannot be proven settled, the transaction requires recovery and retains its protected before-images.
 
 ## Dependencies
 
@@ -43,6 +60,10 @@ execution = { type = "openrc_user", user = "worker", group = "worker" }
 
 Windows registrations use a service SID. Password accounts are unsupported. Generated Linux definitions set `NoNewPrivileges`; OpenRC verifies actual process credentials. Machine-service payloads must be protected from untrusted writes. Applications must provision suitable writable storage.
 
+`systemd_dynamic_user` assigns a distinct generated user and group name to each native unit. Zup verifies those effective names, resolves the allocation through systemd in both directions, and checks the running process credentials. A static account collision or an allocation that cannot be verified is refused. `DynamicUser=yes` alone does not establish a dynamic identity.
+
+systemd control uses the local system bus and requires the system manager's filesystem root and mount, PID, and user namespaces. Caller-provided bus addresses do not change this authority. Controlling a host manager from a container or chroot with a different filesystem view is refused.
+
 ## Runtime failure policies
 
 The default is no automatic restart. Native policies remain explicit because their limits have different semantics:
@@ -58,12 +79,22 @@ failure = { type = "windows", delay_seconds = 2, restart_attempts = 2, reset_sec
 failure = { type = "openrc", delay_seconds = 2, max_respawns = 3, respawn_period_seconds = 60 }
 ```
 
-systemd also accepts `condition = "on_abnormal"`. Each explicit deployment start resets its native start-limit budget; automatic retries remain bounded. OpenRC supervision requires a foreground process.
+systemd also accepts `condition = "on_abnormal"`. Each explicit deployment start resets its native start-limit budget; automatic retries remain bounded. OpenRC always supervises the foreground process. The default disables respawning; an explicit failure policy enables bounded native respawns.
 
-SCM recovery supports crash-triggered restarts only. Zup disables startup while replacing a restart-enabled service. SCM cannot report or cancel queued recovery actions, so preserving Stopped while reenabling a previously executed service is refused. Retiring its restart policy has the same restriction. A service never started in the current boot can be reenabled safely. Commands, reboot actions, and unsupported manager-policy combinations are rejected.
+SCM recovery supports crash-triggered restarts only. Zup disables startup while replacing a restart-enabled service. SCM cannot report or cancel queued recovery actions, so releasing activation while preserving Stopped is refused for an existing registration with a recovery policy. Retiring that policy has the same restriction. Initial protected creation can release a new registration without starting it. A service exit code, including `ERROR_SERVICE_NEVER_STARTED`, does not prove execution history. Commands, reboot actions, and unsupported manager-policy combinations are rejected.
+
+OpenRC service executables must be native ELF images matching the installation target. Shebang scripts are unsupported. The main process must remain in the foreground without daemonizing or replacing itself with another executable. Zup validates new images during staging, before runtime or file mutation, and verifies process executable identity during observation. The controller holds a pidfd for every launched child. Zup verifies the private controller instance, atomic child execution record, executable inode, process birth time, credentials, and native process scope. Shutdown binds both the controller instance and child generation before the native retry schedule can signal the process.
 
 ## Recovery
 
 Zup stages verified content and records durable intent before shutdown. Startup must verify before commit. Compensation stops the new runtime, restores registration and files, then restores the previous runtime when safe.
 
+An unfinished transaction blocks new operations on that installation. Run `recover --transaction <id> --scope machine` before retrying. Preparing an uninstall does not resume an interrupted upgrade or start its services.
+
 External modifications, concurrent jobs, unknown runtime state, or insufficient interruption evidence require recovery. Keep the reported journal and diagnostics. Process side effects are not reversible. See the [plugin SDK](/reference/plugin-api) for typed declarations; plugins cannot control services directly.
+
+Transaction plans use schema 3 and journals use schema 4. Journals retain the interrupted phase when native reconciliation requires recovery. A later recovery attempt rechecks authoritative evidence before continuing. A failed deployment continues compensation rather than resuming forward installation. Journals from earlier prototype formats are rejected; there is no migration path.
+
+OpenRC requires cgroup v2 mounted at `/sys/fs/cgroup` before installation and at every service start. Configure the distribution's cgroups boot service before deploying managed services. Zup does not mount it or start an unrelated system service. Managed scripts require OpenRC's unified service cgroup, and Zup verifies its root-owned, non-delegated controls and main-process membership. A detached child remains in that scope. Zup refuses file replacement while the scope is populated after the main process exits. Automatic OpenRC cgroup cleanup is disabled because its immediate `cgroup.kill` would bypass the configured graceful shutdown interval. Services must clean up detached children during graceful shutdown; a surviving child requires explicit reconciliation.
+
+OpenRC requires the pinned `pidfd-control-v1` native controller. Stock OpenRC is refused before deployment. Build and provisioning instructions are in `native/openrc/README.md` in the repository. Zup does not replace the host service manager. The controller binary must remain unchanged during a transaction and while managed services are running.

@@ -401,12 +401,17 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
     owned.resources.insert(
         key.clone(),
         OwnedResource::Service {
+            timeouts: zup_core::ServiceTimeouts::Windows {
+                start_observation_seconds: 90,
+                stop_observation_seconds: 90,
+            },
             requires_files: Vec::new(),
             requires_services: Vec::new(),
             name: "daemon".into(),
             privilege: Privilege::System,
             previous: ServiceState::Absent,
             installed: Box::new(ServiceState::Registration {
+                native_timeouts: zup_core::NativeServiceTimeouts::Scm,
                 dependencies: Vec::new(),
                 failure: Default::default(),
                 execution: zup_core::ServiceExecution::Windows {
@@ -414,7 +419,7 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
                 },
                 readiness: Default::default(),
                 display_name: "Daemon".into(),
-                command: command.clone(),
+                command: Box::new(command.clone()),
                 start: zup_core::ServiceStart::Automatic,
             }),
         },
@@ -424,6 +429,7 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
             key: key.clone(),
             id,
             state: ObservedServiceState::Service {
+                native_timeouts: zup_core::NativeServiceTimeouts::Scm,
                 dependencies: Vec::new(),
                 failure: Default::default(),
                 execution: zup_core::ServiceExecution::Windows {
@@ -431,7 +437,7 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
                 },
                 readiness: Default::default(),
                 display_name: "Administrator edit".into(),
-                command,
+                command: Box::new(command),
                 start: zup_core::ServiceStart::Manual,
                 runtime_state: None,
             },

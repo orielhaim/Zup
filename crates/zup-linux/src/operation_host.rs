@@ -59,10 +59,33 @@ impl OperationHost for LinuxOperationHost {
             .map_err(zup_runtime::OperationError::from)
     }
 
-    fn validate_context(&self, input: &OperationInput) -> Result<(), String> {
+    fn validate_context(&self, input: &OperationInput) -> Result<(), zup_runtime::OperationError> {
         if input.scope == SelectedScope::User {
             crate::run::refuse_redirected_hierarchy(input.state_root)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| zup_runtime::OperationError::refused("context", error))?;
+        }
+        if input.scope == SelectedScope::User || rustix::process::geteuid().as_raw() == 0 {
+            let store = zup_transaction::FilesystemTransactionStore::private_at(input.state_root);
+            let settled = zup_transaction::settled_records(
+                &store,
+                &input.build.installer.app.id,
+                input.scope,
+                input.prior,
+            )
+            .map_err(|error| match error {
+                zup_transaction::ReconciliationError::RecoveryRequired(transaction) => {
+                    zup_runtime::OperationError::RecoveryRequired(transaction)
+                }
+                error => zup_runtime::OperationError::refused("journal", error),
+            })?;
+            if let Some(record) = settled.into_iter().find(|record| {
+                record.phase == zup_transaction::TransactionPhase::Committed
+                    && record.reconciliation != zup_transaction::ReconciliationState::Complete
+            }) {
+                return Err(zup_runtime::OperationError::RecoveryRequired(
+                    record.transaction_id,
+                ));
+            }
         }
         Ok(())
     }

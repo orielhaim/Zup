@@ -23,9 +23,6 @@ thiserror.workspace = true
 tracing.workspace = true
 zup-core.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-rustix.workspace = true
-
 [dev-dependencies]
 rstest.workspace = true
 tempfile.workspace = true

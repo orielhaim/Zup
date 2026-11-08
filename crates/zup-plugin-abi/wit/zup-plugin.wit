@@ -58,8 +58,29 @@ interface planner {
   record service-lifecycle {
     install: initial-service-state,
     change: changed-service-state,
+    timeouts: option<service-timeouts>,
+  }
+
+  record systemd-timeouts {
     start-timeout-seconds: u32,
-    stop-timeout-seconds: u32,
+    stop-grace-seconds: u32,
+    abort-timeout-seconds: u32,
+    settle-seconds: u32,
+  }
+  record openrc-timeouts {
+    start-timeout-seconds: u32,
+    stop-grace-seconds: u32,
+    kill-wait-seconds: u32,
+    settle-seconds: u32,
+  }
+  record windows-timeouts {
+    start-observation-seconds: u32,
+    stop-observation-seconds: u32,
+  }
+  variant service-timeouts {
+    systemd(systemd-timeouts),
+    openrc(openrc-timeouts),
+    windows(windows-timeouts),
   }
 
   enum windows-service-account {

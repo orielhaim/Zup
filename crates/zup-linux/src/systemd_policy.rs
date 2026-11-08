@@ -80,9 +80,15 @@ pub fn generation() -> Result<String, String> {
 }
 
 pub fn validate(paths: &[String]) -> Result<(), String> {
+    stop_failure_mode(paths).map(|_| ())
+}
+
+pub fn stop_failure_mode(paths: &[String]) -> Result<&'static str, String> {
     let roots = roots()?;
+    let mut paths = paths.iter().map(Path::new).collect::<Vec<_>>();
+    paths.sort_by_key(|path| path.file_name());
+    let mut mode = "terminate";
     for path in paths {
-        let path = Path::new(path);
         let parent = path.parent().ok_or("service drop-in lacks a directory")?;
         let canonical = std::fs::canonicalize(parent).map_err(|error| error.to_string())?;
         if !roots.contains(&canonical)
@@ -90,16 +96,19 @@ pub fn validate(paths: &[String]) -> Result<(), String> {
         {
             return Err("unit-specific service overrides are not authorized".into());
         }
-        validate_contents(&read(
+        if let Some(value) = validate_contents(&read(
             &canonical.join(path.file_name().ok_or("invalid policy path")?),
-        )?)?;
+        )?)? {
+            mode = value;
+        }
     }
-    Ok(())
+    Ok(mode)
 }
 
-fn validate_contents(bytes: &[u8]) -> Result<(), String> {
+fn validate_contents(bytes: &[u8]) -> Result<Option<&'static str>, String> {
     let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
     let mut service = false;
+    let mut mode = None;
     for line in text
         .lines()
         .map(str::trim)
@@ -109,16 +118,23 @@ fn validate_contents(bytes: &[u8]) -> Result<(), String> {
             service = true;
             continue;
         }
-        if !service
-            || !line.split_once('=').is_some_and(|(key, value)| {
-                key.trim() == "TimeoutStopFailureMode"
-                    && matches!(value.trim(), "terminate" | "abort" | "kill")
-            })
-        {
+        let value = match line.split_once('=') {
+            Some((key, value)) if service && key.trim() == "TimeoutStopFailureMode" => {
+                match value.trim() {
+                    "terminate" => Some("terminate"),
+                    "abort" => Some("abort"),
+                    "kill" => Some("kill"),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if value.is_none() {
             return Err("global service policy overrides unsupported settings; only native TimeoutStopFailureMode defaults are supported".into());
         }
+        mode = value;
     }
-    Ok(())
+    Ok(mode)
 }
 
 #[cfg(test)]

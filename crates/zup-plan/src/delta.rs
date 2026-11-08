@@ -563,6 +563,7 @@ fn plan_services(
                     }),
                 ),
                 ObservedServiceState::Service {
+                    native_timeouts,
                     failure,
                     dependencies,
                     execution,
@@ -578,11 +579,12 @@ fn plan_services(
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| desired.name.to_string());
                     let matches = *failure == desired.failure && *dependencies == desired.dependency_names && *display_name == desired_display
+                        && *native_timeouts == desired.lifecycle.timeouts_for(&desired.execution).native()
                         && *execution == desired.execution
                         && commands_match(command, &desired.command)
                         && *start == desired.start
                         && *readiness == desired.readiness
-                        && owned.is_none_or(|owned| matches!(owned, OwnedResource::Service { requires_files, requires_services, .. } if requires_files == &desired.requires_files && requires_services == &desired.requires_services));
+                        && owned.is_none_or(|owned| matches!(owned, OwnedResource::Service { requires_files, requires_services, timeouts, .. } if requires_files == &desired.requires_files && requires_services == &desired.requires_services && *timeouts == desired.lifecycle.timeouts_for(&desired.execution)));
                     if matches && installed.is_some() {
                         (IntegrationChangeKind::NoOp, None)
                     } else {
@@ -606,7 +608,7 @@ fn plan_services(
         out.push(ServiceOperation {
             failure: desired.failure,
             execution: desired.execution.clone(),
-            lifecycle: desired.lifecycle,
+            lifecycle: desired.lifecycle.resolved(&desired.execution),
             readiness: desired.readiness,
             requires_services: desired.requires_services.clone(),
             dependency_names: desired.dependency_names.clone(),

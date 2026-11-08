@@ -288,8 +288,21 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
         zup_core::ServiceLifecycle {
             install: zup_core::InitialServiceState::Running,
             change: zup_core::ChangedServiceState::Preserve,
-            start_timeout_seconds: 17,
-            stop_timeout_seconds: 23,
+            timeouts: Some(
+                if host_target().operating_system() == zup_core::TargetOperatingSystem::Linux {
+                    zup_core::ServiceTimeouts::Systemd {
+                        start_timeout_seconds: 17,
+                        stop_grace_seconds: 23,
+                        abort_timeout_seconds: 5,
+                        settle_seconds: 5,
+                    }
+                } else {
+                    zup_core::ServiceTimeouts::Windows {
+                        start_observation_seconds: 17,
+                        stop_observation_seconds: 23,
+                    }
+                }
+            ),
         }
     );
     assert!(matches!(

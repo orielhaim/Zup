@@ -62,6 +62,7 @@ pub struct OperationSelection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationError {
     Cancelled,
+    RecoveryRequired(zup_transaction::TransactionId),
     Downgrade {
         installed: semver::Version,
         requested: semver::Version,
@@ -85,6 +86,9 @@ impl std::fmt::Display for OperationError {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cancelled => out.write_str("planning cancelled"),
+            Self::RecoveryRequired(transaction) => {
+                write!(out, "transaction {transaction} requires explicit recovery")
+            }
             Self::Downgrade {
                 installed,
                 requested,
@@ -164,7 +168,7 @@ pub struct ContentAccess<'a> {
 }
 
 pub trait OperationHost {
-    fn validate_context(&self, _input: &OperationInput) -> Result<(), String> {
+    fn validate_context(&self, _input: &OperationInput) -> Result<(), OperationError> {
         Ok(())
     }
 
@@ -308,8 +312,7 @@ pub fn prepare_operation<H: OperationHost>(
             "unsupported target scope or frontend",
         ));
     }
-    host.validate_context(input)
-        .map_err(|message| OperationError::refused("capabilities", message))?;
+    host.validate_context(input)?;
     let installer = &input.build.installer;
     if matches!(input.operation, Operation::Repair { .. })
         && (!input.selection.enable.is_empty()

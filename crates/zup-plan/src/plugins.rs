@@ -995,7 +995,7 @@ impl MergeContext<'_> {
         self.collisions
             .insert_service(id.as_str(), Some(plugin_id), resource_name)?;
         lifecycle
-            .validate(start)
+            .validate(start, &execution)
             .and_then(|()| readiness.validate_for(self.plan.target))
             .and_then(|()| execution.validate_policies(failure, readiness, self.plan.target))
             .map_err(|reason| PlanError::PluginResourceRejected {

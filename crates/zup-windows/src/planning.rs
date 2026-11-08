@@ -308,6 +308,7 @@ fn inspect_owned_matches(
                     ObservedServiceState::InvalidService => false,
                     ObservedServiceState::Absent => **installed == ServiceState::Absent,
                     ObservedServiceState::Service {
+                        native_timeouts,
                         failure,
                         dependencies,
                         execution,
@@ -319,6 +320,7 @@ fn inspect_owned_matches(
                     } => {
                         **installed
                             == ServiceState::Registration {
+                                native_timeouts,
                                 failure,
                                 dependencies,
                                 execution,

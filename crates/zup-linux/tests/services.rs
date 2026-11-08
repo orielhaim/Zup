@@ -382,38 +382,7 @@ impl Fixture {
                 OwnedResource::Service { installed, .. } => {
                     snapshot.services.iter().any(|observed| {
                         observed.key == *key
-                            && match (&observed.state, installed.as_ref()) {
-                                (
-                                    zup_plan::ObservedServiceState::Service {
-                                        display_name,
-                                        command,
-                                        start,
-                                        readiness,
-                                        execution,
-                                        failure,
-                                        dependencies,
-                                        ..
-                                    },
-                                    zup_plan::ServiceState::Registration {
-                                        display_name: wanted_display,
-                                        command: wanted_command,
-                                        start: wanted_start,
-                                        readiness: wanted_readiness,
-                                        execution: wanted_execution,
-                                        failure: wanted_failure,
-                                        dependencies: wanted_dependencies,
-                                    },
-                                ) => {
-                                    display_name == wanted_display
-                                        && command == wanted_command
-                                        && start == wanted_start
-                                        && readiness == wanted_readiness
-                                        && execution == wanted_execution
-                                        && failure == wanted_failure
-                                        && dependencies == wanted_dependencies
-                                }
-                                _ => false,
-                            }
+                            && observed.state.configuration().as_ref() == Some(installed.as_ref())
                     })
                 }
                 _ => false,
@@ -644,7 +613,7 @@ impl Fixture {
 
     fn crash_mid_apply(
         &self,
-        record: zup_transaction::TransactionRecord,
+        mut record: zup_transaction::TransactionRecord,
     ) -> zup_transaction::TransactionRecord {
         let ids: Vec<_> = record
             .plan
@@ -659,13 +628,51 @@ impl Fixture {
             .map(|node| node.id.clone())
             .collect();
         assert!(!ids.is_empty(), "the plan holds service work");
+        let mut executor = LinuxFileExecutor::new()
+            .with_payload(DirectoryPayloadSource::new(&self.payload))
+            .for_machine()
+            .with_services(ServiceSupport::isolated(
+                self.roots.clone(),
+                self.systemd.clone(),
+                self.manager.clone(),
+                self.uid,
+            ));
+        executor.register_plan(&record.plan).unwrap();
+        executor.set_transaction_id(record.transaction_id);
+        for id in &record.plan.execution_order {
+            let node = record
+                .plan
+                .nodes
+                .iter()
+                .find(|node| &node.id == id)
+                .unwrap();
+            if ids.contains(id) {
+                record.nodes.insert(id.clone(), NodeState::Running);
+                break;
+            }
+            let receipt = if node.kind.is_barrier() {
+                zup_transaction::OperationReceipt::Control
+            } else {
+                executor.prepare(node).unwrap();
+                let receipt = executor.apply(node).unwrap();
+                executor.verify(node, &receipt).unwrap();
+                receipt
+            };
+            let receipt = Box::new(receipt);
+            record.nodes.insert(
+                id.clone(),
+                if !node.kind.requires_verification() {
+                    NodeState::Applied { receipt }
+                } else {
+                    NodeState::Verified { receipt }
+                },
+            );
+        }
         let store = FilesystemTransactionStore::private_at(&self.state);
         store
             .update(&record.transaction_id, &mut |journaled| {
                 journaled.phase = TransactionPhase::Applying;
-                for id in &ids {
-                    journaled.nodes.insert(id.clone(), NodeState::Running);
-                }
+                journaled.nodes = record.nodes.clone();
                 Ok(())
             })
             .expect("the journal advances")
@@ -1032,8 +1039,10 @@ fn a_mask_before_crash_reconciles() {
     );
 }
 
-#[test]
-fn an_interrupted_uninstall_converges() {
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn an_interrupted_uninstall_converges(#[case] mask_retired: bool) {
     let mut fixture = Fixture::new();
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
@@ -1042,21 +1051,15 @@ fn an_interrupted_uninstall_converges() {
 
     let record = fixture.begin_uninstall(&plan);
     let record = fixture.crash_mid_apply(record);
-    fixture
-        .manager
-        .borrow_mut()
-        .disable(&unit)
-        .expect("policy retired");
-    let (record, outcome) = fixture.recover(record);
-    assert_eq!(outcome, TransactionOutcome::Committed);
-    fixture.publish(&record);
-    assert!(fixture.source(&unit).is_none());
-
-    fixture.commit(&plan, LifecycleAction::Install);
-    let record = fixture.begin_uninstall(&plan);
-    let record = fixture.crash_mid_apply(record);
     std::fs::remove_file(fixture.systemd.unit_dir.join(&unit)).expect("source gone");
-    assert_eq!(fixture.policy(&unit), "enabled", "policy still pending");
+    assert_eq!(fixture.policy(&unit), "masked");
+    if mask_retired {
+        fixture
+            .manager
+            .borrow_mut()
+            .unmask(&unit)
+            .expect("mask retired after source removal");
+    }
     let (record, outcome) = fixture.recover(record);
     assert_eq!(outcome, TransactionOutcome::Committed);
     fixture.publish(&record);

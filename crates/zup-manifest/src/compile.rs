@@ -656,7 +656,7 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
             })?;
         service
             .lifecycle
-            .validate(service.start)
+            .validate(service.start, &service.execution)
             .map_err(|reason| ManifestError::Invalid {
                 message: format!("service `{}`: {reason}", service.id),
                 src: None,

@@ -243,28 +243,67 @@ pub fn compile_machine_execution_plan(
         let owned = ledger.and_then(|ledger| ledger.resources.get(&op.key));
         let payload_changed = affected_services.contains(&op.key);
         if (payload_changed || op.kind != IntegrationChangeKind::NoOp)
-            && (owned.is_some()
-                || op.previous == zup_plan::ObservedServiceState::Absent
-                    && op.lifecycle.install == zup_core::InitialServiceState::Running)
+            && (owned.is_some() || op.previous == zup_plan::ObservedServiceState::Absent)
         {
             let unit = crate::services::unit_name(&parse_service_id(op)?)?;
             let generation = manager.generation().map_err(|error| PlanError::Service {
                 unit: unit.clone(),
                 reason: error.to_string(),
             })?;
-            let runtime = if op.previous == zup_plan::ObservedServiceState::Absent {
-                None
-            } else {
-                Some(manager.runtime(&unit).map_err(|error| PlanError::Service {
-                    unit: unit.clone(),
-                    reason: error.to_string(),
-                })?)
-            };
+            let runtime = Some(manager.runtime(&unit).map_err(|error| PlanError::Service {
+                unit: unit.clone(),
+                reason: error.to_string(),
+            })?);
+            if op.previous == zup_plan::ObservedServiceState::Absent
+                && runtime.as_ref().is_some_and(|runtime| {
+                    runtime.state != zup_plan::ServiceRuntimeState::Stopped || runtime.pending_job
+                })
+            {
+                return Err(PlanError::Service {
+                    unit,
+                    reason:
+                        "a missing service definition still has an active or pending native runtime"
+                            .into(),
+                });
+            }
             let stopped_damaged = op.previous == zup_plan::ObservedServiceState::InvalidService
-                && runtime
-                    .as_ref()
-                    .is_some_and(|runtime| runtime.state == zup_plan::ServiceRuntimeState::Stopped);
-            if !stopped_damaged {
+                && runtime.as_ref().is_some_and(|runtime| {
+                    runtime.state == zup_plan::ServiceRuntimeState::Stopped && !runtime.pending_job
+                });
+            if stopped_damaged {
+                let Some(OwnedResource::Service { installed, .. }) = owned else {
+                    return Err(PlanError::Service {
+                        unit,
+                        reason: "damaged registration has no service ownership".into(),
+                    });
+                };
+                if op.kind != IntegrationChangeKind::RepairOwned
+                    || **installed != op.desired_configuration()
+                {
+                    return Err(PlanError::Service {
+                        unit,
+                        reason: "damaged registration requires explicit owned repair".into(),
+                    });
+                }
+                input
+                    .service_controls
+                    .push(zup_transaction::ServiceControlOperation {
+                        intent: zup_transaction::ServiceControlIntent::Reobserve,
+                        key: op.key.clone(),
+                        native_name: unit,
+                        privilege: op.privilege,
+                        stage: zup_transaction::ServiceControlStage::Restore,
+                        before_configuration: installed.as_ref().clone(),
+                        configuration: installed.as_ref().clone(),
+                        owned_configuration: installed.as_ref().clone(),
+                        before: zup_transaction::ServiceTerminalState::Stopped,
+                        after: zup_transaction::ServiceTerminalState::Stopped,
+                        manager_generation: generation,
+                        before_execution_generation: "stopped".into(),
+                        timeouts: op.lifecycle.timeouts_for(&op.execution),
+                        dependencies: Vec::new(),
+                    });
+            } else {
                 let execution_generation = runtime
                     .map_or_else(|| "stopped".into(), |runtime| runtime.execution_generation);
                 input.service_controls.extend(
@@ -293,6 +332,17 @@ pub fn compile_machine_execution_plan(
                     reason: error.to_string(),
                 }
             })?;
+        let previous_source =
+            crate::service_ops::read_canonical_source(&canonical).map_err(into_service)?;
+        if previous_source.is_none() {
+            crate::service_ops::validate_missing_source_residue(&unit, &canonical, owned)
+                .map_err(into_service)?;
+        } else if op.kind == IntegrationChangeKind::Create {
+            return Err(PlanError::Service {
+                unit,
+                reason: "an unowned service definition already exists".into(),
+            });
+        }
 
         crate::service_ops::refuse_source_symlink(&unit, &canonical).map_err(into_service)?;
         crate::service_ops::check_collisions(
@@ -325,8 +375,6 @@ pub fn compile_machine_execution_plan(
             });
         }
 
-        let previous_source =
-            crate::service_ops::read_canonical_source(&canonical).map_err(into_service)?;
         if matches!(op.kind, IntegrationChangeKind::Create)
             && previous_source
                 .as_ref()
@@ -374,7 +422,16 @@ pub fn compile_machine_execution_plan(
                 )
                 .map_err(into_service)?
             }
-            IntegrationChangeKind::NoOp => continue,
+            IntegrationChangeKind::NoOp if !payload_changed => continue,
+            IntegrationChangeKind::NoOp => crate::service_exec::apply_operation(
+                op,
+                &unit,
+                &derived.bytes,
+                true,
+                &previous_policy,
+                previous_source.as_deref(),
+            )
+            .map_err(into_service)?,
             IntegrationChangeKind::Conflict | IntegrationChangeKind::Drift => {
                 return Err(PlanError::Service {
                     unit,
@@ -388,6 +445,7 @@ pub fn compile_machine_execution_plan(
 
     for removal in &service_removals {
         let OwnedResource::Service {
+            timeouts,
             name,
             installed,
             privilege,
@@ -410,27 +468,31 @@ pub fn compile_machine_execution_plan(
             reason: error.to_string(),
         })?;
         match runtime.state {
-            zup_plan::ServiceRuntimeState::Running => {
+            zup_plan::ServiceRuntimeState::Running | zup_plan::ServiceRuntimeState::Stopped => {
                 input
                     .service_controls
                     .push(zup_transaction::ServiceControlOperation {
+                        intent: zup_transaction::ServiceControlIntent::Transition,
                         key: removal.key.clone(),
                         native_name: unit.clone(),
                         privilege: *privilege,
                         stage: zup_transaction::ServiceControlStage::Quiesce,
                         before_configuration: installed.as_ref().clone(),
-                        configuration: installed.as_ref().clone(),
+                        configuration: zup_transaction::disabled_startup(installed)
+                            .expect("registration"),
                         owned_configuration: installed.as_ref().clone(),
-                        before: zup_transaction::ServiceTerminalState::Running,
+                        before: if runtime.state == zup_plan::ServiceRuntimeState::Running {
+                            zup_transaction::ServiceTerminalState::Running
+                        } else {
+                            zup_transaction::ServiceTerminalState::Stopped
+                        },
                         after: zup_transaction::ServiceTerminalState::Stopped,
                         manager_generation: runtime.manager_generation,
                         before_execution_generation: runtime.execution_generation,
-                        timeout_seconds: 90,
-                        rollback_timeout_seconds: 90,
+                        timeouts: *timeouts,
                         dependencies: Vec::new(),
                     })
             }
-            zup_plan::ServiceRuntimeState::Stopped => {}
             _ => {
                 return Err(PlanError::Service {
                     unit,
@@ -465,6 +527,7 @@ pub fn compile_machine_execution_plan(
             unit: "dependency graph".into(),
             reason,
         })?;
+    crate::service_ops::bind_startup_inhibition(&mut input).map_err(into_service)?;
     Ok(input)
 }
 
@@ -715,7 +778,7 @@ mod tests {
     #[case::create(IntegrationChangeKind::Create, 1)]
     #[case::update(IntegrationChangeKind::UpdateOwned, 1)]
     #[case::restore(IntegrationChangeKind::RestoreOwned, 1)]
-    #[case::noop(IntegrationChangeKind::NoOp, 0)]
+    #[case::unchanged_registration(IntegrationChangeKind::NoOp, 1)]
     fn executable_deltas_become_typed_operations(
         #[case] kind: IntegrationChangeKind,
         #[case] expected: usize,
@@ -943,6 +1006,9 @@ mod tests {
                     id: ServiceId::new("tool").expect("an id"),
                 },
                 zup_plan::OwnedResource::Service {
+                    timeouts: zup_core::ServiceTimeouts::for_execution(
+                        &zup_core::ServiceExecution::SystemdDynamicUser,
+                    ),
                     requires_files: Vec::new(),
                     requires_services: Vec::new(),
                     name: "Tool".to_owned(),
@@ -1008,12 +1074,23 @@ mod tests {
             scope: zup_core::SelectedScope::Machine,
             privilege: Privilege::System,
             owned: zup_plan::OwnedResource::Service {
+                timeouts: zup_core::ServiceTimeouts::for_execution(
+                    &zup_core::ServiceExecution::SystemdDynamicUser,
+                ),
                 requires_files: Vec::new(),
                 requires_services: Vec::new(),
                 name: "Tool".to_owned(),
                 privilege: Privilege::System,
                 previous: zup_plan::ServiceState::Absent,
-                installed: Box::new(zup_plan::ServiceState::Absent),
+                installed: Box::new(
+                    operation_at(
+                        &with.services[0].command.executable,
+                        vec!["--serve".into()],
+                        ServiceStart::Automatic,
+                        IntegrationChangeKind::Create,
+                    )
+                    .desired_configuration(),
+                ),
             },
         });
         let mut manager = FakeSystemd::default();

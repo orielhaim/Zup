@@ -164,14 +164,26 @@ pub struct ServiceOperation {
 }
 
 impl ServiceOperation {
+    pub fn preserves_runtime(&self) -> bool {
+        self.desired_configuration()
+            .update_from(
+                &self
+                    .previous
+                    .configuration()
+                    .unwrap_or(crate::ServiceState::Absent),
+            )
+            .preserves_runtime()
+    }
+
     pub fn desired_configuration(&self) -> crate::ServiceState {
         crate::ServiceState::Registration {
+            native_timeouts: self.lifecycle.timeouts_for(&self.execution).native(),
             dependencies: self.dependency_names.clone(),
             failure: self.failure,
             execution: self.execution.clone(),
             readiness: self.readiness,
             display_name: self.display_name.clone(),
-            command: self.command.clone(),
+            command: Box::new(self.command.clone()),
             start: self.start,
         }
     }

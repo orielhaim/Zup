@@ -5,6 +5,8 @@ on:
     branches: [master]
     paths:
       - "**/*.rs"
+      - "**/*.wit"
+      - "native/**"
       - "**/Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -14,10 +16,12 @@ on:
       - "fixtures/**"
       - "schema/**"
       - "examples/**"
-      - ".github/workflows/ci.yml"
+      - ".github/workflows/**"
   pull_request:
     paths:
       - "**/*.rs"
+      - "**/*.wit"
+      - "native/**"
       - "**/Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -27,7 +31,7 @@ on:
       - "fixtures/**"
       - "schema/**"
       - "examples/**"
-      - ".github/workflows/ci.yml"
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:
@@ -98,7 +102,19 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
+          sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev meson ninja-build libcap-dev
+
+      - name: Build pinned OpenRC controller
+        if: runner.os == 'Linux'
+        shell: bash
+        run: python3 scripts/build-openrc-control.py --output "$RUNNER_TEMP/openrc-control"
+
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Linux' && always()
+        with:
+          name: openrc-controller-gnu-build
+          path: ${{ runner.temp }}/openrc-control/build.json
+          if-no-files-found: warn
 
       - name: Test CI diagnostics reporter
         run: python -m unittest discover -s scripts/ci -p "test_*.py"
@@ -145,3 +161,28 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: cargo test --doc --all-features $PORTABLE $LINUX
+
+  terminal-arm64:
+    name: terminal ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04-arm, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: terminal-${{ runner.os }}-${{ runner.arch }}-debug0
+          cache-on-failure: false
+
+      - name: Terminal and automation lifecycle
+        run: cargo test -p zup-installer --no-default-features --features console,headless,online --test terminal

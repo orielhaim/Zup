@@ -164,7 +164,7 @@ pub fn discover_recovery(
             | zup_transaction::TransactionPhase::RollingBack => {
                 RecoveryStatus::InterruptedApplyingTransaction { transaction_id }
             }
-            zup_transaction::TransactionPhase::RecoveryRequired => {
+            zup_transaction::TransactionPhase::RecoveryRequired { .. } => {
                 RecoveryStatus::RecoveryRequired { transaction_id }
             }
             zup_transaction::TransactionPhase::Committed => {

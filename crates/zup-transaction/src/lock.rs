@@ -216,4 +216,38 @@ mod tests {
         );
         drop(again);
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launched_processes_cannot_inherit_installation_lock_authority() {
+        use std::io::{BufRead, Write};
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        use std::process::{Command, Stdio};
+
+        let root = tempfile::tempdir().unwrap();
+        let held = InstallationLock::try_acquire(root.path(), "child-authority")
+            .unwrap()
+            .unwrap();
+        let metadata = held.file.metadata().unwrap();
+        let identity = (metadata.dev(), metadata.ino());
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"ready\n").unwrap();
+        let mut reply = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut reply)
+            .unwrap();
+        let inherited =
+            std::fs::metadata(format!("/proc/{}/fd/{}", child.id(), held.file.as_raw_fd()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(reply, "ready\n");
+        match inherited {
+            Ok(metadata) => assert_ne!((metadata.dev(), metadata.ino()), identity),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        }
+    }
 }

@@ -128,12 +128,13 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
         }
     };
     Ok(ObservedServiceState::Service {
+        native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies,
         failure,
         execution: zup_core::ServiceExecution::Windows { account },
         readiness: Default::default(),
         display_name,
-        command,
+        command: Box::new(command),
         start,
         runtime_state: Some(crate::service_control::runtime(
             service

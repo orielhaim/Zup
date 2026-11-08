@@ -279,6 +279,11 @@ pub(crate) fn drive_client(
             Message::Failed(failed) if failed.kind == zup_protocol::WorkerFailure::StalePlan => {
                 return Err(ExecError::StalePlan);
             }
+            Message::Failed(failed)
+                if failed.kind == zup_protocol::WorkerFailure::RecoveryRequired =>
+            {
+                return Err(ExecError::RecoveryRequired(failed.message));
+            }
             Message::Failed(failed) => {
                 return Err(ExecError::Worker(format!(
                     "{:?}: {}",
@@ -646,10 +651,13 @@ fn drive_loopback(
         control.map(|control| &control.cancellation),
     );
     drop(client);
-    match worker.join() {
-        Ok(Ok(_)) => outcome,
-        Ok(Err(error)) => Err(ExecError::Worker(error.to_string())),
-        Err(_) => Err(ExecError::Worker("the worker thread failed".into())),
+    let finished = worker
+        .join()
+        .map_err(|_| ExecError::Worker("the worker thread failed".into()))
+        .and_then(|result| result.map_err(into_run_error));
+    match (outcome, finished) {
+        (Ok(outcome), Ok(_)) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
 }
 

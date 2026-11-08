@@ -2,9 +2,10 @@ use zup_plugin_abi as abi;
 
 pub use super::exports::zup::plugin::planner::{
     ChangedServiceState, FileAssociation, GeneratedFile, InitialServiceState, Launcher,
-    LauncherLocation, OpenrcFailurePolicy, Protocol, Service, ServiceExecution,
-    ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart, SystemdFailurePolicy,
-    SystemdRestartCondition, SystemdUser, WindowsFailurePolicy, WindowsServiceAccount,
+    LauncherLocation, OpenrcFailurePolicy, OpenrcTimeouts, Protocol, Service, ServiceExecution,
+    ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart, ServiceTimeouts,
+    SystemdFailurePolicy, SystemdRestartCondition, SystemdTimeouts, SystemdUser,
+    WindowsFailurePolicy, WindowsServiceAccount, WindowsTimeouts,
 };
 use super::exports::zup::plugin::planner::{PathEntry, PluginError, ResourceItem};
 
@@ -116,8 +117,7 @@ impl Service {
             lifecycle: ServiceLifecycle {
                 install: InitialServiceState::Stopped,
                 change: ChangedServiceState::Preserve,
-                start_timeout_seconds: 90,
-                stop_timeout_seconds: 90,
+                timeouts: None,
             },
         }
     }

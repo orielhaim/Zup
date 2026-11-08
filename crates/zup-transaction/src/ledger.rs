@@ -74,7 +74,7 @@ pub fn validate_ledger_identity(
                 }),
             OwnedResource::PathEntry { value, .. } => matches!(key, ResourceKey::PathEntry { value: identity }
                 if value.target() == &ledger.target && zup_plan::TargetPath::new(ledger.target, identity).is_ok_and(|identity| value == &identity)),
-            OwnedResource::Service { name, previous, installed, requires_files, requires_services, privilege } =>
+            OwnedResource::Service { name, previous, installed, requires_files, requires_services, privilege, timeouts } =>
                 matches!(key, ResourceKey::Service { .. }) && !name.is_empty()
                   && requires_services.len() <= 256
                   && requires_services.iter().collect::<BTreeSet<_>>().len() == requires_services.len()
@@ -84,9 +84,10 @@ pub fn validate_ledger_identity(
                   && requires_files.iter().all(|path| path.target() == &ledger.target
                       && matches!(ledger.resources.get(&ResourceKey::File { destination: path.to_string() }.canonical_for(&ledger.target)),
                           Some(OwnedResource::File { destination, privilege: file_privilege, .. }) if destination == path && file_privilege == privilege))
+                && matches!(installed.as_ref(), zup_plan::ServiceState::Registration { execution, native_timeouts, .. } if timeouts.validate_for(execution).is_ok() && timeouts.native() == *native_timeouts)
                 && [previous, installed].iter().all(|state| match state {
                     zup_plan::ServiceState::Absent => true,
-                    zup_plan::ServiceState::Registration { command, execution, .. } => command.executable.target() == &ledger.target && execution.validate_for(ledger.target).is_ok(),
+                    zup_plan::ServiceState::Registration { command, execution, native_timeouts, .. } => command.executable.target() == &ledger.target && execution.validate_for(ledger.target).is_ok() && native_timeouts.validate_for(execution).is_ok(),
                 }),
             OwnedResource::Protocol { previous, installed, .. } =>
                 matches!(key, ResourceKey::Protocol { .. }) && [previous, installed].iter().all(|state| match state {

@@ -121,6 +121,7 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
 
 fn exact_service() -> ObservedServiceState {
     ObservedServiceState::Service {
+        native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
@@ -128,7 +129,7 @@ fn exact_service() -> ObservedServiceState {
         },
         readiness: Default::default(),
         display_name: "Acme Agent".into(),
-        command: cmd(r"C:\PF\Acme\acme-agent.exe", &[]),
+        command: Box::new(cmd(r"C:\PF\Acme\acme-agent.exe", &[])),
         start: ServiceStart::Automatic,
         runtime_state: None,
     }
@@ -238,6 +239,7 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     let original_service = ServiceState::Registration {
+        native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
@@ -245,7 +247,7 @@ fn launcher_and_service_ownership_decisions() {
         },
         readiness: Default::default(),
         display_name: "Old Agent".into(),
-        command: target.services[0].command.clone(),
+        command: Box::new(target.services[0].command.clone()),
         start: ServiceStart::Manual,
     };
     snapshot.launchers[0].state = ObservedLauncherState::Launcher {
@@ -254,6 +256,7 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
@@ -261,7 +264,7 @@ fn launcher_and_service_ownership_decisions() {
         },
         readiness: Default::default(),
         display_name: "Old Agent".into(),
-        command: target.services[0].command.clone(),
+        command: Box::new(target.services[0].command.clone()),
         start: ServiceStart::Manual,
         runtime_state: None,
     };
@@ -287,6 +290,10 @@ fn launcher_and_service_ownership_decisions() {
     ledger.resources.insert(
         target.services[0].key.clone(),
         OwnedResource::Service {
+            timeouts: zup_core::ServiceTimeouts::Windows {
+                start_observation_seconds: 90,
+                stop_observation_seconds: 90,
+            },
             requires_files: Vec::new(),
             requires_services: Vec::new(),
             name: target.services[0].name.to_string(),
@@ -313,6 +320,7 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
         execution: zup_core::ServiceExecution::Windows {
@@ -320,7 +328,7 @@ fn launcher_and_service_ownership_decisions() {
         },
         readiness: Default::default(),
         display_name: "Old Agent".into(),
-        command: target.services[0].command.clone(),
+        command: Box::new(target.services[0].command.clone()),
         start: ServiceStart::Manual,
         runtime_state: None,
     };

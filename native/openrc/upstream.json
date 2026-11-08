@@ -1,0 +1,9 @@
+{
+  "version": "0.63.2",
+  "commit": "b3a99e01c8bda7e5c2b9a8975a6d36ec3eff370e",
+  "archive_url": "https://codeload.github.com/OpenRC/openrc/tar.gz/b3a99e01c8bda7e5c2b9a8975a6d36ec3eff370e",
+  "archive_sha256": "fedc0a233d0911be7b6eef7dca9c5b5f233296ff45e0935cd759d10f3cc435af",
+  "patch_sha256": "4bf114a2fb35404bc881a50d024b3022df69afe42c10efffa426b3df94f8beb6",
+  "control_protocol": "pidfd-control-v1",
+  "source_date_epoch": 1781356051
+}

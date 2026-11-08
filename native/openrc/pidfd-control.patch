@@ -1,0 +1,1189 @@
+diff --git a/src/librc/librc.c b/src/librc/librc.c
+index ecadd5a..c0ac129 100644
+--- a/src/librc/librc.c
++++ b/src/librc/librc.c
+@@ -1059,8 +1059,10 @@ rc_service_value_set(const char *service, const char *option, const char *value)
+ 	if (!value) {
+ 		unlinkat(optdirfd, option, 0);
+ 	} else if ((fp = do_fopenat(optdirfd, option, O_WRONLY | O_CREAT | O_TRUNC))) {
+-		fprintf(fp, "%s", value);
+-		fclose(fp);
++		if (fprintf(fp, "%s", value) < 0)
++			ret = false;
++		if (fclose(fp) < 0)
++			ret = false;
+ 	} else {
+ 		ret = false;
+ 	}
+diff --git a/src/shared/schedules.c b/src/shared/schedules.c
+index a32d8d3..ed1bc55 100644
+--- a/src/shared/schedules.c
++++ b/src/shared/schedules.c
+@@ -24,6 +24,11 @@
+ #include <ctype.h>
+ #include <errno.h>
+ #include <signal.h>
++#include <poll.h>
++#include <unistd.h>
++#ifdef __linux__
++#include <sys/syscall.h>
++#endif
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -36,6 +41,7 @@
+ #include "queue.h"
+ #include "rc.h"
+ #include "schedules.h"
++#include "timeutils.h"
+ #include "helpers.h"
+ 
+ typedef struct scheduleitem {
+@@ -52,6 +58,14 @@ typedef struct scheduleitem {
+ 
+ static TAILQ_HEAD(, scheduleitem) schedule;
+ 
++int64_t rc_stop_now(void)
++{
++    struct timespec now;
++    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
++        return -1;
++    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++
+ void free_schedulelist(void)
+ {
+ 	SCHEDULEITEM *s1 = TAILQ_FIRST(&schedule);
+@@ -295,46 +309,19 @@ int do_stop(const char *applet, const char *exec, const char *const *argv,
+ 	return nkilled;
+ }
+ 
+-int run_stop_schedule(const char *applet,
+-		const char *exec, const char *const *argv,
+-		pid_t pid, uid_t uid,
+-    bool test, bool progress, bool quiet)
++typedef int (*stop_target_fn)(const char *, const void *, int, bool, bool);
++
++static int run_schedule(const char *applet, stop_target_fn stop_target,
++    const void *target, bool test, bool progress, bool quiet)
+ {
+ 	SCHEDULEITEM *item = TAILQ_FIRST(&schedule);
+ 	int nkilled = 0;
+ 	int tkilled = 0;
+ 	int nrunning = 0;
+-	long nloops, nsecs;
++	int64_t deadline, now, next_progress;
+ 	struct timespec ts;
+-	const char *const *p;
+ 	bool progressed = false;
+ 
+-	if (!(pid > 0 || exec || uid || (argv && *argv)))
+-		return 0;
+-
+-	if (exec) {
+-		einfov("Will stop %s", exec);
+-		syslog(LOG_DEBUG, "Will stop %s", exec);
+-	}
+-	if (pid > 0) {
+-		einfov("Will stop PID %d", pid);
+-		syslog(LOG_DEBUG, "Will stop PID %d", pid);
+-	}
+-	if (uid) {
+-		einfov("Will stop processes owned by UID %d", uid);
+-		syslog(LOG_DEBUG, "Will stop processes owned by UID %d", uid);
+-	}
+-	if (argv && *argv) {
+-		einfovn("Will stop processes of `");
+-		if (rc_yesno(getenv("EINFO_VERBOSE"))) {
+-			for (p = argv; p && *p; p++) {
+-				if (p != argv)
+-					printf(" ");
+-				printf("%s", *p);
+-			}
+-			printf("'\n");
+-		}
+-	}
+ 
+ 	while (item) {
+ 		switch (item->type) {
+@@ -344,8 +331,7 @@ int run_stop_schedule(const char *applet,
+ 
+ 		case SC_SIGNAL:
+ 			nrunning = 0;
+-			nkilled = do_stop(applet, exec, argv, pid, uid, item->value, test,
+-					quiet);
++			nkilled = stop_target(applet, target, item->value, test, quiet);
+ 			if (nkilled == 0) {
+ 				if (tkilled == 0) {
+ 					if (progressed)
+@@ -355,7 +341,7 @@ int run_stop_schedule(const char *applet,
+ 				return tkilled;
+ 			}
+ 			else if (nkilled == -1)
+-				return 0;
++				return -1;
+ 
+ 			tkilled += nkilled;
+ 			break;
+@@ -365,36 +351,34 @@ int run_stop_schedule(const char *applet,
+ 				item = NULL;
+ 				break;
+ 			}
+-
+-			ts.tv_sec = 0;
+-			ts.tv_nsec = POLL_INTERVAL;
+-
+-			for (nsecs = 0; item->type == SC_FOREVER || nsecs < item->value; nsecs++) {
+-				for (nloops = 0;
+-				     nloops < ONE_SECOND / POLL_INTERVAL;
+-				     nloops++)
+-				{
+-					if ((nrunning = do_stop(applet, exec, argv,
+-						    pid, uid, 0, test, quiet)) == 0)
+-						return 0;
+-
+-
+-					if (nanosleep(&ts, NULL) == -1) {
+-						if (progressed) {
+-							printf("\n");
+-							progressed = false;
+-						}
+-						if (errno != EINTR) {
+-							eerror("%s: nanosleep: %s",
+-							    applet, strerror(errno));
+-							return 0;
+-						}
+-					}
+-				}
+-				if (progress) {
++			now = rc_stop_now();
++			if (now < 0)
++				return -1;
++			deadline = item->type == SC_FOREVER ? INT64_MAX :
++			    now + (int64_t)item->value * 1000;
++			next_progress = now + 1000;
++			while ((now = rc_stop_now()) < deadline) {
++				if (now < 0)
++					return -1;
++				nrunning = stop_target(applet, target, 0, test, quiet);
++				if (nrunning == 0)
++					return 0;
++				if (nrunning < 0)
++					return -1;
++				now = rc_stop_now();
++				if (now < 0)
++					return -1;
++				if (now >= deadline)
++					break;
++				ts.tv_sec = 0;
++				ts.tv_nsec = (deadline - now < 20 ? deadline - now : 20) * 1000000;
++				if (nanosleep(&ts, NULL) < 0 && errno != EINTR)
++					return -1;
++				if (progress && rc_stop_now() >= next_progress) {
+ 					printf(".");
+ 					fflush(stdout);
+ 					progressed = true;
++					next_progress = rc_stop_now() + 1000;
+ 				}
+ 			}
+ 			break;
+@@ -426,3 +410,117 @@ int run_stop_schedule(const char *applet,
+ 
+ 	return -nrunning;
+ }
++
++struct matching_target {
++	const char *exec;
++	const char *const *argv;
++	pid_t pid;
++	uid_t uid;
++};
++
++static int stop_matching(const char *applet, const void *opaque, int sig,
++    bool test, bool quiet)
++{
++	const struct matching_target *target = opaque;
++	return do_stop(applet, target->exec, target->argv, target->pid,
++	    target->uid, sig, test, quiet);
++}
++
++int rc_pidfd_open(pid_t pid)
++{
++#if defined(__linux__) && defined(SYS_pidfd_open)
++	return syscall(SYS_pidfd_open, pid, 0);
++#else
++	(void)pid;
++	errno = ENOTSUP;
++	return -1;
++#endif
++}
++
++int rc_pidfd_signal(int fd, int sig)
++{
++#if defined(__linux__) && defined(SYS_pidfd_send_signal)
++	return syscall(SYS_pidfd_send_signal, fd, sig, NULL, 0);
++#else
++	(void)fd;
++	(void)sig;
++	errno = ENOTSUP;
++	return -1;
++#endif
++}
++
++int rc_pidfd_alive(int fd)
++{
++	struct pollfd event = { .fd = fd, .events = POLLIN };
++	int ready;
++
++	if (fd < 0) { errno = EBADF; return -1; }
++
++	do {
++		ready = poll(&event, 1, 0);
++	} while (ready < 0 && errno == EINTR);
++	if (ready < 0 || (event.revents & (POLLERR | POLLNVAL)))
++		return -1;
++	return (event.revents & (POLLIN | POLLHUP)) ? 0 : 1;
++}
++
++static int stop_pidfd(const char *applet, const void *opaque, int sig,
++    bool test, bool quiet)
++{
++	const int fd = *(const int *)opaque;
++	int alive = rc_pidfd_alive(fd);
++
++	(void)applet;
++	(void)quiet;
++	if (alive <= 0 || !sig || test)
++		return alive;
++	if (rc_pidfd_signal(fd, sig) == 0)
++		return 1;
++	return errno == ESRCH ? 0 : -1;
++}
++
++int run_stop_schedule(const char *applet,
++    const char *exec, const char *const *argv, pid_t pid, uid_t uid,
++    bool test, bool progress, bool quiet)
++{
++	const struct matching_target target = { exec, argv, pid, uid };
++	const char *const *p;
++	if (!(pid > 0 || exec || uid || (argv && *argv)))
++		return 0;
++
++	if (exec) {
++		einfov("Will stop %s", exec);
++		syslog(LOG_DEBUG, "Will stop %s", exec);
++	}
++	if (pid > 0) {
++		einfov("Will stop PID %d", pid);
++		syslog(LOG_DEBUG, "Will stop PID %d", pid);
++	}
++	if (uid) {
++		einfov("Will stop processes owned by UID %d", uid);
++		syslog(LOG_DEBUG, "Will stop processes owned by UID %d", uid);
++	}
++	if (argv && *argv) {
++		einfovn("Will stop processes of `");
++		if (rc_yesno(getenv("EINFO_VERBOSE"))) {
++			for (p = argv; p && *p; p++) {
++				if (p != argv)
++					printf(" ");
++				printf("%s", *p);
++			}
++			printf("'\n");
++		}
++	}
++
++	return run_schedule(applet, stop_matching, &target, test, progress, quiet);
++}
++
++int run_stop_schedule_pidfd(const char *applet, int pidfd,
++    bool test, bool progress, bool quiet)
++{
++	if (pidfd < 0) {
++		errno = EBADF;
++		return -1;
++	}
++	return run_schedule(applet, stop_pidfd, &pidfd, test, progress, quiet);
++}
+diff --git a/src/shared/schedules.h b/src/shared/schedules.h
+index 43cf12f..11603b7 100644
+--- a/src/shared/schedules.h
++++ b/src/shared/schedules.h
+@@ -14,6 +14,7 @@
+ #define __RC_SCHEDULES_H
+ 
+ #include <stdbool.h>
++#include <stdint.h>
+ #include <sys/types.h>
+ 
+ void free_schedulelist(void);
+@@ -26,4 +27,12 @@ int run_stop_schedule(const char *applet,
+ 		pid_t pid, uid_t uid,
+ 		bool test, bool progress, bool quiet);
+ 
++int64_t rc_stop_now(void);
++int rc_pidfd_open(pid_t pid);
++int rc_pidfd_signal(int fd, int sig);
++int rc_pidfd_alive(int fd);
++
++int run_stop_schedule_pidfd(const char *applet, int pidfd,
++    bool test, bool progress, bool quiet);
++
+ #endif
+diff --git a/src/supervise-daemon/supervise-daemon.c b/src/supervise-daemon/supervise-daemon.c
+index d896a69..7331279 100644
+--- a/src/supervise-daemon/supervise-daemon.c
++++ b/src/supervise-daemon/supervise-daemon.c
+@@ -24,6 +24,7 @@
+ #include <grp.h>
+ #include <pwd.h>
+ #include <signal.h>
++#include <poll.h>
+ #include <stddef.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -36,6 +37,7 @@
+ #endif
+ #include <syslog.h>
+ #include <sys/ioctl.h>
++#include <sys/file.h>
+ #include <sys/resource.h>
+ #include <sys/stat.h>
+ #include <sys/wait.h>
+@@ -81,6 +83,14 @@ enum {
+   LONGOPT_NOTIFY,
+   LONGOPT_RESPAWN_DELAY_STEP,
+   LONGOPT_RESPAWN_DELAY_CAP,
++  LONGOPT_PIDFD_CONTROL,
++  LONGOPT_NO_RESPAWN,
++  LONGOPT_SHUTDOWN,
++  LONGOPT_SHUTDOWN_TIMEOUT,
++  LONGOPT_CONTROL_FEATURES,
++  LONGOPT_EXPECTED_INSTANCE,
++  LONGOPT_EXPECTED_CHILD,
++  LONGOPT_START_TIMEOUT,
+ };
+ 
+ const char *applet = NULL;
+@@ -119,6 +129,14 @@ const struct option longopts[] = {
+ 	{ "stderr-logger",1, NULL, LONGOPT_STDERR_LOGGER},
+ 	{ "reexec",       0, NULL, '3'},
+ 	{ "notify",       1, NULL, LONGOPT_NOTIFY},
++	{ "pidfd-control", 0, NULL, LONGOPT_PIDFD_CONTROL},
++	{ "no-respawn", 0, NULL, LONGOPT_NO_RESPAWN},
++	{ "shutdown", 0, NULL, LONGOPT_SHUTDOWN},
++	{ "shutdown-timeout", 1, NULL, LONGOPT_SHUTDOWN_TIMEOUT},
++	{ "control-features", 0, NULL, LONGOPT_CONTROL_FEATURES},
++	{ "expected-instance", 1, NULL, LONGOPT_EXPECTED_INSTANCE},
++	{ "expected-child", 1, NULL, LONGOPT_EXPECTED_CHILD},
++	{ "start-timeout", 1, NULL, LONGOPT_START_TIMEOUT},
+ 	longopts_COMMON
+ };
+ const char * const longopts_help[] = {
+@@ -153,6 +171,14 @@ const char * const longopts_help[] = {
+ 	"Redirect stderr to process",
+ 	"reexec (used internally)",
+ 	"Configures experimental notification behaviour",
++	"Require identity-safe pidfd control of the foreground child",
++	"Do not respawn the foreground child",
++	"Shut down through the supervisor control FIFO",
++	"Bound waiting for supervisor shutdown in seconds",
++	"Print available native control features",
++	"Require this exact controller instance before shutdown",
++	"Require this foreground PID:start-ticks:sequence before shutdown",
++	"Bound foreground exec handoff in seconds",
+ 	longopts_help_COMMON
+ };
+ const char *usagestring = NULL;
+@@ -182,6 +208,27 @@ static char *stdout_process = NULL;
+ static int tty_fd = -1;
+ #endif
+ static pid_t child_pid;
++static int child_pidfd = -1;
++static uint64_t child_generation_counter;
++static uint64_t child_start_ticks;
++static pid_t reaped_child_pid;
++static uint64_t reaped_child_ticks, reaped_child_sequence;
++static bool strict_pidfd = false;
++static int start_timeout = 30;
++static int64_t worker_start_deadline = 0;
++static bool no_respawn = false;
++static int ready_pipe[2] = { -1, -1 };
++static int worker_gate = -1;
++static int worker_exec = -1;
++static int control_lock = -1;
++static char stop_request[33];
++static char *resultpath;
++static char *identitypath;
++static char *childpath;
++static char controller_instance[33];
++static char control_frame[128];
++static size_t control_length;
++
+ static int respawn_count = 0;
+ static int64_t respawn_delay; /* default set inside main() */
+ static int64_t respawn_delay_step = TM_MS(128);
+@@ -240,7 +287,8 @@ static void handle_signal(int sig)
+ 
+ 	switch (sig) {
+ 	case SIGALRM:
+-		do_healthcheck = 1;
++		if (!strict_pidfd)
++			do_healthcheck = 1;
+ 		break;
+ 	case SIGCHLD:
+ 		if (exiting)
+@@ -257,6 +305,10 @@ static void handle_signal(int sig)
+ 		exiting = 1;
+ 		break;
+ 	default:
++		if (strict_pidfd) {
++			exiting = 1;
++			break;
++		}
+ 		syslog(LOG_WARNING, "caught signal %d", sig);
+ 		re_exec_supervisor();
+ 	}
+@@ -637,6 +689,349 @@ RC_NORETURN static void child_process(char *exec, char **argv)
+ 	eerrorx("%s: failed to exec `%s': %s", applet, exec,strerror(errno));
+ }
+ 
++
++static bool random_identity(char value[33])
++{
++	unsigned char bytes[16];
++	size_t offset = 0;
++	ssize_t count;
++	int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
++	int i;
++	if (fd < 0)
++		return false;
++	while (offset < sizeof(bytes)) {
++		count = read(fd, bytes + offset, sizeof(bytes) - offset);
++		if (count < 0 && errno == EINTR)
++			continue;
++		if (count <= 0) { close(fd); return false; }
++		offset += count;
++	}
++	close(fd);
++	for (i = 0; i < 16; ++i)
++		snprintf(value + i * 2, 3, "%02x", bytes[i]);
++	return true;
++}
++
++static uint64_t process_start_ticks(pid_t pid)
++{
++	char path[64], stat[4096], *field, *tail;
++	int fd, i;
++	ssize_t size;
++	uint64_t ticks;
++	snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
++	fd = open(path, O_RDONLY | O_CLOEXEC);
++	if (fd < 0)
++		return 0;
++	size = read(fd, stat, sizeof(stat) - 1);
++	close(fd);
++	if (size <= 0)
++		return 0;
++	stat[size] = 0;
++	field = strrchr(stat, ')');
++	if (!field || field[1] != ' ')
++		return 0;
++	field += 2;
++	for (i = 0; i < 19; ++i) {
++		field = strchr(field, ' ');
++		if (!field)
++			return 0;
++		++field;
++	}
++	errno = 0;
++	ticks = strtoull(field, &tail, 10);
++	return errno || tail == field || *tail != ' ' ? 0 : ticks;
++}
++
++static bool publish_state(const char *path, const char *record)
++{
++	char *temporary;
++	int fd, saved;
++	size_t offset = 0, length = strlen(record);
++	ssize_t count;
++	bool written = true;
++
++	xasprintf(&temporary, "%s.new", path);
++	/* The controller lock permits one writer for this service. */
++	unlink(temporary);
++	fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
++	if (fd < 0) { free(temporary); return false; }
++	while (offset < length) {
++		count = write(fd, record + offset, length - offset);
++		if (count < 0 && errno == EINTR)
++			continue;
++		if (count <= 0) { written = false; break; }
++		offset += count;
++	}
++	if (close(fd) < 0)
++		written = false;
++	if (written && rename(temporary, path) < 0)
++		written = false;
++	saved = errno;
++	if (!written)
++		unlink(temporary);
++	free(temporary);
++	errno = saved;
++	return written;
++}
++
++static bool publish_controller(void)
++{
++	char record[160];
++	uint64_t ticks = process_start_ticks(getpid());
++
++	if (!ticks || !controller_instance[0])
++		return false;
++	snprintf(record, sizeof(record), "%s %ld %"PRIu64"\n",
++	    controller_instance, (long)getpid(), ticks);
++	return publish_state(identitypath, record);
++}
++
++static bool publish_child(const char *state)
++{
++	char record[192];
++	pid_t pid = child_pid ? child_pid : reaped_child_pid;
++	uint64_t ticks = child_pid ? child_start_ticks : reaped_child_ticks;
++
++	snprintf(record, sizeof(record), "%s %ld %"PRIu64" %"PRIu64" %s\n",
++	    controller_instance, (long)pid, ticks, child_generation_counter, state);
++	return publish_state(childpath, record);
++}
++
++static int retain_controller(pid_t *pid)
++{
++	char record[160], executable[64], extra;
++	struct stat identity, own_image, image;
++	long number;
++	uint64_t ticks;
++	int fd, handle;
++	ssize_t size;
++
++	fd = open(identitypath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
++	if (fd < 0)
++		return -1;
++	if (fstat(fd, &identity) < 0 || !S_ISREG(identity.st_mode) ||
++	    identity.st_uid != geteuid() || (identity.st_mode & 077) != 0) {
++		close(fd); errno = EPERM; return -1;
++	}
++	size = read(fd, record, sizeof(record) - 1);
++	close(fd);
++	if (size <= 0 || size == sizeof(record) - 1)
++		return -1;
++	record[size] = 0;
++	if (sscanf(record, "%32s %ld %"SCNu64" %c", controller_instance,
++	    &number, &ticks, &extra) != 3 || number <= 0 || number > INT_MAX ||
++	    strlen(controller_instance) != 32 ||
++	    strspn(controller_instance, "0123456789abcdef") != 32)
++		return -1;
++	*pid = (pid_t)number;
++	handle = rc_pidfd_open(*pid);
++	if (handle < 0)
++		return -1;
++	snprintf(executable, sizeof(executable), "/proc/%ld/exe", number);
++	if (process_start_ticks(*pid) != ticks ||
++	    stat("/proc/self/exe", &own_image) < 0 || stat(executable, &image) < 0 ||
++	    own_image.st_dev != image.st_dev || own_image.st_ino != image.st_ino ||
++	    process_start_ticks(*pid) != ticks || rc_pidfd_alive(handle) != 1) {
++		close(handle); errno = ESTALE; return -1;
++	}
++	return handle;
++}
++
++static int control_features(void)
++{
++	int fd = rc_pidfd_open(getpid());
++	if (fd < 0)
++		return EXIT_FAILURE;
++	if (rc_pidfd_signal(fd, 0) < 0) {
++		close(fd);
++		return EXIT_FAILURE;
++	}
++	close(fd);
++	puts("pidfd-control-v1");
++	return EXIT_SUCCESS;
++}
++
++static bool release_worker(void)
++{
++	struct pollfd event = { .fd = worker_exec, .events = POLLIN };
++	char value;
++	bool ready = false;
++	int result;
++	int64_t deadline = worker_start_deadline, remaining;
++
++	if (worker_gate < 0)
++		return true;
++	if (rc_stop_now() < deadline && write(worker_gate, "1", 1) == 1) {
++		do {
++			remaining = deadline - rc_stop_now();
++			if (remaining <= 0) { result = 0; break; }
++			result = poll(&event, 1, (int)remaining);
++		} while (result < 0 && errno == EINTR);
++		ready = result > 0 && read(worker_exec, &value, 1) == 0 &&
++		    rc_pidfd_alive(child_pidfd) == 1 && rc_stop_now() < deadline;
++		if (ready && !publish_child("running"))
++			ready = false;
++	}
++	close(worker_gate);
++	close(worker_exec);
++	worker_gate = worker_exec = -1;
++	if (!ready) {
++		no_respawn = true;
++		exiting = 1;
++	}
++	return ready;
++}
++
++static pid_t fork_service(const sigset_t *child_signals)
++{
++	sigset_t blocked, previous;
++	struct sigaction action;
++	int gate[2], exec_pipe[2], status, saved;
++	char release, counter[32];
++	pid_t pid;
++
++	if (!strict_pidfd)
++		return fork();
++	if (pipe2(gate, O_CLOEXEC) < 0)
++		return -1;
++	if (pipe2(exec_pipe, O_CLOEXEC) < 0) {
++		close(gate[0]); close(gate[1]);
++		return -1;
++	}
++	sigemptyset(&blocked);
++	sigaddset(&blocked, SIGCHLD);
++	if (sigprocmask(SIG_BLOCK, &blocked, &previous) < 0)
++		eerrorx("Unable to block child reaping: %s", strerror(errno));
++	pid = fork();
++	if (pid > 0) {
++		close(gate[0]); close(exec_pipe[1]);
++		child_pid = pid;
++		child_pidfd = rc_pidfd_open(pid);
++		child_start_ticks = process_start_ticks(pid);
++		if (child_pidfd >= 0 && !child_start_ticks) {
++			close(child_pidfd); child_pidfd = -1; errno = ESTALE;
++		}
++		if (child_pidfd >= 0) {
++			if (child_generation_counter == UINT64_MAX) {
++				close(child_pidfd); child_pidfd = -1; errno = EOVERFLOW;
++			} else {
++				snprintf(counter, sizeof(counter), "%"PRIu64, ++child_generation_counter);
++				if (!rc_service_value_set(svcname, "child_generation", counter) || !publish_child("pending")) {
++					close(child_pidfd); child_pidfd = -1;
++				}
++			}
++		}
++		if (child_pidfd < 0) {
++			saved = errno;
++			close(gate[1]); close(exec_pipe[0]);
++			do status = waitpid(pid, NULL, 0); while (status < 0 && errno == EINTR);
++			pid = -1;
++			errno = saved;
++		} else {
++			worker_gate = gate[1];
++			worker_exec = exec_pipe[0];
++		}
++	} else if (pid == 0) {
++		close(gate[1]); close(exec_pipe[0]);
++		if (control_lock >= 0)
++			close(control_lock);
++		memset(&action, 0, sizeof(action));
++		action.sa_handler = SIG_DFL;
++		sigemptyset(&action.sa_mask);
++		sigaction(SIGCHLD, &action, NULL);
++		sigaction(SIGTERM, &action, NULL);
++		sigaction(SIGALRM, &action, NULL);
++		do status = read(gate[0], &release, 1); while (status < 0 && errno == EINTR);
++		close(gate[0]);
++		if (status != 1 || release != '1')
++			_exit(EXIT_FAILURE);
++	} else {
++		close(gate[0]); close(gate[1]);
++		close(exec_pipe[0]); close(exec_pipe[1]);
++	}
++	if (sigprocmask(SIG_SETMASK,
++	    pid == 0 && child_signals ? child_signals : &previous, NULL) < 0)
++		eerrorx("Unable to restore child signal mask: %s", strerror(errno));
++	return pid;
++}
++
++
++static void stop_result(bool success)
++{
++	char result[96];
++	if (!stop_request[0])
++		return;
++	snprintf(result, sizeof(result), "%s %ld %s", stop_request,
++	    (long)getpid(), success ? "stopped" : "pending");
++	if (!publish_state(resultpath, result))
++		syslog(LOG_ERR, "Unable to publish shutdown result: %s", strerror(errno));
++}
++
++static void strict_control(int timeout)
++{
++	struct pollfd events[2] = {
++		{ .fd = fifo_fd, .events = POLLIN },
++		{ .fd = child_pidfd, .events = POLLIN }
++	};
++	char input[2048];
++	ssize_t count, at;
++	int sig, ready;
++	char instance[33], request[33], extra;
++	long expected_pid;
++	uint64_t expected_ticks, expected_generation;
++
++	ready = poll(events, 2, timeout);
++	if (ready < 0) {
++		if (errno != EINTR)
++			eerrorx("Unable to poll supervisor control: %s", strerror(errno));
++		return;
++	}
++	if (events[0].revents & (POLLERR | POLLHUP | POLLNVAL))
++		eerrorx("Supervisor control FIFO became unavailable");
++	if (!(events[0].revents & POLLIN))
++		return;
++	count = read(fifo_fd, input, sizeof(input));
++	if (count < 0) {
++		if (errno != EINTR && errno != EAGAIN)
++			eerrorx("Unable to read supervisor control: %s", strerror(errno));
++		return;
++	}
++	for (at = 0; at < count; ++at) {
++		if (input[at] == '\n') {
++			control_frame[control_length] = 0;
++			if (sscanf(control_frame, "stop %32s %32s %ld %"SCNu64" %"SCNu64" %c", instance, request, &expected_pid, &expected_ticks, &expected_generation, &extra) == 5 &&
++			    !strcmp(instance, controller_instance) && strlen(request) == 32 &&
++			    strspn(request, "0123456789abcdef") == 32 &&
++			    (expected_pid == 0 || (expected_pid == child_pid && expected_ticks > 0 &&
++			    child_start_ticks == expected_ticks && expected_generation == child_generation_counter && rc_pidfd_alive(child_pidfd) == 1) ||
++			    (child_pid == 0 && child_pidfd == -1 && expected_pid == reaped_child_pid &&
++			    expected_ticks == reaped_child_ticks && expected_generation == reaped_child_sequence &&
++			    expected_generation == child_generation_counter))) {
++				memcpy(stop_request, request, 33);
++				exiting = 1;
++				no_respawn = true;
++			} else if (!exiting && child_pidfd >= 0 &&
++			    sscanf(control_frame, "sig %d", &sig) == 1 &&
++			    sig >= 0 && sig < NSIG) {
++				if (rc_pidfd_signal(child_pidfd, sig) < 0 && errno != ESRCH)
++					syslog(LOG_ERR, "Unable to signal owned child: %s", strerror(errno));
++			}
++			control_length = 0;
++		} else if (control_length < sizeof(control_frame) - 1) {
++			control_frame[control_length++] = input[at];
++		}
++	}
++}
++
++static void strict_respawn_wait(int64_t delay)
++{
++	int64_t deadline = tm_now() + delay;
++	int64_t remaining;
++
++	while (!exiting && (remaining = deadline - tm_now()) > 0)
++		strict_control(remaining > INT_MAX ? INT_MAX : (int)remaining);
++}
++
+ RC_NORETURN static void supervisor(char *exec, char **argv)
+ {
+ 	FILE *fp;
+@@ -648,7 +1043,9 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 	int healthcheck_respawn;
+ 	int i;
+ 	int nkilled;
++	bool executed;
+ 	int sig_send;
++	bool child_exited;
+ 	pid_t health_pid;
+ 	pid_t wait_pid;
+ 	sigset_t old_signals;
+@@ -688,6 +1085,21 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 	close(tty_fd);
+ #endif
+ 
++	if (strict_pidfd) {
++		fifo_fd = open(fifopath, O_RDWR | O_NONBLOCK | O_CLOEXEC);
++		if (fifo_fd < 0)
++			eerrorx("Unable to open supervisor control FIFO: %s", strerror(errno));
++		if (!publish_controller())
++			eerrorx("Unable to publish controller instance before exec");
++		executed = release_worker();
++		if (ready_pipe[1] >= 0) {
++			if (write(ready_pipe[1], executed ? "1" : "0", 1) != 1)
++				syslog(LOG_ERR, "Supervisor startup reply was lost");
++			close(ready_pipe[1]);
++			ready_pipe[1] = -1;
++		}
++	}
++
+ 	/*
+ 	 * Supervisor main loop
+ 	 */
+@@ -698,6 +1110,9 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 	failing = 0;
+ 	while (!exiting) {
+ 		healthcheck_respawn = 0;
++		if (strict_pidfd) {
++			strict_control(-1);
++		} else {
+ 		fifo_fd = open(fifopath, O_RDONLY);
+ 		if (fifo_fd > 0) {
+ 			memset(buf, 0, sizeof(buf));
+@@ -721,7 +1136,9 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 			}
+ 			continue;
+ 		}
+-		if (do_healthcheck) {
++		}
++
++		if (!strict_pidfd && do_healthcheck) {
+ 			do_healthcheck = 0;
+ 			alarm(0);
+ 			if (verbose)
+@@ -745,6 +1162,8 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 			}
+ 		}
+ 		if (exiting) {
++			if (strict_pidfd)
++				break;
+ 			alarm(0);
+ 			syslog(LOG_INFO, "stopping %s, pid %d", exec, child_pid);
+ 			nkilled = run_stop_schedule(applet, NULL, NULL, child_pid, 0,
+@@ -754,7 +1173,8 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 			continue;
+ 		}
+ 		wait_pid = waitpid(child_pid, &i, WNOHANG);
+-		if (wait_pid == child_pid) {
++		child_exited = wait_pid == child_pid;
++		if (child_exited) {
+ 			if (WIFEXITED(i))
+ 				syslog(LOG_WARNING, "%s, pid %d, exited with return code %d",
+ 						exec, child_pid, WEXITSTATUS(i));
+@@ -762,7 +1182,22 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 				syslog(LOG_WARNING, "%s, pid %d, terminated by signal %d",
+ 						exec, child_pid, WTERMSIG(i));
+ 		}
+-		if (wait_pid == child_pid || healthcheck_respawn) {
++		if (child_exited && strict_pidfd) {
++			reaped_child_pid = child_pid;
++			reaped_child_ticks = child_start_ticks;
++			reaped_child_sequence = child_generation_counter;
++			close(child_pidfd);
++			child_pidfd = -1;
++			child_pid = 0;
++			if (!publish_child("reaped"))
++				syslog(LOG_ERR, "Unable to publish reaped child identity");
++		}
++		if (child_exited && no_respawn) {
++			exiting = 1;
++			failing = !WIFEXITED(i) || WEXITSTATUS(i) != 0;
++			continue;
++		}
++		if (child_exited || healthcheck_respawn) {
+ 			do_healthcheck = 0;
+ 			healthcheck_respawn = 0;
+ 			alarm(0);
+@@ -785,10 +1220,14 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 			sleep_for = respawn_delay + (respawn_delay_step * respawn_count);
+ 			if (respawn_delay_step > 0 && sleep_for > respawn_delay_cap)
+ 				sleep_for = respawn_delay_cap;
+-			tm_sleep(sleep_for, TM_NO_EINTR);
++			if (strict_pidfd)
++				strict_respawn_wait(sleep_for);
++			else
++				tm_sleep(sleep_for, TM_NO_EINTR);
+ 			if (exiting)
+ 				continue;
+-			child_pid = fork();
++			worker_start_deadline = rc_stop_now() + (int64_t)start_timeout * 1000;
++			child_pid = fork_service(&old_signals);
+ 			if (child_pid == -1) {
+ 				syslog(LOG_ERR, "%s: fork: %s", applet, strerror(errno));
+ 				exit(EXIT_FAILURE);
+@@ -802,6 +1241,8 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 				sigaction(SIGTERM, &sa, NULL);
+ 				child_process(exec, argv);
+ 			}
++			if (strict_pidfd)
++				(void)release_worker();
+ 			if (healthcheckdelay)
+ 				alarm(healthcheckdelay);
+ 			else if (healthchecktimer)
+@@ -809,6 +1250,24 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 		}
+ 	}
+ 
++	if (strict_pidfd && child_pidfd >= 0) {
++		alarm(0);
++		while (run_stop_schedule_pidfd(applet, child_pidfd, false, false, true) < 0 ||
++		    rc_pidfd_alive(child_pidfd) != 0) {
++			syslog(LOG_ERR, "Owned child shutdown remains pending");
++			stop_result(false);
++			exiting = 0;
++			while (!exiting && rc_pidfd_alive(child_pidfd) > 0)
++				strict_control(-1);
++		}
++
++		close(child_pidfd);
++		child_pidfd = -1;
++	}
++	if (strict_pidfd)
++		stop_result(true);
++	if (strict_pidfd && fifo_fd >= 0)
++		close(fifo_fd);
+ 	if (svcname) {
+ 		rc_service_daemon_set(svcname, exec, (const char *const *)argv,
+ 				pidfile, false);
+@@ -821,6 +1280,10 @@ RC_NORETURN static void supervisor(char *exec, char **argv)
+ 		unlink(pidfile);
+ 	if (fifopath)
+ 		unlink(fifopath);
++	if (strict_pidfd) {
++		unlink(identitypath);
++		unlink(childpath);
++	}
+ 	exit(EXIT_SUCCESS);
+ }
+ 
+@@ -833,6 +1296,17 @@ int main(int argc, char **argv)
+ 	bool stop = false;
+ 	bool reexec = false;
+ 	bool sendsig = false;
++	char request[128], expected[96], shutdown_result[96];
++	const char *expected_instance = NULL;
++	long expected_child = 0;
++	uint64_t expected_ticks = 0, expected_generation = 0;
++	char expected_extra;
++	int client_lock, result_fd;
++	ssize_t result_size;
++	bool shutdown = false;
++	int shutdown_timeout = 120;
++	struct pollfd event;
++	int64_t shutdown_deadline, shutdown_remaining;
+ 	char *exec = NULL;
+ 	char *retry = NULL;
+ 	int sig = SIGTERM;
+@@ -860,6 +1334,8 @@ int main(int argc, char **argv)
+ 	const char *respawn_period_str = "12sec";
+ 
+ 	applet = basename_c(argv[0]);
++	if (argc == 2 && !strcmp(argv[1], "--control-features"))
++		return control_features();
+ 	atexit(cleanup);
+ 	svcname = getenv("RC_SVCNAME");
+ 	if (!svcname)
+@@ -1122,9 +1598,56 @@ int main(int argc, char **argv)
+ 				eerrorx("Invalid respawn-delay-cap value '%s'", optarg);
+ 			break;
+ 
++		case LONGOPT_EXPECTED_INSTANCE:
++			expected_instance = optarg;
++			if (strlen(optarg) != 32 || strspn(optarg, "0123456789abcdef") != 32)
++				eerrorx("Invalid expected controller identity");
++			break;
++		case LONGOPT_EXPECTED_CHILD:
++			if (sscanf(optarg, "%ld:%"SCNu64":%"SCNu64"%c", &expected_child, &expected_ticks, &expected_generation, &expected_extra) != 3 ||
++			    expected_child <= 0 || expected_child > INT_MAX || expected_ticks == 0 || expected_generation == 0)
++				eerrorx("Invalid expected child generation");
++			break;
++		case LONGOPT_PIDFD_CONTROL:
++			strict_pidfd = true;
++			break;
++		case LONGOPT_NO_RESPAWN:
++			no_respawn = true;
++			break;
++		case LONGOPT_SHUTDOWN:
++			shutdown = true;
++			break;
++		case LONGOPT_START_TIMEOUT:
++			errno = 0;
++			x = strtol(optarg, &p, 10);
++			if (errno || *p || x < 1 || x > 3600)
++				eerrorx("Invalid foreground exec handoff bound");
++			start_timeout = x;
++			break;
++		case LONGOPT_SHUTDOWN_TIMEOUT:
++			errno = 0;
++			x = strtol(optarg, &p, 10);
++			if (errno || *p || x < 1 || x > 86400)
++				eerrorx("Invalid shutdown wait bound");
++			shutdown_timeout = x;
++			break;
++		case LONGOPT_CONTROL_FEATURES:
++			return control_features();
++
+ 		case_RC_COMMON_GETOPT
+ 		}
+ 
++	if (strict_pidfd && (healthcheckdelay || healthchecktimer))
++		eerrorx("pidfd control does not support healthcheck callbacks");
++	if (strict_pidfd) {
++		int probe = rc_pidfd_open(getpid());
++		if (probe < 0 || rc_pidfd_signal(probe, 0) < 0)
++			eerrorx("pidfd control is unavailable: %s", strerror(errno));
++		close(probe);
++	}
++	if ((expected_instance != NULL) != (expected_child > 0) ||
++	    (expected_instance && !shutdown))
++		eerrorx("Expected runtime identity requires guarded shutdown");
+ 	verbose = rc_yesno(getenv ("EINFO_VERBOSE"));
+ 	endpwent();
+ 	argc -= optind;
+@@ -1148,11 +1671,26 @@ int main(int argc, char **argv)
+ 	if (!pidfile)
+ 		xasprintf(&pidfile, "%s/supervise-%s.pid", rc_is_user() ? getenv("XDG_RUNTIME_DIR") : "/var/run", svcname);
+ 	xasprintf(&fifopath, "%s/supervise-%s.ctl", rc_svcdir(), svcname);
+-	if (mkfifo(fifopath, 0600) == -1 && errno != EEXIST)
++	xasprintf(&resultpath, "%s/supervise-%s.result", rc_svcdir(), svcname);
++	xasprintf(&identitypath, "%s/supervise-%s.identity", rc_svcdir(), svcname);
++	xasprintf(&childpath, "%s/supervise-%s.child", rc_svcdir(), svcname);
++	if (start && strict_pidfd) {
++		xasprintf(&tmp, "%s/supervise-%s.lock", rc_svcdir(), svcname);
++		control_lock = open(tmp, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
++		free(tmp);
++		if (control_lock < 0 || flock(control_lock, LOCK_EX | LOCK_NB) < 0)
++			eerrorx("Identity-safe controller is already active or cannot be locked");
++	}
++
++	if (!shutdown && mkfifo(fifopath, 0600) == -1 && errno != EEXIST)
+ 		eerrorx("%s: unable to create control fifo: %s",
+ 				applet, strerror(errno));
+ 
+ 	if (reexec) {
++		str = rc_service_value_get(svcname, "pidfd_control");
++		if (str && !strcmp(str, "yes"))
++			eerrorx("pidfd supervision cannot be reconstructed by reexec");
++		free(str);
+ 		str = rc_service_value_get(svcname, "argc");
+ 		sscanf(str, "%d", &child_argc);
+ 		child_argv = xmalloc((child_argc + 1) * sizeof(char *));
+@@ -1223,7 +1761,7 @@ int main(int argc, char **argv)
+ 		} else
+ 			eerrorx("%s: nothing to start", applet);
+ 
+-		pid = get_pid(applet, pidfile);
++		pid = strict_pidfd ? -1 : get_pid(applet, pidfile);
+ 		if (pid != -1)
+ 			if (do_stop(applet, exec, (const char * const *)argv, pid, uid,
+ 						0, false, true) > 0)
+@@ -1268,11 +1806,37 @@ int main(int argc, char **argv)
+ 		rc_service_value_set(svcname, "respawn_delay_cap", numbuf);
+ 		snprintf(numbuf, sizeof(numbuf), "%i", respawn_max);
+ 		rc_service_value_set(svcname, "respawn_max", numbuf);
++		if (strict_pidfd) {
++			rc_service_value_set(svcname, "pidfd_control", "yes");
++			if (pipe(ready_pipe) < 0 ||
++			    fcntl(ready_pipe[0], F_SETFD, FD_CLOEXEC) < 0 ||
++			    fcntl(ready_pipe[1], F_SETFD, FD_CLOEXEC) < 0)
++				eerrorx("Unable to establish supervisor readiness: %s", strerror(errno));
++		}
++		worker_start_deadline = rc_stop_now() + (int64_t)start_timeout * 1000;
+ 		child_pid = fork();
+ 		if (child_pid == -1)
+ 			eerrorx("%s: fork: %s", applet, strerror(errno));
+-		if (child_pid != 0)
++		if (child_pid != 0) {
++			if (strict_pidfd) {
++				close(ready_pipe[1]);
++				event.fd = ready_pipe[0];
++				event.events = POLLIN;
++				event.revents = 0;
++				shutdown_remaining = worker_start_deadline - rc_stop_now();
++				do {
++					i = shutdown_remaining > 0 ? poll(&event, 1, (int)shutdown_remaining) : 0;
++					shutdown_remaining = worker_start_deadline - rc_stop_now();
++				} while (i < 0 && errno == EINTR);
++				if (i <= 0 ||
++				    read(ready_pipe[0], numbuf, 1) != 1 || numbuf[0] != '1')
++					eerrorx("Supervisor did not establish identity-safe control");
++				close(ready_pipe[0]);
++			}
+ 			exit(notify_wait(applet, notify) ? EXIT_SUCCESS : EXIT_FAILURE);
++		}
++		if (strict_pidfd)
++			close(ready_pipe[0]);
+ 
+ #ifdef TIOCNOTTY
+ 		tty_fd = open("/dev/tty", O_RDWR);
+@@ -1285,7 +1849,9 @@ int main(int argc, char **argv)
+ 		if (notify.type == NOTIFY_FD)
+ 			close(notify.pipe[0]);
+ 
+-		child_pid = fork();
++		if (strict_pidfd && !random_identity(controller_instance))
++			eerrorx("Unable to allocate controller identity");
++		child_pid = fork_service(NULL);
+ 		if (child_pid == -1)
+ 			eerrorx("%s: fork: %s", applet, strerror(errno));
+ 		else if (child_pid != 0) {
+@@ -1308,6 +1874,54 @@ int main(int argc, char **argv)
+ 			supervisor(exec, argv);
+ 		} else
+ 			child_process(exec, argv);
++	} else if (shutdown) {
++		str = rc_service_value_get(svcname, "pidfd_control");
++		if (!str || strcmp(str, "yes"))
++			eerrorx("Supervisor does not provide identity-safe shutdown");
++		free(str);
++		xasprintf(&tmp, "%s/supervise-%s.client", rc_svcdir(), svcname);
++		client_lock = open(tmp, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
++		free(tmp);
++		if (client_lock < 0 || flock(client_lock, LOCK_EX | LOCK_NB) < 0)
++			eerrorx("Another shutdown observation is active");
++		x = retain_controller(&pid);
++		if (x < 0)
++			eerrorx("Active controller instance cannot be proven");
++		if (expected_instance && strcmp(expected_instance, controller_instance))
++			eerrorx("Controller instance changed before shutdown");
++		if (!random_identity(stop_request))
++			eerrorx("Unable to create shutdown request identity");
++		snprintf(request, sizeof(request), "stop %s %s %ld %"PRIu64" %"PRIu64"\n", controller_instance, stop_request, expected_child, expected_ticks, expected_generation);
++		snprintf(expected, sizeof(expected), "%s %ld stopped", stop_request, (long)pid);
++		fifo_fd = open(fifopath, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
++		if (fifo_fd < 0 || write(fifo_fd, request, strlen(request)) != (ssize_t)strlen(request))
++			eerrorx("Supervisor shutdown could not be submitted: %s", strerror(errno));
++		close(fifo_fd);
++		shutdown_deadline = rc_stop_now() + (int64_t)shutdown_timeout * 1000;
++		while ((i = rc_pidfd_alive(x)) > 0) {
++			shutdown_remaining = shutdown_deadline - rc_stop_now();
++			if (shutdown_remaining <= 0)
++				eerrorx("Supervisor shutdown remains pending");
++			event.fd = x;
++			event.events = POLLIN;
++			event.revents = 0;
++			if (poll(&event, 1, shutdown_remaining > INT_MAX ? INT_MAX : (int)shutdown_remaining) < 0 && errno != EINTR)
++				eerrorx("Supervisor completion cannot be observed: %s", strerror(errno));
++		}
++		close(x);
++		if (i < 0)
++			eerrorx("Supervisor completion could not be established");
++		result_fd = open(resultpath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
++		result_size = result_fd < 0 ? -1 : read(result_fd, shutdown_result, sizeof(shutdown_result) - 1);
++		if (result_fd >= 0)
++			close(result_fd);
++		if (result_size < 0)
++			eerrorx("Owned child shutdown result is unavailable");
++		shutdown_result[result_size] = 0;
++		if (strcmp(shutdown_result, expected))
++			eerrorx("Owned child shutdown was not acknowledged by this controller");
++		unlink(resultpath);
++		exit(EXIT_SUCCESS);
+ 	} else if (stop) {
+ 		pid = get_pid(applet, pidfile);
+ 		if (pid != -1) {
+@@ -1342,7 +1956,7 @@ int main(int argc, char **argv)
+ 		fifo_fd = open(fifopath, O_WRONLY |O_NONBLOCK);
+ 		if (fifo_fd < 0)
+ 			eerrorx("%s: unable to open control fifo %s", applet, strerror(errno));
+-		xasprintf(&str, "sig %d", sig);
++		xasprintf(&str, "sig %d\n", sig);
+ 		x = write(fifo_fd, str, strlen(str));
+ 		if (x == -1) {
+ 			free(tmp);

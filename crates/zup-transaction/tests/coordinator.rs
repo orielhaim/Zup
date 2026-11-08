@@ -7,7 +7,7 @@ use common::{chain_input, sample_app_id, sample_input, sample_plan, sample_versi
 use rstest::rstest;
 use tempfile::TempDir;
 use zup_transaction::{
-    FilesystemTransactionStore, NodeKind, NodeState, OperationId, ReconcileResult,
+    FilesystemTransactionStore, NodeKind, NodeState, OperationId, ReconcileResult, RecoveryPhase,
     TransactionCoordinator, TransactionId, TransactionNode, TransactionOutcome, TransactionPhase,
     TransactionRecord, TransactionStore, compile_transaction, recover,
 };
@@ -416,9 +416,12 @@ fn failure_rolls_back_applied_work_in_reverse_order(
 }
 
 #[rstest]
-#[case::rollback_failure(FakeExecutor::new().fail_on_apply(6).fail_on_rollback(0))]
-#[case::incomplete_mutation(FakeExecutor::new().fail_on_apply(6).reconcile_with(ReconcileResult::Incomplete))]
-fn failed_mutation_or_rollback_requires_recovery(#[case] mut exec: FakeExecutor) {
+#[case::rollback_failure(FakeExecutor::new().fail_on_apply(6).fail_on_rollback(0), RecoveryPhase::RollingBack)]
+#[case::incomplete_mutation(FakeExecutor::new().fail_on_apply(6).reconcile_with(ReconcileResult::Incomplete), RecoveryPhase::Applying)]
+fn failed_mutation_or_rollback_requires_recovery(
+    #[case] mut exec: FakeExecutor,
+    #[case] resume: RecoveryPhase,
+) {
     let (_dir, coord) = coord();
     let plan = compile_transaction(&chain_input()).unwrap();
     let open = coord
@@ -432,16 +435,52 @@ fn failed_mutation_or_rollback_requires_recovery(#[case] mut exec: FakeExecutor)
     let settled = open.execute(&mut exec).unwrap();
     let (final_record, outcome) = (settled.record, settled.outcome);
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
-    assert_eq!(final_record.phase, TransactionPhase::RecoveryRequired);
+    assert_eq!(
+        final_record.phase,
+        TransactionPhase::RecoveryRequired { resume }
+    );
 }
 
-/// Verification is journalled per node, so a crash inside the pass resumes at
-/// the first node that is not yet `Verified` and never re-checks one that is.
-/// `resume_from` is how many nodes the crashed pass had already checked.
+#[rstest]
+#[case::still_ambiguous(ReconcileResult::Ambiguous, TransactionOutcome::RecoveryRequired)]
+#[case::proved_unapplied(ReconcileResult::NotApplied, TransactionOutcome::RolledBack)]
+fn blocked_failed_apply_rechecks_evidence_without_resuming_forward_work(
+    #[case] evidence: ReconcileResult,
+    #[case] expected: TransactionOutcome,
+) {
+    let (_dir, store) = coord_with_store();
+    let coordinator = TransactionCoordinator::new(store.clone());
+    let open = coordinator
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            compile_transaction(&chain_input()).unwrap(),
+        )
+        .unwrap();
+    let mut original = FakeExecutor::new()
+        .fail_on_apply(6)
+        .reconcile_with(ReconcileResult::Ambiguous);
+    let blocked = open.execute(&mut original).unwrap();
+    assert_eq!(blocked.outcome, TransactionOutcome::RecoveryRequired);
+    let failure = blocked.record.failure.clone();
+    let mut retry = FakeExecutor::new().reconcile_with(evidence);
+    let (record, outcome) = recover(blocked.record, &store, &mut retry).unwrap();
+    assert_eq!(outcome, expected);
+    assert_eq!(record.failure, failure);
+    assert!(!retry.reconcile_calls.is_empty());
+    assert!(retry.applied.is_empty());
+    if expected == TransactionOutcome::RecoveryRequired {
+        assert!(retry.rolled_back.is_empty());
+    }
+    record.validate().unwrap();
+}
+
 #[rstest]
 #[case::nothing_checked_yet(0)]
 #[case::first_node_already_checked(1)]
-fn verification_crash_resumes_where_it_stopped(#[case] resume_from: usize) {
+#[case::all_work_already_checked(3)]
+fn recovery_rechecks_payload_without_replaying_completed_work(#[case] resume_from: usize) {
     let (_dir, store) = coord_with_store();
     let record = TransactionRecord::new(
         TransactionId::new_v7(),
@@ -457,7 +496,7 @@ fn verification_crash_resumes_where_it_stopped(#[case] resume_from: usize) {
         .filter(|node| node.kind.requires_verification())
         .cloned()
         .collect::<Vec<_>>();
-    assert!(verified.len() > resume_from);
+    assert!(verified.len() >= resume_from);
 
     for node in verified.iter().take(resume_from) {
         let Some(NodeState::Applied { receipt }) = crashed.nodes.get(&node.id).cloned() else {
@@ -486,15 +525,26 @@ fn verification_crash_resumes_where_it_stopped(#[case] resume_from: usize) {
             node.id
         );
     }
+    let expected: std::collections::BTreeSet<_> = verified
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            *index >= resume_from
+                || matches!(
+                    node.kind,
+                    NodeKind::FileMutation { .. } | NodeKind::FileRemoval { .. }
+                )
+        })
+        .map(|(_, node)| node.id.as_str().to_owned())
+        .collect();
     assert_eq!(
-        exec.verified,
-        verified[resume_from..]
+        exec.verified
             .iter()
-            .map(|node| node.id.as_str().to_owned())
-            .collect::<Vec<_>>(),
-        "an already-verified node is never verified twice: {:?}",
-        exec.labels()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
     );
+    assert_eq!(exec.verified.len(), expected.len());
     assert_eq!(
         exec.applied,
         vec!["ctrl:verify".to_owned(), "ctrl:commit".to_owned()],
@@ -553,7 +603,12 @@ fn interrupted_rollback_never_rolls_forward() {
     let mut exec = FakeExecutor::new().reconcile_with(ReconcileResult::Applied);
     let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
-    assert_eq!(final_record.phase, TransactionPhase::RecoveryRequired);
+    assert_eq!(
+        final_record.phase,
+        TransactionPhase::RecoveryRequired {
+            resume: RecoveryPhase::RollingBack
+        }
+    );
     assert!(exec.applied.is_empty(), "no further mutation");
     assert!(exec.rolled_back.is_empty());
 }
@@ -583,7 +638,7 @@ fn interrupted_rollback_never_rolls_forward() {
 #[case::ambiguous_escalates(
     ReconcileResult::Ambiguous,
     TransactionOutcome::RecoveryRequired,
-    TransactionPhase::RecoveryRequired,
+    TransactionPhase::RecoveryRequired { resume: RecoveryPhase::Applying },
     0
 )]
 fn crash_running_reconciles_without_double_applying(

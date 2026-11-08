@@ -46,6 +46,8 @@ mod service_control;
 #[cfg(target_os = "linux")]
 mod service_exec;
 #[cfg(target_os = "linux")]
+mod service_host;
+#[cfg(target_os = "linux")]
 mod service_ops;
 mod services;
 #[cfg(target_os = "linux")]

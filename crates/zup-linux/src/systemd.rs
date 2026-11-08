@@ -3,6 +3,70 @@ use std::time::Duration;
 
 pub const DBUS_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn unknown_property(error: &zbus_systemd::zbus::Error) -> bool {
+    match error {
+        zbus_systemd::zbus::Error::MethodError(name, _, _) => {
+            name.as_str() == "org.freedesktop.DBus.Error.UnknownProperty"
+        }
+        zbus_systemd::zbus::Error::FDO(error) => matches!(
+            error.as_ref(),
+            zbus_systemd::zbus::fdo::Error::UnknownProperty(_)
+        ),
+        _ => false,
+    }
+}
+
+async fn verify_running_credentials(
+    service: &zbus_systemd::systemd1::ServiceProxy<'_>,
+    unit: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<(), IpcError> {
+    let refused = |reason| IpcError::SystemdRefused {
+        unit: unit.into(),
+        reason,
+    };
+    let pid = service
+        .main_pid()
+        .await
+        .map_err(|error| refused(error.to_string()))?;
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .map_err(|error| refused(format!("process credentials are unavailable: {error}")))?;
+    for (field, expected) in [("Uid:", uid), ("Gid:", gid)] {
+        if !status
+            .lines()
+            .find_map(|line| line.strip_prefix(field))
+            .is_some_and(|ids| {
+                let ids = ids.split_ascii_whitespace().collect::<Vec<_>>();
+                ids.len() == 4 && ids.iter().all(|id| id.parse::<u32>() == Ok(expected))
+            })
+        {
+            return Err(refused(
+                "process credentials differ from the native execution identity".into(),
+            ));
+        }
+    }
+    if status
+        .lines()
+        .find_map(|line| line.strip_prefix("NoNewPrivs:"))
+        .map(str::trim)
+        != Some("1")
+    {
+        return Err(refused("running process lacks NoNewPrivileges".into()));
+    }
+    if service
+        .main_pid()
+        .await
+        .map_err(|error| refused(error.to_string()))?
+        != pid
+    {
+        return Err(refused(
+            "main process changed during credential verification".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UnitChange {
     pub kind: String,
@@ -47,6 +111,9 @@ pub struct UnitInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitRuntime {
+    pub argv: Option<Vec<String>>,
+    pub dependencies: Vec<String>,
+    pub native_timeouts: Option<zup_core::NativeServiceTimeouts>,
     pub failure: zup_core::ServiceFailurePolicy,
     pub execution: Option<zup_core::ServiceExecution>,
     pub service_type: String,
@@ -59,6 +126,10 @@ pub struct UnitRuntime {
 }
 
 pub trait SystemdManager {
+    fn process_scope_is_empty(&mut self, unit: &str) -> Result<bool, IpcError>;
+    fn retain_unit(&mut self, _unit: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
     fn generation(&mut self) -> Result<String, IpcError> {
         Err(IpcError::SystemdUnavailable(
             "manager generation is unavailable".into(),
@@ -117,23 +188,45 @@ pub struct RealSystemd {
 
 impl RealSystemd {
     pub fn connect() -> Result<Self, IpcError> {
+        crate::service_host::validate_init_view().map_err(IpcError::SystemdUnavailable)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| IpcError::SystemdUnavailable(format!("tokio runtime: {error}")))?;
         let connection = runtime
             .block_on(async {
-                tokio::time::timeout(DBUS_TIMEOUT, zbus_systemd::zbus::Connection::system())
+                tokio::time::timeout(DBUS_TIMEOUT, async {
+                    let stream = tokio::net::UnixStream::connect("/run/dbus/system_bus_socket")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let peer = stream.peer_cred().map_err(|error| error.to_string())?;
+                    let pid = peer
+                        .pid()
+                        .filter(|pid| *pid > 0)
+                        .ok_or("system bus peer is outside the local PID namespace")?;
+                    crate::service_host::same_object(
+                        "/proc/self/ns/pid",
+                        &format!("/proc/{pid}/ns/pid"),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    zbus_systemd::zbus::connection::Builder::unix_stream(
+                        stream.into_std().map_err(|error| error.to_string())?,
+                    )
+                    .build()
                     .await
-                    .map_err(|_| "connecting to the system bus timed out".to_owned())?
                     .map_err(|error| format!("system bus: {error}"))
+                })
+                .await
+                .map_err(|_| "connecting to the system bus timed out".to_owned())?
             })
             .map_err(IpcError::SystemdUnavailable)?;
-        Ok(Self {
+        let mut manager = Self {
             runtime,
             connection,
             subscribed: false,
-        })
+        };
+        manager.generation()?;
+        Ok(manager)
     }
 
     fn manager(&self) -> Result<zbus_systemd::systemd1::ManagerProxy<'_>, IpcError> {
@@ -197,7 +290,38 @@ impl RealSystemd {
 }
 
 impl SystemdManager for RealSystemd {
+    fn process_scope_is_empty(&mut self, unit: &str) -> Result<bool, IpcError> {
+        let manager = self.manager()?;
+        self.call("service process scope", async {
+            match manager.get_unit_processes(unit.into()).await {
+                Ok(processes) => Ok(processes.is_empty()),
+                // systemd retains units with populated cgroups, including inactive masked units.
+                Err(zbus_systemd::zbus::Error::MethodError(name, _, _))
+                    if name.as_str() == "org.freedesktop.systemd1.NoSuchUnit" =>
+                {
+                    Ok(true)
+                }
+                Err(error) => Err(IpcError::SystemdRefused {
+                    unit: unit.into(),
+                    reason: error.to_string(),
+                }),
+            }
+        })
+    }
+    fn retain_unit(&mut self, unit: &str) -> Result<(), IpcError> {
+        let manager = self.manager()?;
+        self.call("retain unit", async {
+            manager
+                .ref_unit(unit.into())
+                .await
+                .map_err(|error| IpcError::SystemdRefused {
+                    unit: unit.into(),
+                    reason: error.to_string(),
+                })
+        })
+    }
     fn generation(&mut self) -> Result<String, IpcError> {
+        crate::service_host::validate_init_view().map_err(IpcError::SystemdUnavailable)?;
         self.call("manager generation", async {
             let bus = zbus_systemd::zbus::fdo::DBusProxy::new(&self.connection)
                 .await
@@ -210,6 +334,15 @@ impl SystemdManager for RealSystemd {
                 )
                 .await
                 .map_err(|e| IpcError::SystemdUnavailable(e.to_string()))?;
+            let pid = bus
+                .get_connection_unix_process_id(owner.clone().into())
+                .await
+                .map_err(|e| IpcError::SystemdUnavailable(e.to_string()))?;
+            if pid != 1 {
+                return Err(IpcError::SystemdUnavailable(
+                    "the systemd bus owner is not the local system manager".into(),
+                ));
+            }
             let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
                 .map_err(|e| IpcError::SystemdUnavailable(e.to_string()))?;
             let policy =
@@ -231,22 +364,204 @@ impl SystemdManager for RealSystemd {
             let service = zbus_systemd::systemd1::ServiceProxy::new(&self.connection, path)
                 .await
                 .map_err(failed)?;
+            if !service.exec_condition().await.map_err(failed)?.is_empty()
+                || !service.exec_start_pre().await.map_err(failed)?.is_empty()
+                || !service.exec_start_post().await.map_err(failed)?.is_empty()
+                || !service.exec_reload().await.map_err(failed)?.is_empty()
+                || !service.exec_stop().await.map_err(failed)?.is_empty()
+                || !service.exec_stop_post().await.map_err(failed)?.is_empty()
+            {
+                return Err(IpcError::SystemdRefused {
+                    unit: unit.into(),
+                    reason: "unmanaged executable lifecycle hooks".into(),
+                });
+            }
+            match service.exec_reload_post().await {
+                Ok(commands) if commands.is_empty() => {}
+                Err(error) if unknown_property(&error) => {}
+                Err(error) => return Err(failed(error)),
+                Ok(_) => return Err(IpcError::SystemdRefused {
+                    unit: unit.into(),
+                    reason: "unmanaged executable reload hooks".into(),
+                }),
+            }
+            let commands = service.exec_start_ex().await.map_err(failed)?;
+            let argv = match commands.as_slice() {
+                [] => None,
+                [(path, argv, flags, ..)]
+                    if argv.first() == Some(path) && flags == &["no-env-expand"] => Some(argv.clone()),
+                _ => return Err(IpcError::SystemdRefused {
+                    unit: unit.into(),
+                    reason: "unmanaged executable command or execution flags".into(),
+                }),
+            };
             let active = proxy.active_state().await.map_err(failed)?;
             let sub_state = proxy.sub_state().await.map_err(failed)?;
             let result = service.result().await.map_err(failed)?;
             let service_type = service.type_property().await.map_err(failed)?;
+            let dependencies = proxy.requires().await.map_err(failed)?
+                .into_iter()
+                .filter(|name| !matches!(name.as_str(), "sysinit.target" | "system.slice"))
+                .collect();
             let execution = if proxy.load_state().await.map_err(failed)? == "loaded" {
+                let stop_failure_mode = crate::systemd_policy::stop_failure_mode(
+                    &proxy.drop_in_paths().await.map_err(failed)?,
+                ).map_err(|reason| IpcError::SystemdRefused { unit: unit.into(), reason })?;
+                match service.restart_randomized_delay_u_sec().await {
+                    Ok(0) => {},
+                    Err(error) if unknown_property(&error) => {},
+                    Err(error) => return Err(failed(error)),
+                    Ok(_) => return Err(IpcError::SystemdRefused {
+                        unit: unit.into(),
+                        reason: "unmanaged randomized restart delay".into(),
+                    }),
+                }
+                if !proxy.wants().await.map_err(failed)?.is_empty()
+                    || !proxy.requisite().await.map_err(failed)?.is_empty()
+                    || !proxy.binds_to().await.map_err(failed)?.is_empty()
+                    || !proxy.upholds().await.map_err(failed)?.is_empty()
+                    || !proxy.part_of().await.map_err(failed)?.is_empty()
+                    || !proxy.on_failure().await.map_err(failed)?.is_empty()
+                    || !proxy.on_success().await.map_err(failed)?.is_empty()
+                    || proxy.conflicts().await.map_err(failed)?.iter().any(|name| name != "shutdown.target")
+                    || proxy.failure_action().await.map_err(failed)? != "none"
+                    || proxy.success_action().await.map_err(failed)? != "none"
+                    || proxy.start_limit_action().await.map_err(failed)? != "none"
+                    || proxy.stop_when_unneeded().await.map_err(failed)?
+                    || proxy.refuse_manual_start().await.map_err(failed)?
+                    || proxy.refuse_manual_stop().await.map_err(failed)?
+                    || proxy.job_timeout_u_sec().await.map_err(failed)? != u64::MAX
+                    || proxy.job_running_timeout_u_sec().await.map_err(failed)? != u64::MAX
+                    || proxy.job_timeout_action().await.map_err(failed)? != "none"
+                {
+                    return Err(IpcError::SystemdRefused {
+                        unit: unit.into(),
+                        reason: "unmanaged effective unit dependencies or actions".into(),
+                    });
+                }
+                if service.kill_mode().await.map_err(failed)? != "control-group"
+                    || !service.send_sigkill().await.map_err(failed)?
+                    || service.kill_signal().await.map_err(failed)? != rustix::process::Signal::TERM.as_raw()
+                    || service.final_kill_signal().await.map_err(failed)? != rustix::process::Signal::KILL.as_raw()
+                    || service.send_sighup().await.map_err(failed)?
+                {
+                    return Err(IpcError::SystemdRefused {
+                        unit: unit.into(),
+                        reason: "effective shutdown policy does not terminate the complete service cgroup".into(),
+                    });
+                }
                 if !service.no_new_privileges().await.map_err(failed)? {
                     return Err(IpcError::SystemdRefused {
                         unit: unit.into(),
                         reason: "effective service security lacks NoNewPrivileges".into(),
                     });
                 }
+                if service.delegate().await.map_err(failed)? {
+                    return Err(IpcError::SystemdRefused { unit: unit.into(), reason: "service cgroup delegation is not authorized".into() });
+                }
+                if service.ambient_capabilities().await.map_err(failed)? != 0
+                    || !service.supplementary_groups().await.map_err(failed)?.is_empty()
+                    || !service.pam_name().await.map_err(failed)?.is_empty()
+                    || !service.environment().await.map_err(failed)?.is_empty()
+                    || !service.environment_files().await.map_err(failed)?.is_empty()
+                    || !service.pass_environment().await.map_err(failed)?.is_empty()
+                    || !service.unset_environment().await.map_err(failed)?.is_empty()
+                    || !service.root_directory().await.map_err(failed)?.is_empty()
+                    || !service.root_image().await.map_err(failed)?.is_empty()
+                    || !matches!(service.working_directory().await.map_err(failed)?.as_str(), "" | "/")
+                    || !service.bind_paths().await.map_err(failed)?.is_empty()
+                    || !service.bind_read_only_paths().await.map_err(failed)?.is_empty()
+                    || !service.extension_images().await.map_err(failed)?.is_empty()
+                    || !service.extension_directories().await.map_err(failed)?.is_empty()
+                    || !service.mount_images().await.map_err(failed)?.is_empty()
+                    || !service.open_file().await.map_err(failed)?.is_empty()
+                    || !service.set_credential().await.map_err(failed)?.is_empty()
+                    || !service.set_credential_encrypted().await.map_err(failed)?.is_empty()
+                    || !service.load_credential().await.map_err(failed)?.is_empty()
+                    || !service.load_credential_encrypted().await.map_err(failed)?.is_empty()
+                    || !service.import_credential().await.map_err(failed)?.is_empty()
+                {
+                    return Err(IpcError::SystemdRefused {
+                        unit: unit.into(),
+                        reason: "unmanaged effective execution environment or privileges".into(),
+                    });
+                }
+                if service.exit_type().await.map_err(failed)? != "main"
+                    || service.notify_access().await.map_err(failed)? != if service_type == "notify" { "main" } else { "none" }
+                    || service.remain_after_exit().await.map_err(failed)?
+                    || !service.pid_file().await.map_err(failed)?.is_empty()
+                    || !matches!(service.watchdog_u_sec().await.map_err(failed)?, 0 | u64::MAX)
+                    || service.runtime_max_u_sec().await.map_err(failed)? != u64::MAX
+                    || service.runtime_randomized_extra_u_sec().await.map_err(failed)? != 0
+                    || service.timeout_start_failure_mode().await.map_err(failed)? != "terminate"
+                    || service.timeout_stop_failure_mode().await.map_err(failed)? != stop_failure_mode
+                    || service.restart_mode().await.map_err(failed)? != "normal"
+                    || service.restart_steps().await.map_err(failed)? != 0
+                    || service.restart_max_delay_u_sec().await.map_err(failed)? != u64::MAX
+                {
+                    return Err(IpcError::SystemdRefused {
+                        unit: unit.into(),
+                        reason: "unmanaged effective runtime lifecycle policy".into(),
+                    });
+                }
+                for (statuses, signals) in [
+                    service.success_exit_status().await.map_err(failed)?,
+                    service.restart_prevent_exit_status().await.map_err(failed)?,
+                    service.restart_force_exit_status().await.map_err(failed)?,
+                ] {
+                    if !statuses.is_empty() || !signals.is_empty() {
+                        return Err(IpcError::SystemdRefused {
+                            unit: unit.into(),
+                            reason: "unmanaged effective exit classification".into(),
+                        });
+                    }
+                }
                 Some(if service.dynamic_user().await.map_err(failed)? {
+                    let name = crate::services::dynamic_user_name(unit);
+                    if service.user().await.map_err(failed)? != name
+                        || service.group().await.map_err(failed)? != name
+                    {
+                        return Err(IpcError::SystemdRefused {
+                            unit: unit.into(),
+                            reason: "dynamic service account names differ from the owned registration".into(),
+                        });
+                    }
+                    let uid = match manager.lookup_dynamic_user_by_name(name.clone()).await {
+                        Ok(uid) => {
+                            if manager.lookup_dynamic_user_by_uid(uid).await.map_err(failed)? != name {
+                                return Err(IpcError::SystemdRefused { unit: unit.into(), reason: "dynamic account allocation does not round-trip through the manager".into() });
+                            }
+                            Some(uid)
+                        },
+                        Err(zbus_systemd::zbus::Error::MethodError(error, _, _))
+                            if error.as_str() == "org.freedesktop.systemd1.NoSuchDynamicUser" && active != "active" => None,
+                        Err(error) => return Err(failed(error)),
+                    };
+                    let user = uzers::get_user_by_name(&name);
+                    let group = uzers::get_group_by_name(&name);
+                    if user.as_ref().is_some_and(|user| Some(user.uid()) != uid)
+                        || group.as_ref().is_some_and(|group| Some(group.gid()) != uid)
+                    {
+                        return Err(IpcError::SystemdRefused { unit: unit.into(), reason: "dynamic account name collides with another account".into() });
+                    }
+                    if active == "active" {
+                        let uid = uid.ok_or_else(|| IpcError::SystemdRefused { unit: unit.into(), reason: "running service lacks a dynamic account allocation".into() })?;
+                        verify_running_credentials(&service, unit, uid, uid).await?;
+                        if manager.lookup_dynamic_user_by_uid(uid).await.map_err(failed)? != name {
+                            return Err(IpcError::SystemdRefused { unit: unit.into(), reason: "dynamic execution changed during credential verification".into() });
+                        }
+                    }
                     zup_core::ServiceExecution::SystemdDynamicUser
                 } else {
                     let user = service.user().await.map_err(failed)?;
                     let group = service.group().await.map_err(failed)?;
+                    if active == "active" {
+                        let account = uzers::get_user_by_name(&user).ok_or_else(|| IpcError::SystemdRefused { unit: unit.into(), reason: "service account is not resolvable".into() })?;
+                        let gid = if group.is_empty() { account.primary_group_id() } else {
+                            uzers::get_group_by_name(&group).ok_or_else(|| IpcError::SystemdRefused { unit: unit.into(), reason: "service group is not resolvable".into() })?.gid()
+                        };
+                        verify_running_credentials(&service, unit, account.uid(), gid).await?;
+                    }
                     zup_core::ServiceExecution::SystemdUser {
                         user,
                         group: (!group.is_empty()).then_some(group),
@@ -263,8 +578,42 @@ impl SystemdManager for RealSystemd {
                 }
             };
             let restart = service.restart().await.map_err(failed)?;
+            let native_timeouts = if execution.is_some() {
+                let timeout = |value| {
+                    seconds(value).filter(|value| *value > 0).ok_or_else(|| {
+                        IpcError::SystemdRefused {
+                            unit: unit.into(),
+                            reason: "native timeouts must use bounded whole seconds".into(),
+                        }
+                    })
+                };
+                Some(zup_core::NativeServiceTimeouts::Systemd {
+                    start_timeout_seconds: timeout(
+                        service.timeout_start_u_sec().await.map_err(failed)?,
+                    )?,
+                    stop_grace_seconds: timeout(
+                        service.timeout_stop_u_sec().await.map_err(failed)?,
+                    )?,
+                    abort_timeout_seconds: timeout(
+                        service.timeout_abort_u_sec().await.map_err(failed)?,
+                    )?,
+                })
+            } else {
+                None
+            };
             let failure = match restart.as_str() {
-                "no" => zup_core::ServiceFailurePolicy::None,
+                "no" => {
+                    if execution.is_some() && (service.restart_u_sec().await.map_err(failed)? != 0
+                        || proxy.start_limit_interval_u_sec().await.map_err(failed)? != 0
+                        || proxy.start_limit_burst().await.map_err(failed)? != 0)
+                    {
+                        return Err(IpcError::SystemdRefused {
+                            unit: unit.into(),
+                            reason: "unmanaged effective disabled restart policy".into(),
+                        });
+                    }
+                    zup_core::ServiceFailurePolicy::None
+                },
                 "on-failure" | "on-abnormal" => {
                     let Some(delay_seconds) =
                         seconds(service.restart_u_sec().await.map_err(failed)?)
@@ -324,6 +673,9 @@ impl SystemdManager for RealSystemd {
                 _ => Runtime::Unknown,
             };
             Ok(UnitRuntime {
+                argv,
+                dependencies,
+                native_timeouts,
                 failure,
                 execution,
                 service_type,
@@ -356,24 +708,32 @@ impl SystemdManager for RealSystemd {
         controlled_units: &[String],
     ) -> Result<(), IpcError> {
         use futures_util::StreamExt;
+        let deadline = tokio::time::Instant::now() + timeout;
         if !self.subscribed {
             let manager = self.manager()?;
-            self.call("subscribe to jobs", async {
-                manager
-                    .subscribe()
+            self.runtime.block_on(async {
+                tokio::time::timeout_at(deadline, manager.subscribe())
                     .await
+                    .map_err(|_| IpcError::SystemdTimeout("subscribe to jobs".into()))?
                     .map_err(|error| IpcError::SystemdUnavailable(error.to_string()))
             })?;
             self.subscribed = true;
         }
         let manager = self.manager()?;
         self.runtime.block_on(async {
-            tokio::time::timeout(timeout, async {
+            tokio::time::timeout_at(deadline, async {
                 let failed = |error: zbus_systemd::zbus::Error| IpcError::SystemdRefused {
                     unit: unit.into(),
                     reason: error.to_string(),
                 };
                 let mut jobs = manager.receive_job_removed().await.map_err(failed)?;
+                // Keep inactive units loaded through ResetFailedUnit and job completion.
+                // The manager releases this client's references when the bus disconnects.
+                if state == zup_transaction::ServiceTerminalState::Running
+                    || !matches!(manager.get_unit_file_state(unit.into()).await.map_err(failed)?.as_str(), "masked" | "masked-runtime")
+                {
+                    manager.ref_unit(unit.into()).await.map_err(failed)?;
+                }
                 if state == zup_transaction::ServiceTerminalState::Stopped {
                     let path = manager.get_unit(unit.into()).await.map_err(failed)?;
                     let proxy = zbus_systemd::systemd1::UnitProxy::new(&self.connection, path).await.map_err(failed)?;
@@ -390,11 +750,20 @@ impl SystemdManager for RealSystemd {
                         }
                     }
                 }
+                let within_deadline = || {
+                    if tokio::time::Instant::now() >= deadline {
+                        Err(IpcError::SystemdTimeout(format!("service {unit}")))
+                    } else {
+                        Ok(())
+                    }
+                };
+                within_deadline()?;
                 let job = match state {
                     zup_transaction::ServiceTerminalState::Running => {
                         // A deployment start begins a new native retry budget, including
                         // compensation after a failed replacement exhausted the old one.
                         manager.reset_failed_unit(unit.into()).await.map_err(failed)?;
+                        within_deadline()?;
                         manager.start_unit(unit.into(), "fail".into()).await
                     }
                     zup_transaction::ServiceTerminalState::Stopped => {
@@ -415,6 +784,7 @@ impl SystemdManager for RealSystemd {
                                 if observed.job().await.map_err(failed)?.0 == 0
                                     && matches!(active.as_str(), "active" | "inactive" | "failed")
                                 {
+                                    within_deadline()?;
                                     return Ok(());
                                 }
                                 tokio::time::sleep(interval).await;

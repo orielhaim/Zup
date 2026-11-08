@@ -4,15 +4,21 @@ on:
   push:
     branches: [master]
     paths:
+      - "action.yml"
       - "action/**"
-      - "crates/zup/**"
+      - "crates/**"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/action.yml"
   pull_request:
     paths:
+      - "action.yml"
       - "action/**"
-      - "crates/zup/**"
+      - "crates/**"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/action.yml"

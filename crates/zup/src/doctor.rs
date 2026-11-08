@@ -1019,7 +1019,7 @@ fn system_systemd() -> SystemdReadiness {
 #[cfg(target_os = "linux")]
 fn systemd_too_old_message(version: u32) -> String {
     format!(
-        "systemd {version} is older than the minimum {} for `Type=exec` service units",
+        "systemd {version} is older than the minimum {} for managed service units",
         zup_linux::MINIMUM_SYSTEMD_VERSION,
     )
 }
@@ -1027,7 +1027,7 @@ fn systemd_too_old_message(version: u32) -> String {
 /// Linux: a non-Linux host never constructs `TooOld`, so its copy just
 #[cfg(not(target_os = "linux"))]
 fn systemd_too_old_message(version: u32) -> String {
-    format!("systemd {version} is too old for `Type=exec` service units")
+    format!("systemd {version} is too old for managed service units")
 }
 #[allow(dead_code)]
 enum SystemdReadiness {
@@ -1052,7 +1052,7 @@ mod readiness_tests {
     use super::SystemdReadiness;
 
     #[test]
-    fn versions_verdict_by_the_exec_baseline() {
+    fn versions_verdict_by_the_service_timeout_baseline() {
         assert!(matches!(
             SystemdReadiness::of_version(Some("259")),
             SystemdReadiness::Ready(259)
@@ -1062,12 +1062,12 @@ mod readiness_tests {
             SystemdReadiness::Ready(259)
         ));
         assert!(matches!(
-            SystemdReadiness::of_version(Some("240")),
-            SystemdReadiness::Ready(240)
+            SystemdReadiness::of_version(Some("254")),
+            SystemdReadiness::Ready(254)
         ));
         assert!(matches!(
-            SystemdReadiness::of_version(Some("239")),
-            SystemdReadiness::TooOld(239)
+            SystemdReadiness::of_version(Some("242")),
+            SystemdReadiness::TooOld(242)
         ));
         assert!(matches!(
             SystemdReadiness::of_version(Some("not-a-version")),

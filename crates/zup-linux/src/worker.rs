@@ -653,21 +653,14 @@ fn prepare_operation(
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
 
     let settled_before = seed.as_ref().map(|ledger| ledger.committed_transaction);
-    recover_pending(
-        &state_root,
-        &app_id,
-        &carrier,
-        &carrier_path,
-        &RecoveryHost {
-            roots: &roots,
-            systemd: &context.systemd,
-            lock: &lock,
-        },
-    )?;
-
     ledger_store
         .repair_committed(&app_id, SelectedScope::Machine)
-        .map_err(|error| IpcError::Transaction(error.to_string()))?;
+        .map_err(|error| match error {
+            crate::error::ExecError::RecoveryRequired(transaction) => {
+                IpcError::RecoveryRequired(transaction)
+            }
+            error => IpcError::Transaction(error.to_string()),
+        })?;
     crate::machine::verify_ledger_trust(&state_root, &app_id, rustix::process::geteuid().as_raw())
         .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
     let ledger = ledger_store
@@ -799,32 +792,6 @@ struct RecoveryHost<'a> {
     roots: &'a MachineRoots,
     systemd: &'a crate::machine::SystemdRoots,
     lock: &'a zup_transaction::InstallationLock,
-}
-
-fn recover_pending(
-    state_root: &Path,
-    app_id: &AppId,
-    carrier: &crate::carrier::Carrier,
-    carrier_path: &Path,
-    host: &RecoveryHost<'_>,
-) -> Result<(), IpcError> {
-    let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
-    loop {
-        match ledger_store.repair_committed(app_id, SelectedScope::Machine) {
-            Ok(()) => return Ok(()),
-            Err(crate::error::ExecError::RecoveryRequired(transaction)) => {
-                recover_one(
-                    state_root,
-                    app_id,
-                    carrier,
-                    carrier_path,
-                    &transaction,
-                    host,
-                )?;
-            }
-            Err(error) => return Err(IpcError::Transaction(error.to_string())),
-        }
-    }
 }
 
 fn recover_one(

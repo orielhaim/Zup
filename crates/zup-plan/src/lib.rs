@@ -45,7 +45,8 @@ pub use files::resolve_files;
 pub use install_locations::{InstallLocationError, InstallLocationResolver};
 pub use inventory::{
     ExtensionState, FileAssociationState, INSTALL_LEDGER_SCHEMA, InstallLedger, LauncherState,
-    OwnedResource, ProtocolState, ServiceState, owned_content_digests,
+    OwnedResource, ProtocolState, ServiceRegistrationChange, ServiceState, ServiceUpdate,
+    owned_content_digests,
 };
 pub use lifecycle::{DeploymentIntent, LifecycleAction, LifecycleError, plan_lifecycle};
 pub use observe::{

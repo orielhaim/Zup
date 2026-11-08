@@ -23,12 +23,19 @@ mod fixture {
 
     define_windows_service!(service_main, run);
 
+    static FINISHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     pub fn dispatch(name: String) -> windows_service::Result<()> {
-        windows_service::service_dispatcher::start(name, service_main)
+        windows_service::service_dispatcher::start(name, service_main)?;
+        while !FINISHED.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::park_timeout(Duration::from_millis(20));
+        }
+        Ok(())
     }
 
     fn run(_: Vec<OsString>) {
         execute().expect("SCM fixture status publication");
+        FINISHED.store(true, std::sync::atomic::Ordering::Release);
     }
 
     fn execute() -> windows_service::Result<()> {
@@ -72,6 +79,9 @@ mod fixture {
         if mode == "fail" {
             return publish(ServiceState::Stopped, 0, 1066);
         }
+        if mode == "reported-never-started" {
+            return publish(ServiceState::Stopped, 0, 1077);
+        }
         publish(ServiceState::Running, 0, 0)?;
         if mode == "crash" {
             if stopped.recv_timeout(Duration::from_millis(500)).is_err() {
@@ -80,10 +90,22 @@ mod fixture {
         } else {
             let _ = stopped.recv();
         }
-        for checkpoint in 1..=3 {
+        for checkpoint in 1..=if mode == "slow-stop" { 50 } else { 3 } {
             publish(ServiceState::StopPending, checkpoint, 0)?;
             std::thread::park_timeout(Duration::from_millis(100));
         }
-        publish(ServiceState::Stopped, 0, 0)
+        publish(ServiceState::Stopped, 0, 0)?;
+        if mode == "linger-stop" {
+            std::thread::park_timeout(Duration::from_secs(2));
+        }
+        if mode == "linger-stop-gated" {
+            let release = std::env::current_exe()
+                .expect("fixture executable")
+                .with_extension("exit");
+            while !release.exists() {
+                std::thread::park_timeout(Duration::from_millis(20));
+            }
+        }
+        Ok(())
     }
 }

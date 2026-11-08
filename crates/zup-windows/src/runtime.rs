@@ -1703,7 +1703,8 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
         match &operation.kind {
             zup_transaction::NodeKind::BackendOperation { .. }
             | zup_transaction::NodeKind::BackendRemoval { .. } => {
-                crate::integration::verify_managed(receipt).map_err(|error| error.to_string())
+                crate::integration::verify_managed(operation, receipt)
+                    .map_err(|error| error.to_string())
             }
             zup_transaction::NodeKind::Barrier => Ok(()),
             _ => crate::verify_installed_file(receipt).map_err(|error| error.to_string()),
@@ -1712,7 +1713,7 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
 
     fn rollback(
         &mut self,
-        _operation: &TransactionNode,
+        operation: &TransactionNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         match receipt {
@@ -1727,7 +1728,7 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
                 .inner
                 .rollback_transaction_receipt(receipt)
                 .map_err(|e| e.to_string()),
-            _ => crate::rollback_managed(receipt).map_err(|e| e.to_string()),
+            _ => crate::rollback_managed(operation, receipt).map_err(|e| e.to_string()),
         }
     }
 

@@ -11,7 +11,25 @@ use zup_core::{AppId, SelectedScope, Sha256Digest, Target};
 use crate::id::{OperationId, TransactionId};
 use crate::plan::TransactionPlan;
 
-pub const JOURNAL_SCHEMA: u32 = 1;
+pub const JOURNAL_SCHEMA: u32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryPhase {
+    Prepared,
+    Applying,
+    RollingBack,
+}
+
+impl From<RecoveryPhase> for TransactionPhase {
+    fn from(phase: RecoveryPhase) -> Self {
+        match phase {
+            RecoveryPhase::Prepared => Self::Prepared,
+            RecoveryPhase::Applying => Self::Applying,
+            RecoveryPhase::RollingBack => Self::RollingBack,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -21,7 +39,7 @@ pub enum TransactionPhase {
     RollingBack,
     RolledBack,
     Committed,
-    RecoveryRequired,
+    RecoveryRequired { resume: RecoveryPhase },
 }
 
 impl TransactionPhase {
@@ -33,11 +51,26 @@ impl TransactionPhase {
                 | (Prepared, RollingBack)
                 | (Applying, Committed)
                 | (Applying, RollingBack)
-                | (Applying, RecoveryRequired)
+                | (
+                    Applying,
+                    RecoveryRequired {
+                        resume: RecoveryPhase::Applying
+                    }
+                )
                 | (RollingBack, RolledBack)
-                | (RollingBack, RecoveryRequired)
-                | (Prepared, RecoveryRequired)
-        );
+                | (
+                    RollingBack,
+                    RecoveryRequired {
+                        resume: RecoveryPhase::RollingBack
+                    }
+                )
+                | (
+                    Prepared,
+                    RecoveryRequired {
+                        resume: RecoveryPhase::Prepared
+                    }
+                )
+        ) || matches!(self, RecoveryRequired { resume } if Self::from(resume) == next);
         if ok {
             Ok(next)
         } else {
@@ -304,7 +337,7 @@ fn phase_accepts(
             state,
             NodeState::Pending | NodeState::RolledBack | NodeState::Failed
         ),
-        TransactionPhase::RecoveryRequired => true,
+        TransactionPhase::RecoveryRequired { .. } => true,
     }
 }
 

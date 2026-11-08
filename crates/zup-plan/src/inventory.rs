@@ -9,7 +9,7 @@ use zup_core::{
     SelectedScope, ServiceStart, Sha256Digest, Target,
 };
 
-pub const INSTALL_LEDGER_SCHEMA: u32 = 1;
+pub const INSTALL_LEDGER_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallLedger {
@@ -159,6 +159,7 @@ pub enum OwnedResource {
     },
     Service {
         name: String,
+        timeouts: zup_core::ServiceTimeouts,
         privilege: Privilege,
         requires_files: Vec<crate::TargetPath>,
         requires_services: Vec<zup_core::ServiceId>,
@@ -257,14 +258,109 @@ pub enum LauncherState {
 pub enum ServiceState {
     Absent,
     Registration {
+        native_timeouts: zup_core::NativeServiceTimeouts,
         dependencies: Vec<String>,
         failure: zup_core::ServiceFailurePolicy,
         execution: zup_core::ServiceExecution,
         display_name: String,
-        command: CommandSpec,
+        command: Box<CommandSpec>,
         start: ServiceStart,
         readiness: zup_core::ServiceReadiness,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceRegistrationChange {
+    Registration,
+    Command,
+    ExecutionIdentity,
+    Dependencies,
+    Readiness,
+    StartupPolicy,
+    DisplayName,
+    FailurePolicy,
+    NativeTimeouts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "runtime", content = "changes", rename_all = "snake_case")]
+pub enum ServiceUpdate {
+    Unchanged,
+    Preserve(Vec<ServiceRegistrationChange>),
+    Replace(Vec<ServiceRegistrationChange>),
+}
+
+impl ServiceUpdate {
+    pub fn preserves_runtime(&self) -> bool {
+        !matches!(self, Self::Replace(_))
+    }
+}
+
+impl ServiceState {
+    pub fn update_from(&self, previous: &Self) -> ServiceUpdate {
+        use ServiceRegistrationChange as Change;
+        if self == previous {
+            return ServiceUpdate::Unchanged;
+        }
+        let (
+            Self::Registration {
+                native_timeouts,
+                dependencies,
+                failure,
+                execution,
+                display_name,
+                command,
+                start,
+                readiness,
+            },
+            Self::Registration {
+                native_timeouts: old_timeouts,
+                dependencies: old_dependencies,
+                failure: old_failure,
+                execution: old_execution,
+                display_name: old_display,
+                command: old_command,
+                start: old_start,
+                readiness: old_readiness,
+            },
+        ) = (self, previous)
+        else {
+            return ServiceUpdate::Replace(vec![Change::Registration]);
+        };
+        let changes: Vec<_> = [
+            (command != old_command, Change::Command),
+            (execution != old_execution, Change::ExecutionIdentity),
+            (dependencies != old_dependencies, Change::Dependencies),
+            (readiness != old_readiness, Change::Readiness),
+            (start != old_start, Change::StartupPolicy),
+            (display_name != old_display, Change::DisplayName),
+            (failure != old_failure, Change::FailurePolicy),
+            (native_timeouts != old_timeouts, Change::NativeTimeouts),
+        ]
+        .into_iter()
+        .filter(|(changed, _)| *changed)
+        .map(|(_, change)| change)
+        .collect();
+        let systemd = matches!(
+            execution,
+            zup_core::ServiceExecution::SystemdUser { .. }
+                | zup_core::ServiceExecution::SystemdDynamicUser
+        );
+        let replacement = changes.iter().any(|change| match change {
+            Change::DisplayName => false,
+            Change::StartupPolicy => {
+                *start == ServiceStart::Disabled || *old_start == ServiceStart::Disabled
+            }
+            Change::FailurePolicy | Change::NativeTimeouts => !systemd,
+            _ => true,
+        });
+        if replacement {
+            ServiceUpdate::Replace(changes)
+        } else {
+            ServiceUpdate::Preserve(changes)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

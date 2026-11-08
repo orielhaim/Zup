@@ -247,7 +247,7 @@ fn duplicate(file: &PrivateFile) -> Result<std::fs::File, Error> {
     #[cfg(unix)]
     {
         use std::os::fd::AsFd;
-        let owned = rustix::io::dup(file.as_fd()).map_err(Error::from)?;
+        let owned = file.as_fd().try_clone_to_owned().map_err(Error::from)?;
         Ok(std::fs::File::from(owned))
     }
     #[cfg(windows)]

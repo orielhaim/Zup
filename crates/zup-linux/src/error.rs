@@ -220,6 +220,9 @@ impl From<zup_runtime::OperationError> for ExecError {
     fn from(error: zup_runtime::OperationError) -> Self {
         match error {
             zup_runtime::OperationError::Cancelled => Self::Cancelled,
+            zup_runtime::OperationError::RecoveryRequired(transaction) => {
+                Self::RecoveryRequired(transaction.to_string())
+            }
             zup_runtime::OperationError::Downgrade {
                 installed,
                 requested,
@@ -282,6 +285,8 @@ pub enum IpcError {
     Policy(String),
     #[error("worker transaction failed: {0}")]
     Transaction(String),
+    #[error("transaction {0} requires explicit recovery")]
+    RecoveryRequired(String),
     #[error("cancelled")]
     Cancelled,
     #[error("the confirmed plan went stale during preparation")]
@@ -316,6 +321,7 @@ impl IpcError {
             }
             Self::Policy(_) => zup_protocol::WorkerFailure::Policy,
             Self::Transaction(_) => zup_protocol::WorkerFailure::Transaction,
+            Self::RecoveryRequired(_) => zup_protocol::WorkerFailure::RecoveryRequired,
             Self::Cancelled | Self::PkexecCancelled => zup_protocol::WorkerFailure::Cancelled,
             Self::WorkerStalePlan => zup_protocol::WorkerFailure::StalePlan,
             Self::WorkerBusy => zup_protocol::WorkerFailure::InstallationBusy,

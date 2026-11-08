@@ -2,7 +2,7 @@ use crate::error::PlanError;
 use zup_core::{ServiceId, ServiceStart};
 use zup_plan::{CommandSpec, DesiredService};
 
-pub const MINIMUM_SYSTEMD_VERSION: u32 = 240;
+pub const MINIMUM_SYSTEMD_VERSION: u32 = 254;
 
 pub fn parse_manager_version(raw: &str) -> Option<u32> {
     let digits: String = raw
@@ -125,6 +125,17 @@ fn is_valid_unit_name(unit: &str) -> bool {
         && !stem.contains('\0')
 }
 
+pub(crate) fn dynamic_user_name(unit: &str) -> String {
+    let digest = zup_core::hash_bytes(unit.as_bytes());
+    format!(
+        "zu_{}",
+        digest.as_bytes()[..14]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
 pub fn render_unit(
     service: &DesiredService<zup_plan::TargetPath>,
     display_name: &str,
@@ -135,6 +146,7 @@ pub fn render_unit(
             reason,
         })?;
     let definition = UnitDefinition {
+        native_timeouts: service.lifecycle.timeouts_for(&service.execution).native(),
         display_name: display_name.into(),
         argv: std::iter::once(executable)
             .chain(service.command.arguments.iter().cloned())
@@ -145,7 +157,10 @@ pub fn render_unit(
         execution: service.execution.clone(),
     };
     definition
-        .render(*service.command.executable.target())
+        .render(
+            *service.command.executable.target(),
+            &unit_name(&service.id)?,
+        )
         .map_err(|reason| PlanError::ServiceRefused {
             id: service.id.to_string(),
             reason,
@@ -153,6 +168,7 @@ pub fn render_unit(
 }
 
 pub struct UnitDefinition {
+    pub native_timeouts: zup_core::NativeServiceTimeouts,
     pub failure: zup_core::ServiceFailurePolicy,
     pub dependencies: Vec<String>,
     pub display_name: String,
@@ -161,8 +177,40 @@ pub struct UnitDefinition {
     pub execution: zup_core::ServiceExecution,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn render_registration(
+    unit: &str,
+    state: &zup_plan::ServiceState,
+) -> Result<Vec<u8>, String> {
+    let zup_plan::ServiceState::Registration {
+        native_timeouts,
+        failure,
+        dependencies,
+        display_name,
+        command,
+        readiness,
+        execution,
+        ..
+    } = state
+    else {
+        return Err("service registration required".into());
+    };
+    UnitDefinition {
+        native_timeouts: *native_timeouts,
+        failure: *failure,
+        dependencies: dependencies.clone(),
+        display_name: display_name.clone(),
+        argv: std::iter::once(host_executable(command)?)
+            .chain(command.arguments.iter().cloned())
+            .collect(),
+        readiness: *readiness,
+        execution: execution.clone(),
+    }
+    .render(*command.executable.target(), unit)
+}
+
 impl UnitDefinition {
-    fn render(&self, target: zup_core::Target) -> Result<Vec<u8>, String> {
+    fn render(&self, target: zup_core::Target, unit: &str) -> Result<Vec<u8>, String> {
         if self.dependencies.len() > 256
             || self.dependencies.iter().any(|name| {
                 !name.ends_with(".service")
@@ -209,7 +257,10 @@ impl UnitDefinition {
         let exec_start = render_exec_start(executable, arguments)?;
         self.execution.validate_for(target).map_err(str::to_owned)?;
         let execution = match &self.execution {
-            zup_core::ServiceExecution::SystemdDynamicUser => "DynamicUser=yes\n".to_owned(),
+            zup_core::ServiceExecution::SystemdDynamicUser => {
+                let user = dynamic_user_name(unit);
+                format!("DynamicUser=yes\nUser={user}\nGroup={user}\n")
+            }
             zup_core::ServiceExecution::SystemdUser { user, group } => {
                 let mut value = format!("User={user}\n");
                 if let Some(group) = group {
@@ -231,7 +282,18 @@ impl UnitDefinition {
         } else {
             ""
         };
-        Ok(format!("[Unit]\nDescription={description}\n{dependencies}StartLimitIntervalSec={interval}\nStartLimitBurst={burst}\n\n[Service]\nType={service_type}\n{notify}{execution}NoNewPrivileges=yes\nRestart={restart}\nRestartSec={delay}\nExecStart={exec_start}\nTimeoutStartSec=90\nTimeoutStopSec=90\n\n[Install]\nWantedBy={WANTED_BY}\n").into_bytes())
+        self.native_timeouts
+            .validate_for(&self.execution)
+            .map_err(str::to_owned)?;
+        let zup_core::NativeServiceTimeouts::Systemd {
+            start_timeout_seconds,
+            stop_grace_seconds,
+            abort_timeout_seconds,
+        } = self.native_timeouts
+        else {
+            return Err("systemd requires native systemd timeout settings".into());
+        };
+        Ok(format!("[Unit]\nDescription={description}\n{dependencies}StartLimitIntervalSec={interval}\nStartLimitBurst={burst}\n\n[Service]\nType={service_type}\n{notify}{execution}NoNewPrivileges=yes\nKillMode=control-group\nSendSIGKILL=yes\nRestart={restart}\nRestartSec={delay}\nExecStart={exec_start}\nTimeoutStartSec={start_timeout_seconds}\nTimeoutStopSec={stop_grace_seconds}\nTimeoutAbortSec={abort_timeout_seconds}\n\n[Install]\nWantedBy={WANTED_BY}\n").into_bytes())
     }
 }
 
@@ -267,7 +329,7 @@ pub fn render_exec_start(executable: &str, arguments: &[String]) -> Result<Strin
     for argument in arguments {
         words.push(quote_word(argument)?);
     }
-    Ok(words.join(" "))
+    Ok(format!(":{}", words.join(" ")))
 }
 
 fn quote_word(word: &str) -> Result<String, String> {
@@ -282,7 +344,6 @@ fn quote_word(word: &str) -> Result<String, String> {
         match ch {
             '\\' => escaped.push_str("\\\\"),
             '"' => escaped.push_str("\\\""),
-            '$' => escaped.push_str("$$"),
             '%' => escaped.push_str("%%"),
             _ => escaped.push(ch),
         }
@@ -291,6 +352,9 @@ fn quote_word(word: &str) -> Result<String, String> {
 }
 
 pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
+    let line = line
+        .strip_prefix(':')
+        .ok_or("managed ExecStart requires literal argument expansion")?;
     let mut words = Vec::new();
     let mut current = String::new();
     let mut in_word = false;
@@ -312,14 +376,6 @@ pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
                         _ => return Err(format!("unsupported escape `\\{next}` in ExecStart")),
                     }
                 }
-                '$' => {
-                    if chars.peek() == Some(&'$') {
-                        chars.next();
-                        current.push('$');
-                    } else {
-                        return Err("unescaped `$` in ExecStart".into());
-                    }
-                }
                 '%' => {
                     if chars.peek() == Some(&'%') {
                         chars.next();
@@ -337,14 +393,6 @@ pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
             if in_word {
                 words.push(std::mem::take(&mut current));
                 in_word = false;
-            }
-        } else if ch == '$' {
-            if chars.peek() == Some(&'$') {
-                chars.next();
-                current.push('$');
-                in_word = true;
-            } else {
-                return Err("unescaped `$` in ExecStart".into());
             }
         } else if ch == '%' {
             if chars.peek() == Some(&'%') {
@@ -381,12 +429,19 @@ pub fn parse_exec_start(line: &str) -> Result<Vec<String>, String> {
 
 // Parsed back by the Linux runtime and by the render round-trip tests.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefinition, String> {
+pub fn parse_unit(
+    bytes: &[u8],
+    target: zup_core::Target,
+    unit: &str,
+) -> Result<UnitDefinition, String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "a unit source is UTF-8".to_owned())?;
     let mut restart = None;
     let mut restart_delay = None;
     let mut restart_interval = None;
     let mut restart_burst = None;
+    let mut start_timeout = None;
+    let mut stop_grace = None;
+    let mut abort_timeout = None;
     let mut dependencies = Vec::new();
     let mut description: Option<String> = None;
     let mut exec_start: Option<String> = None;
@@ -417,6 +472,9 @@ pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefiniti
             continue;
         };
         match (section, key.trim()) {
+            ("Service", "TimeoutStartSec") => start_timeout = value.parse::<u32>().ok(),
+            ("Service", "TimeoutStopSec") => stop_grace = value.parse::<u32>().ok(),
+            ("Service", "TimeoutAbortSec") => abort_timeout = value.parse::<u32>().ok(),
             ("Service", "Restart") => restart = Some(value.to_owned()),
             ("Service", "RestartSec") => restart_delay = value.parse::<u32>().ok(),
             ("Unit", "StartLimitIntervalSec") => restart_interval = value.parse::<u32>().ok(),
@@ -455,7 +513,9 @@ pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefiniti
         return Err("managed services require NoNewPrivileges=yes".into());
     }
     let execution = match (dynamic, user, group) {
-        (true, None, None) => zup_core::ServiceExecution::SystemdDynamicUser,
+        (true, Some(user), Some(group)) if user == dynamic_user_name(unit) && group == user => {
+            zup_core::ServiceExecution::SystemdDynamicUser
+        }
         (false, Some(user), group) => zup_core::ServiceExecution::SystemdUser { user, group },
         _ => return Err("service execution identity is missing or inconsistent".into()),
     };
@@ -484,6 +544,11 @@ pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefiniti
         _ => return Err("runtime failure policy is missing or unsupported".into()),
     };
     let definition = UnitDefinition {
+        native_timeouts: zup_core::NativeServiceTimeouts::Systemd {
+            start_timeout_seconds: start_timeout.ok_or("startup timeout is required")?,
+            stop_grace_seconds: stop_grace.ok_or("shutdown grace is required")?,
+            abort_timeout_seconds: abort_timeout.ok_or("abort timeout is required")?,
+        },
         failure,
         dependencies,
         display_name: description,
@@ -491,7 +556,7 @@ pub fn parse_unit(bytes: &[u8], target: zup_core::Target) -> Result<UnitDefiniti
         readiness: readiness.ok_or("service type is required")?,
         execution,
     };
-    if definition.render(target)? != bytes {
+    if definition.render(target, unit)? != bytes {
         return Err("service definition differs from the canonical managed configuration".into());
     }
     Ok(definition)
@@ -537,7 +602,7 @@ mod tests {
     #[rstest::rstest]
     #[case::plain("259", Some(259))]
     #[case::suffixed("259.5-0ubuntu3.4", Some(259))]
-    #[case::minimum("240", Some(MINIMUM_SYSTEMD_VERSION))]
+    #[case::minimum("254", Some(MINIMUM_SYSTEMD_VERSION))]
     #[case::old("239", Some(239))]
     #[case::empty("", None)]
     #[case::unknown("unknown", None)]
@@ -642,6 +707,7 @@ mod tests {
         let argv = parse_unit(
             &desired.bytes,
             zup_core::Target::parse("linux-x64").unwrap(),
+            &desired.unit,
         )
         .unwrap()
         .argv;
@@ -651,7 +717,7 @@ mod tests {
             args.iter().map(|a| a.to_string()).collect::<Vec<_>>()[..]
         );
         assert!(
-            !exec_line.contains("$FOO") || exec_line.contains("$$FOO"),
+            exec_line.starts_with(':'),
             "environment expansion neutralized: {exec_line}"
         );
         assert!(
@@ -681,7 +747,11 @@ mod tests {
         let desired = service("tool", "/opt/acme/tool", vec![], ServiceStart::Manual);
         let canonical = render_unit(&desired, "Tool").unwrap();
         let changed = String::from_utf8(canonical).unwrap().replace(old, new);
-        let parsed = parse_unit(changed.as_bytes(), *desired.command.executable.target());
+        let parsed = parse_unit(
+            changed.as_bytes(),
+            *desired.command.executable.target(),
+            &unit_name(&desired.id).unwrap(),
+        );
         if let Ok(parsed) = parsed {
             assert_ne!(parsed.execution, desired.execution);
         }

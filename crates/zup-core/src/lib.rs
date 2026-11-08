@@ -8,8 +8,9 @@ mod installer;
 mod model;
 mod service;
 pub use service::{
-    ChangedServiceState, InitialServiceState, ServiceExecution, ServiceFailurePolicy,
-    ServiceLifecycle, ServiceReadiness, SystemdRestartCondition, WindowsServiceAccount,
+    ChangedServiceState, InitialServiceState, NativeServiceTimeouts, ServiceExecution,
+    ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceTimeouts,
+    SystemdRestartCondition, WindowsServiceAccount,
 };
 mod path;
 mod prerequisite;

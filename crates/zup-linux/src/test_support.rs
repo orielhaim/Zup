@@ -325,6 +325,12 @@ impl FakeSystemd {
 }
 
 impl SystemdManager for FakeSystemd {
+    fn process_scope_is_empty(&mut self, unit: &str) -> Result<bool, IpcError> {
+        if let Some(error) = self.fail("process_scope", unit) {
+            return Err(error);
+        }
+        Ok(self.runtime(unit)?.state == zup_plan::ServiceRuntimeState::Stopped)
+    }
     fn generation(&mut self) -> Result<String, IpcError> {
         Ok("fake-manager".into())
     }
@@ -338,6 +344,31 @@ impl SystemdManager for FakeSystemd {
             .get(unit)
             .cloned()
             .unwrap_or(crate::systemd::UnitRuntime {
+                dependencies: self
+                    .units
+                    .get(unit)
+                    .and_then(|entry| std::fs::read(&entry.fragment_path).ok())
+                    .and_then(|bytes| {
+                        crate::services::parse_unit(&bytes, zup_core::Target::host().unwrap(), unit)
+                            .ok()
+                    })
+                    .map(|definition| definition.dependencies)
+                    .unwrap_or_default(),
+                argv: self
+                    .units
+                    .get(unit)
+                    .and_then(|entry| std::fs::read(&entry.fragment_path).ok())
+                    .and_then(|bytes| {
+                        crate::services::parse_unit(&bytes, zup_core::Target::host().unwrap(), unit)
+                            .ok()
+                    })
+                    .map(|definition| definition.argv),
+                native_timeouts: Some(
+                    zup_core::ServiceTimeouts::for_execution(
+                        &zup_core::ServiceExecution::SystemdDynamicUser,
+                    )
+                    .native(),
+                ),
                 failure: Default::default(),
                 execution: Some(zup_core::ServiceExecution::SystemdUser {
                     user: "root".into(),
@@ -368,6 +399,9 @@ impl SystemdManager for FakeSystemd {
         self.runtimes.insert(
             unit.into(),
             crate::systemd::UnitRuntime {
+                argv: current.argv,
+                dependencies: current.dependencies,
+                native_timeouts: current.native_timeouts,
                 failure: Default::default(),
                 execution: current.execution,
                 service_type: current.service_type,
@@ -395,6 +429,17 @@ impl SystemdManager for FakeSystemd {
     fn reload(&mut self) -> Result<(), IpcError> {
         if let Some(error) = self.fail("reload", "") {
             return Err(error);
+        }
+        for (unit, runtime) in &mut self.runtimes {
+            runtime.argv = self
+                .units
+                .get(unit)
+                .and_then(|entry| std::fs::read(&entry.fragment_path).ok())
+                .and_then(|bytes| {
+                    crate::services::parse_unit(&bytes, zup_core::Target::host().unwrap(), unit)
+                        .ok()
+                })
+                .map(|definition| definition.argv);
         }
         self.reloads += 1;
         if self.lost("reload") {
@@ -558,6 +603,9 @@ impl SharedFakeSystemd {
 }
 
 impl SystemdManager for SharedFakeSystemd {
+    fn process_scope_is_empty(&mut self, unit: &str) -> Result<bool, IpcError> {
+        self.0.borrow_mut().process_scope_is_empty(unit)
+    }
     fn generation(&mut self) -> Result<String, IpcError> {
         self.0.borrow_mut().generation()
     }

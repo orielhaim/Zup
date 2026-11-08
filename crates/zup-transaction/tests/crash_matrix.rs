@@ -126,12 +126,10 @@ fn assert_settled(record: &TransactionRecord, outcome: TransactionOutcome) {
             }
         }
         TransactionOutcome::RecoveryRequired => {
-            assert_eq!(
+            assert!(matches!(
                 record.phase,
-                TransactionPhase::RecoveryRequired,
-                "a record that needs a human must say so, and a record that does not must not \
-                 claim it"
-            );
+                TransactionPhase::RecoveryRequired { .. }
+            ));
         }
     }
     record

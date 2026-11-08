@@ -166,8 +166,10 @@ fn all_resources() -> Vec<PluginResource> {
             readiness: Default::default(),
             lifecycle: zup_core::ServiceLifecycle {
                 install: zup_core::InitialServiceState::Running,
-                start_timeout_seconds: 17,
-                stop_timeout_seconds: 23,
+                timeouts: Some(zup_core::ServiceTimeouts::Windows {
+                    start_observation_seconds: 17,
+                    stop_observation_seconds: 23,
+                }),
                 ..Default::default()
             },
             id: "plugin-service".to_owned(),
@@ -260,8 +262,22 @@ source = "plugins/one.wasm"
         result.plan.services[0].lifecycle.install,
         zup_core::InitialServiceState::Running
     );
-    assert_eq!(result.plan.services[0].lifecycle.start_timeout_seconds, 17);
-    assert_eq!(result.plan.services[0].lifecycle.stop_timeout_seconds, 23);
+    assert_eq!(
+        result.plan.services[0]
+            .lifecycle
+            .timeouts
+            .unwrap()
+            .start_observation_seconds(),
+        17
+    );
+    assert_eq!(
+        result.plan.services[0]
+            .lifecycle
+            .timeouts
+            .unwrap()
+            .stop_observation_seconds(),
+        23
+    );
     assert_eq!(result.plan.launchers[0].privilege, Privilege::System);
     assert_eq!(
         result.plan.file_associations[0].privilege,
@@ -293,7 +309,10 @@ source = "plugins/one.wasm"
     else {
         panic!("service fixture required");
     };
-    lifecycle.start_timeout_seconds = timeout;
+    lifecycle.timeouts = Some(zup_core::ServiceTimeouts::Windows {
+        start_observation_seconds: timeout,
+        stop_observation_seconds: 23,
+    });
     *policy = start;
     let mut executor =
         FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::new(resources))]);

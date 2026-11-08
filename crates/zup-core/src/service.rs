@@ -128,7 +128,7 @@ pub enum ChangedServiceState {
 }
 
 /// Boot policy remains independent of these deployment-time decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ServiceLifecycle {
@@ -136,36 +136,261 @@ pub struct ServiceLifecycle {
     pub install: InitialServiceState,
     #[serde(default)]
     pub change: ChangedServiceState,
-    #[serde(default = "default_timeout")]
-    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
-    pub start_timeout_seconds: u32,
-    #[serde(default = "default_timeout")]
-    #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
-    pub stop_timeout_seconds: u32,
+    #[serde(default)]
+    pub timeouts: Option<ServiceTimeouts>,
 }
 
-const fn default_timeout() -> u32 {
-    90
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServiceTimeouts {
+    Systemd {
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        start_timeout_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        stop_grace_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        abort_timeout_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        settle_seconds: u32,
+    },
+    Openrc {
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        start_timeout_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        stop_grace_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        kill_wait_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        settle_seconds: u32,
+    },
+    Windows {
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        start_observation_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        stop_observation_seconds: u32,
+    },
 }
 
-impl Default for ServiceLifecycle {
-    fn default() -> Self {
-        Self {
-            install: InitialServiceState::Stopped,
-            change: ChangedServiceState::Preserve,
-            start_timeout_seconds: default_timeout(),
-            stop_timeout_seconds: default_timeout(),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeServiceTimeouts {
+    Systemd {
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        start_timeout_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        stop_grace_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        abort_timeout_seconds: u32,
+    },
+    Openrc {
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        start_timeout_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        stop_grace_seconds: u32,
+        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
+        kill_wait_seconds: u32,
+    },
+    Scm,
+}
+
+impl ServiceTimeouts {
+    pub const fn for_execution(execution: &ServiceExecution) -> Self {
+        match execution {
+            ServiceExecution::Windows { .. } => Self::Windows {
+                start_observation_seconds: 90,
+                stop_observation_seconds: 90,
+            },
+            ServiceExecution::OpenrcUser { .. } => Self::Openrc {
+                start_timeout_seconds: 90,
+                stop_grace_seconds: 90,
+                kill_wait_seconds: 5,
+                settle_seconds: 5,
+            },
+            ServiceExecution::SystemdUser { .. } | ServiceExecution::SystemdDynamicUser => {
+                Self::Systemd {
+                    start_timeout_seconds: 90,
+                    stop_grace_seconds: 90,
+                    abort_timeout_seconds: 5,
+                    settle_seconds: 5,
+                }
+            }
+        }
+    }
+
+    pub const fn native(self) -> NativeServiceTimeouts {
+        match self {
+            Self::Systemd {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                abort_timeout_seconds,
+                ..
+            } => NativeServiceTimeouts::Systemd {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                abort_timeout_seconds,
+            },
+            Self::Openrc {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                kill_wait_seconds,
+                ..
+            } => NativeServiceTimeouts::Openrc {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                kill_wait_seconds,
+            },
+            Self::Windows { .. } => NativeServiceTimeouts::Scm,
+        }
+    }
+
+    pub const fn start_observation_seconds(self) -> u32 {
+        match self {
+            Self::Systemd {
+                start_timeout_seconds,
+                settle_seconds,
+                ..
+            }
+            | Self::Openrc {
+                start_timeout_seconds,
+                settle_seconds,
+                ..
+            } => start_timeout_seconds.saturating_add(settle_seconds),
+            Self::Windows {
+                start_observation_seconds,
+                ..
+            } => start_observation_seconds,
+        }
+    }
+
+    pub const fn stop_observation_seconds(self) -> u32 {
+        match self {
+            Self::Systemd {
+                stop_grace_seconds,
+                abort_timeout_seconds,
+                settle_seconds,
+                ..
+            } => stop_grace_seconds
+                .saturating_add(abort_timeout_seconds)
+                .saturating_add(settle_seconds),
+            Self::Openrc {
+                stop_grace_seconds,
+                kill_wait_seconds,
+                settle_seconds,
+                ..
+            } => stop_grace_seconds
+                .saturating_add(kill_wait_seconds)
+                .saturating_add(settle_seconds),
+            Self::Windows {
+                stop_observation_seconds,
+                ..
+            } => stop_observation_seconds,
+        }
+    }
+
+    pub fn validate_for(self, execution: &ServiceExecution) -> Result<(), &'static str> {
+        let values: &[u32] = match &self {
+            Self::Systemd {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                abort_timeout_seconds,
+                settle_seconds,
+            } if matches!(
+                execution,
+                ServiceExecution::SystemdUser { .. } | ServiceExecution::SystemdDynamicUser
+            ) =>
+            {
+                &[
+                    *start_timeout_seconds,
+                    *stop_grace_seconds,
+                    *abort_timeout_seconds,
+                    *settle_seconds,
+                ]
+            }
+            Self::Openrc {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                kill_wait_seconds,
+                settle_seconds,
+            } if matches!(execution, ServiceExecution::OpenrcUser { .. }) => &[
+                *start_timeout_seconds,
+                *stop_grace_seconds,
+                *kill_wait_seconds,
+                *settle_seconds,
+            ],
+            Self::Windows {
+                start_observation_seconds,
+                stop_observation_seconds,
+            } if matches!(execution, ServiceExecution::Windows { .. }) => {
+                &[*start_observation_seconds, *stop_observation_seconds]
+            }
+            _ => return Err("service timeout policy does not match its native manager"),
+        };
+        if values.iter().all(|seconds| (1..=3600).contains(seconds))
+            && self.stop_observation_seconds() <= 3600
+            && self.start_observation_seconds() <= 3600
+        {
+            Ok(())
+        } else {
+            Err(
+                "service timeout components must be positive and derived transition waits must not exceed 3600 seconds",
+            )
         }
     }
 }
 
+impl NativeServiceTimeouts {
+    pub fn validate_for(self, execution: &ServiceExecution) -> Result<(), &'static str> {
+        let policy = match self {
+            Self::Systemd {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                abort_timeout_seconds,
+            } => ServiceTimeouts::Systemd {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                abort_timeout_seconds,
+                settle_seconds: 1,
+            },
+            Self::Openrc {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                kill_wait_seconds,
+            } => ServiceTimeouts::Openrc {
+                start_timeout_seconds,
+                stop_grace_seconds,
+                kill_wait_seconds,
+                settle_seconds: 1,
+            },
+            Self::Scm => ServiceTimeouts::Windows {
+                start_observation_seconds: 1,
+                stop_observation_seconds: 1,
+            },
+        };
+        policy.validate_for(execution)
+    }
+}
+
 impl ServiceLifecycle {
-    pub fn validate(self, start: crate::ServiceStart) -> Result<(), &'static str> {
-        if !(1..=3600).contains(&self.start_timeout_seconds)
-            || !(1..=3600).contains(&self.stop_timeout_seconds)
-        {
-            return Err("service transition timeouts must be between 1 and 3600 seconds");
+    pub fn resolved(self, execution: &ServiceExecution) -> Self {
+        Self {
+            timeouts: Some(self.timeouts_for(execution)),
+            ..self
         }
+    }
+
+    pub fn timeouts_for(self, execution: &ServiceExecution) -> ServiceTimeouts {
+        self.timeouts
+            .unwrap_or_else(|| ServiceTimeouts::for_execution(execution))
+    }
+
+    pub fn validate(
+        self,
+        start: crate::ServiceStart,
+        execution: &ServiceExecution,
+    ) -> Result<(), &'static str> {
+        self.timeouts_for(execution).validate_for(execution)?;
         if start == crate::ServiceStart::Disabled && self.install == InitialServiceState::Running {
             return Err("disabled services cannot request startup after installation");
         }
@@ -257,6 +482,20 @@ impl ServiceFailurePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[rstest::rstest]
+    #[case::zero(ServiceTimeouts::Windows { start_observation_seconds: 0, stop_observation_seconds: 1 }, ServiceExecution::Windows { account: WindowsServiceAccount::LocalService })]
+    #[case::overflow(ServiceTimeouts::Openrc { start_timeout_seconds: 1, stop_grace_seconds: u32::MAX, kill_wait_seconds: 1, settle_seconds: 1 }, ServiceExecution::OpenrcUser { user: "worker".into(), group: None })]
+    #[case::openrc_total(ServiceTimeouts::Openrc { start_timeout_seconds: 1, stop_grace_seconds: 3590, kill_wait_seconds: 5, settle_seconds: 6 }, ServiceExecution::OpenrcUser { user: "worker".into(), group: None })]
+    #[case::systemd_total(ServiceTimeouts::Systemd { start_timeout_seconds: 1, stop_grace_seconds: 3590, abort_timeout_seconds: 5, settle_seconds: 6 }, ServiceExecution::SystemdDynamicUser)]
+    #[case::start_total(ServiceTimeouts::Openrc { start_timeout_seconds: 3600, stop_grace_seconds: 1, kill_wait_seconds: 1, settle_seconds: 1 }, ServiceExecution::OpenrcUser { user: "worker".into(), group: None })]
+    #[case::wrong_manager(ServiceTimeouts::Windows { start_observation_seconds: 1, stop_observation_seconds: 1 }, ServiceExecution::SystemdDynamicUser)]
+    fn unenforceable_timeout_policies_are_rejected(
+        #[case] timeouts: ServiceTimeouts,
+        #[case] execution: ServiceExecution,
+    ) {
+        assert!(timeouts.validate_for(&execution).is_err());
+    }
 
     #[rstest::rstest]
     #[case::root("root", true)]

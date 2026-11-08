@@ -14,9 +14,10 @@ pub mod prelude;
 pub use api::{Context, Plugin, Scope};
 pub use plan::{
     ChangedServiceState, Error, FileAssociation, InitialServiceState, Launcher,
-    OpenrcFailurePolicy, Path, Plan, Protocol, Service, ServiceExecution, ServiceFailurePolicy,
-    ServiceLifecycle, ServiceReadiness, ServiceStart, SystemdFailurePolicy,
-    SystemdRestartCondition, SystemdUser, WindowsFailurePolicy, WindowsServiceAccount,
+    OpenrcFailurePolicy, OpenrcTimeouts, Path, Plan, Protocol, Service, ServiceExecution,
+    ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart, ServiceTimeouts,
+    SystemdFailurePolicy, SystemdRestartCondition, SystemdTimeouts, SystemdUser,
+    WindowsFailurePolicy, WindowsServiceAccount, WindowsTimeouts,
 };
 
 pub use api::__answer;
