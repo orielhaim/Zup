@@ -96,11 +96,10 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
         Ok(Some(directory))
     }
 
-    fn create_child(
+    fn create_private_child(
         &self,
         parent: &OwnedDirectory,
         name: &str,
-        _intent: &GenerationIntent,
     ) -> Result<OwnedDirectory, ExecError> {
         let directory = parent.create_exclusive_directory(name, Mode::from_bits_truncate(0o700))?;
         parent.sync()?;
@@ -111,7 +110,7 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
         object(directory)
     }
 
-    fn populate(
+    fn populate_private(
         &self,
         directory: &OwnedDirectory,
         intent: &GenerationIntent,
@@ -122,9 +121,19 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
                 .sources
                 .get(&file.path)
                 .ok_or_else(|| refused(intent, "generation member has no authenticated source"))?;
-            let (parent, leaf) = member_parent(directory, file.path.as_str(), true, intent)?;
-            if parent.kind_or_absent(&leaf)?.is_some() {
-                verify_file(&parent, &leaf, file, intent)?;
+            let mut components: Vec<_> = file.path.as_str().split('/').collect();
+            let leaf = components
+                .pop()
+                .ok_or_else(|| refused(intent, "generation member path is empty"))?;
+            let mut parent = directory.duplicate()?;
+            for component in components {
+                parent = match self.open_child(&parent, component, GenerationAccess::Private)? {
+                    Some(directory) => directory,
+                    None => self.create_private_child(&parent, component)?,
+                };
+            }
+            if parent.kind_or_absent(leaf)?.is_some() {
+                verify_file(&parent, leaf, file, intent)?;
                 continue;
             }
             let mut reader = payload
@@ -134,7 +143,7 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
                     source: source_error,
                 })?;
             let (size, digest) = parent.stage_stream(
-                &leaf,
+                leaf,
                 &mut reader,
                 file.size,
                 Mode::from_bits_truncate(file_mode(file)),
@@ -200,7 +209,7 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
                     "generation directory changed before access publication",
                 ));
             }
-            directory.chmod_self(directory_mode(intent))?;
+            directory.chmod_self(published_directory_mode(intent))?;
             directory.sync()?;
             zup_transaction::fault_injection::boundary(
                 zup_transaction::fault_injection::Boundary::MaterializationMemberExposed,
@@ -215,7 +224,7 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
                 "generation root changed during access publication",
             ));
         }
-        root.chmod_self(directory_mode(intent))?;
+        root.chmod_self(published_directory_mode(intent))?;
         root.sync()?;
         Ok(root)
     }
@@ -328,7 +337,7 @@ fn namespace(intent: &GenerationIntent, create: bool) -> Result<OwnedDirectory, 
     }
     let host = to_host_path(&root)?;
     let mut parent = if create {
-        OwnedDirectory::create(&host, directory_mode(intent))?
+        OwnedDirectory::create(&host, published_directory_mode(intent))?
     } else {
         OwnedDirectory::open(&host)?
     };
@@ -362,23 +371,6 @@ fn child(
     };
     directory.verify_descendants(Path::new("."), rustix::process::geteuid().as_raw())?;
     Ok(directory)
-}
-
-fn member_parent(
-    root: &OwnedDirectory,
-    path: &str,
-    create: bool,
-    intent: &GenerationIntent,
-) -> Result<(OwnedDirectory, String), ExecError> {
-    let mut components: Vec<_> = path.split('/').collect();
-    let leaf = components
-        .pop()
-        .ok_or_else(|| refused(intent, "generation member path is empty"))?;
-    let mut parent = root.duplicate()?;
-    for component in components {
-        parent = child(&parent, component, directory_mode(intent), create)?;
-    }
-    Ok((parent, leaf.to_owned()))
 }
 
 fn verify_tree(
@@ -432,7 +424,7 @@ fn verify_tree(
             }
         };
         let mode = directory.stat_self()?.mode;
-        let public_mode = directory_mode(intent).bits();
+        let public_mode = published_directory_mode(intent).bits();
         let valid = match access {
             GenerationAccess::Private => mode == 0o700,
             GenerationAccess::Publishing => mode == 0o700 || mode == public_mode,
@@ -457,7 +449,9 @@ fn verify_tree(
             }
             match state.kind {
                 EntryKind::Directory if directories.contains(&path) => {
-                    let child = child(&directory, &name, directory_mode(intent), false)?;
+                    let child = directory.open_child(&name)?;
+                    child
+                        .verify_descendants(Path::new("."), rustix::process::geteuid().as_raw())?;
                     let identity = object(&child)?;
                     if identity != state.object() {
                         return Err(refused(
@@ -536,7 +530,7 @@ fn object(directory: &OwnedDirectory) -> Result<NativeObjectIdentity, ExecError>
     })
 }
 
-fn directory_mode(intent: &GenerationIntent) -> Mode {
+fn published_directory_mode(intent: &GenerationIntent) -> Mode {
     Mode::from_bits_truncate(if intent.privilege == Privilege::System {
         0o755
     } else {

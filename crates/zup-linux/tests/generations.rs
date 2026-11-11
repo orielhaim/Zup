@@ -173,15 +173,16 @@ fn deployment_effects(
 }
 
 fn commit_effects(state: &Path, source: &Path, effects: DeploymentEffects) -> InstallationRecord {
+    let scope = effects.requirements.scope;
     let plan = compile_deployment(&effects).unwrap();
     let publisher = native_publisher(state);
     publisher
-        .validate_plan(&plan.requirements.app.id, SelectedScope::User, &plan)
+        .validate_plan(&plan.requirements.app.id, scope, &plan)
         .unwrap();
     let open = TransactionCoordinator::new(FilesystemTransactionStore::private_at(state))
         .begin(
             AppId::new("example.generations").unwrap(),
-            SelectedScope::User,
+            scope,
             "1.0.0".parse().unwrap(),
             plan,
         )
@@ -195,7 +196,7 @@ fn commit_effects(state: &Path, source: &Path, effects: DeploymentEffects) -> In
         settled.record
     );
     publisher
-        .load(&settled.record.app_id, SelectedScope::User)
+        .load(&settled.record.app_id, scope)
         .unwrap()
         .unwrap()
 }
@@ -217,6 +218,10 @@ fn native_executor(
 fn native_publisher(state: &Path) -> LinuxInstallationStore {
     LinuxInstallationStore::new(state)
 }
+
+#[cfg(feature = "test-faults")]
+#[path = "generations/access_publication.rs"]
+mod access_publication;
 
 #[test]
 fn upgrade_and_repair_create_verified_instances_without_mutating_prior_content() {

@@ -359,11 +359,10 @@ impl<P: PayloadSource> GenerationFilesystem for WindowsGenerationFilesystem<P> {
         parent.child(name, false, access).map(Some)
     }
 
-    fn create_child(
+    fn create_private_child(
         &self,
         parent: &GenerationDirectory,
         name: &str,
-        _intent: &GenerationIntent,
     ) -> Result<GenerationDirectory, String> {
         let directory = parent.child(name, true, GenerationAccess::Private)?;
         parent.sync()?;
@@ -374,7 +373,7 @@ impl<P: PayloadSource> GenerationFilesystem for WindowsGenerationFilesystem<P> {
         directory.identity()
     }
 
-    fn populate(
+    fn populate_private(
         &self,
         root: &GenerationDirectory,
         intent: &GenerationIntent,
@@ -393,7 +392,7 @@ impl<P: PayloadSource> GenerationFilesystem for WindowsGenerationFilesystem<P> {
                 let directory =
                     match self.open_child(parent, component, GenerationAccess::Private)? {
                         Some(directory) => directory,
-                        None => self.create_child(parent, component, intent)?,
+                        None => self.create_private_child(parent, component)?,
                     };
                 directories.push(directory);
             }

@@ -23,14 +23,15 @@ pub trait GenerationFilesystem {
         name: &str,
         access: GenerationAccess,
     ) -> Result<Option<Self::Directory>, Self::Error>;
-    fn create_child(
+    /// Creates a private staging directory, independent of the installation scope.
+    fn create_private_child(
         &self,
         parent: &Self::Directory,
         name: &str,
-        intent: &GenerationIntent,
     ) -> Result<Self::Directory, Self::Error>;
     fn object(directory: &Self::Directory) -> Result<NativeObjectIdentity, Self::Error>;
-    fn populate(
+    /// Populates staging while keeping every directory private until `publish_access`.
+    fn populate_private(
         &self,
         directory: &Self::Directory,
         intent: &GenerationIntent,
@@ -120,7 +121,7 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
                 .map_err(|error| F::refused(intent, &error.to_string()))?;
                 let directory = self
                     .filesystem
-                    .create_child(&parent, staging.as_str(), intent)?;
+                    .create_private_child(&parent, staging.as_str())?;
                 boundary(
                     crate::fault_injection::Boundary::MaterializationDirectoryCreated,
                     intent,
@@ -161,7 +162,8 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
                 let payload = payload.ok_or_else(|| {
                     F::refused(intent, "generation payload source is unavailable")
                 })?;
-                self.filesystem.populate(&directory, intent, payload)?;
+                self.filesystem
+                    .populate_private(&directory, intent, payload)?;
                 let tree =
                     self.filesystem
                         .verify_tree(&directory, intent, GenerationAccess::Private)?;
@@ -456,7 +458,7 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         .map_err(|error| F::refused(intent, &error.to_string()))?;
         let directory = self
             .filesystem
-            .create_child(&parent, name.as_str(), intent)?;
+            .create_private_child(&parent, name.as_str())?;
         F::sync(&parent)?;
         record.retired_preparations.push(crate::RetiredPreparation {
             directory: previous.clone(),
