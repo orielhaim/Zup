@@ -47,17 +47,29 @@ pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::
 
 #[derive(Debug, Clone, Copy)]
 pub enum Verb {
+    Cleanup {
+        keep: u16,
+    },
     Modify,
-    Repair { force: bool },
+    Repair {
+        force: bool,
+    },
     Upgrade,
+    Downgrade,
+    Rollback {
+        revision: zup_core::ActivationRevision,
+    },
 }
 
 impl Verb {
     pub fn action(self) -> Operation {
         match self {
+            Self::Cleanup { keep } => Operation::Cleanup { keep },
             Self::Modify => Operation::Modify,
             Self::Repair { force } => Operation::Repair { force },
             Self::Upgrade => Operation::Upgrade,
+            Self::Downgrade => Operation::Downgrade,
+            Self::Rollback { revision } => Operation::Rollback { revision },
         }
     }
 }
@@ -98,7 +110,13 @@ pub fn transition(
     }
 
     match package::open_bundle_if_present(&executable)? {
-        Some(bundle) if bundle.package().is_plan_only() => {
+        Some(bundle)
+            if bundle.package().is_plan_only()
+                && !matches!(
+                    request,
+                    Operation::Rollback { .. } | Operation::Cleanup { .. }
+                ) =>
+        {
             run_graph_transition(request, args, &bundle, policy)
         }
         Some(bundle) => {
@@ -168,18 +186,28 @@ fn run_handoff(
         &cache_root,
         handoff_path,
         args.handoff_digest.as_deref(),
+        args.state_root.as_deref(),
     )
-    .map_err(|error| {
-        debug_assert!(error.left_machine_unchanged());
-        miette::miette!("{error}")
-    })?;
+    .map_err(|error| miette::miette!("{error}"))?;
+    if args
+        .scope
+        .map(SelectedScope::from)
+        .is_some_and(|scope| scope != accepted.scope)
+    {
+        return Err(miette::miette!(
+            "requested scope differs from the runtime handoff; restart with the same scope"
+        ));
+    }
     let resume = accepted.session.resume_line();
     if args.output == crate::terminal::Output::Human && !resume.is_empty() {
         eprintln!("{resume}");
     }
     let expected = match accepted.mode {
+        zup_acquire::HandoffMode::Cleanup { keep } => LifecycleAction::Cleanup { keep },
         zup_acquire::HandoffMode::Install => LifecycleAction::Install,
         zup_acquire::HandoffMode::Upgrade => LifecycleAction::Upgrade,
+        zup_acquire::HandoffMode::Downgrade => LifecycleAction::Downgrade,
+        zup_acquire::HandoffMode::Rollback { revision } => LifecycleAction::Rollback { revision },
         zup_acquire::HandoffMode::Modify => LifecycleAction::Modify,
         zup_acquire::HandoffMode::Uninstall => LifecycleAction::Uninstall,
         zup_acquire::HandoffMode::Repair => LifecycleAction::Repair {
@@ -200,6 +228,7 @@ fn run_handoff(
     }
     run_acquired_transition(
         acquire::Request {
+            state_root: args.state_root.clone(),
             action: Some(expected),
             enable: args.enable.clone(),
             disable: args.disable.clone(),
@@ -214,8 +243,11 @@ fn run_handoff(
 
 pub(crate) fn named_action(operation: Operation) -> Option<LifecycleAction> {
     match operation {
+        Operation::Cleanup { keep } => Some(LifecycleAction::Cleanup { keep }),
         Operation::Install => Some(LifecycleAction::Install),
         Operation::Upgrade => Some(LifecycleAction::Upgrade),
+        Operation::Downgrade => Some(LifecycleAction::Downgrade),
+        Operation::Rollback { revision } => Some(LifecycleAction::Rollback { revision }),
         Operation::Modify => Some(LifecycleAction::Modify),
         Operation::Repair { force } => Some(LifecycleAction::Repair { force }),
         Operation::Uninstall => Some(LifecycleAction::Uninstall),
@@ -242,50 +274,23 @@ fn run_graph_transition(
 ) -> miette::Result<()> {
     let build = package::target_plan(bundle)?;
     let installer = &build.installer;
-    let config = installer.updates.as_ref().ok_or_else(|| {
-        miette::miette!(
-            "this runtime carries a plan but no `[updates]` configuration, so there is no \
-             release graph to acquire from"
-        )
-    })?;
     let scope = installer
         .install
         .scope
         .select(args.scope.map(Into::into))
         .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?;
-    let state_root = state::resolve_state_root(args.state_root.clone(), scope)?;
-    let ledger = zup_windows::InstallLedgerStore::new(&state_root)
-        .load(&installer.app.id, scope)
+    let state_root = state::resolve_state_root(&installer.app.id, args.state_root.clone(), scope)?;
+    let ledger = zup_windows::InstallationRecordStore::new(&state_root)
+        .observe(&installer.app.id, scope)
         .map_err(|error| miette::miette!("installation ledger: {error}"))?;
 
-    if let Some(identity) = ledger
-        .as_ref()
-        .and_then(zup_plan::InstallLedger::release_identity)
-    {
-        if identity.app_id != installer.app.id {
-            return Err(miette::miette!(
-                "the installation in {scope} is `{}` and this runtime installs `{}`",
-                identity.app_id,
-                installer.app.id
-            ));
-        }
-    } else if matches!(request, Operation::Repair { .. }) {
-        return Err(miette::miette!(
-            "this installation has no release identity, so there is no authenticated source \
-             to repair it from; re-run it from its installer"
-        ));
-    }
-
     let content_root = if scope == SelectedScope::Machine && args.state_root.is_none() {
-        state::peer_user_state_root()?
+        state::peer_user_state_root(&installer.app.id)?
     } else {
         state_root.clone()
     };
-    let context = zup_update::TrustContext::from_update_config(
-        config,
-        installer.app.id.clone(),
-        content_root,
-    );
+    let context = acquire::source_context(installer, ledger.as_ref(), request, content_root)
+        .map_err(|error| miette::miette!("source selection: {error}"))?;
     let seeds: Vec<PathBuf> = args.source.iter().cloned().collect();
     let (sink, receiver) = zup_acquire::ProgressSink::channel(256);
     let emitter = match args.output {
@@ -309,10 +314,10 @@ fn run_graph_transition(
         sink,
     ));
     drop(emitter);
-    let acquired = acquired.map_err(|error| {
-        debug_assert!(error.left_machine_unchanged());
-        miette::miette!("release acquisition: {error}")
-    })?;
+    let acquired = acquired.map_err(|error| miette::miette!("release acquisition: {error}"))?;
+
+    acquire::validate_selected_source(&acquired, bundle.package().plan(), ledger.as_ref(), request)
+        .map_err(|error| miette::miette!("source selection: {error}"))?;
 
     if let Operation::Repair { force } = request {
         let owned = ledger
@@ -325,6 +330,7 @@ fn run_graph_transition(
         let narrowed = acquire::Acquired { plan, ..acquired };
         return run_acquired_transition(
             acquire::Request {
+                state_root: Some(state_root.clone()),
                 action: Some(LifecycleAction::Repair { force }),
                 scope: Some(scope),
                 ..acquire::Request::default()
@@ -338,7 +344,10 @@ fn run_graph_transition(
     let action = match request {
         Operation::Apply => resolve_request_operation(
             Operation::Apply,
-            ledger.as_ref().map(|ledger| &ledger.version),
+            ledger
+                .as_ref()
+                .filter(|ledger| ledger.is_installed())
+                .map(|ledger| &ledger.current.version),
             &acquired.resolved.descriptor.version,
         )?,
         named => named_action(named).expect("named operations resolve directly"),
@@ -346,6 +355,7 @@ fn run_graph_transition(
 
     run_acquired_transition(
         acquire::Request {
+            state_root: Some(state_root),
             scope: Some(scope),
             ..acquire::Request::new(action).components(&args.enable, &args.disable)
         },
@@ -362,6 +372,7 @@ pub fn run_acquired_transition(
     policy: ExecutionPolicy,
 ) -> miette::Result<()> {
     let acquire::Request {
+        state_root,
         action,
         enable,
         disable,
@@ -380,12 +391,13 @@ pub fn run_acquired_transition(
         .select(scope)
         .map_err(|error| miette::miette!("{error}; specify --scope user or --scope machine"))?;
 
-    let state_root = state::resolve_state_root(Some(acquired.cache.root().to_path_buf()), scope)?;
-    let prior =
-        match zup_windows::InstallLedgerStore::new(&state_root).load(&installer.app.id, scope) {
-            Ok(prior) => prior,
-            Err(error) => return Err(miette::miette!("installation ledger: {error}")),
-        };
+    let state_root = state::resolve_state_root(&installer.app.id, state_root, scope)?;
+    let prior = match zup_windows::InstallationRecordStore::new(&state_root)
+        .observe(&installer.app.id, scope)
+    {
+        Ok(prior) => prior,
+        Err(error) => return Err(miette::miette!("installation ledger: {error}")),
+    };
 
     if matches!(action, LifecycleAction::Install) && prior.is_some() {
         return Err(miette::miette!(
@@ -398,7 +410,7 @@ pub fn run_acquired_transition(
     }
     if let Some(installed) = prior
         .as_ref()
-        .and_then(zup_plan::InstallLedger::release_identity)
+        .and_then(zup_plan::InstallationRecord::release_identity)
         && installed.variant != acquired.resolved.variant.id
     {
         return Err(miette::miette!(
@@ -409,11 +421,13 @@ pub fn run_acquired_transition(
     }
 
     let identity = acquired.identity();
-    let payload = acquire::payload_source(acquired).map_err(|error| {
-        debug_assert!(error.left_machine_unchanged());
-        miette::miette!("content source: {error}")
-    })?;
-    let executable = package::current_executable()?;
+    let payload = acquire::payload_source(acquired)
+        .map_err(|error| miette::miette!("content source: {error}"))?;
+    let source = Arc::new(
+        zup_windows::AcquiredRuntime::stage(acquired)
+            .map_err(|error| miette::miette!("release runtime: {error}"))?,
+    );
+    let executable = source.path();
     let host = WindowsOperationHost {
         app_id: installer.app.id.clone(),
         scope,
@@ -424,10 +438,11 @@ pub fn run_acquired_transition(
     };
     let input = OperationInput {
         build: &build,
-        installer: &executable,
+        installer: executable,
         scope,
         operation: Operation::from(action),
         selection: OperationSelection {
+            deployment: None,
             enable,
             disable,
             install_directory,
@@ -437,21 +452,12 @@ pub fn run_acquired_transition(
         cancellation: &zup_plan::NeverCancelled,
     };
     let prepared = prepare_operation(&input, &host).map_err(|error| miette::miette!("{error}"))?;
-    let app_version = prepared
-        .target_plan()
-        .map(|target| target.app.version.clone())
-        .or_else(|| prior.as_ref().map(|ledger| ledger.version.clone()))
-        .ok_or_else(|| miette::miette!("installation not found"))?;
     let request = runtime_request(
         &prepared,
-        installer.app.id.clone(),
-        app_version,
-        scope,
         state_root,
         zup_runtime::RequestOptions {
             bootstrap: prepared.bootstrap().cloned(),
             release: Some(identity.clone()),
-            recovery_id: None,
         },
     );
     let backend = zup_windows::WindowsRuntimeBackend::from_acquired(
@@ -460,8 +466,8 @@ pub fn run_acquired_transition(
         acquired
             .handoff(scope, handoff_mode(action))
             .map_err(|error| miette::miette!("{error}"))?,
+        source,
     )
-    .map_err(|error| miette::miette!("content source: {error}"))?
     .with_generated_files(&prepared, &request.state_root)
     .map_err(|error| miette::miette!("plugin content: {error}"))?;
     let prepared = PreparedRuntime {
@@ -481,9 +487,8 @@ pub fn run_acquired_transition(
     } else {
         execute::execute_frontend(prepared, output, action).map_err(Into::into)
     };
-    // never leaves a machine believing it has content it does not.
     if result.is_ok() {
-        let _ = acquired.record_retention(CachePolicy::Auto);
+        let _ = acquired.maintain_cache(CachePolicy::Auto);
     }
     result
 }
@@ -528,9 +533,9 @@ pub fn prepare_embedded_transition_with_cancellation(
     let bundle = package::open_bundle(&executable)?;
     let build = package::target_plan(&bundle)?;
     let app_id = build.installer.app.id.clone();
-    let state_root = state::resolve_state_root(state, scope)?;
-    let prior = zup_windows::InstallLedgerStore::new(&state_root)
-        .load(&app_id, scope)
+    let state_root = state::resolve_state_root(&app_id, state, scope)?;
+    let prior = zup_windows::InstallationRecordStore::new(&state_root)
+        .observe(&app_id, scope)
         .map_err(|error| miette::miette!("ledger: {error}"))?;
     let host = WindowsOperationHost {
         app_id: app_id.clone(),
@@ -546,6 +551,7 @@ pub fn prepare_embedded_transition_with_cancellation(
         scope,
         operation: request,
         selection: OperationSelection {
+            deployment: None,
             enable,
             disable,
             install_directory,
@@ -555,21 +561,12 @@ pub fn prepare_embedded_transition_with_cancellation(
         cancellation: mode.cancellation,
     };
     let prepared = prepare_operation(&input, &host).map_err(|error| miette::miette!("{error}"))?;
-    let app_version = prepared
-        .target_plan()
-        .map(|target| target.app.version.clone())
-        .or_else(|| prior.as_ref().map(|ledger| ledger.version.clone()))
-        .ok_or_else(|| miette::miette!("installation not found"))?;
     let request = runtime_request(
         &prepared,
-        app_id,
-        app_version,
-        scope,
         state_root.clone(),
         zup_runtime::RequestOptions {
             bootstrap: prepared.bootstrap().cloned(),
             release: None,
-            recovery_id: None,
         },
     );
     let backend = WindowsRuntimeBackend::from_path(executable, None)
@@ -585,8 +582,11 @@ pub fn prepare_embedded_transition_with_cancellation(
 
 pub(crate) fn handoff_mode(action: LifecycleAction) -> zup_acquire::HandoffMode {
     match action {
+        LifecycleAction::Cleanup { keep } => zup_acquire::HandoffMode::Cleanup { keep },
         LifecycleAction::Install => zup_acquire::HandoffMode::Install,
         LifecycleAction::Upgrade => zup_acquire::HandoffMode::Upgrade,
+        LifecycleAction::Downgrade => zup_acquire::HandoffMode::Downgrade,
+        LifecycleAction::Rollback { revision } => zup_acquire::HandoffMode::Rollback { revision },
         LifecycleAction::Modify => zup_acquire::HandoffMode::Modify,
         LifecycleAction::Repair { .. } => zup_acquire::HandoffMode::Repair,
         LifecycleAction::Uninstall => zup_acquire::HandoffMode::Uninstall,

@@ -390,7 +390,7 @@ impl<'a> Request<'a> {
 }
 
 fn check_redirect(origin: &Origin, from: &Url, to: &Url) -> Result<(), HttpError> {
-    if to.scheme() != "https" && to.scheme() != "file" {
+    if to.scheme() != "https" {
         return Err(HttpError::Redirect {
             origin: origin.to_string(),
             reason: format!("downgrade to `{}`", to.scheme()),

@@ -1,12 +1,15 @@
+mod support;
+
 use std::collections::BTreeMap;
+use zup_core::TargetPath;
 
 use zup_core::{
     App, AppId, ComponentId, NonEmptyString, Privilege, RelativePath, ResourceKey, SelectedScope,
     Target, hash_reader,
 };
 use zup_plan::{
-    DesiredFile, DesiredState, FileOperationKind, HostSnapshot, InstallLedger, LifecycleAction,
-    LifecycleError, ObservedFile, ObservedFileState, OwnedResource, RemovalKind, TargetPath,
+    DesiredFile, DesiredState, FileOperationKind, HostSnapshot, InstallationRecord,
+    LifecycleAction, LifecycleError, ObservedFile, ObservedFileState, OwnedResource, RemovalKind,
     plan_lifecycle,
 };
 
@@ -18,10 +21,18 @@ fn file(name: &str, contents: &[u8]) -> DesiredFile<TargetPath> {
     .unwrap();
     DesiredFile {
         key: ResourceKey::File {
-            destination: destination.to_string(),
+            id: zup_core::FileResourceId::Payload {
+                id: zup_core::PayloadId::TreeMember {
+                    declaration: zup_core::ResourceId::new("fixture").unwrap(),
+                    member: zup_core::RelativePath::new(name).unwrap(),
+                },
+            },
         },
         source_relative: RelativePath::new(name).unwrap(),
-        destination,
+        placement: zup_core::PayloadPlacement::Fixed {
+            replacement: zup_core::FixedReplacement::Atomic,
+            path: destination,
+        },
         size: contents.len() as u64,
         sha256: hash_reader(contents).unwrap().1,
         privilege: Privilege::User,
@@ -31,9 +42,15 @@ fn file(name: &str, contents: &[u8]) -> DesiredFile<TargetPath> {
 
 fn make_target(
     version: &str,
-    files: Vec<DesiredFile<zup_plan::TargetPath>>,
-) -> DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
+    files: Vec<DesiredFile<zup_core::TargetPath>>,
+) -> zup_plan::BoundDeployment {
     DesiredState {
+        generation_readers: Default::default(),
+        data: Vec::new(),
+        requirements: (),
+        maintenance: None,
+        installation: "00000000-0000-4000-8000-000000000001".parse().unwrap(),
+        generation: None,
         app: App {
             id: AppId::new("com.zup.lifecycle").unwrap(),
             name: NonEmptyString::new("Lifecycle").unwrap(),
@@ -59,22 +76,25 @@ fn make_target(
         file_associations: vec![],
         preset: None,
     }
+    .bind_fixed()
+    .expect("fixed deployment requirements")
 }
 
-fn ledger(files: &[DesiredFile<zup_plan::TargetPath>]) -> InstallLedger {
-    let mut ledger = InstallLedger::new(
-        AppId::new("com.zup.lifecycle").unwrap(),
-        Target::parse("windows-x64").unwrap(),
-        SelectedScope::User,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.version = "1.0.0".parse().unwrap();
-    ledger.selected_components = vec![ComponentId::new("core").unwrap()];
+fn ledger(files: &[DesiredFile<zup_core::TargetPath>]) -> InstallationRecord {
+    let mut ledger = support::installed(&make_target("1.0.0", files.to_vec()));
     for file in files {
-        ledger.resources.insert(
+        ledger.current.resources.insert(
             file.key.clone(),
             OwnedResource::File {
-                destination: file.destination.clone(),
+                replacement: zup_core::FixedReplacement::Atomic,
+                instance: zup_core::FixedFileInstance {
+                    origin: ledger.current.transaction,
+                    object: zup_core::NativeObjectIdentity::Windows {
+                        volume: 1,
+                        file: [1; 16],
+                    },
+                },
+                destination: file.destination().clone(),
                 source_relative: file.source_relative.clone(),
                 sha256: file.sha256,
                 size: file.size,
@@ -87,10 +107,7 @@ fn ledger(files: &[DesiredFile<zup_plan::TargetPath>]) -> InstallLedger {
     ledger
 }
 
-fn snapshot(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-    states: &[ObservedFileState],
-) -> HostSnapshot {
+fn snapshot(target: &zup_plan::BoundDeployment, states: &[ObservedFileState]) -> HostSnapshot {
     HostSnapshot {
         files: target
             .files
@@ -98,7 +115,7 @@ fn snapshot(
             .zip(states)
             .map(|(file, state)| ObservedFile {
                 key: file.key.clone(),
-                path: file.destination.clone(),
+                path: file.destination().clone(),
                 state: state.clone(),
             })
             .collect(),
@@ -106,19 +123,25 @@ fn snapshot(
     }
 }
 
-#[test]
-fn upgrade_adds_updates_and_retires_owned_files() {
+#[rstest::rstest]
+#[case("1.0.0")]
+#[case("2.0.0")]
+fn upgrade_adds_updates_and_retires_owned_files(#[case] version: &str) {
     let old_a = file("a.exe", b"old-a");
     let old_b = file("b.exe", b"old-b");
     let ledger = ledger(&[old_a.clone(), old_b.clone()]);
     let target = make_target(
-        "2.0.0",
+        version,
         vec![file("a.exe", b"new-a"), file("c.exe", b"new-c")],
     );
     let snapshot = snapshot(
         &target,
         &[
             ObservedFileState::File {
+                object: zup_core::NativeObjectIdentity::Windows {
+                    volume: 1,
+                    file: [1; 16],
+                },
                 executable: None,
                 size: old_a.size,
                 sha256: old_a.sha256,
@@ -166,7 +189,7 @@ fn uninstall_skips_drift_and_needs_no_manifest() {
         &matches,
     )
     .unwrap();
-    assert!(plan.uninstall);
+    assert!(plan.transition.is_remove());
     assert_eq!(
         plan.removals
             .iter()
@@ -202,6 +225,10 @@ fn repair_restores_missing_and_requires_force_for_digest_drift() {
     let changed = snapshot(
         &target,
         &[ObservedFileState::File {
+            object: zup_core::NativeObjectIdentity::Windows {
+                volume: 1,
+                file: [1; 16],
+            },
             executable: None,
             size: 4,
             sha256: hash_reader(&b"edit"[..]).unwrap().1,
@@ -237,6 +264,10 @@ fn observations_are_matched_by_identity_for_install_and_repair() {
         &target,
         &[
             ObservedFileState::File {
+                object: zup_core::NativeObjectIdentity::Windows {
+                    volume: 1,
+                    file: [1; 16],
+                },
                 executable: None,
                 size: a.size,
                 sha256: a.sha256,
@@ -289,9 +320,13 @@ fn decisions_remain_bound_to_content_identity_and_generation() {
     target.files[0].sha256 = zup_core::hash_bytes(b"replacement");
     assert!(execution.validate_desired(Some(&target)).is_err());
     target.files[0].key = ResourceKey::File {
-        destination: "another path".into(),
+        id: zup_core::FileResourceId::Payload {
+            id: zup_core::PayloadId::File {
+                declaration: zup_core::ResourceId::new("fixture-1").unwrap(),
+            },
+        },
     };
-    assert!(target.validate_resolved().is_err());
+    assert!(execution.validate_desired(Some(&target)).is_err());
     assert!(execution.validate_generation(Some(&ledger(&[]))).is_err());
 }
 
@@ -306,11 +341,12 @@ fn resolved_resources_cannot_occupy_overlapping_paths(
 ) {
     let mut target = make_target("1.0.0", vec![file("one", b"a"), file("two", b"b")]);
     target.target = platform;
+    target.requirements.target = platform;
     target.install_directory = TargetPath::new(platform, root).unwrap();
     for (file, destination) in target.files.iter_mut().zip([first, second]) {
-        file.destination = TargetPath::new(platform, destination).unwrap();
-        file.key = ResourceKey::File {
-            destination: file.destination.to_string(),
+        file.placement = zup_core::PayloadPlacement::Fixed {
+            replacement: zup_core::FixedReplacement::Atomic,
+            path: TargetPath::new(platform, destination).unwrap(),
         };
     }
     assert!(matches!(
@@ -342,11 +378,17 @@ fn windows_case_changes_preserve_ownership(
     let mut original = file("APP.exe", b"old");
     original.key = original.key.canonical_for(&Target::WINDOWS_X64);
     let installed = ledger(std::slice::from_ref(&original));
-    let mut desired = make_target("2.0.0", vec![file("app.exe", contents)]);
+    let mut updated = file("app.exe", contents);
+    updated.key = original.key.clone();
+    let mut desired = make_target("2.0.0", vec![updated]);
     desired.canonicalize_keys();
     let observed = snapshot(
         &desired,
         &[ObservedFileState::File {
+            object: zup_core::NativeObjectIdentity::Windows {
+                volume: 1,
+                file: [1; 16],
+            },
             executable: None,
             size: original.size,
             sha256: original.sha256,
@@ -366,27 +408,30 @@ fn windows_case_changes_preserve_ownership(
 
 #[test]
 fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_effect() {
+    use zup_core::CommandSpec;
     use zup_plan::{
-        CommandSpec, DesiredService, IntegrationChangeKind, ObservedService, ObservedServiceState,
-        ServiceState,
+        DesiredService, IntegrationChangeKind, ObservedService, ObservedServiceState, ServiceState,
     };
     let id = zup_core::ServiceId::new("daemon").unwrap();
     let key = ResourceKey::Service { id: id.clone() };
     let command = CommandSpec {
-        executable: file("daemon.exe", b"daemon").destination,
+        executable: file("daemon.exe", b"daemon").destination().clone(),
         arguments: vec!["--serve".into()],
     };
     let mut target = make_target("1.0.0", vec![]);
     target.scope = SelectedScope::Machine;
     target.services.push(DesiredService {
+        state_directories: Vec::new(),
         failure: Default::default(),
-        execution: zup_core::ServiceExecution::Windows {
+        execution: zup_core::ServiceExecution::WindowsJob {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
         requires_files: Vec::new(),
         requires_services: Vec::new(),
         dependency_names: Vec::new(),
-        lifecycle: Default::default(),
+        lifecycle: zup_core::ServiceLifecycle {
+            ..Default::default()
+        },
         readiness: Default::default(),
         key: key.clone(),
         id: id.clone(),
@@ -396,11 +441,16 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
         start: zup_core::ServiceStart::Automatic,
         privilege: Privilege::System,
     });
+    target = target.bind_fixed().unwrap();
     let mut owned = ledger(&[]);
     owned.scope = SelectedScope::Machine;
-    owned.resources.insert(
+    owned.current.requirements = target.requirements.clone();
+    owned.current.resources.insert(
         key.clone(),
-        OwnedResource::Service {
+        OwnedResource::Service(zup_plan::OwnedService {
+            registration: zup_core::NativeServiceRegistration::Scm {
+                installation: owned.id,
+            },
             timeouts: zup_core::ServiceTimeouts::Windows {
                 start_observation_seconds: 90,
                 stop_observation_seconds: 90,
@@ -409,12 +459,12 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
             requires_services: Vec::new(),
             name: "daemon".into(),
             privilege: Privilege::System,
-            previous: ServiceState::Absent,
             installed: Box::new(ServiceState::Registration {
+                state_directories: Vec::new(),
                 native_timeouts: zup_core::NativeServiceTimeouts::Scm,
                 dependencies: Vec::new(),
                 failure: Default::default(),
-                execution: zup_core::ServiceExecution::Windows {
+                execution: zup_core::ServiceExecution::WindowsJob {
                     account: zup_core::WindowsServiceAccount::LocalService,
                 },
                 readiness: Default::default(),
@@ -422,17 +472,24 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
                 command: Box::new(command.clone()),
                 start: zup_core::ServiceStart::Automatic,
             }),
-        },
+        }),
     );
     let snapshot = HostSnapshot {
         services: vec![ObservedService {
+            registration: zup_core::ObservedServiceRegistration::Scm {
+                claim: zup_core::ServiceOwnershipClaim {
+                    installation: owned.id,
+                    service: id.clone(),
+                },
+            },
             key: key.clone(),
             id,
             state: ObservedServiceState::Service {
+                state_directories: Vec::new(),
                 native_timeouts: zup_core::NativeServiceTimeouts::Scm,
                 dependencies: Vec::new(),
                 failure: Default::default(),
-                execution: zup_core::ServiceExecution::Windows {
+                execution: zup_core::ServiceExecution::WindowsJob {
                     account: zup_core::WindowsServiceAccount::LocalService,
                 },
                 readiness: Default::default(),
@@ -462,30 +519,45 @@ fn forced_service_repair_requires_owned_configuration_and_becomes_an_explicit_ef
         .command
         .arguments
         .push("--different".into());
-    let result = plan_lifecycle(
-        LifecycleAction::Repair { force: true },
-        Some(&target),
-        Some(&snapshot),
-        Some(&owned),
-        &BTreeMap::new(),
-    )
-    .unwrap();
-    assert_ne!(result.services[0].kind, IntegrationChangeKind::RepairOwned);
+    target = target.bind_fixed().unwrap();
+    assert!(matches!(
+        plan_lifecycle(
+            LifecycleAction::Repair { force: true },
+            Some(&target),
+            Some(&snapshot),
+            Some(&owned),
+            &BTreeMap::new(),
+        ),
+        Err(zup_plan::LifecycleError::RepairRequirementsChanged)
+    ));
 }
 
-#[test]
-fn repair_cannot_change_the_committed_execution_policy() {
+#[rstest::rstest]
+#[case::executable(true, zup_core::FixedReplacement::Atomic)]
+#[case::replacement(false, zup_core::FixedReplacement::Quiescent)]
+fn repair_cannot_change_committed_file_contracts(
+    #[case] executable: bool,
+    #[case] policy: zup_core::FixedReplacement,
+) {
     let original = file("a.exe", b"owned");
     let installed = ledger(std::slice::from_ref(&original));
     let mut changed = original.clone();
-    changed.executable = true;
+    changed.executable = executable;
+    let zup_core::PayloadPlacement::Fixed { replacement, .. } = &mut changed.placement else {
+        unreachable!()
+    };
+    *replacement = policy;
     let target = make_target("1.0.0", vec![changed]);
     let observed = snapshot(
         &target,
         &[ObservedFileState::File {
+            object: zup_core::NativeObjectIdentity::Windows {
+                volume: 1,
+                file: [1; 16],
+            },
             size: original.size,
             sha256: original.sha256,
-            executable: Some(true),
+            executable: Some(executable),
         }],
     );
     assert!(matches!(
@@ -496,6 +568,6 @@ fn repair_cannot_change_the_committed_execution_policy() {
             Some(&installed),
             &BTreeMap::new()
         ),
-        Err(zup_plan::LifecycleError::RepairDesiredChanged { .. })
+        Err(zup_plan::LifecycleError::RepairRequirementsChanged)
     ));
 }

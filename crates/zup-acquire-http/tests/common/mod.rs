@@ -367,7 +367,7 @@ impl TestOrigin {
         let server = TestServer::start();
         for (descriptor, wire) in blobs {
             server.route(
-                &zup_acquire::WebLayout::blob(&descriptor.digest).to_string(),
+                &zup_acquire::blob_path(&descriptor.digest).to_string(),
                 Behaviour::Serve(wire.clone()),
             );
         }
@@ -383,7 +383,7 @@ impl TestOrigin {
 /// Write a blob into a directory in the immutable web layout.
 pub fn seed_tree(root: &std::path::Path, descriptor: &zup_acquire::ContentDescriptor, wire: &[u8]) {
     let mut path = root.to_path_buf();
-    for segment in zup_acquire::WebLayout::blob(&descriptor.digest)
+    for segment in zup_acquire::blob_path(&descriptor.digest)
         .to_string()
         .split('/')
     {

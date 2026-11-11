@@ -12,3 +12,11 @@ mod tests;
 pub use process::{PresetProcess, PresetReader, SessionError, launch};
 pub use stage::{PresetStage, StageError, confirm_bytes};
 pub use state::{ActionRefusal, HostDecision, HostState, Launchable, Selection};
+
+#[cfg(test)]
+mod requirements_fixture {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/deployment.rs"
+    ));
+}

@@ -18,6 +18,7 @@ struct Hold {
 
 #[derive(Clone, Copy)]
 enum Script {
+    Recovery(zup_core::TransactionId),
     Commit,
     Panic,
     CommitAfterCancel,
@@ -58,6 +59,12 @@ impl zup_runtime::RuntimeBackend for FakeBackend {
             }
             self.ran.store(true, Ordering::SeqCst);
             match self.script {
+                Script::Recovery(transaction) => {
+                    Ok(zup_runtime::InstallOutcome::RecoveryRequired {
+                        transaction: Some(transaction.0),
+                        detail: "activation outcome is uncertain".into(),
+                    })
+                }
                 Script::Panic => panic!("operation task failed"),
                 Script::CommitAfterCancel => {
                     let _ = control.events.send(zup_runtime::RuntimeEvent::Progress {
@@ -109,6 +116,8 @@ fn fixture_build() -> zup_core::TargetBuildPlan {
             frontend: zup_core::Frontend::Gui,
             updates: None,
             install: zup_core::Install {
+                generation_readers: Default::default(),
+                data: Vec::new(),
                 scope: zup_core::InstallScope::User,
                 directory: zup_core::InstallDirectory {
                     user: None,
@@ -137,9 +146,15 @@ fn fixture_build() -> zup_core::TargetBuildPlan {
     }
 }
 
-fn fixture_target() -> zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
+fn fixture_target() -> zup_plan::BoundDeployment {
     let target = Target::parse("windows-x64").expect("valid target");
     zup_plan::DesiredState {
+        generation_readers: Default::default(),
+        data: Vec::new(),
+        requirements: (),
+        maintenance: None,
+        installation: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+        generation: None,
         app: zup_core::App {
             id: zup_core::AppId::new("com.example.session").expect("valid id"),
             name: zup_core::NonEmptyString::new("Session").expect("valid name"),
@@ -150,7 +165,7 @@ fn fixture_target() -> zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::Ta
         },
         target,
         scope: SelectedScope::User,
-        install_directory: zup_plan::TargetPath::new(target, "C:\\Session").expect("valid path"),
+        install_directory: zup_core::TargetPath::new(target, "C:\\Session").expect("valid path"),
         selected_components: Vec::new(),
         prerequisites: Vec::new(),
         files: Vec::new(),
@@ -162,10 +177,18 @@ fn fixture_target() -> zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::Ta
 
         preset: None,
     }
+    .bind_fixed()
+    .expect("fixed deployment requirements")
 }
 
 fn fixture_install() -> zup_plan::DesiredState {
     zup_plan::DesiredState {
+        generation_readers: Default::default(),
+        data: Vec::new(),
+        requirements: (),
+        maintenance: None,
+        installation: fixture_target().installation,
+        generation: None,
         app: zup_core::App {
             id: zup_core::AppId::new("com.example.session").expect("valid id"),
             name: zup_core::NonEmptyString::new("Session").expect("valid name"),
@@ -190,30 +213,75 @@ fn fixture_install() -> zup_plan::DesiredState {
     }
 }
 
+fn installed(scope: SelectedScope) -> zup_plan::InstallationRecord {
+    let desired = fixture_target();
+    {
+        let fixture_commit = zup_plan::InstallationCommit {
+            transaction: zup_core::TransactionId::new_v7(),
+            plan_hash: zup_core::hash_bytes(b"session installation"),
+        };
+        zup_plan::InstallationRecord {
+            commit: fixture_commit,
+            retired_deployments: Vec::new(),
+            data: Default::default(),
+            id: desired.installation,
+            state: zup_plan::InstallationState::Installed,
+            app_id: desired.app.id,
+            scope,
+            target: desired.target,
+            directory: desired.install_directory,
+            current: zup_plan::DeploymentSnapshot {
+                maintenance: None,
+                requirements: zup_plan::DeploymentRequirements {
+                    scope,
+                    ..desired.requirements.clone()
+                },
+                revision: zup_core::ActivationRevision::FIRST,
+                transaction: fixture_commit.transaction,
+                plan_hash: fixture_commit.plan_hash,
+                version: desired.app.version,
+                selected_components: Vec::new(),
+                release: None,
+                preset: None,
+                materialization: None,
+                resources: BTreeMap::new(),
+            },
+            retained: Vec::new(),
+        }
+    }
+}
+
 impl zup_runtime::OperationHost for FakeHost {
     fn plan_build(
         &self,
         _build: &zup_core::TargetBuildPlan,
-        _request: &zup_plan::PlanRequest,
+        request: &zup_plan::PlanRequest,
         _cancellation: &dyn zup_plan::CancellationQuery,
     ) -> Result<zup_plan::PlannedInstallation, zup_runtime::OperationError> {
+        let mut plan = fixture_install();
+        plan.installation = request.installation;
+        plan.scope = request.scope;
         Ok(zup_plan::PlannedInstallation {
-            plan: fixture_install(),
+            plan,
             generated_files: Vec::new(),
         })
     }
 
     fn resolve_target(
         &self,
-        _install: &zup_plan::DesiredState,
-    ) -> Result<zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String> {
-        Ok(fixture_target())
+        install: &zup_plan::DesiredState,
+    ) -> Result<zup_plan::BoundDeployment, String> {
+        let mut target = fixture_target();
+        target.installation = install.installation;
+        target.scope = install.scope;
+        target.requirements.scope = install.scope;
+        Ok(target)
     }
 
     fn observe(
         &self,
-        _target: Option<&zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-        _ledger: Option<&zup_plan::InstallLedger>,
+        _target: Option<&zup_plan::BoundDeployment>,
+        _ledger: Option<&zup_plan::InstallationRecord>,
     ) -> Result<
         (
             Option<zup_plan::HostSnapshot>,
@@ -226,18 +294,23 @@ impl zup_runtime::OperationHost for FakeHost {
 
     fn compile(
         &self,
-        _execution: &zup_plan::ExecutionPlan,
-        _target: Option<&zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-        _ledger: Option<&zup_plan::InstallLedger>,
-    ) -> Result<zup_transaction::TransactionInput, String> {
-        Ok(zup_transaction::TransactionInput::new(
-            Target::parse("windows-x64").expect("valid target"),
-        ))
+        execution: &zup_plan::ExecutionPlan,
+        _target: Option<&zup_plan::BoundDeployment>,
+        _ledger: Option<&zup_plan::InstallationRecord>,
+    ) -> Result<zup_plan::DeploymentEffects, String> {
+        let binding = execution.binding.as_ref().expect("bound execution");
+        let mut effects =
+            zup_plan::DeploymentEffects::new(binding.installation, binding.requirements.clone());
+        effects.install_directory = execution.install_directory.clone();
+        effects.observed = binding.observed_activation;
+        effects.observed_transaction = binding.observed_transaction;
+        effects.transition = execution.transition;
+        Ok(effects)
     }
 
     fn attach_content(
         &self,
-        _target: &mut zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        _target: &mut zup_plan::BoundDeployment,
         _content: &zup_runtime::ContentAccess,
         _preset: Option<&zup_core::PresetRuntime>,
     ) -> Result<(), String> {
@@ -262,6 +335,38 @@ impl SessionHost for FakeHost {
 
     fn describe(&mut self, _executable: &Path) -> Result<Arc<zup_core::TargetBuildPlan>, String> {
         Ok(Arc::new(self.build.clone()))
+    }
+
+    fn recover<'a>(
+        &'a self,
+        _context: &'a OperationContext,
+        transaction: zup_core::TransactionId,
+        _control: &'a zup_runtime::OperationControl,
+    ) -> zup_runtime::RuntimeFuture<
+        'a,
+        Result<zup_runtime::InstallOutcome, zup_runtime::SessionError>,
+    > {
+        Box::pin(async move {
+            assert!(
+                matches!(self.backend.script, Script::Recovery(expected) if expected == transaction)
+            );
+            self.seen
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("recover {transaction}"));
+            Ok(zup_runtime::InstallOutcome::Recovered {
+                settlement: zup_runtime::RecoverySettlement::RolledBack,
+            })
+        })
+    }
+
+    fn refresh_installation(
+        &mut self,
+        _context: &OperationContext,
+    ) -> Result<Option<Arc<zup_core::TargetBuildPlan>>, String> {
+        self.seen.events.lock().unwrap().push("refreshed".into());
+        Ok(None)
     }
 
     fn observe(
@@ -421,13 +526,7 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
     let root = tempfile::tempdir().expect("state root");
     let mut session_host = host("close_preset");
     session_host.after_commit_error = Some("cleanup failed".into());
-    let mut ledger = zup_plan::InstallLedger::new(
-        session_host.build.installer.app.id.clone(),
-        session_host.build.installer.target,
-        SelectedScope::User,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.version = session_host.build.installer.app.version.clone();
+    let ledger = installed(SelectedScope::User);
     session_host.installations = vec![zup_session::ScopedInstallation {
         scope: SelectedScope::User,
         state_root: root.path().to_path_buf(),
@@ -458,7 +557,9 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
     assert!(
         matches!(
             completion.outcome,
-            zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. }
+            zup_session::SessionOutcome::Deployment(
+                zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. }
+            )
         ),
         "cleanup after commit stays a committed reconciliation: {:?}",
         completion.outcome
@@ -490,15 +591,26 @@ async fn an_install_runs_the_shared_operation_to_commit() {
     );
 }
 
+#[tokio::test]
+async fn a_preset_recovers_the_reported_transaction_and_refreshes_state() {
+    let mut host = host("recovery_preset");
+    let transaction = zup_core::TransactionId::new_v7();
+    host.backend.script = Script::Recovery(transaction);
+    zup_session::run(host.clone(), fake_exe(), SessionLaunch::default())
+        .await
+        .expect("recovery settles");
+    let seen = host.seen.events.lock().unwrap();
+    assert!(seen.contains(&format!("recover {transaction}")));
+    assert_eq!(
+        seen.iter()
+            .filter(|event| event.as_str() == "refreshed")
+            .count(),
+        1
+    );
+}
+
 #[test]
 fn an_unspecified_either_scope_presents_an_existing_installation() {
-    let installed = [SelectedScope::Machine];
-    let installations = [zup_session::ScopedInstallation {
-        scope: SelectedScope::Machine,
-        state_root: PathBuf::from("machine"),
-        ledger: None,
-    }];
-    let _ = installations;
     let scope = zup_session::select_scope(
         zup_core::InstallScope::Either,
         &SessionLaunch {
@@ -508,12 +620,7 @@ fn an_unspecified_either_scope_presents_an_existing_installation() {
         &[zup_session::ScopedInstallation {
             scope: SelectedScope::Machine,
             state_root: PathBuf::from("machine"),
-            ledger: Some(zup_plan::InstallLedger::new(
-                zup_core::AppId::new("com.example.session").expect("id"),
-                Target::parse("windows-x64").expect("target"),
-                SelectedScope::Machine,
-                zup_core::TransactionId::new_v7(),
-            )),
+            ledger: Some(installed(SelectedScope::Machine)),
         }],
     )
     .expect("presentation");
@@ -527,7 +634,6 @@ fn an_unspecified_either_scope_presents_an_existing_installation() {
         headless.is_err(),
         "a console either install names its scope"
     );
-    let _ = installed;
 }
 
 #[tokio::test]
@@ -585,13 +691,7 @@ async fn switching_from_machine_to_user_uses_the_user_installation() {
     let machine_root = tempfile::tempdir().expect("machine root");
     let mut host = host("user_scope_install_preset");
     host.build.installer.install.scope = zup_core::InstallScope::Either;
-    let mut user_ledger = zup_plan::InstallLedger::new(
-        host.build.installer.app.id.clone(),
-        host.build.installer.target,
-        SelectedScope::User,
-        zup_core::TransactionId::new_v7(),
-    );
-    user_ledger.version = host.build.installer.app.version.clone();
+    let user_ledger = installed(SelectedScope::User);
     host.installations = vec![
         zup_session::ScopedInstallation {
             scope: SelectedScope::User,
@@ -636,13 +736,7 @@ async fn switching_from_machine_to_user_uses_the_user_installation() {
 async fn a_gui_uninstall_reaches_execution_without_an_install_plan() {
     let root = tempfile::tempdir().expect("state root");
     let mut host = host("uninstall_preset");
-    let mut ledger = zup_plan::InstallLedger::new(
-        host.build.installer.app.id.clone(),
-        host.build.installer.target,
-        SelectedScope::User,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.version = host.build.installer.app.version.clone();
+    let ledger = installed(SelectedScope::User);
     host.installations = vec![zup_session::ScopedInstallation {
         scope: SelectedScope::User,
         state_root: root.path().to_path_buf(),

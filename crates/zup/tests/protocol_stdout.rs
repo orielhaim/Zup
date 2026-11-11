@@ -65,8 +65,9 @@ scope = "user"
 user = "${location.user_data}/StdoutApp"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#
         .replace("windows-x64", zup_plugin_contract::HOST_TARGET),
     )

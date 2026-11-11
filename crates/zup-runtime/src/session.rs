@@ -2,14 +2,14 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use zup_core::TransactionId;
+use zup_plan::DeploymentPlan;
 
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use zup_bootstrap::BoundBootstrapPlan;
 use zup_core::{AppId, ReleaseIdentity, SelectedScope, Target};
-use zup_transaction::{
-    CancellationProbe, FilesystemTransactionStore, TransactionId, TransactionPlan, TransactionStore,
-};
+use zup_transaction::CancellationProbe;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -49,22 +49,51 @@ pub enum SessionError {
     #[error("parent disconnect")]
     ParentDisconnect,
 
-    #[error("recovery required")]
-    RecoveryRequired,
+    #[error("{detail}")]
+    RecoveryRequired {
+        transaction: Option<uuid::Uuid>,
+        detail: String,
+    },
 }
 
 #[derive(Clone)]
 pub struct RuntimeRequest {
-    pub intent: Option<zup_plan::DeploymentIntent>,
+    pub operation: RuntimeOperation,
     pub target: Target,
     pub app_id: AppId,
     pub app_version: semver::Version,
     pub scope: SelectedScope,
-    pub transaction_plan: TransactionPlan,
     pub state_root: PathBuf,
-    pub recovery_id: Option<TransactionId>,
+}
+
+#[derive(Clone)]
+pub struct RuntimeDeployment {
+    pub plan: DeploymentPlan,
+    pub intent: zup_plan::DeploymentIntent,
     pub bootstrap: Option<BootstrapRequest>,
     pub release: Option<ReleaseIdentity>,
+}
+
+#[derive(Clone)]
+pub enum RuntimeOperation {
+    Deployment(Box<RuntimeDeployment>),
+    Recovery { transaction: TransactionId },
+}
+
+impl RuntimeOperation {
+    pub fn deployment(&self) -> Option<&RuntimeDeployment> {
+        match self {
+            Self::Deployment(deployment) => Some(deployment),
+            Self::Recovery { .. } => None,
+        }
+    }
+
+    pub fn recovery_transaction(&self) -> Option<TransactionId> {
+        match self {
+            Self::Recovery { transaction } => Some(*transaction),
+            Self::Deployment(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -89,14 +118,20 @@ impl ExecutionPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
     Committed,
+    Recovered {
+        settlement: RecoverySettlement,
+    },
     RebootRequired {
         prerequisite_id: String,
         exit_code: i32,
     },
     RolledBack,
     Cancelled,
-    RecoveryRequired,
-    /// The journal is committed. Ledger publication or required post-commit work is not.
+    RecoveryRequired {
+        transaction: Option<uuid::Uuid>,
+        detail: String,
+    },
+    /// The installation is committed; required post-commit work remains.
     CommittedPendingReconciliation {
         transaction: Option<uuid::Uuid>,
         detail: String,
@@ -108,6 +143,31 @@ pub enum InstallOutcome {
         operation: &'static str,
     },
     Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoverySettlement {
+    Committed,
+    RolledBack,
+}
+
+impl InstallOutcome {
+    pub fn recovery(record: &zup_transaction::TransactionRecord) -> Self {
+        let transaction = Some(record.transaction_id.as_uuid());
+        let detail = record.recovery_detail();
+        if record.phase == zup_transaction::TransactionPhase::Committed {
+            Self::CommittedPendingReconciliation {
+                transaction,
+                detail,
+            }
+        } else {
+            Self::RecoveryRequired {
+                transaction,
+                detail,
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -137,43 +197,6 @@ impl CancellationProbe for TokenProbe {
     fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecoveryStatus {
-    NoRecoveryNeeded,
-    CommittedTransaction { transaction_id: String },
-    PreparedTransaction { transaction_id: String },
-    InterruptedApplyingTransaction { transaction_id: String },
-    RecoveryRequired { transaction_id: String },
-}
-
-pub fn discover_recovery(
-    state_root: &Path,
-) -> Result<Vec<RecoveryStatus>, zup_transaction::StoreError> {
-    let store = FilesystemTransactionStore::private_at(state_root);
-    let mut out = Vec::new();
-    for id in store.list_ids()? {
-        let record = store.load(&id)?;
-        let transaction_id = id.to_string();
-        out.push(match record.phase {
-            zup_transaction::TransactionPhase::Prepared => {
-                RecoveryStatus::PreparedTransaction { transaction_id }
-            }
-            zup_transaction::TransactionPhase::Applying
-            | zup_transaction::TransactionPhase::RollingBack => {
-                RecoveryStatus::InterruptedApplyingTransaction { transaction_id }
-            }
-            zup_transaction::TransactionPhase::RecoveryRequired { .. } => {
-                RecoveryStatus::RecoveryRequired { transaction_id }
-            }
-            zup_transaction::TransactionPhase::Committed => {
-                RecoveryStatus::CommittedTransaction { transaction_id }
-            }
-            zup_transaction::TransactionPhase::RolledBack => RecoveryStatus::NoRecoveryNeeded,
-        });
-    }
-    Ok(out)
 }
 
 pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -294,20 +317,27 @@ pub async fn execute(
     request: RuntimeRequest,
     control: &OperationControl,
 ) -> Result<InstallOutcome, SessionError> {
-    if request.target != request.transaction_plan.target {
+    if request
+        .operation
+        .deployment()
+        .map(|deployment| &deployment.plan)
+        .is_some_and(|plan| request.target != plan.target)
+    {
         return Err(SessionError::PlanInvalid(
             "runtime target does not match the finalized transaction plan".into(),
         ));
     }
     if request
-        .bootstrap
-        .as_ref()
+        .operation
+        .deployment()
+        .and_then(|deployment| deployment.bootstrap.as_ref())
         .is_some_and(|bootstrap| bootstrap.plan.plan.key.target != request.target)
     {
         return Err(SessionError::PlanInvalid(
             "runtime target does not match the bootstrap plan".into(),
         ));
     }
+    let recovering = request.operation.recovery_transaction().is_some();
     let mut incoming = control.subscribe();
     let progress = control.progress.clone();
     let session_log = SessionLog::start(&request, "lifecycle");
@@ -319,7 +349,7 @@ pub async fn execute(
             "plan_received",
             serde_json::json!({
                 "target": request.target.to_string(),
-                "total_work": request.transaction_plan.total_work(),
+                "total_work": request.operation.deployment().map(|deployment| &deployment.plan).map(DeploymentPlan::total_work),
             }),
         );
     }
@@ -348,6 +378,15 @@ pub async fn execute(
                 result = &mut execution => break result,
             }
         }
+    };
+    let result = match (recovering, result) {
+        (true, Ok(InstallOutcome::Committed)) => Ok(InstallOutcome::Recovered {
+            settlement: RecoverySettlement::Committed,
+        }),
+        (true, Ok(InstallOutcome::RolledBack)) => Ok(InstallOutcome::Recovered {
+            settlement: RecoverySettlement::RolledBack,
+        }),
+        (_, result) => result,
     };
     while let Ok(event) = incoming.try_recv() {
         progress.send_modify(|current| current.observe(&event));
@@ -379,7 +418,13 @@ pub fn outcome_of(result: Result<InstallOutcome, SessionError>) -> InstallOutcom
         Err(SessionError::InstallationBusy) => InstallOutcome::Busy {
             operation: "maintenance",
         },
-        Err(SessionError::RecoveryRequired) => InstallOutcome::RecoveryRequired,
+        Err(SessionError::RecoveryRequired {
+            transaction,
+            detail,
+        }) => InstallOutcome::RecoveryRequired {
+            transaction,
+            detail,
+        },
         Err(error) => InstallOutcome::Failed(error.to_string()),
     }
 }
@@ -392,6 +437,13 @@ pub(crate) fn emit_terminal(
         Ok(InstallOutcome::Committed) => {
             let _ = events.send(RuntimeEvent::Completed {
                 outcome: CompletionOutcome::Committed,
+            });
+        }
+        Ok(InstallOutcome::Recovered { settlement }) => {
+            let _ = events.send(RuntimeEvent::Completed {
+                outcome: CompletionOutcome::Recovered {
+                    settlement: *settlement,
+                },
             });
         }
         Ok(InstallOutcome::RebootRequired {
@@ -420,10 +472,10 @@ pub(crate) fn emit_terminal(
                 outcome: CompletionOutcome::Cancelled,
             });
         }
-        Ok(InstallOutcome::RecoveryRequired) => {
+        Ok(InstallOutcome::RecoveryRequired { detail, .. }) => {
             let _ = events.send(RuntimeEvent::Failed {
                 kind: FailureKind::RecoveryRequired,
-                message: "recovery required".into(),
+                message: detail.clone(),
             });
         }
         Ok(InstallOutcome::CommittedPendingReconciliation { detail, .. }) => {
@@ -474,7 +526,7 @@ pub(crate) fn emit_terminal(
             let kind = match error {
                 SessionError::AuthorizationRequired => FailureKind::AuthorizationRequired,
                 SessionError::AuthorizationCancelled => FailureKind::AuthorizationCancelled,
-                SessionError::RecoveryRequired => FailureKind::RecoveryRequired,
+                SessionError::RecoveryRequired { .. } => FailureKind::RecoveryRequired,
                 _ => FailureKind::Session,
             };
             let _ = events.send(RuntimeEvent::Failed {
@@ -491,6 +543,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum CompletionOutcome {
     Committed,
+    Recovered { settlement: RecoverySettlement },
     RebootRequired,
     RolledBack,
     Cancelled,
@@ -527,6 +580,9 @@ pub enum RuntimeState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RuntimeEvent {
+    PlanPrepared {
+        plan: Box<DeploymentPlan>,
+    },
     StateChanged {
         state: RuntimeState,
     },
@@ -626,7 +682,7 @@ impl SessionLog {
                 "app_id": request.app_id.as_str(),
                 "app_version": request.app_version.to_string(),
                 "scope": request.scope,
-                "transaction_id": request.recovery_id.map(|id| id.to_string()),
+                "transaction_id": request.operation.recovery_transaction().map(|id| id.to_string()),
                 "state_root": request.state_root.display().to_string(),
             }),
         );

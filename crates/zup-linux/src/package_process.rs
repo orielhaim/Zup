@@ -71,7 +71,7 @@ impl PackageProcess<'_> {
             program: self.program.into(),
             state,
         })?;
-        zup_transaction::publish_full(
+        zup_storage::publish_full(
             self.directory,
             format!("{}.json", self.stem()),
             &bytes,

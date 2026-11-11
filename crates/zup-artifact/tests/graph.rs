@@ -202,10 +202,12 @@ fn a_variant_mismatch_is_refused_with_a_named_dimension(
 fn an_offline_artifact_without_a_runtime_is_incomplete() {
     let root = TempDir::new().unwrap();
     let x64 = build_target(root.path().join("x64"), &X64);
+    let mut installer = x64.plan().installer.clone();
+    installer.files.clear();
     let without_runtime = DistributionVariant::resolve(
         &x64_resolved(&x64, root.path()),
-        &zup_build::TargetBuildPlan {
-            installer: x64.plan().installer.clone(),
+        &zup_core::TargetBuildPlan {
+            installer,
             prerequisites: Vec::new(),
             plugins: Vec::new(),
             files: Vec::new(),

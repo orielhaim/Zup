@@ -1,5 +1,67 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceOwnershipClaim {
+    pub installation: crate::InstallationId,
+    pub service: crate::ServiceId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeServiceRegistration {
+    Scm { installation: crate::InstallationId },
+    SourceFile,
+}
+
+impl NativeServiceRegistration {
+    pub fn for_service(execution: &ServiceExecution, installation: crate::InstallationId) -> Self {
+        match execution {
+            ServiceExecution::WindowsJob { .. } => Self::Scm { installation },
+            _ => Self::SourceFile,
+        }
+    }
+
+    pub fn claim(self, service: crate::ServiceId) -> Option<ServiceOwnershipClaim> {
+        match self {
+            Self::Scm { installation } => Some(ServiceOwnershipClaim {
+                installation,
+                service,
+            }),
+            Self::SourceFile => None,
+        }
+    }
+
+    pub fn belongs_to(self, installation: crate::InstallationId, target: crate::Target) -> bool {
+        match self {
+            Self::Scm {
+                installation: owner,
+            } => owner == installation && target.is_windows(),
+            Self::SourceFile => target.operating_system() == crate::TargetOperatingSystem::Linux,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ObservedServiceRegistration {
+    Unclaimed,
+    Scm { claim: ServiceOwnershipClaim },
+    SourceFile,
+}
+
+impl ObservedServiceRegistration {
+    pub fn matches(&self, expected: NativeServiceRegistration, service: &crate::ServiceId) -> bool {
+        match (self, expected) {
+            (Self::Scm { claim }, NativeServiceRegistration::Scm { installation }) => {
+                claim.installation == installation && &claim.service == service
+            }
+            (Self::SourceFile, NativeServiceRegistration::SourceFile) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -13,7 +75,7 @@ pub enum WindowsServiceAccount {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServiceExecution {
-    Windows {
+    WindowsJob {
         account: WindowsServiceAccount,
     },
     SystemdDynamicUser,
@@ -30,6 +92,54 @@ pub enum ServiceExecution {
 }
 
 impl ServiceExecution {
+    pub fn native_name(
+        &self,
+        app: &crate::AppId,
+        id: &crate::ServiceId,
+        declared: Option<&crate::NonEmptyString>,
+    ) -> Result<crate::NonEmptyString, &'static str> {
+        let name = match declared {
+            Some(name) => name.to_string(),
+            None => {
+                let mut preimage = b"zup:native-service-name:1\0".to_vec();
+                preimage
+                    .extend(serde_json::to_vec(&(app, id)).expect("service identity serializes"));
+                let digest = crate::hash_bytes(&preimage);
+                let suffix = if matches!(self, Self::SystemdUser { .. } | Self::SystemdDynamicUser)
+                {
+                    ".service"
+                } else {
+                    ""
+                };
+                format!("zup-{}{suffix}", digest.to_hex())
+            }
+        };
+        let valid = if matches!(self, Self::WindowsJob { .. }) {
+            name.encode_utf16().count() <= 256
+                && !name
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '/' | '\\'))
+        } else {
+            let stem = if matches!(self, Self::SystemdUser { .. } | Self::SystemdDynamicUser) {
+                name.strip_suffix(".service")
+                    .ok_or("systemd native names must end in .service")?
+            } else {
+                &name
+            };
+            !stem.is_empty()
+                && name.len() <= 200
+                && stem
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+                && stem != "."
+                && stem != ".."
+        };
+        if !valid {
+            return Err("native service name is not a safe name for the selected service manager");
+        }
+        crate::NonEmptyString::new(name).map_err(|_| "native service name must not be empty")
+    }
+
     pub fn validate_policies(
         &self,
         failure: ServiceFailurePolicy,
@@ -42,7 +152,10 @@ impl ServiceExecution {
         let supported = matches!(
             (self, failure),
             (_, ServiceFailurePolicy::None)
-                | (Self::Windows { .. }, ServiceFailurePolicy::Windows { .. })
+                | (
+                    Self::WindowsJob { .. },
+                    ServiceFailurePolicy::Windows { .. }
+                )
                 | (
                     Self::SystemdUser { .. } | Self::SystemdDynamicUser,
                     ServiceFailurePolicy::Systemd { .. }
@@ -60,7 +173,7 @@ impl ServiceExecution {
 
     pub fn validate_for(&self, target: crate::Target) -> Result<(), &'static str> {
         match (self, target.operating_system()) {
-            (Self::Windows { .. }, crate::TargetOperatingSystem::Windows)
+            (Self::WindowsJob { .. }, crate::TargetOperatingSystem::Windows)
             | (Self::SystemdDynamicUser, crate::TargetOperatingSystem::Linux) => Ok(()),
             (
                 Self::SystemdUser { user, group } | Self::OpenrcUser { user, group },
@@ -186,8 +299,6 @@ pub enum NativeServiceTimeouts {
     },
     Openrc {
         #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
-        start_timeout_seconds: u32,
-        #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
         stop_grace_seconds: u32,
         #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 3600)))]
         kill_wait_seconds: u32,
@@ -198,7 +309,7 @@ pub enum NativeServiceTimeouts {
 impl ServiceTimeouts {
     pub const fn for_execution(execution: &ServiceExecution) -> Self {
         match execution {
-            ServiceExecution::Windows { .. } => Self::Windows {
+            ServiceExecution::WindowsJob { .. } => Self::Windows {
                 start_observation_seconds: 90,
                 stop_observation_seconds: 90,
             },
@@ -232,12 +343,10 @@ impl ServiceTimeouts {
                 abort_timeout_seconds,
             },
             Self::Openrc {
-                start_timeout_seconds,
                 stop_grace_seconds,
                 kill_wait_seconds,
                 ..
             } => NativeServiceTimeouts::Openrc {
-                start_timeout_seconds,
                 stop_grace_seconds,
                 kill_wait_seconds,
             },
@@ -322,7 +431,7 @@ impl ServiceTimeouts {
             Self::Windows {
                 start_observation_seconds,
                 stop_observation_seconds,
-            } if matches!(execution, ServiceExecution::Windows { .. }) => {
+            } if matches!(execution, ServiceExecution::WindowsJob { .. }) => {
                 &[*start_observation_seconds, *stop_observation_seconds]
             }
             _ => return Err("service timeout policy does not match its native manager"),
@@ -354,11 +463,10 @@ impl NativeServiceTimeouts {
                 settle_seconds: 1,
             },
             Self::Openrc {
-                start_timeout_seconds,
                 stop_grace_seconds,
                 kill_wait_seconds,
             } => ServiceTimeouts::Openrc {
-                start_timeout_seconds,
+                start_timeout_seconds: 1,
                 stop_grace_seconds,
                 kill_wait_seconds,
                 settle_seconds: 1,
@@ -484,7 +592,7 @@ mod tests {
     use super::*;
 
     #[rstest::rstest]
-    #[case::zero(ServiceTimeouts::Windows { start_observation_seconds: 0, stop_observation_seconds: 1 }, ServiceExecution::Windows { account: WindowsServiceAccount::LocalService })]
+    #[case::zero(ServiceTimeouts::Windows { start_observation_seconds: 0, stop_observation_seconds: 1 }, ServiceExecution::WindowsJob { account: WindowsServiceAccount::LocalService })]
     #[case::overflow(ServiceTimeouts::Openrc { start_timeout_seconds: 1, stop_grace_seconds: u32::MAX, kill_wait_seconds: 1, settle_seconds: 1 }, ServiceExecution::OpenrcUser { user: "worker".into(), group: None })]
     #[case::openrc_total(ServiceTimeouts::Openrc { start_timeout_seconds: 1, stop_grace_seconds: 3590, kill_wait_seconds: 5, settle_seconds: 6 }, ServiceExecution::OpenrcUser { user: "worker".into(), group: None })]
     #[case::systemd_total(ServiceTimeouts::Systemd { start_timeout_seconds: 1, stop_grace_seconds: 3590, abort_timeout_seconds: 5, settle_seconds: 6 }, ServiceExecution::SystemdDynamicUser)]
@@ -530,7 +638,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            ServiceExecution::Windows {
+            ServiceExecution::WindowsJob {
                 account: WindowsServiceAccount::LocalSystem
             }
             .validate_for(linux)

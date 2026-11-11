@@ -10,11 +10,12 @@ description = "Transaction graph, durable record, and recovery engine for zup"
 test-faults = []
 
 [dependencies]
+uuid = { workspace = true, features = ["v4"] }
+zup-storage.workspace = true
 zup-plan.workspace = true
 jiff.workspace = true
 private-fs.workspace = true
 miette.workspace = true
-petgraph.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true

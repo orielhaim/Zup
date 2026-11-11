@@ -1,6 +1,6 @@
 # Demo App
 
-A Windows example with required and optional components, user or machine scope, shortcuts, a PATH entry, and installer branding. Read `zup.toml` for its declarations.
+A Windows example with required and optional components, user or machine scope, shortcuts, a PATH entry, and installer branding. Payloads use immutable generations. Shortcuts and PATH registration refer to the selected generation. Read `zup.toml` for its declarations.
 
 ## Run
 
@@ -30,7 +30,7 @@ Run `Demo App-Setup.exe`:
 2. Toggle Documentation and Sample data and inspect the planned changes.
 3. Install, then check the Start menu, desktop shortcut, and `demo --version` in a new command prompt.
 4. Use Change to modify component selection.
-5. Delete `NOTES.txt` from the install directory and run Repair.
+5. Inspect the active generation, remove its `NOTES.txt`, and run Repair. Repair prepares a verified replacement generation.
 6. Uninstall and verify that the managed files, shortcuts, and PATH entry are removed.
 
 To test an upgrade, change the application version, rebuild with `zup build --force`, and run the new installer. This example does not configure an update repository.

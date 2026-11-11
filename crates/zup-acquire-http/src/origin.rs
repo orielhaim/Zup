@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use url::Url;
-use zup_acquire::{RelativeContentPath, check_channel};
+use zup_acquire::RelativeContentPath;
 
 /// One place content might be served from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,19 +29,10 @@ impl Origin {
         Self::from_url(url)
     }
 
-    /// An origin for a local filesystem repository, for tests and for an
-    /// offline mirror on disk.
-    pub fn file(path: &std::path::Path) -> Result<Self, String> {
-        let url =
-            Url::from_file_path(path).map_err(|()| "the path is not a file URL".to_owned())?;
-        Self::from_url(url)
-    }
-
     fn from_url(mut url: Url) -> Result<Self, String> {
-        let local = url.scheme() == "file";
-        if !local && url.scheme() != "https" && !(url.scheme() == "http" && is_loopback(&url)) {
+        if url.scheme() != "https" && !(url.scheme() == "http" && is_loopback(&url)) {
             return Err(format!(
-                "an origin must be https, a local file, or a loopback address, not `{}`",
+                "an HTTP origin must be https or a loopback address, not `{}`",
                 url.scheme()
             ));
         }
@@ -51,7 +42,7 @@ impl Origin {
         if url.query().is_some() || url.fragment().is_some() {
             return Err("an origin cannot carry a query or a fragment".to_owned());
         }
-        if !local && url.host_str().is_none_or(str::is_empty) {
+        if url.host_str().is_none_or(str::is_empty) {
             return Err("an origin must name a host".to_owned());
         }
         if !url.path().ends_with('/') {
@@ -74,11 +65,6 @@ impl Origin {
     /// The scheme, which decides whether a redirect may stay on it.
     pub fn scheme(&self) -> &str {
         self.url.scheme()
-    }
-
-    /// Whether this origin is on the local filesystem.
-    pub fn is_local(&self) -> bool {
-        self.url.scheme() == "file"
     }
 
     /// Whether this origin is served over plain HTTP.
@@ -242,39 +228,5 @@ impl OriginSet {
     /// The origin at `index`.
     pub fn get(&self, index: usize) -> Option<&Origin> {
         self.origins.get(index)
-    }
-}
-
-/// A repository's location: a channel, an origin set, and where the documents
-/// live.
-#[derive(Debug, Clone)]
-pub struct RepositoryLocation {
-    pub channel: String,
-    pub origins: OriginSet,
-}
-
-impl RepositoryLocation {
-    /// Build a location, checking the channel before anything is addressed.
-    pub fn new(channel: &str, origins: OriginSet) -> Result<Self, String> {
-        check_channel(channel)?;
-        Ok(Self {
-            channel: channel.to_owned(),
-            origins,
-        })
-    }
-
-    /// The release descriptor for this channel.
-    pub fn release(&self) -> Result<RelativeContentPath, String> {
-        zup_acquire::WebLayout::release(&self.channel).map_err(str::to_owned)
-    }
-
-    /// The content catalog for this channel.
-    pub fn catalog(&self) -> Result<RelativeContentPath, String> {
-        zup_acquire::WebLayout::catalog(&self.channel).map_err(str::to_owned)
-    }
-
-    /// One variant's manifest.
-    pub fn variant_manifest(&self, variant: &str) -> Result<RelativeContentPath, String> {
-        zup_acquire::WebLayout::variant_manifest(&self.channel, variant).map_err(str::to_owned)
     }
 }

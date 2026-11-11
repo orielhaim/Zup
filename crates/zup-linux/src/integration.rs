@@ -1,7 +1,8 @@
 use std::path::Path;
+use zup_core::TargetPath;
 
 use zup_core::{LauncherLocation, ResourceKey, SelectedScope, Target};
-use zup_plan::{DesiredState, TargetPath};
+use zup_plan::DesiredState;
 
 use crate::error::PlanError;
 
@@ -79,24 +80,25 @@ fn lower_integration_in(
     let icon = stable_stem(plan.app.id.as_str());
     let mut output = lower_path_entries(plan, resolver)?;
 
-    let mut menu_launchers: Vec<_> = plan.launchers.iter().collect();
-    menu_launchers.sort_by(|a, b| {
-        (
-            a.location.to_string(),
-            a.target.to_string(),
-            a.name.to_string(),
-        )
-            .cmp(&(
-                b.location.to_string(),
-                b.target.to_string(),
-                b.name.to_string(),
-            ))
-    });
-    for (index, launcher) in menu_launchers.iter().enumerate() {
-        let file_name = if index == 0 {
-            format!("{stem}.desktop")
-        } else {
-            format!("{stem}-launcher-{}.desktop", index + 1)
+    for launcher in &plan.launchers {
+        let id = match &launcher.key {
+            ResourceKey::Launcher { id } => id,
+            _ => {
+                return Err(PlanError::IntegrationUnsupported(
+                    "launcher has no declared identity".into(),
+                ));
+            }
+        };
+        let file_name = match id {
+            zup_core::DeclaredResourceId::Application { id } if id.as_str() == "main" => {
+                format!("{stem}.desktop")
+            }
+            _ => format!(
+                "{stem}-{}.desktop",
+                zup_core::hash_bytes(
+                    &serde_json::to_vec(id).expect("launcher identity serializes")
+                )
+            ),
         };
         let desktop = launcher.location == LauncherLocation::Desktop;
         let directory = if desktop {
@@ -129,6 +131,10 @@ fn lower_integration_in(
         output.needs_desktop_refresh |= !desktop;
         let category = if desktop { "desktop" } else { "applications" };
         let mut file = generated(
+            zup_core::NativeFileId::DesktopEntry {
+                location: launcher.location,
+                id: id.clone(),
+            },
             &format!("{GENERATED_PREFIX}/{category}/{file_name}"),
             destination,
             entry.render()?.into_bytes(),
@@ -193,6 +199,7 @@ fn lower_integration_in(
         };
         output.needs_desktop_refresh = true;
         output.files.push(generated(
+            zup_core::NativeFileId::ProtocolHandler,
             &format!("{GENERATED_PREFIX}/applications/{stem}-uri.desktop"),
             destination,
             entry.render()?.into_bytes(),
@@ -235,6 +242,7 @@ fn lower_integration_in(
         )?;
         output.needs_mime_refresh = true;
         output.files.push(generated(
+            zup_core::NativeFileId::MimeDefinitions,
             &format!("{GENERATED_PREFIX}/mime/{stem}.xml"),
             package_destination,
             package.into_bytes(),
@@ -258,6 +266,7 @@ fn lower_integration_in(
         };
         output.needs_desktop_refresh = true;
         output.files.push(generated(
+            zup_core::NativeFileId::FileAssociationHandler,
             &format!("{GENERATED_PREFIX}/applications/{stem}-files.desktop"),
             destination,
             entry.render()?.into_bytes(),
@@ -267,12 +276,76 @@ fn lower_integration_in(
     Ok(output)
 }
 
+pub(crate) fn service_sources(
+    target: Target,
+    services: &[zup_plan::DesiredService<TargetPath>],
+) -> Result<Vec<GeneratedFile>, PlanError> {
+    services
+        .iter()
+        .map(|service| {
+            let openrc = matches!(
+                service.execution,
+                zup_core::ServiceExecution::OpenrcUser { .. }
+            );
+            let (destination, bytes) = if openrc {
+                let name = service.name.to_string();
+                let bytes = crate::openrc::render(&name, &crate::openrc::registration(service))
+                    .map_err(|reason| PlanError::ServiceRefused {
+                        id: service.id.to_string(),
+                        reason,
+                    })?;
+                (format!("/etc/init.d/{name}"), bytes)
+            } else {
+                let unit = crate::services::SystemdUnit::derive(service)?;
+                (unit.source_path, unit.bytes)
+            };
+            let key = ResourceKey::File {
+                id: zup_core::FileResourceId::Native {
+                    id: zup_core::NativeFileId::ServiceSource {
+                        id: service.id.clone(),
+                    },
+                },
+            };
+            let source = service_source_name(&key);
+            let destination = TargetPath::new(target, destination).map_err(|error| {
+                PlanError::InvalidTargetPath {
+                    path: source.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+            let mut file = generated(
+                zup_core::NativeFileId::ServiceSource {
+                    id: service.id.clone(),
+                },
+                &source,
+                destination,
+                bytes,
+            )?;
+            file.key = key;
+            file.executable = openrc;
+            Ok(file)
+        })
+        .collect()
+}
+
+pub(crate) fn service_source_name(key: &ResourceKey) -> String {
+    let identity = serde_json::to_vec(key).expect("logical service source serializes");
+    format!(
+        "{GENERATED_PREFIX}/services/{}.source",
+        zup_core::hash_bytes(&identity)
+    )
+}
+
 #[cfg(target_os = "linux")]
 pub fn generated_map(
     plan: &DesiredState,
     resolver: &crate::locations::LinuxInstallLocationResolver,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, PlanError> {
-    let output = lower_integration_with_resolver(plan, &resolver.data_home()?, resolver)?;
+    let mut output = lower_integration_with_resolver(plan, &resolver.data_home()?, resolver)?;
+    let resolved = crate::resolve::resolve_target(plan, resolver)?;
+    output
+        .files
+        .extend(service_sources(plan.target, &resolved.services)?);
     Ok(output
         .files
         .into_iter()
@@ -290,7 +363,7 @@ fn io_path(path: &std::path::Path, error: impl std::fmt::Display) -> PlanError {
 
 #[cfg(target_os = "linux")]
 fn object_key(app_id: &zup_core::AppId, scope: SelectedScope) -> String {
-    zup_transaction::InstallationLock::lock_key(app_id.as_str(), zup_transaction::scope_name(scope))
+    zup_transaction::ResourceLock::lock_key(app_id.as_str(), zup_transaction::scope_name(scope))
 }
 
 #[cfg(target_os = "linux")]
@@ -298,7 +371,7 @@ fn objects_dir(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
     scope: SelectedScope,
-    lock: &zup_transaction::InstallationLock,
+    lock: &zup_transaction::ResourceLock,
 ) -> Result<private_fs::PrivateDir, PlanError> {
     let key = object_key(app_id, scope);
     if lock.key() != key {
@@ -335,7 +408,7 @@ pub fn stage_generated(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
     scope: SelectedScope,
-    lock: &zup_transaction::InstallationLock,
+    lock: &zup_transaction::ResourceLock,
     generated: &std::collections::BTreeMap<String, Vec<u8>>,
 ) -> Result<(), PlanError> {
     if generated.is_empty() {
@@ -384,10 +457,9 @@ fn publish_object(
             "content-addressed object changed during its durability sync",
         )));
     }
-    match zup_transaction::publish_full(directory, &name, bytes, private_fs::Publication::CreateNew)
-    {
+    match zup_storage::publish_full(directory, &name, bytes, private_fs::Publication::CreateNew) {
         Ok(()) => Ok(()),
-        Err(error) if !zup_transaction::absent_collision(&error) => Err(error.into()),
+        Err(error) if !zup_storage::absent_collision(&error) => Err(error.into()),
         Err(error) => match read_object(directory, &name)? {
             Some(existing) if object_matches(&existing, digest, size) => {
                 directory.sync_all()?;
@@ -428,8 +500,8 @@ pub fn generated_for_plan(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
     scope: SelectedScope,
-    lock: &zup_transaction::InstallationLock,
-    plan: &zup_transaction::TransactionPlan,
+    lock: &zup_transaction::ResourceLock,
+    plan: &zup_plan::DeploymentPlan,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, PlanError> {
     let mut generated = std::collections::BTreeMap::new();
     let mut directory = None;
@@ -481,7 +553,7 @@ pub fn reap_generated(
     state_root: &std::path::Path,
     app_id: &zup_core::AppId,
     scope: SelectedScope,
-    lock: &zup_transaction::InstallationLock,
+    lock: &zup_transaction::ResourceLock,
 ) -> Result<(), PlanError> {
     let key = object_key(app_id, scope);
     if lock.key() != key {
@@ -531,6 +603,9 @@ fn retained_objects(
     scope: SelectedScope,
 ) -> Result<std::collections::BTreeSet<String>, PlanError> {
     let mut retained = std::collections::BTreeSet::new();
+    let installation = crate::ledger::LinuxInstallationStore::new(state_root)
+        .load(app_id, scope)
+        .map_err(|error| PlanError::IntegrationUnsupported(error.to_string()))?;
     let transactions = state_root.join("transactions");
     let root = match private_fs::PrivateDir::open(&transactions) {
         Ok(root) => root,
@@ -566,7 +641,18 @@ fn retained_objects(
                 path: transactions.join(&name).display().to_string(),
                 reason: error.to_string(),
             })?;
-        if record.app_id != *app_id || record.scope != scope || !phase_keeps_generated(record.phase)
+        record
+            .validate()
+            .map_err(|error| PlanError::InvalidTargetPath {
+                path: transactions.join(&name).display().to_string(),
+                reason: error.to_string(),
+            })?;
+        if record.app_id != *app_id
+            || record.scope != scope
+            || !(phase_keeps_generated(record.phase)
+                || installation.as_ref().is_some_and(|installation| {
+                    installation.references_transaction(record.transaction_id)
+                }))
         {
             continue;
         }
@@ -662,6 +748,7 @@ fn lower_path_entries(
         stable_stem(plan.app.id.as_str())
     );
     output.files.push(generated(
+        zup_core::NativeFileId::Environment,
         &format!("{GENERATED_PREFIX}/environment/{name}"),
         xdg_target(&plan.target, &directory.join(name))?,
         format!("PATH=\"{paths}${{PATH:+:${{PATH}}}}\"\n").into_bytes(),
@@ -735,6 +822,7 @@ fn host_text(path: &TargetPath) -> Result<String, PlanError> {
 }
 
 fn generated(
+    id: zup_core::NativeFileId,
     source_relative: &str,
     destination: TargetPath,
     bytes: Vec<u8>,
@@ -746,7 +834,7 @@ fn generated(
         })?;
     Ok(GeneratedFile {
         key: ResourceKey::File {
-            destination: destination.to_string(),
+            id: zup_core::FileResourceId::Native { id },
         },
         source_relative: source_relative.to_owned(),
         destination,

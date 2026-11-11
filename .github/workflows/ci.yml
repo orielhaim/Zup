@@ -102,19 +102,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev meson ninja-build libcap-dev
-
-      - name: Build pinned OpenRC controller
-        if: runner.os == 'Linux'
-        shell: bash
-        run: python3 scripts/build-openrc-control.py --output "$RUNNER_TEMP/openrc-control"
-
-      - uses: actions/upload-artifact@v7
-        if: runner.os == 'Linux' && always()
-        with:
-          name: openrc-controller-gnu-build
-          path: ${{ runner.temp }}/openrc-control/build.json
-          if-no-files-found: warn
+          sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
 
       - name: Test CI diagnostics reporter
         run: python -m unittest discover -s scripts/ci -p "test_*.py"

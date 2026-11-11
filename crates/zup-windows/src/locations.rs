@@ -1,5 +1,6 @@
+use zup_core::TargetPath;
 use zup_core::{InstallLocation, SelectedScope, Target};
-use zup_plan::{InstallLocationError, InstallLocationResolver, TargetPath};
+use zup_plan::{InstallLocationError, InstallLocationResolver};
 
 /// Target-canonical Windows folders for build-time validation.
 ///

@@ -39,8 +39,8 @@ pub enum BootstrapPlanError {
     StateRoot(String),
 }
 
-pub fn peer_user_state_root() -> Result<PathBuf, BootstrapPlanError> {
-    crate::machine_state::default_state_root(SelectedScope::User)
+pub fn peer_user_state_root(app: &zup_core::AppId) -> Result<PathBuf, BootstrapPlanError> {
+    crate::machine_state::default_state_root(app, SelectedScope::User)
         .map_err(|error| BootstrapPlanError::StateRoot(error.to_string()))
 }
 
@@ -86,7 +86,7 @@ pub fn prepare(
     .map_err(|error| BootstrapPlanError::Detection(error.to_string()))?;
 
     let quarantine_root = if scope == SelectedScope::Machine {
-        peer_user_state_root()?
+        peer_user_state_root(&install.app.id)?
             .join("bootstrap-acquisition")
             .join(id.as_uuid().to_string())
     } else {

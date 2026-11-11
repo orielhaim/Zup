@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use zup_core::TransactionId;
+use zup_plan::DeploymentNode;
 
 use tokio::sync::broadcast;
 use zup_bootstrap::{
@@ -9,21 +11,21 @@ use zup_bootstrap::{
 };
 use zup_bundle::{AcquiredPayloadSource, PayloadSource};
 use zup_core::SelectedScope;
-use zup_plan::{FileOperationKind, FilePrecondition};
+use zup_plan::FileOperationKind;
 use zup_runtime::{
     BootstrapRequest, CancellationHandle, ExecutionPolicy, InstallOutcome, RuntimeBackend,
-    RuntimeControl, RuntimeEvent, RuntimeFuture, RuntimeRequest, RuntimeState, SessionError,
+    RuntimeControl, RuntimeEvent, RuntimeFuture, RuntimeOperation, RuntimeRequest, RuntimeState,
+    SessionError,
 };
 use zup_transaction::{
-    CancellationProbe, FilesystemTransactionStore, InstallationLock, OperationExecutor,
-    OperationReceipt, ReconcileResult, TransactionCoordinator, TransactionId, TransactionNode,
-    TransactionOutcome, TransactionStore,
+    CancellationProbe, FilesystemTransactionStore, OperationExecutor, OperationReceipt,
+    ReconcileResult, ResourceLock, TransactionCoordinator, TransactionOutcome, TransactionStore,
 };
 
 type SharedPayloadSource = Arc<dyn PayloadSource + Send + Sync>;
 
 use crate::{
-    AutoPayloadSource, BundleError, InstallLedgerStore, NullProgress, PAYLOAD_OVERLAY_DIRECTORY,
+    AutoPayloadSource, BundleError, InstallationRecordStore, PAYLOAD_OVERLAY_DIRECTORY,
     PayloadOverlayIdentity, WindowsFileExecutor, cleanup_payload_overlay,
     payload_overlay_base_root, verify_payload_overlay,
 };
@@ -42,7 +44,13 @@ pub struct WindowsRuntimeBackend {
     payload_root: PathBuf,
     payload_overlay_root: Option<PathBuf>,
     retain_on_blocked: bool,
-    content: Option<zup_acquire::RuntimeHandoff>,
+    content: Option<AcquiredContent>,
+}
+
+#[derive(Clone)]
+struct AcquiredContent {
+    handoff: zup_acquire::RuntimeHandoff,
+    image: Arc<crate::AcquiredRuntime>,
 }
 
 impl WindowsRuntimeBackend {
@@ -83,15 +91,10 @@ impl WindowsRuntimeBackend {
         let overlay = if !transaction_identity.has_files() || generated_files.is_empty() {
             None
         } else {
-            let transaction_sources: BTreeSet<_> = transaction_plan
-                .nodes
-                .iter()
-                .filter_map(|node| node.meta.source_relative.clone())
+            let transaction_sources: BTreeSet<_> = transaction_identity
+                .files()
+                .map(|file| &file.source_relative)
                 .collect();
-            let mut overlay_plan = install.clone();
-            overlay_plan
-                .files
-                .retain(|file| transaction_sources.contains(&file.source_relative));
             let overlay_files: Vec<_> = generated_files
                 .iter()
                 .filter(|file| transaction_sources.contains(&file.source_relative))
@@ -99,12 +102,10 @@ impl WindowsRuntimeBackend {
                 .collect();
             let base = crate::payload_overlay_base_root(state_root, scope)
                 .map_err(|error| error.to_string())?;
-            match crate::materialize_payload_overlay(&base, &overlay_plan, &overlay_files) {
+            match crate::materialize_payload_overlay(&base, &transaction_identity, &overlay_files) {
                 Ok(overlay) => overlay,
                 Err(error) => {
-                    if let Ok(identity) = PayloadOverlayIdentity::from_desired_state(&overlay_plan)
-                        && let Some(overlay) = identity.path_under(&base)
-                    {
+                    if let Some(overlay) = transaction_identity.path_under(&base) {
                         let _ = cleanup_payload_overlay(&base, Some(&overlay));
                     }
                     return Err(error.to_string());
@@ -159,15 +160,19 @@ impl WindowsRuntimeBackend {
         payload: std::sync::Arc<AcquiredPayloadSource>,
         payload_root: impl Into<PathBuf>,
         content: zup_acquire::RuntimeHandoff,
-    ) -> Result<Self, BundleError> {
+        image: Arc<crate::AcquiredRuntime>,
+    ) -> Self {
         let payload_root = payload_root.into();
-        Ok(Self {
-            payload,
+        Self {
+            payload: Arc::new(image.payload_source(payload)),
             payload_root,
             payload_overlay_root: None,
             retain_on_blocked: false,
-            content: Some(content),
-        })
+            content: Some(AcquiredContent {
+                handoff: content,
+                image,
+            }),
+        }
     }
 
     pub fn from_bundle(
@@ -269,14 +274,13 @@ async fn run_bootstrap_phase(
         crate::windows_bootstrap_file_system(),
     )
     .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
-    let bootstrap_lock_key = InstallationLock::lock_key(
+    let bootstrap_lock_key = ResourceLock::lock_key(
         request.plan.plan.key.app_id.as_str(),
         &request.plan.plan.key.scope.to_string(),
     );
-    let _bootstrap_lock =
-        InstallationLock::try_acquire(&request.quarantine_root, &bootstrap_lock_key)
-            .map_err(|_| SessionError::InstallationBusy)?
-            .ok_or(SessionError::InstallationBusy)?;
+    let _bootstrap_lock = ResourceLock::try_acquire(&request.quarantine_root, &bootstrap_lock_key)
+        .map_err(|_| SessionError::InstallationBusy)?
+        .ok_or(SessionError::InstallationBusy)?;
     for artifact in request.plan.artifacts.values() {
         quarantine
             .verify(artifact)
@@ -490,13 +494,13 @@ async fn run_elevated_bootstrap(
         .map_err(|error| SessionError::PlanInvalid(format!("worker bundle: {error}")))?;
     crate::validate_embedded_bundle_target(&bundle, &request.plan.plan.key.target)
         .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
-    let session_id = zup_protocol::SessionId::new_v7();
+    let session_id = zup_core::SessionId::new_v7();
     let pipe = crate::pipe_name(&session_id.to_string());
     let mut server = crate::PipeServer::create(&pipe)
         .map_err(|error| SessionError::Protocol(error.to_string()))?;
     let bootstrap_json = serde_json::to_string(&request.plan)
         .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
-    let plan_hash = crate::plan_hash_hex(&bootstrap_json);
+    let plan_hash = crate::request_digest_hex(&bootstrap_json);
     let bootstrap = crate::WorkerBootstrap {
         protocol_version: zup_protocol::PROTOCOL_VERSION,
         session_id,
@@ -507,7 +511,7 @@ async fn run_elevated_bootstrap(
             .display()
             .to_owned(),
         target: request.plan.plan.key.target,
-        expected_plan_hash: plan_hash.clone(),
+        expected_request_digest: plan_hash.clone(),
     };
     let params = format!(
         "__worker {}",
@@ -554,7 +558,7 @@ async fn run_elevated_bootstrap(
                 session_id,
                 target: request.plan.plan.key.target,
                 transaction_id: request.plan.id.as_uuid(),
-                expected_plan_hash: plan_hash.clone(),
+                expected_request_digest: plan_hash.clone(),
             }),
         })
         .await
@@ -664,7 +668,7 @@ async fn run_elevated_bootstrap(
                             }
                             zup_protocol::WorkerFailure::Protocol => SessionError::Protocol(failed.message),
                             zup_protocol::WorkerFailure::Cancelled => SessionError::Cancelled,
-                            zup_protocol::WorkerFailure::RecoveryRequired => SessionError::RecoveryRequired,
+                            zup_protocol::WorkerFailure::RecoveryRequired { transaction } => SessionError::RecoveryRequired { transaction: transaction.map(|id| id.0), detail: failed.message },
                             zup_protocol::WorkerFailure::AuthorizationRequired => SessionError::AuthorizationRequired,
                             zup_protocol::WorkerFailure::StalePlan | zup_protocol::WorkerFailure::Policy => SessionError::PlanInvalid(failed.message),
                             zup_protocol::WorkerFailure::Transaction => SessionError::Prerequisite(failed.message),
@@ -690,8 +694,11 @@ impl WindowsRuntimeBackend {
         let events = control.events;
         let policy = control.policy;
         let mut cleanup = OverlayCleanup::from_backend(self, &request);
-        let recovery = request.recovery_id.is_some();
-        let bootstrap_for_cleanup = request.bootstrap.clone();
+        let recovery = request.operation.recovery_transaction().is_some();
+        let bootstrap_for_cleanup = request
+            .operation
+            .deployment()
+            .and_then(|deployment| deployment.bootstrap.clone());
         let result = self
             .execute_inner_with_control(request, cancellation, events, policy)
             .await;
@@ -706,7 +713,7 @@ impl WindowsRuntimeBackend {
             let _ = std::fs::remove_dir_all(&bootstrap.quarantine_root);
         }
         match &result {
-            Ok(InstallOutcome::RecoveryRequired)
+            Ok(InstallOutcome::RecoveryRequired { .. })
             | Ok(InstallOutcome::CommittedPendingReconciliation { .. }) => cleanup.retain(),
             Ok(InstallOutcome::Failed(message))
                 if self.retain_on_blocked
@@ -729,11 +736,15 @@ impl WindowsRuntimeBackend {
         policy: ExecutionPolicy,
     ) -> Result<InstallOutcome, SessionError> {
         validate_runtime_request(&request, self)?;
-        if let Some(bootstrap) = request.bootstrap.clone() {
+        if let Some(bootstrap) = request
+            .operation
+            .deployment()
+            .and_then(|deployment| deployment.bootstrap.clone())
+        {
             match run_bootstrap_phase(&bootstrap, &cancel, &events, policy).await? {
                 BootstrapOutcome::Ready => {}
                 BootstrapOutcome::RecoveryRequired => {
-                    return Err(SessionError::RecoveryRequired);
+                    return Err(SessionError::RecoveryRequired { transaction: None, detail: "Prerequisite recovery is required before deployment can continue; rerun this installer to reconcile its bootstrap state".into() });
                 }
                 BootstrapOutcome::RebootRequired {
                     exit_code,
@@ -748,7 +759,11 @@ impl WindowsRuntimeBackend {
         }
 
         let needs_authorization = request.scope == SelectedScope::Machine
-            || request.transaction_plan.requires_authorization();
+            || request
+                .operation
+                .deployment()
+                .map(|deployment| &deployment.plan)
+                .is_some_and(zup_plan::DeploymentPlan::requires_authorization);
         let already_authorized = if needs_authorization {
             Some(
                 crate::is_process_elevated()
@@ -769,7 +784,12 @@ impl WindowsRuntimeBackend {
                 request,
                 &self.payload_root,
                 self.payload_overlay_root.clone(),
-                self.content.clone(),
+                self.content
+                    .as_ref()
+                    .map(|content| zup_protocol::AcquiredSource {
+                        handoff: content.handoff.clone(),
+                        image: crate::plain_path_text(content.image.path()),
+                    }),
                 cancel,
                 events,
             )
@@ -808,7 +828,11 @@ async fn run_local_install_control_inner(
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
 ) -> Result<InstallOutcome, SessionError> {
-    if request.transaction_plan.requires_authorization()
+    if request
+        .operation
+        .deployment()
+        .map(|deployment| &deployment.plan)
+        .is_some_and(zup_plan::DeploymentPlan::requires_authorization)
         && !crate::is_process_elevated()
             .map_err(|error| SessionError::Protocol(error.to_string()))?
     {
@@ -823,7 +847,11 @@ async fn run_local_install_control_inner(
     let _ = events.send(RuntimeEvent::StateChanged {
         state: RuntimeState::Executing,
     });
-    let total_work = request.transaction_plan.total_work();
+    let total_work = request
+        .operation
+        .deployment()
+        .map(|deployment| &deployment.plan)
+        .map_or(0, zup_plan::DeploymentPlan::total_work);
     let _ = events.send(RuntimeEvent::Progress {
         phase: zup_core::OperationPhase::Prepare,
         completed: 0,
@@ -855,7 +883,7 @@ async fn run_elevated_worker(
     request: RuntimeRequest,
     payload_root: &Path,
     payload_overlay_root: Option<PathBuf>,
-    content: Option<zup_acquire::RuntimeHandoff>,
+    content: Option<zup_protocol::AcquiredSource>,
     cancel: CancellationHandle,
     events: broadcast::Sender<RuntimeEvent>,
 ) -> Result<InstallOutcome, SessionError> {
@@ -868,7 +896,7 @@ async fn run_elevated_worker(
         .map_err(|error| SessionError::PlanInvalid(format!("worker bundle: {error}")))?;
     crate::validate_embedded_bundle_target(&bundle, &request.target)
         .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
-    let session_id = zup_protocol::SessionId::new_v7();
+    let session_id = zup_core::SessionId::new_v7();
 
     let _ = events.send(RuntimeEvent::WaitingForAuthorization);
 
@@ -876,10 +904,11 @@ async fn run_elevated_worker(
     let mut server =
         crate::PipeServer::create(&pipe).map_err(|e| SessionError::Protocol(e.to_string()))?;
 
-    let machine_recovery = request.scope == SelectedScope::Machine && request.recovery_id.is_some();
+    let machine_recovery = request.scope == SelectedScope::Machine
+        && request.operation.recovery_transaction().is_some();
     let plan = if machine_recovery {
-        request.transaction_plan.clone()
-    } else if let Some(id) = request.recovery_id {
+        None
+    } else if let Some(id) = request.operation.recovery_transaction() {
         let record = FilesystemTransactionStore::private_at(&request.state_root)
             .load(&id)
             .map_err(|e| SessionError::Transaction(e.to_string()))?;
@@ -887,7 +916,6 @@ async fn run_elevated_worker(
             || record.scope != request.scope
             || record.app_version != request.app_version
             || record.target != request.target
-            || record.plan != request.transaction_plan
         {
             return Err(SessionError::Protocol("recovery identity mismatch".into()));
         }
@@ -919,65 +947,92 @@ async fn run_elevated_worker(
             )
             .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
         }
-        record.plan
+        Some(record.plan)
     } else {
-        request.transaction_plan.clone()
+        request
+            .operation
+            .deployment()
+            .map(|deployment| &deployment.plan)
+            .cloned()
     };
     let has_lifecycle = machine_recovery
-        || plan.uninstall
-        || !plan.retired_keys.is_empty()
-        || plan.nodes.iter().any(|node| {
-            matches!(
-                node.kind,
-                zup_transaction::NodeKind::FileMutation {
-                    delta: FileOperationKind::RestoreOwned | FileOperationKind::RepairOwned,
-                    ..
-                }
-            )
+        || plan.as_ref().is_some_and(|plan| {
+            plan.transition.is_remove()
+                || !plan.retired_keys.is_empty()
+                || plan.nodes.iter().any(|node| {
+                    matches!(
+                        node.kind,
+                        zup_plan::NodeKind::FileMutation {
+                            delta: FileOperationKind::RestoreOwned | FileOperationKind::RepairOwned,
+                            ..
+                        }
+                    )
+                })
         });
     let has_backend = machine_recovery
-        || plan.nodes.iter().any(|node| {
-            matches!(
-                node.kind,
-                zup_transaction::NodeKind::BackendOperation { .. }
-                    | zup_transaction::NodeKind::BackendRemoval { .. }
-            )
+        || plan.as_ref().is_some_and(|plan| {
+            plan.nodes.iter().any(|node| {
+                matches!(
+                    node.kind,
+                    zup_plan::NodeKind::NativeService { .. }
+                        | zup_plan::NodeKind::BackendOperation { .. }
+                        | zup_plan::NodeKind::BackendRemoval { .. }
+                )
+            })
         });
-    if plan.target != request.target {
+    if plan
+        .as_ref()
+        .is_some_and(|plan| plan.target != request.target)
+    {
         return Err(SessionError::PlanInvalid(
             "transaction plan target does not match runtime request".into(),
         ));
     }
-    let recovery_intent = if machine_recovery {
-        let intent = zup_protocol::MachineRecoveryIntent {
-            transaction_id: request
-                .recovery_id
-                .map(|id| id.as_uuid())
-                .unwrap_or(uuid::Uuid::nil()),
-            app_id: request.app_id.to_string(),
-            app_version: request.app_version.to_string(),
-            scope: "machine".into(),
-            target: request.target,
-        };
-        Some(intent)
-    } else {
-        None
+    let operation = match &request.operation {
+        RuntimeOperation::Deployment(deployment) => {
+            zup_protocol::PreparedTransactionRequest::Deployment {
+                plan: Box::new(deployment.plan.clone()),
+                intent: Box::new(deployment.intent.clone()),
+            }
+        }
+        RuntimeOperation::Recovery { transaction } => {
+            zup_protocol::PreparedTransactionRequest::Recovery {
+                transaction: *transaction,
+            }
+        }
     };
-    let plan_json = if let Some(intent) = &recovery_intent {
-        intent
-            .canonical_json()
-            .map_err(|error| SessionError::PlanInvalid(error.to_string()))?
-    } else {
-        serde_json::to_string(&plan).map_err(|e| SessionError::PlanInvalid(e.to_string()))?
+    let prepare = zup_protocol::PrepareTransaction {
+        content,
+        operation,
+        target: request.target,
+        app_id: request.app_id.to_string(),
+        app_version: request.app_version.to_string(),
+        scope: request.scope.to_string(),
+        payload_root: payload_root.display().to_string(),
+        payload_overlay_root: payload_overlay_root
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        payload_overlay_base_root: payload_overlay_base_root
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        state_root: request.state_root.display().to_string(),
+        release: request
+            .operation
+            .deployment()
+            .and_then(|deployment| deployment.release.clone()),
     };
-    let total_work = plan.total_work();
+    let total_work = plan
+        .as_ref()
+        .map_or(0, zup_plan::DeploymentPlan::total_work);
     let _ = events.send(RuntimeEvent::Progress {
         phase: zup_core::OperationPhase::Prepare,
         completed: 0,
         total: total_work,
         action: "Preparing…".into(),
     });
-    let plan_hash = crate::plan_hash_hex(&plan_json);
+    let plan_hash = prepare
+        .digest()
+        .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
 
     let bootstrap = crate::WorkerBootstrap {
         protocol_version: zup_protocol::PROTOCOL_VERSION,
@@ -989,7 +1044,7 @@ async fn run_elevated_worker(
             .display()
             .to_owned(),
         target: request.target,
-        expected_plan_hash: plan_hash.clone(),
+        expected_request_digest: plan_hash.clone(),
     };
     let bootstrap_arg = crate::format_bootstrap(&bootstrap);
     let params = format!("__worker {}", crate::quote_arg(&bootstrap_arg));
@@ -1039,7 +1094,7 @@ async fn run_elevated_worker(
                 session_id,
                 target: request.target,
                 transaction_id: uuid::Uuid::now_v7(),
-                expected_plan_hash: plan_hash.clone(),
+                expected_request_digest: plan_hash.clone(),
             }),
         })
         .await
@@ -1049,55 +1104,52 @@ async fn run_elevated_worker(
             version: zup_protocol::PROTOCOL_VERSION,
             session_id,
             sequence: 2,
-            message: zup_protocol::Message::ExecuteTransaction(Box::new(
-                zup_protocol::ExecuteTransaction {
-                    content,
-                    intent: request.intent.clone(),
-                    target: request.target,
-                    plan_json,
-                    plan_hash,
-                    app_id: request.app_id.to_string(),
-                    app_version: request.app_version.to_string(),
-                    scope: match request.scope {
-                        SelectedScope::User => "user",
-                        SelectedScope::Machine => "machine",
-                    }
-                    .into(),
-                    payload_root: payload_root.display().to_string(),
-                    payload_overlay_root: payload_overlay_root
-                        .as_ref()
-                        .map(|path| path.display().to_string()),
-                    payload_overlay_base_root: payload_overlay_base_root
-                        .as_ref()
-                        .map(|path| path.display().to_string()),
-                    state_root: request.state_root.display().to_string(),
-
-                    recovery_id: request.recovery_id.map(|id| id.as_uuid()),
-                    recovery_intent,
-                    release: request.release.clone(),
-                },
-            )),
+            message: zup_protocol::Message::PrepareTransaction(Box::new(prepare)),
         })
         .await
         .map_err(|e| SessionError::Protocol(e.to_string()))?;
 
     let mut cancel_sent = false;
+    let mut execution_sent = false;
+    let mut sequence = 3;
     loop {
         tokio::select! {
                    () = cancel.cancelled(), if !cancel_sent => {
                        writer.send(&zup_protocol::WireEnvelope {
                            version: zup_protocol::PROTOCOL_VERSION,
                            session_id,
-                           sequence: 3,
+                           sequence,
                            message: zup_protocol::Message::Cancel,
                        }).await.map_err(|e| SessionError::Protocol(e.to_string()))?;
                        cancel_sent = true;
+                       sequence += 1;
                    }
                    message = reader.recv() => {
                        let message = message.map_err(|e| SessionError::Protocol(e.to_string()))?;
                        worker_sequence.accept(message.sequence)
                            .map_err(|e| SessionError::Protocol(e.to_string()))?;
                        match message.message {
+                       zup_protocol::Message::Prepared(prepared) => {
+                           if execution_sent || prepared.target != request.target
+                               || prepared.plan.requirements.app.id != request.app_id
+                               || prepared.plan.requirements.scope != request.scope
+                               || prepared.plan.fingerprint().to_hex() != prepared.plan_digest
+                               || prepared.plan.requirements.app.version != request.app_version
+                               || plan.as_ref().is_some_and(|expected| expected.requirements != prepared.plan.requirements
+                                   || expected.install_directory != prepared.plan.install_directory || expected.transition.is_remove() != prepared.plan.transition.is_remove())
+                           {
+                               return Err(SessionError::Protocol("worker preparation differs from the authorized operation".into()));
+                           }
+                           prepared.plan.validate().map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
+                           let _ = events.send(RuntimeEvent::PlanPrepared { plan: prepared.plan });
+                           if cancel_sent { continue; }
+                           writer.send(&zup_protocol::WireEnvelope {
+                               version: zup_protocol::PROTOCOL_VERSION, session_id, sequence,
+                               message: zup_protocol::Message::Execute(zup_protocol::ExecuteOperation { plan_digest: prepared.plan_digest }),
+                           }).await.map_err(|error| SessionError::Protocol(error.to_string()))?;
+                           sequence += 1;
+                           execution_sent = true;
+                       }
                        zup_protocol::Message::Progress(progress) => {
                            if progress.kind == zup_protocol::ProgressKind::ResourceBlocked {
                                let _ = events.send(RuntimeEvent::ResourceBlocked { pids: progress.blocked_pids, detail: progress.detail });
@@ -1121,12 +1173,14 @@ async fn run_elevated_worker(
                                zup_protocol::WorkerOutcome::Committed => InstallOutcome::Committed,
                                zup_protocol::WorkerOutcome::RolledBack => InstallOutcome::RolledBack,
                                zup_protocol::WorkerOutcome::Cancelled => InstallOutcome::Cancelled,
-                               zup_protocol::WorkerOutcome::RecoveryRequired => InstallOutcome::RecoveryRequired,
+                               zup_protocol::WorkerOutcome::RecoveryRequired => InstallOutcome::RecoveryRequired {
+                                   transaction: Some(completed.transaction_id),
+                                   detail: completed.detail.unwrap_or_else(|| "The transaction requires recovery before another operation can proceed".into()),
+                               },
                                zup_protocol::WorkerOutcome::CommittedPendingReconciliation => {
                                    InstallOutcome::CommittedPendingReconciliation {
                                        transaction: Some(completed.transaction_id),
-                                       detail: "the transaction committed and ledger reconciliation is still required"
-                                           .into(),
+                                       detail: completed.detail.unwrap_or_else(|| "The transaction committed; ownership reconciliation requires recovery".into()),
                                    }
                                }
                                other => return Err(SessionError::Protocol(format!("unexpected worker outcome {other:?}"))),
@@ -1144,7 +1198,7 @@ async fn run_elevated_worker(
                                }
                                zup_protocol::WorkerFailure::Protocol => SessionError::Protocol(failed.message),
                                zup_protocol::WorkerFailure::Cancelled => SessionError::Cancelled,
-                               zup_protocol::WorkerFailure::RecoveryRequired => SessionError::RecoveryRequired,
+                               zup_protocol::WorkerFailure::RecoveryRequired { transaction } => SessionError::RecoveryRequired { transaction: transaction.map(|id| id.0), detail: failed.message },
                                zup_protocol::WorkerFailure::AuthorizationRequired => SessionError::AuthorizationRequired,
                                zup_protocol::WorkerFailure::StalePlan | zup_protocol::WorkerFailure::Policy => SessionError::PlanInvalid(failed.message),
                                zup_protocol::WorkerFailure::Transaction => SessionError::Transaction(failed.message),
@@ -1161,7 +1215,7 @@ fn validate_runtime_request(
     request: &RuntimeRequest,
     backend: &WindowsRuntimeBackend,
 ) -> Result<(), SessionError> {
-    let Some(id) = request.recovery_id else {
+    let Some(id) = request.operation.recovery_transaction() else {
         return validate_request(request, backend);
     };
     if request.scope == SelectedScope::Machine {
@@ -1174,7 +1228,6 @@ fn validate_runtime_request(
         || record.app_version != request.app_version
         || record.scope != request.scope
         || record.target != request.target
-        || record.plan != request.transaction_plan
     {
         return Err(SessionError::Protocol("recovery identity mismatch".into()));
     }
@@ -1267,11 +1320,15 @@ fn validate_request(
     request: &RuntimeRequest,
     backend: &WindowsRuntimeBackend,
 ) -> Result<(), SessionError> {
-    request
-        .transaction_plan
-        .validate()
+    let RuntimeOperation::Deployment(deployment) = &request.operation else {
+        return Err(SessionError::Protocol(
+            "deployment validation requires a deployment request".into(),
+        ));
+    };
+    let plan = &deployment.plan;
+    plan.validate()
         .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
-    if request.target != request.transaction_plan.target {
+    if request.target != plan.target {
         return Err(SessionError::PlanInvalid(
             "request target does not match the finalized plan".into(),
         ));
@@ -1280,7 +1337,7 @@ fn validate_request(
         request.app_id.clone(),
         request.app_version.clone(),
         request.scope,
-        &request.transaction_plan,
+        plan,
     )
     .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
     let base = backend
@@ -1293,7 +1350,7 @@ fn validate_request(
         &identity,
         backend.payload_overlay_root.as_deref(),
         base.as_deref(),
-        request.recovery_id.is_some(),
+        false,
     )
     .map_err(SessionError::PlanInvalid)?;
     Ok(())
@@ -1315,7 +1372,7 @@ fn execute_local_blocking_with_events_inner(
     cancel: impl CancellationProbe + Send + 'static,
     events: Option<broadcast::Sender<RuntimeEvent>>,
 ) -> InstallOutcome {
-    let lock_key = InstallationLock::lock_key(
+    let lock_key = ResourceLock::lock_key(
         request.app_id.as_str(),
         match request.scope {
             SelectedScope::User => "user",
@@ -1323,7 +1380,7 @@ fn execute_local_blocking_with_events_inner(
         },
     );
     let machine = if request.scope == SelectedScope::Machine {
-        match crate::machine_authority::MachineRoot::acquire() {
+        match crate::machine_authority::MachineRoot::acquire(&request.app_id) {
             Ok(machine) => Some(machine),
             Err(error) => return InstallOutcome::Failed(error.to_string()),
         }
@@ -1334,21 +1391,12 @@ fn execute_local_blocking_with_events_inner(
         .as_ref()
         .map(|machine| machine.path().to_path_buf())
         .unwrap_or_else(|| request.state_root.clone());
-    let _machine_work = match machine
-        .as_ref()
-        .map(|machine| machine.work_dir())
-        .transpose()
-    {
-        Ok(work) => work,
-        Err(error) => return InstallOutcome::Failed(error.to_string()),
-    };
-    let work_root = state_root.join("work");
     let lock_result = match &machine {
         Some(machine) => machine
             .try_lock(&lock_key)
             .map_err(|error| error.to_string()),
         None => {
-            InstallationLock::try_acquire(&state_root, &lock_key).map_err(|error| error.to_string())
+            ResourceLock::try_acquire(&state_root, &lock_key).map_err(|error| error.to_string())
         }
     };
     let _lock = match lock_result {
@@ -1366,15 +1414,13 @@ fn execute_local_blocking_with_events_inner(
         None => FilesystemTransactionStore::private_at(&state_root),
     };
     let coordinator = TransactionCoordinator::new(store.clone());
-    if let Some(id) = request.recovery_id {
+    if let Some(id) = request.operation.recovery_transaction() {
         let record = match store.load(&id) {
             Ok(record)
                 if record.app_id == request.app_id
                     && record.scope == request.scope
                     && record.app_version == request.app_version
-                    && record.target == request.target
-                    && (request.scope == SelectedScope::Machine
-                        || record.plan == request.transaction_plan) =>
+                    && record.target == request.target =>
             {
                 record
             }
@@ -1382,34 +1428,34 @@ fn execute_local_blocking_with_events_inner(
             Err(error) => return InstallOutcome::Failed(error.to_string()),
         };
         let mut executor = ProductionExecutor {
-            inner: WindowsFileExecutor::new(
-                payload,
-                work_root.clone(),
-                id.to_string(),
-                record.target.executable_suffix(),
-                Box::new(NullProgress),
-            ),
+            lifecycle: crate::service_control::ScmLifecycle::default(),
+            inner: WindowsFileExecutor::new(payload, id, record.target.executable_suffix())
+                .with_state_authority(state_root.clone(), request.scope, &request.app_id),
             cancel,
             events,
             completed_work: 0,
             total_work: record.plan.total_work(),
-            blocked_paths: crate::plan_mutating_paths(&record.plan, &request.target),
+            blocked_paths: crate::preflight_paths(&record.plan),
             service_controls: record
                 .plan
                 .nodes
                 .iter()
                 .filter_map(|node| match &node.kind {
-                    zup_transaction::NodeKind::ServiceControl { operation } => {
+                    zup_plan::NodeKind::ServiceControl { operation } => {
                         Some(operation.as_ref().clone())
                     }
                     _ => None,
                 })
                 .collect(),
         };
-        note_plan_files(&mut executor.inner, &record.plan);
-        return match zup_transaction::recover(record, &store, &mut executor) {
+        return match zup_transaction::recover(
+            record,
+            &store,
+            &mut executor,
+            &InstallationRecordStore::new(&state_root),
+        ) {
             Ok((record, TransactionOutcome::Committed)) => {
-                match InstallLedgerStore::new(&state_root)
+                match InstallationRecordStore::new(&state_root)
                     .repair_committed(&request.app_id, request.scope)
                 {
                     Ok(_) => {
@@ -1419,26 +1465,23 @@ fn execute_local_blocking_with_events_inner(
                     Err(error) => InstallOutcome::Failed(error.to_string()),
                 }
             }
-            Ok((record, TransactionOutcome::RolledBack)) => {
-                match InstallLedgerStore::new(&state_root).cleanup_work(&record) {
-                    Ok(()) => InstallOutcome::RolledBack,
-                    Err(error) => InstallOutcome::Failed(error.to_string()),
-                }
-            }
-            Ok((_, TransactionOutcome::RecoveryRequired)) => InstallOutcome::RecoveryRequired,
+            Ok((_, TransactionOutcome::RolledBack)) => InstallOutcome::RolledBack,
+            Ok((record, TransactionOutcome::RecoveryRequired)) => InstallOutcome::recovery(&record),
             Err(error) => InstallOutcome::Failed(error.to_string()),
         };
     }
     if let Err(e) =
-        InstallLedgerStore::new(&state_root).repair_committed(&request.app_id, request.scope)
+        InstallationRecordStore::new(&state_root).repair_committed(&request.app_id, request.scope)
     {
         return InstallOutcome::Failed(e.to_string());
     }
-    let plan = request.transaction_plan.clone();
-    if let Err(e) = InstallLedgerStore::new(&state_root).validate_plan(
+    let RuntimeOperation::Deployment(deployment) = &request.operation else {
+        return InstallOutcome::Failed("deployment request has no plan".into());
+    };
+    let plan = deployment.plan.clone();
+    if let Err(e) = InstallationRecordStore::new(&state_root).validate_plan(
         &request.app_id,
         request.scope,
-        &request.app_version,
         &plan,
     ) {
         return InstallOutcome::Failed(e.to_string());
@@ -1450,8 +1493,14 @@ fn execute_local_blocking_with_events_inner(
             request.app_version.clone(),
             plan,
         )
-        .and_then(|open| open.with_release(request.release.clone()))
-    {
+        .and_then(|open| {
+            open.with_release(
+                request
+                    .operation
+                    .deployment()
+                    .and_then(|deployment| deployment.release.clone()),
+            )
+        }) {
         Ok(open) => open,
         Err(e) => return InstallOutcome::Failed(e.to_string()),
     };
@@ -1461,13 +1510,9 @@ fn execute_local_blocking_with_events_inner(
 
     if cancel.is_cancelled() {
         let mut executor = ProductionExecutor {
-            inner: WindowsFileExecutor::new(
-                payload,
-                work_root.clone(),
-                transaction_id.to_string(),
-                target_suffix,
-                Box::new(NullProgress),
-            ),
+            lifecycle: crate::service_control::ScmLifecycle::default(),
+            inner: WindowsFileExecutor::new(payload, transaction_id, target_suffix)
+                .with_state_authority(state_root.clone(), request.scope, &request.app_id),
             cancel,
             events,
             completed_work: 0,
@@ -1482,9 +1527,12 @@ fn execute_local_blocking_with_events_inner(
             }) => InstallOutcome::Cancelled,
             Ok(zup_transaction::SettledTransaction {
                 outcome: TransactionOutcome::RecoveryRequired,
-                ..
-            })
-            | Err(_) => InstallOutcome::RecoveryRequired,
+                record,
+            }) => InstallOutcome::recovery(&record),
+            Err(error) => InstallOutcome::RecoveryRequired {
+                transaction: Some(transaction_id.as_uuid()),
+                detail: error.to_string(),
+            },
             Ok(zup_transaction::SettledTransaction {
                 outcome: TransactionOutcome::Committed,
                 ..
@@ -1493,23 +1541,19 @@ fn execute_local_blocking_with_events_inner(
     }
 
     let mut executor = ProductionExecutor {
-        inner: WindowsFileExecutor::new(
-            payload,
-            work_root.clone(),
-            transaction_id.to_string(),
-            target_suffix,
-            Box::new(NullProgress),
-        ),
+        lifecycle: crate::service_control::ScmLifecycle::default(),
+        inner: WindowsFileExecutor::new(payload, transaction_id, target_suffix)
+            .with_state_authority(state_root.clone(), request.scope, &request.app_id),
         cancel,
         events,
         completed_work: 0,
         total_work: plan_for_executor.total_work(),
-        blocked_paths: crate::plan_mutating_paths(&plan_for_executor, &request.target),
+        blocked_paths: crate::preflight_paths(&plan_for_executor),
         service_controls: plan_for_executor
             .nodes
             .iter()
             .filter_map(|node| match &node.kind {
-                zup_transaction::NodeKind::ServiceControl { operation } => {
+                zup_plan::NodeKind::ServiceControl { operation } => {
                     Some(operation.as_ref().clone())
                 }
                 _ => None,
@@ -1517,31 +1561,28 @@ fn execute_local_blocking_with_events_inner(
             .collect(),
     };
 
-    note_plan_files(&mut executor.inner, &plan_for_executor);
-
-    match open.execute(&mut executor) {
+    match open.execute(&mut executor, &InstallationRecordStore::new(&state_root)) {
         Ok(zup_transaction::SettledTransaction {
             record,
             outcome: TransactionOutcome::Committed,
         }) => {
-            match InstallLedgerStore::new(&state_root).publish_committed(&record, request.scope) {
+            match InstallationRecordStore::new(&state_root)
+                .reconcile_installation(&record, request.scope)
+            {
                 Ok(_) => {
                     crate::notify_committed_path_change(&record);
                     InstallOutcome::Committed
                 }
                 Err(e) => InstallOutcome::CommittedPendingReconciliation {
                     transaction: Some(record.transaction_id.as_uuid()),
-                    detail: format!("transaction committed but ledger publication failed: {e}"),
+                    detail: format!("installation committed but reconciliation failed: {e}"),
                 },
             }
         }
         Ok(zup_transaction::SettledTransaction {
             outcome: TransactionOutcome::RolledBack,
-            record,
+            record: _,
         }) => {
-            if let Err(error) = InstallLedgerStore::new(&state_root).cleanup_work(&record) {
-                return InstallOutcome::Failed(error.to_string());
-            }
             if executor.cancel.is_cancelled() {
                 InstallOutcome::Cancelled
             } else {
@@ -1550,32 +1591,12 @@ fn execute_local_blocking_with_events_inner(
         }
         Ok(zup_transaction::SettledTransaction {
             outcome: TransactionOutcome::RecoveryRequired,
-            ..
-        })
-        | Err(_) => InstallOutcome::RecoveryRequired,
-    }
-}
-
-fn note_plan_files<P: zup_bundle::PayloadSource>(
-    executor: &mut WindowsFileExecutor<P>,
-    plan: &zup_transaction::TransactionPlan,
-) {
-    for node in &plan.nodes {
-        if matches!(
-            node.kind,
-            zup_transaction::NodeKind::StageFile { .. }
-                | zup_transaction::NodeKind::FileMutation { .. }
-        ) {
-            let (sha256, size) = match (node.meta.expected_sha256, node.meta.expected_size) {
-                (Some(h), Some(s)) => (h, s),
-                _ => continue,
-            };
-            let precondition = node
-                .meta
-                .file_precondition
-                .unwrap_or(FilePrecondition::Absent);
-            executor.note_file(&node.id, precondition, sha256, size);
-        }
+            record,
+        }) => InstallOutcome::recovery(&record),
+        Err(error) => InstallOutcome::RecoveryRequired {
+            transaction: Some(transaction_id.as_uuid()),
+            detail: error.to_string(),
+        },
     }
 }
 
@@ -1587,7 +1608,8 @@ struct ProductionExecutor<P: zup_bundle::PayloadSource, C: CancellationProbe> {
     total_work: u64,
 
     blocked_paths: Vec<PathBuf>,
-    service_controls: Vec<zup_transaction::ServiceControlOperation>,
+    service_controls: Vec<zup_plan::ServiceControlOperation>,
+    lifecycle: crate::service_control::ScmLifecycle,
 }
 
 impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
@@ -1595,12 +1617,62 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
 {
     type Error = String;
 
-    fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error> {
+    fn prepare_compensation(
+        &mut self,
+        _operation: &DeploymentNode,
+        receipt: &OperationReceipt,
+    ) -> Result<OperationReceipt, String> {
+        match receipt {
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::prepare_service_compensation(&mut self.lifecycle, receipt)
+                    .map(|receipt| OperationReceipt::ServiceControl(Box::new(receipt)))
+            }
+            _ => Ok(receipt.clone()),
+        }
+    }
+
+    fn reconcile_rollback(
+        &mut self,
+        operation: &DeploymentNode,
+        receipt: &OperationReceipt,
+    ) -> Result<zup_transaction::RollbackReconcileResult, String> {
+        match receipt {
+            OperationReceipt::PersistentDirectory(owned) => {
+                self.inner.verify_persistent(operation, owned)?;
+                Ok(zup_transaction::RollbackReconcileResult::Restored)
+            }
+            OperationReceipt::NativeService(receipt) => {
+                let zup_plan::NodeKind::NativeService { operation } = &operation.kind else {
+                    return Err("native service receipt requires a native service operation".into());
+                };
+                crate::services::reconcile_native_rollback(operation, receipt)
+                    .map_err(|error| error.to_string())
+            }
+            OperationReceipt::Generation(receipt) => {
+                self.inner.retain_generation(operation, receipt)?;
+                Ok(zup_transaction::RollbackReconcileResult::Restored)
+            }
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::reconcile_service_rollback(&mut self.lifecycle, receipt)
+            }
+            OperationReceipt::Control => Ok(zup_transaction::RollbackReconcileResult::Restored),
+            OperationReceipt::RetainedFile { .. }
+            | OperationReceipt::StageFile { .. }
+            | OperationReceipt::CreateFile { .. }
+            | OperationReceipt::ReplaceFile { .. }
+            | OperationReceipt::RemoveFile { .. } => {
+                Ok(zup_transaction::RollbackReconcileResult::Retry)
+            }
+            _ => Ok(zup_transaction::RollbackReconcileResult::Ambiguous),
+        }
+    }
+
+    fn prepare(&mut self, operation: &DeploymentNode) -> Result<(), Self::Error> {
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
         match &operation.kind {
-            zup_transaction::NodeKind::Barrier => {
+            zup_plan::NodeKind::Barrier => {
                 if let Some(events) = &self.events {
                     let _ = events.send(RuntimeEvent::PreflightStarted);
                 }
@@ -1609,9 +1681,12 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
                     .iter()
                     .map(|path| path.as_path())
                     .collect::<Vec<_>>();
-                let blocked =
-                    crate::restart_manager::preflight_services(&blockers, &self.service_controls)
-                        .map_err(|error| error.to_string())?;
+                let blocked = crate::restart_manager::preflight_services(
+                    &blockers,
+                    &self.service_controls,
+                    &mut self.lifecycle,
+                )
+                .map_err(|error| error.to_string())?;
                 let Some(detail) = crate::blocked_reason(&blocked) else {
                     return Ok(());
                 };
@@ -1636,7 +1711,11 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
         }
     }
 
-    fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error> {
+    fn apply(
+        &mut self,
+        operation: &DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, Self::Error> {
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
@@ -1646,41 +1725,52 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
             });
         }
         let receipt = match &operation.kind {
-            zup_transaction::NodeKind::ServiceControl { operation } => {
-                zup_transaction::apply_service_control(
-                    &mut crate::service_control::ScmLifecycle,
-                    operation,
-                )
+            zup_plan::NodeKind::Cleanup { .. } => self.inner.apply_cleanup(operation, transaction),
+            zup_plan::NodeKind::PersistentDirectory { .. } => {
+                self.inner.apply_persistent(operation, transaction)
             }
-            zup_transaction::NodeKind::Barrier => Ok(OperationReceipt::Control),
-            zup_transaction::NodeKind::BackendOperation { .. } => {
-                crate::apply_managed(operation).map_err(|e| e.to_string())
+            zup_plan::NodeKind::NativeService { operation } => {
+                crate::services::apply_native(operation, &mut self.lifecycle)
+                    .map_err(|error| error.to_string())
             }
-            zup_transaction::NodeKind::BackendRemoval { .. } => {
-                crate::apply_owned_removal(operation).map_err(|e| e.to_string())
+            zup_plan::NodeKind::NativeCache { .. } => {
+                Err("Linux native cache operation is unsupported on Windows".into())
             }
-            zup_transaction::NodeKind::FileRemoval { .. } => self
+            zup_plan::NodeKind::Generation { .. } => self.inner.apply_generation(operation),
+            zup_plan::NodeKind::Retention { .. }
+            | zup_plan::NodeKind::ReserveInstallation
+            | zup_plan::NodeKind::PublishInstallation => {
+                Err("installation publication belongs to the coordinator".into())
+            }
+            zup_plan::NodeKind::ServiceControl { operation } => {
+                zup_transaction::apply_service_control(&mut self.lifecycle, operation)
+            }
+            zup_plan::NodeKind::Barrier => Ok(OperationReceipt::Control),
+            zup_plan::NodeKind::BackendOperation { .. } => {
+                crate::integration::apply_managed(operation).map_err(|e| e.to_string())
+            }
+            zup_plan::NodeKind::BackendRemoval { .. } => {
+                crate::integration::apply_owned_removal(operation).map_err(|e| e.to_string())
+            }
+            zup_plan::NodeKind::FileRemoval { .. } => self
                 .inner
                 .apply_owned_file_removal(operation)
                 .map_err(|e| e.to_string()),
-            zup_transaction::NodeKind::StageFile { .. }
-            | zup_transaction::NodeKind::FileMutation { .. } => {
-                let (source_relative, dest) = extract_file_identity(operation)?;
-                crate::apply_node(&mut self.inner, operation, &source_relative, &dest)
-                    .map(crate::transaction_receipt)
+            zup_plan::NodeKind::StageFile { .. }
+            | zup_plan::NodeKind::RetainFile { .. }
+            | zup_plan::NodeKind::FileMutation { .. } => {
+                crate::apply_node(&mut self.inner, operation, transaction)
                     .map_err(|e| e.to_string())
             }
         }?;
 
-        self.completed_work = self
-            .completed_work
-            .saturating_add(zup_runtime::operation_work(operation));
+        self.completed_work = self.completed_work.saturating_add(operation.work());
         if let Some(events) = &self.events {
             let _ = events.send(RuntimeEvent::Progress {
                 phase: zup_runtime::operation_phase(operation),
                 completed: self.completed_work.min(self.total_work),
                 total: self.total_work,
-                action: zup_runtime::operation_action(operation).into(),
+                action: zup_runtime::operation_result_action(operation, &receipt).into(),
             });
         }
         Ok(receipt)
@@ -1688,74 +1778,118 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
 
     fn verify(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
+        if matches!(receipt, OperationReceipt::Cleanup { .. }) {
+            return self.inner.verify_cleanup(operation, receipt);
+        }
+        if let OperationReceipt::PersistentDirectory(owned) = receipt {
+            return self.inner.verify_persistent(operation, owned);
+        }
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
+        if let OperationReceipt::NativeService(receipt) = receipt {
+            let zup_plan::NodeKind::NativeService { operation } = &operation.kind else {
+                return Err("native service receipt requires a native service operation".into());
+            };
+            return crate::services::verify_native(operation, receipt, &mut self.lifecycle)
+                .map_err(|error| error.to_string());
+        }
+        if let OperationReceipt::Generation(receipt) = receipt {
+            return self.inner.verify_generation(operation, receipt);
+        }
         if let OperationReceipt::ServiceControl(receipt) = receipt {
-            return zup_transaction::verify_service_control(
-                &mut crate::service_control::ScmLifecycle,
-                receipt,
-            );
+            return zup_transaction::verify_service_control(&mut self.lifecycle, receipt);
         }
         match &operation.kind {
-            zup_transaction::NodeKind::BackendOperation { .. }
-            | zup_transaction::NodeKind::BackendRemoval { .. } => {
+            zup_plan::NodeKind::BackendOperation { .. }
+            | zup_plan::NodeKind::BackendRemoval { .. } => {
                 crate::integration::verify_managed(operation, receipt)
                     .map_err(|error| error.to_string())
             }
-            zup_transaction::NodeKind::Barrier => Ok(()),
-            _ => crate::verify_installed_file(receipt).map_err(|error| error.to_string()),
+            zup_plan::NodeKind::Barrier => Ok(()),
+            _ => {
+                crate::verify_installed_file(operation, receipt).map_err(|error| error.to_string())
+            }
         }
     }
 
     fn rollback(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         match receipt {
-            OperationReceipt::ServiceControl(receipt) => zup_transaction::rollback_service_control(
-                &mut crate::service_control::ScmLifecycle,
-                receipt,
-            ),
-            OperationReceipt::StageFile { .. }
+            OperationReceipt::PersistentDirectory(owned) => {
+                self.inner.verify_persistent(operation, owned)
+            }
+            OperationReceipt::NativeService(receipt) => {
+                let zup_plan::NodeKind::NativeService { operation } = &operation.kind else {
+                    return Err("native service receipt requires a native service operation".into());
+                };
+                crate::services::rollback_native(operation, receipt, &mut self.lifecycle)
+                    .map_err(|error| error.to_string())
+            }
+            OperationReceipt::Generation(receipt) => {
+                self.inner.retain_generation(operation, receipt)
+            }
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::rollback_service_control(&mut self.lifecycle, receipt)
+            }
+            OperationReceipt::RetainedFile { .. }
+            | OperationReceipt::StageFile { .. }
             | OperationReceipt::CreateFile { .. }
             | OperationReceipt::ReplaceFile { .. }
             | OperationReceipt::RemoveFile { .. } => self
                 .inner
-                .rollback_transaction_receipt(receipt)
+                .rollback_transaction_receipt(operation, receipt)
                 .map_err(|e| e.to_string()),
-            _ => crate::rollback_managed(operation, receipt).map_err(|e| e.to_string()),
+            _ => {
+                crate::integration::rollback_managed(operation, receipt).map_err(|e| e.to_string())
+            }
         }
     }
 
     fn reconcile(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         _receipt: Option<&OperationReceipt>,
+        transaction: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, Self::Error> {
-        if let zup_transaction::NodeKind::ServiceControl { operation } = &operation.kind {
+        if matches!(operation.kind, zup_plan::NodeKind::Cleanup { .. }) {
+            return self
+                .inner
+                .apply_cleanup(operation, transaction)
+                .map(ReconcileResult::AppliedWithReceipt);
+        }
+        if let zup_plan::NodeKind::NativeService { operation } = &operation.kind {
+            return crate::services::reconcile_native(operation, &mut self.lifecycle)
+                .map_err(|error| error.to_string());
+        }
+        if matches!(operation.kind, zup_plan::NodeKind::Generation { .. }) {
+            return self.inner.reconcile_generation(operation, _receipt);
+        }
+        if let zup_plan::NodeKind::ServiceControl { operation } = &operation.kind {
             let receipt = match _receipt {
                 Some(OperationReceipt::ServiceControl(receipt)) => Some(receipt.as_ref()),
                 _ => None,
             };
             return zup_transaction::reconcile_service_control(
-                &mut crate::service_control::ScmLifecycle,
+                &mut self.lifecycle,
                 operation,
                 receipt,
             );
         }
         match &operation.kind {
-            zup_transaction::NodeKind::BackendOperation { .. } => {
+            zup_plan::NodeKind::BackendOperation { .. } => {
                 return crate::reconcile_managed(operation).map_err(|e| e.to_string());
             }
-            zup_transaction::NodeKind::BackendRemoval { .. } => {
+            zup_plan::NodeKind::BackendRemoval { .. } => {
                 return crate::reconcile_owned_removal(operation).map_err(|e| e.to_string());
             }
-            zup_transaction::NodeKind::FileRemoval { .. } => {
+            zup_plan::NodeKind::FileRemoval { .. } => {
                 return self
                     .inner
                     .reconcile_owned_file_removal(operation)
@@ -1764,32 +1898,7 @@ impl<P: zup_bundle::PayloadSource, C: CancellationProbe> OperationExecutor
             _ => {}
         }
         self.inner
-            .reconcile_transaction_node(operation)
+            .reconcile_transaction_node(operation, _receipt, transaction)
             .map_err(|e| e.to_string())
     }
 }
-
-fn extract_file_identity(
-    operation: &TransactionNode,
-) -> Result<(zup_core::RelativePath, std::path::PathBuf), String> {
-    match &operation.kind {
-        zup_transaction::NodeKind::StageFile { key }
-        | zup_transaction::NodeKind::FileMutation { key, .. } => {
-            let destination = match key {
-                ResourceKey::File { destination }
-                | ResourceKey::Maintenance { destination, .. } => destination,
-                _ => return Err("not a file resource".into()),
-            };
-            let dest = std::path::PathBuf::from(destination);
-            let source_relative = operation
-                .meta
-                .source_relative
-                .clone()
-                .ok_or_else(|| "file operation has no payload path".to_owned())?;
-            Ok((source_relative, dest))
-        }
-        _ => Err("unsupported node".into()),
-    }
-}
-
-use zup_core::ResourceKey;

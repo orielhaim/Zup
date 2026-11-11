@@ -54,8 +54,6 @@ pub fn linux_capability_errors(
     errors.extend(resource_errors(
         &plan.installer,
         config.install.scope.scopes(),
-        config.profile.as_str(),
-        plan,
     ));
     errors
 }
@@ -67,22 +65,12 @@ pub fn operation_capability_errors(build: &TargetBuildPlan, scope: SelectedScope
         &installer.target,
         installer.frontend,
     ));
-    errors.extend(resource_errors(
-        installer,
-        &[scope],
-        installer.app.name.as_str(),
-        build,
-    ));
+    errors.extend(resource_errors(installer, &[scope]));
 
     errors
 }
 
-fn resource_errors(
-    installer: &zup_core::Installer,
-    scopes: &[SelectedScope],
-    name: &str,
-    plan: &TargetBuildPlan,
-) -> Vec<String> {
+fn resource_errors(installer: &zup_core::Installer, scopes: &[SelectedScope]) -> Vec<String> {
     let mut errors = Vec::new();
     if let Some(capabilities) = zup_plan::capabilities(&installer.target) {
         for &scope in scopes {
@@ -108,7 +96,6 @@ fn resource_errors(
     }
     errors.extend(protocol_errors(&installer.protocols));
     errors.extend(association_errors(&installer.file_associations));
-    errors.extend(main_executable_errors(name, plan));
     errors
 }
 
@@ -154,34 +141,6 @@ fn association_errors(associations: &[zup_core::FileAssociation]) -> Vec<String>
     Vec::new()
 }
 
-fn main_executable_errors(name: &str, plan: &TargetBuildPlan) -> Vec<String> {
-    if plan.files.is_empty() {
-        return Vec::new();
-    }
-    let Some(main) = &plan.installer.app.main else {
-        return Vec::new();
-    };
-    let main = main.to_string();
-    let matches = plan
-        .files
-        .iter()
-        .filter(|file| file.destination.to_string() == main)
-        .collect::<Vec<_>>();
-    if matches.is_empty() {
-        return vec![format!(
-            "the declared application main `{main}` for `{name}` matches no shipped file: name a \
-             `[[files]]` destination, or remove `app.main`",
-        )];
-    }
-    if matches.iter().all(|file| !file.executable) {
-        return vec![format!(
-            "the declared application main `{main}` for `{name}` is not executable: mark the shipped \
-             file `executable = true`",
-        )];
-    }
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +153,8 @@ mod tests {
             source: zup_core::Source::new(std::path::PathBuf::from("dist")).unwrap(),
             frontend,
             install: zup_core::Install {
+                generation_readers: Default::default(),
+                data: Vec::new(),
                 scope,
                 directory: zup_core::InstallDirectory {
                     user: None,
@@ -220,6 +181,8 @@ mod tests {
                 frontend: Frontend::Console,
                 updates: None,
                 install: zup_core::Install {
+                    generation_readers: Default::default(),
+                    data: Vec::new(),
                     scope: InstallScope::User,
                     directory: zup_core::InstallDirectory {
                         user: None,
@@ -301,6 +264,7 @@ mod tests {
         let config = config("linux-x64", Frontend::Console, InstallScope::User);
         let mut plan = plan();
         plan.installer.launchers.push(zup_core::Launcher {
+            id: zup_core::ResourceId::new("main").unwrap(),
             location: zup_core::LauncherLocation::Desktop,
             name: zup_core::NonEmptyString::new("Tool").unwrap(),
             target: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
@@ -310,6 +274,7 @@ mod tests {
             when: None,
         });
         plan.installer.path.push(zup_core::PathEntry {
+            id: zup_core::ResourceId::new("cli").unwrap(),
             value: zup_core::Template::parse("${location.programs}/tool").unwrap(),
             component: None,
             when: None,
@@ -333,7 +298,7 @@ mod tests {
             lifecycle: Default::default(),
             readiness: Default::default(),
             id: zup_core::ServiceId::new("tool").unwrap(),
-            name: zup_core::NonEmptyString::new("Tool").unwrap(),
+            native_name: None,
             display_name: None,
             binary: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
             arguments: Vec::new(),
@@ -393,7 +358,7 @@ mod tests {
             lifecycle: Default::default(),
             readiness: Default::default(),
             id: zup_core::ServiceId::new("tool").unwrap(),
-            name: zup_core::NonEmptyString::new("Tool").unwrap(),
+            native_name: None,
             display_name: None,
             binary: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),
             arguments: Vec::new(),
@@ -409,6 +374,7 @@ mod tests {
             let config = config("linux-x64", Frontend::Console, scope);
             let mut plan = plan();
             plan.installer.launchers.push(zup_core::Launcher {
+                id: zup_core::ResourceId::new("main").unwrap(),
                 location: zup_core::LauncherLocation::Menu,
                 name: zup_core::NonEmptyString::new("Tool").unwrap(),
                 target: zup_core::Template::parse("${location.programs}/tool/tool").unwrap(),

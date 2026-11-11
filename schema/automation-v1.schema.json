@@ -45,7 +45,11 @@
               "type": "string"
             }
           },
-          "required": ["id", "name", "version"]
+          "required": [
+            "id",
+            "name",
+            "version"
+          ]
         },
         "targets": {
           "description": "The targets the operation selected.",
@@ -83,7 +87,10 @@
             },
             "id": {
               "description": "The provider's identifier for it, when it has one.\n\nA string because whether a provider's id fits in a double is the provider's\nbusiness. Encoding it as a number is how a release id silently becomes\n`1.2345678901234568e18` somewhere between the host and a log line.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "state": {
               "description": "`published`, `draft`, `prerelease`, `deleted`, or whatever the provider says.",
@@ -91,11 +98,17 @@
             },
             "url": {
               "description": "The address a person can open, when there is one.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "immutable": {
               "description": "Whether the host refuses to replace these bytes. `null` when it did not say.",
-              "type": ["boolean", "null"]
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "assets": {
               "description": "The files the release carries.",
@@ -106,10 +119,19 @@
             },
             "receipt": {
               "description": "The provider's own receipt, project-relative, when one was written.\n\nNamed rather than inlined: the receipt is the provider's document in the\nprovider's shape, and a contract that absorbed it would have to version it\nseparately. A machine consumer that wants the tag, the state and the asset\nnames does not need to read it.",
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
-          "required": ["provider", "subject", "tag", "state", "assets"]
+          "required": [
+            "provider",
+            "subject",
+            "tag",
+            "state",
+            "assets"
+          ]
         },
         "diagnostics": {
           "description": "Everything zup wants the reader to know. Present on success too.",
@@ -135,7 +157,9 @@
                 }
               },
               "$ref": "#/$defs/BuildDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup check`.",
@@ -147,7 +171,9 @@
                 }
               },
               "$ref": "#/$defs/CheckDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup plan`.",
@@ -159,7 +185,9 @@
                 }
               },
               "$ref": "#/$defs/PlanDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup doctor`.",
@@ -171,7 +199,9 @@
                 }
               },
               "$ref": "#/$defs/DoctorDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup publish stage`.",
@@ -183,7 +213,9 @@
                 }
               },
               "$ref": "#/$defs/PublishStageDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup publish github`.",
@@ -195,7 +227,9 @@
                 }
               },
               "$ref": "#/$defs/PublishDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup sign prepare`.",
@@ -207,7 +241,9 @@
                 }
               },
               "$ref": "#/$defs/SignPrepareDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup sign verify`.",
@@ -219,7 +255,9 @@
                 }
               },
               "$ref": "#/$defs/SignVerifyDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup toolchain install`.",
@@ -231,7 +269,9 @@
                 }
               },
               "$ref": "#/$defs/ToolchainInstallDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup toolchain status`.",
@@ -243,7 +283,9 @@
                 }
               },
               "$ref": "#/$defs/ToolchainStatusDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup toolchain clean`.",
@@ -255,7 +297,9 @@
                 }
               },
               "$ref": "#/$defs/ToolchainCleanDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             },
             {
               "description": "`zup artifact inspect`.",
@@ -267,7 +311,9 @@
                 }
               },
               "$ref": "#/$defs/ArtifactInspectDetails",
-              "required": ["kind"]
+              "required": [
+                "kind"
+              ]
             }
           ]
         }
@@ -326,7 +372,10 @@
           "type": "string"
         }
       },
-      "required": ["profile", "target"]
+      "required": [
+        "profile",
+        "target"
+      ]
     },
     "Artifact": {
       "description": "A file a zup operation produced, or a provider published.",
@@ -354,15 +403,24 @@
         },
         "id": {
           "description": "The declared artifact id, when the manifest named one.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "target": {
           "description": "The Zup target, for an artifact that serves exactly one machine.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "variants": {
           "description": "The variant ids this artifact carries, for one that serves several.",
-          "type": ["array", "null"],
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string"
           }
@@ -379,7 +437,13 @@
           ]
         }
       },
-      "required": ["path", "digest", "size", "kind", "mode"]
+      "required": [
+        "path",
+        "digest",
+        "size",
+        "kind",
+        "mode"
+      ]
     },
     "Digest": {
       "description": "The algorithm behind a digest, and the value it produced.\n\nTwo fields rather than a `sha256:<hex>` string, because a consumer has to be able\nto compare the algorithm to decide whether a comparison means anything. A prefixed\nstring is one field a consumer has to split and get right for every value.",
@@ -394,7 +458,10 @@
           "type": "string"
         }
       },
-      "required": ["algorithm", "value"]
+      "required": [
+        "algorithm",
+        "value"
+      ]
     },
     "ByteCount": {
       "description": "A byte count, bounded so that a consumer holding it in a 64-bit float represents it exactly. A larger value is refused rather than rounded.",
@@ -418,7 +485,10 @@
           }
         }
       },
-      "required": ["state", "evidence"]
+      "required": [
+        "state",
+        "evidence"
+      ]
     },
     "SigningEvidence": {
       "description": "What was established about a file's signature.\n\nA list rather than a state word, because the facts fail separately and mean\ndifferent things: a signature can cover the bytes without the platform trusting the\nchain, and either can hold without a publisher. A single `signed`/`unsigned` field\ncannot say which, so it would either overstate or say nothing.\n\n`fact` is open on purpose. Today's vocabulary is `signature_covers_bytes`,\n`platform_trust_accepted`, `publisher`, `certificate` and `timestamp`; a new fact is\nan additive change, and a consumer that displays an unknown one is doing the right\nthing. `value` is the platform's own wording, because translating it would be zup\nmaking a claim the platform did not.",
@@ -431,7 +501,10 @@
           "type": "string"
         }
       },
-      "required": ["fact", "value"]
+      "required": [
+        "fact",
+        "value"
+      ]
     },
     "PublicationAsset": {
       "description": "One file a published release carries.",
@@ -461,7 +534,11 @@
           "$ref": "#/$defs/Identifier"
         }
       },
-      "required": ["name", "size", "state"]
+      "required": [
+        "name",
+        "size",
+        "state"
+      ]
     },
     "Diagnostic": {
       "description": "One thing zup wants a developer to know.",
@@ -492,10 +569,17 @@
         },
         "help": {
           "description": "The line a developer can act on.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["severity", "code", "message"]
+      "required": [
+        "severity",
+        "code",
+        "message"
+      ]
     },
     "Severity": {
       "description": "How loudly zup is saying something.",
@@ -527,30 +611,44 @@
         },
         "start_line": {
           "description": "1-based.",
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
           "minimum": 0
         },
         "start_column": {
           "description": "1-based.",
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
           "minimum": 0
         },
         "end_line": {
           "description": "1-based, inclusive.",
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
           "minimum": 0
         },
         "end_column": {
           "description": "1-based, inclusive.",
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint32",
           "minimum": 0
         }
       },
-      "required": ["file"]
+      "required": [
+        "file"
+      ]
     },
     "BuildDetails": {
       "description": "What a build produced that is not an artifact.",
@@ -558,7 +656,10 @@
       "properties": {
         "signing_plan": {
           "description": "The signing plan, project-relative, when one was written.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pending_signatures": {
           "description": "How many files the plan says an external signer has to touch.",
@@ -567,7 +668,9 @@
           "minimum": 0
         }
       },
-      "required": ["pending_signatures"]
+      "required": [
+        "pending_signatures"
+      ]
     },
     "Composition": {
       "description": "Whether a set of targets can become one artifact.",
@@ -593,7 +696,10 @@
           "type": "string"
         }
       },
-      "required": ["composable", "detail"]
+      "required": [
+        "composable",
+        "detail"
+      ]
     },
     "CheckDetails": {
       "description": "What a check established.",
@@ -617,7 +723,9 @@
           ]
         }
       },
-      "required": ["variants"]
+      "required": [
+        "variants"
+      ]
     },
     "PlanResource": {
       "oneOf": [
@@ -627,6 +735,9 @@
             "kind": {
               "type": "string",
               "const": "file"
+            },
+            "placement": {
+              "$ref": "#/$defs/PlanFilePlacement"
             },
             "destination": {
               "type": "string"
@@ -641,7 +752,14 @@
               "type": "boolean"
             }
           },
-          "required": ["kind", "destination", "size", "digest", "generated"]
+          "required": [
+            "kind",
+            "placement",
+            "destination",
+            "size",
+            "digest",
+            "generated"
+          ]
         },
         {
           "type": "object",
@@ -666,10 +784,19 @@
               }
             },
             "working_directory": {
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
-          "required": ["kind", "name", "location", "executable", "arguments"]
+          "required": [
+            "kind",
+            "name",
+            "location",
+            "executable",
+            "arguments"
+          ]
         },
         {
           "type": "object",
@@ -682,7 +809,10 @@
               "type": "string"
             }
           },
-          "required": ["kind", "value"]
+          "required": [
+            "kind",
+            "value"
+          ]
         },
         {
           "type": "object",
@@ -707,7 +837,13 @@
               "type": "string"
             }
           },
-          "required": ["kind", "id", "executable", "arguments", "start"]
+          "required": [
+            "kind",
+            "id",
+            "executable",
+            "arguments",
+            "start"
+          ]
         },
         {
           "type": "object",
@@ -729,7 +865,12 @@
               }
             }
           },
-          "required": ["kind", "scheme", "executable", "arguments"]
+          "required": [
+            "kind",
+            "scheme",
+            "executable",
+            "arguments"
+          ]
         },
         {
           "type": "object",
@@ -754,7 +895,13 @@
               }
             }
           },
-          "required": ["kind", "id", "extension", "executable", "arguments"]
+          "required": [
+            "kind",
+            "id",
+            "extension",
+            "executable",
+            "arguments"
+          ]
         },
         {
           "type": "object",
@@ -770,8 +917,20 @@
               "type": "string"
             }
           },
-          "required": ["kind", "id", "name"]
+          "required": [
+            "kind",
+            "id",
+            "name"
+          ]
         }
+      ]
+    },
+    "PlanFilePlacement": {
+      "type": "string",
+      "enum": [
+        "generation",
+        "fixed_atomic",
+        "fixed_quiescent"
       ]
     },
     "PlanDetails": {
@@ -788,7 +947,10 @@
         },
         "install_directory": {
           "description": "Where it would install, when the project chose a directory.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "estimated_bytes": {
           "description": "What it would write.",
@@ -839,7 +1001,12 @@
           }
         }
       },
-      "required": ["profile", "target", "status", "checks"]
+      "required": [
+        "profile",
+        "target",
+        "status",
+        "checks"
+      ]
     },
     "DoctorCheck": {
       "description": "One readiness check.",
@@ -859,10 +1026,17 @@
         },
         "path": {
           "description": "The file it examined, when it examined one.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["kind", "status", "message"]
+      "required": [
+        "kind",
+        "status",
+        "message"
+      ]
     },
     "DoctorDetails": {
       "description": "What `zup doctor` found.\n\nThe whole check table crosses the wire, green rows included. A readiness check that\nwas *skipped* is not the same fact as one that *passed* - it says the answer was\nnever obtained - so a consumer that could only see the failures would report a\nproject as ready on the strength of checks that never ran.",
@@ -894,7 +1068,13 @@
           }
         }
       },
-      "required": ["manifest", "host", "ready", "checks", "targets"]
+      "required": [
+        "manifest",
+        "host",
+        "ready",
+        "checks",
+        "targets"
+      ]
     },
     "StagedPackage": {
       "description": "One transport package.",
@@ -922,7 +1102,12 @@
           "minimum": 0
         }
       },
-      "required": ["variant", "names", "size", "blob_count"]
+      "required": [
+        "variant",
+        "names",
+        "size",
+        "blob_count"
+      ]
     },
     "PublishStageDetails": {
       "description": "What a staged release holds.",
@@ -960,7 +1145,10 @@
         },
         "release_digest": {
           "description": "The digest of the release descriptor, so a consumer can prove which release the\ntree is without reading it.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "packages": {
           "description": "One transport package per variant, when `--packages` was asked for.",
@@ -978,7 +1166,10 @@
         },
         "release_manifest": {
           "description": "The release description folded from a build matrix, when `--release-dir` was\ngiven.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1009,7 +1200,11 @@
           "type": "string"
         }
       },
-      "required": ["phase", "step", "detail"]
+      "required": [
+        "phase",
+        "step",
+        "detail"
+      ]
     },
     "PublishDetails": {
       "description": "What a publication did, beyond the release it produced.",
@@ -1021,7 +1216,10 @@
         },
         "receipt": {
           "description": "Where the provider's receipt went, project-relative.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "failures": {
           "description": "The steps that failed, which is what a failed publication needs and what a\nsuccessful one does not.",
@@ -1031,7 +1229,10 @@
           }
         }
       },
-      "required": ["dry_run", "failures"]
+      "required": [
+        "dry_run",
+        "failures"
+      ]
     },
     "SignSubject": {
       "description": "One file signing has an opinion about.",
@@ -1087,7 +1288,14 @@
           ]
         }
       },
-      "required": ["path", "role", "stage", "variants", "verified", "detail"]
+      "required": [
+        "path",
+        "role",
+        "stage",
+        "variants",
+        "verified",
+        "detail"
+      ]
     },
     "SignPrepareDetails": {
       "description": "What an external signer has to touch.",
@@ -1105,7 +1313,10 @@
           }
         }
       },
-      "required": ["plan", "subjects"]
+      "required": [
+        "plan",
+        "subjects"
+      ]
     },
     "SignVerifyDetails": {
       "description": "What verification concluded, per file.",
@@ -1135,7 +1346,12 @@
           "minimum": 0
         }
       },
-      "required": ["plan", "subjects", "finalized", "unsigned"]
+      "required": [
+        "plan",
+        "subjects",
+        "finalized",
+        "unsigned"
+      ]
     },
     "ToolchainInstallDetails": {
       "description": "What a toolchain install copied.",
@@ -1161,7 +1377,12 @@
           }
         }
       },
-      "required": ["zup_version", "source", "cache", "components"]
+      "required": [
+        "zup_version",
+        "source",
+        "cache",
+        "components"
+      ]
     },
     "ToolchainComponentStatus": {
       "description": "One toolchain component's state.",
@@ -1188,14 +1409,23 @@
         },
         "path": {
           "description": "The file, when one was found.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "problem": {
           "description": "Why it was refused, when it was.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["component", "found"]
+      "required": [
+        "component",
+        "found"
+      ]
     },
     "ToolchainStatusDetails": {
       "description": "What a build here would resolve.",
@@ -1225,7 +1455,13 @@
           }
         }
       },
-      "required": ["zup_version", "host", "cache", "complete", "components"]
+      "required": [
+        "zup_version",
+        "host",
+        "cache",
+        "complete",
+        "components"
+      ]
     },
     "ToolchainCleanDetails": {
       "description": "What a clean removed, or would remove.",
@@ -1254,7 +1490,12 @@
           }
         }
       },
-      "required": ["cache", "dry_run", "removed", "kept"]
+      "required": [
+        "cache",
+        "dry_run",
+        "removed",
+        "kept"
+      ]
     },
     "InspectedVariant": {
       "description": "One variant inside an artifact.",
@@ -1374,7 +1615,12 @@
           "type": "string"
         }
       },
-      "required": ["authenticode", "index", "content_digests", "variants"]
+      "required": [
+        "authenticode",
+        "index",
+        "content_digests",
+        "variants"
+      ]
     },
     "ArtifactInspectDetails": {
       "description": "What an artifact contains.\n\nThe whole report, because inspection is the one operation whose product *is* the\ndetail: a caller asking what a file contains wants the content accounting and the\ntrust questions, not a summary of them.",
@@ -1440,7 +1686,9 @@
             }
           },
           "$ref": "#/$defs/StreamVersion",
-          "required": ["type"]
+          "required": [
+            "type"
+          ]
         },
         {
           "description": "A step began.",
@@ -1459,7 +1707,11 @@
               "type": "string"
             }
           },
-          "required": ["type", "phase", "message"]
+          "required": [
+            "type",
+            "phase",
+            "message"
+          ]
         },
         {
           "description": "A counter moved.",
@@ -1486,7 +1738,12 @@
               "type": "string"
             }
           },
-          "required": ["type", "completed", "total", "label"]
+          "required": [
+            "type",
+            "completed",
+            "total",
+            "label"
+          ]
         },
         {
           "description": "Something a reader should know now rather than at the end.",
@@ -1500,7 +1757,10 @@
               "$ref": "#/$defs/Diagnostic"
             }
           },
-          "required": ["type", "diagnostic"]
+          "required": [
+            "type",
+            "diagnostic"
+          ]
         },
         {
           "description": "A file was produced.",
@@ -1514,7 +1774,10 @@
               "$ref": "#/$defs/Artifact"
             }
           },
-          "required": ["type", "artifact"]
+          "required": [
+            "type",
+            "artifact"
+          ]
         },
         {
           "description": "A release went somewhere.",
@@ -1528,7 +1791,10 @@
               "$ref": "#/$defs/Publication"
             }
           },
-          "required": ["type", "publication"]
+          "required": [
+            "type",
+            "publication"
+          ]
         },
         {
           "description": "Human output that would have gone to a terminal.\n\nExists so a build's logs can be *shown* without being *suppressed*: in\n`--format jsonl` the child's and zup's own human lines come out here, and a\nconsumer that ignores them still has a complete stream.",
@@ -1545,7 +1811,11 @@
               "type": "string"
             }
           },
-          "required": ["type", "level", "message"]
+          "required": [
+            "type",
+            "level",
+            "message"
+          ]
         },
         {
           "description": "The last line. The authoritative result.\n\nBoxed because the result is three orders of magnitude larger than any other\nevent, and a stream that carries thousands of progress lines would otherwise\npay for it on every line. Invisible on the wire.",
@@ -1559,7 +1829,10 @@
               "$ref": "#/$defs/AutomationResult"
             }
           },
-          "required": ["type", "result"]
+          "required": [
+            "type",
+            "result"
+          ]
         }
       ]
     },
@@ -1580,7 +1853,11 @@
           "$ref": "#/$defs/Identifier"
         }
       },
-      "required": ["protocol", "zup", "operation"]
+      "required": [
+        "protocol",
+        "zup",
+        "operation"
+      ]
     },
     "Publication": {
       "description": "Where a release went, and what state it is in.",
@@ -1600,7 +1877,10 @@
         },
         "id": {
           "description": "The provider's identifier for it, when it has one.\n\nA string because whether a provider's id fits in a double is the provider's\nbusiness. Encoding it as a number is how a release id silently becomes\n`1.2345678901234568e18` somewhere between the host and a log line.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "state": {
           "description": "`published`, `draft`, `prerelease`, `deleted`, or whatever the provider says.",
@@ -1608,11 +1888,17 @@
         },
         "url": {
           "description": "The address a person can open, when there is one.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "immutable": {
           "description": "Whether the host refuses to replace these bytes. `null` when it did not say.",
-          "type": ["boolean", "null"]
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "assets": {
           "description": "The files the release carries.",
@@ -1623,15 +1909,28 @@
         },
         "receipt": {
           "description": "The provider's own receipt, project-relative, when one was written.\n\nNamed rather than inlined: the receipt is the provider's document in the\nprovider's shape, and a contract that absorbed it would have to version it\nseparately. A machine consumer that wants the tag, the state and the asset\nnames does not need to read it.",
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": ["provider", "subject", "tag", "state", "assets"]
+      "required": [
+        "provider",
+        "subject",
+        "tag",
+        "state",
+        "assets"
+      ]
     },
     "LogLevel": {
       "description": "How a routed human line is marked.",
       "type": "string",
-      "enum": ["info", "warning", "error"]
+      "enum": [
+        "info",
+        "warning",
+        "error"
+      ]
     }
   }
 }

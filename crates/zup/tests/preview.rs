@@ -229,7 +229,7 @@ fn toolchain(root: Option<&Path>) -> Arc<zup::ToolchainResolver> {
     let resolver = zup::ToolchainResolver::new(
         env!("CARGO_PKG_VERSION").to_owned(),
         PathBuf::from("C:/nowhere/zup.exe"),
-        PathBuf::from("C:/nowhere/state"),
+        zup::ToolchainCache::Directory(PathBuf::from("C:/nowhere/state")),
     );
     Arc::new(resolver.with_root(Some(match root {
         Some(root) => root.to_path_buf(),

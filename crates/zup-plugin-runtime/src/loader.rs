@@ -1,11 +1,10 @@
 use std::collections::BTreeMap;
+use zup_core::{PackagePlan, PluginArtifact};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use wasmtime::{Engine, Precompiled};
-use zup_bundle::{
-    AcquiredPayloadSource, Package, PackageError, PayloadError, PluginArtifact, PortableBuildPlan,
-};
+use zup_bundle::{AcquiredPayloadSource, Package, PackageError, PayloadError};
 use zup_core::{PluginId, Sha256Digest, Target};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, ContractError, EngineError, HOST_TARGET, MAX_AOT_BYTES, PLUGIN_API_VERSION,
@@ -71,7 +70,7 @@ pub(crate) fn load_bundle(
 }
 
 pub(crate) fn load_acquired(
-    plan: &PortableBuildPlan,
+    plan: &PackagePlan,
     source: &AcquiredPayloadSource,
     expected_target: &Target,
 ) -> Result<LoadedBundle, LoadError> {
@@ -103,7 +102,7 @@ pub(crate) fn load_compiled(
     })
 }
 
-fn check_target(plan: &PortableBuildPlan, expected: &Target) -> Result<(), LoadError> {
+fn check_target(plan: &PackagePlan, expected: &Target) -> Result<(), LoadError> {
     if plan.installer.target != *expected {
         return Err(LoadError::TargetMismatch {
             expected: *expected,
@@ -299,6 +298,6 @@ fn verify_metadata(
             found: artifact.aot_size.to_string(),
         });
     }
-    artifact.validate().map_err(LoadError::Package)?;
+    zup_bundle::validate_plugin_artifact(artifact).map_err(LoadError::Package)?;
     Ok(())
 }

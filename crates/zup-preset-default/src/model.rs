@@ -265,8 +265,12 @@ pub fn byline(product: &ProductIdentity) -> String {
 
 pub fn operation_title(kind: OperationKind, product: &str) -> String {
     match kind {
+        OperationKind::Recover => format!("Recovering {product}"),
+        OperationKind::Cleanup => format!("Cleaning up {product}"),
         OperationKind::Install => format!("Installing {product}"),
         OperationKind::Upgrade => format!("Upgrading {product}"),
+        OperationKind::Downgrade => format!("Downgrading {product}"),
+        OperationKind::Rollback => format!("Restoring {product}"),
         OperationKind::Modify => format!("Updating {product}"),
         OperationKind::Repair => format!("Repairing {product}"),
         OperationKind::Uninstall => format!("Uninstalling {product}"),
@@ -278,7 +282,12 @@ pub fn phase_label(phase: OperationPhase, kind: OperationKind) -> &'static str {
         (OperationPhase::Prepare, OperationKind::Uninstall) => "Preparing to uninstall",
         (OperationPhase::Prepare, _) => "Preparing",
         (OperationPhase::Download, _) => "Downloading required files",
-        (OperationPhase::Verify, _) => "Verifying the download",
+        (OperationPhase::Verify, _) => "Verifying files",
+        (OperationPhase::Stage, _) => "Preparing application files",
+        (OperationPhase::Activate, _) => "Activating the application",
+        (OperationPhase::Rollback, _) => "Restoring the previous deployment",
+        (OperationPhase::Recovery, _) => "Recovering the installation",
+        (OperationPhase::Cleanup, _) => "Cleaning up",
         (OperationPhase::Files, OperationKind::Uninstall) => "Removing files",
         (OperationPhase::Files, OperationKind::Repair) => "Restoring files",
         (OperationPhase::Files, _) => "Copying files",
@@ -385,6 +394,12 @@ pub fn outcome(snapshot: &Snapshot) -> Outcome {
         removed: false,
     };
     match operation(snapshot) {
+        OperationKind::Recover => Outcome {
+            title: "Recovery finished".into(),
+            detail: "The interrupted transaction was reconciled with the installed state.".into(),
+            ..base
+        },
+        OperationKind::Cleanup => Outcome { title: "Storage cleanup finished".into(), detail: "Unused owned payloads were checked for collection. Payloads still in use were retained.".into(), ..base },
         OperationKind::Install => Outcome {
             title: format!("{name} is ready"),
             detail: format!("Version {version} was installed {audience}."),
@@ -399,6 +414,13 @@ pub fn outcome(snapshot: &Snapshot) -> Outcome {
                 }) => format!("Upgraded from version {previous} to {version}."),
                 _ => format!("Upgraded to version {version}."),
             },
+            ..base
+        },
+        OperationKind::Downgrade | OperationKind::Rollback => Outcome {
+            title: format!("{name} was switched"),
+            detail: format!(
+                "Version {version} is active. Persistent application data was preserved."
+            ),
             ..base
         },
         OperationKind::Modify => Outcome {
@@ -416,10 +438,9 @@ pub fn outcome(snapshot: &Snapshot) -> Outcome {
         },
         OperationKind::Uninstall => Outcome {
             title: format!("{name} was removed"),
-            detail: "The app and everything setup added to this computer are gone.".into(),
+            detail: "The active installation and its native registrations were removed.".into(),
             note: Some(format!(
-                "Files {name} created outside its install folder, such as your documents and \
-                 settings, were left in place."
+                "Persistent data and retained recovery content for {name} were preserved according to the installation policy."
             )),
             launch: None,
             removed: true,
@@ -507,8 +528,8 @@ pub fn update_row(snapshot: &Snapshot) -> Option<UpdateRow> {
             action: Some(("Check again", false)),
             busy: false,
         },
-        UpdateState::Available { current, available } => UpdateRow {
-            title: format!("Version {available} is available"),
+        UpdateState::Available { current, candidate } => UpdateRow {
+            title: format!("Update {} is available", candidate.version),
             detail: format!("You have version {current}."),
             tone: Tone::Attention,
             action: Some(("Update", true)),
@@ -682,6 +703,8 @@ pub fn app_detail(blocker: &str) -> Option<&str> {
 
 pub fn category_title(category: ResourceCategory) -> &'static str {
     match category {
+        ResourceCategory::Data => "Application data",
+        ResourceCategory::Application => "Application",
         ResourceCategory::Files => "Files",
         ResourceCategory::Launchers => "Shortcuts",
         ResourceCategory::Path => "Command-line PATH",
@@ -697,7 +720,13 @@ pub fn category_title(category: ResourceCategory) -> &'static str {
 
 pub fn category_about(category: ResourceCategory) -> &'static str {
     match category {
-        ResourceCategory::Files => "The application's own files.",
+        ResourceCategory::Data => {
+            "Mutable application data preserved through upgrades and uninstall."
+        }
+        ResourceCategory::Application => {
+            "Preparation, verification, and activation of the application."
+        }
+        ResourceCategory::Files => "Files that require a fixed location.",
         ResourceCategory::Launchers => "Ways to open it from the menu or the desktop.",
         ResourceCategory::Path => "Lets a terminal find its commands.",
         ResourceCategory::Services => "Programs that keep running in the background.",
@@ -714,6 +743,11 @@ pub fn category_about(category: ResourceCategory) -> &'static str {
 
 pub fn change_label(kind: ChangeKind) -> &'static str {
     match kind {
+        ChangeKind::Preserve => "Preserved",
+        ChangeKind::Prepare => "Prepare",
+        ChangeKind::Seal => "Seal",
+        ChangeKind::Verify => "Verify",
+        ChangeKind::Activate => "Activate",
         ChangeKind::Create => "Added",
         ChangeKind::Update => "Updated",
         ChangeKind::Remove => "Removed",
@@ -725,6 +759,10 @@ pub fn change_label(kind: ChangeKind) -> &'static str {
 
 pub fn change_counts(group: &ChangeGroup) -> Vec<(ChangeKind, usize)> {
     [
+        ChangeKind::Prepare,
+        ChangeKind::Seal,
+        ChangeKind::Verify,
+        ChangeKind::Activate,
         ChangeKind::Create,
         ChangeKind::Update,
         ChangeKind::Remove,
@@ -751,6 +789,11 @@ pub fn counts_line(group: &ChangeGroup) -> String {
     change_counts(group)
         .into_iter()
         .map(|(kind, count)| match kind {
+            ChangeKind::Preserve => format!("{count} preserved"),
+            ChangeKind::Prepare => format!("{count} to prepare"),
+            ChangeKind::Seal => format!("{count} to seal"),
+            ChangeKind::Verify => format!("{count} to verify"),
+            ChangeKind::Activate => format!("{count} to activate"),
             ChangeKind::Create => format!("{count} added"),
             ChangeKind::Update => format!("{count} updated"),
             ChangeKind::Remove => format!("{count} removed"),

@@ -1,4 +1,7 @@
 use std::collections::BTreeMap;
+use zup_plan::DeploymentNode;
+#[cfg(test)]
+use zup_plan::{BackendOperation, BackendOperationIntent, OperationId, Phase};
 
 use windows_link::link;
 use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE, Type};
@@ -6,7 +9,7 @@ use zup_core::{ResourceKey, SelectedScope, Target};
 use zup_plan::{
     ExtensionState, FileAssociationState, LauncherState, OwnedResource, ProtocolState, ServiceState,
 };
-use zup_transaction::{OperationReceipt, ReconcileResult, TransactionNode};
+use zup_transaction::{OperationReceipt, ReconcileResult};
 
 use crate::cmdline::{command_spec_from_command_line, format_command_line};
 use crate::lowering::host_path;
@@ -25,7 +28,7 @@ pub enum IntegrationError {
     Unsupported,
 }
 
-pub fn apply_managed(node: &TransactionNode) -> Result<OperationReceipt, IntegrationError> {
+pub(crate) fn apply_managed(node: &DeploymentNode) -> Result<OperationReceipt, IntegrationError> {
     let operation = node
         .meta
         .backend
@@ -39,13 +42,6 @@ pub fn apply_managed(node: &TransactionNode) -> Result<OperationReceipt, Integra
             native_apply(key, crate::shortcuts::apply(&op).map_err(drift)?)
         }
         ApplyPayload::Path(op) => apply_path(&key, &op),
-        ApplyPayload::Service {
-            operation: op,
-            startup_inhibited,
-        } => native_apply(
-            key,
-            crate::services::apply(&op, startup_inhibited).map_err(drift)?,
-        ),
         ApplyPayload::Protocol(op) => apply_protocol(&key, &op),
         ApplyPayload::FileAssociation(op) => apply_progid(&key, &op),
         ApplyPayload::Extension(op) => apply_extension(&key, &op),
@@ -83,7 +79,6 @@ fn native_owned_receipt(
     key: ResourceKey,
     scope: SelectedScope,
     owned: &OwnedResource,
-    startup_inhibited: bool,
 ) -> Result<BackendReceipt, IntegrationError> {
     let privilege = owned.privilege();
     Ok(match owned {
@@ -105,21 +100,6 @@ fn native_owned_receipt(
             entry: value.to_string(),
             value_type: value_type.clone(),
             privilege,
-        },
-        OwnedResource::Service {
-            name,
-            previous,
-            installed,
-            ..
-        } => BackendReceipt::Service {
-            name: name.clone(),
-            privilege,
-            previous: previous.clone(),
-            installed: if startup_inhibited {
-                zup_transaction::disabled_startup(installed).ok_or(IntegrationError::Unsupported)?
-            } else {
-                installed.as_ref().clone()
-            },
         },
         OwnedResource::Protocol {
             previous,
@@ -164,7 +144,9 @@ fn native_owned_receipt(
             installed: installed.clone(),
         },
         OwnedResource::Backend { .. } => return Err(IntegrationError::Unsupported),
-        OwnedResource::File { .. } => return Err(IntegrationError::Unsupported),
+        OwnedResource::Service(_) | OwnedResource::File { .. } => {
+            return Err(IntegrationError::Unsupported);
+        }
     })
 }
 
@@ -192,6 +174,17 @@ fn invert_receipt(receipt: BackendReceipt) -> Result<BackendReceipt, Integration
             value_type,
             privilege,
         },
+        BackendReceipt::RebindPath {
+            scope,
+            previous,
+            installed,
+            privilege,
+        } => BackendReceipt::RebindPath {
+            scope,
+            previous: installed,
+            installed: previous,
+            privilege,
+        },
         BackendReceipt::RemovePath {
             scope,
             entry,
@@ -202,17 +195,6 @@ fn invert_receipt(receipt: BackendReceipt) -> Result<BackendReceipt, Integration
             entry,
             value_type,
             privilege,
-        },
-        BackendReceipt::Service {
-            name,
-            privilege,
-            previous,
-            installed,
-        } => BackendReceipt::Service {
-            name,
-            privilege,
-            previous: installed,
-            installed: previous,
         },
         BackendReceipt::Protocol {
             scope,
@@ -269,7 +251,9 @@ fn invert_receipt(receipt: BackendReceipt) -> Result<BackendReceipt, Integration
     })
 }
 
-pub fn apply_owned_removal(node: &TransactionNode) -> Result<OperationReceipt, IntegrationError> {
+pub(crate) fn apply_owned_removal(
+    node: &DeploymentNode,
+) -> Result<OperationReceipt, IntegrationError> {
     let operation = node
         .meta
         .backend
@@ -283,9 +267,8 @@ pub fn apply_owned_removal(node: &TransactionNode) -> Result<OperationReceipt, I
             scope,
             key: semantic_key,
             owned,
-            startup_inhibited,
         } => {
-            let original = native_owned_receipt(semantic_key, scope, &owned, startup_inhibited)?;
+            let original = native_owned_receipt(semantic_key, scope, &owned)?;
             rollback_native(&original)?;
             native_apply(key, invert_receipt(original)?)
         }
@@ -319,9 +302,7 @@ pub fn apply_owned_removal(node: &TransactionNode) -> Result<OperationReceipt, I
     }
 }
 
-pub fn reconcile_owned_removal(
-    node: &TransactionNode,
-) -> Result<ReconcileResult, IntegrationError> {
+pub fn reconcile_owned_removal(node: &DeploymentNode) -> Result<ReconcileResult, IntegrationError> {
     let operation = node
         .meta
         .backend
@@ -335,9 +316,8 @@ pub fn reconcile_owned_removal(
             scope,
             key: semantic_key,
             owned,
-            startup_inhibited,
         } => {
-            let original = native_owned_receipt(semantic_key, scope, &owned, startup_inhibited)?;
+            let original = native_owned_receipt(semantic_key, scope, &owned)?;
             let status = reconcile_native(&original)?;
             if status == ReconcileResult::Applied {
                 Ok(ReconcileResult::AppliedWithReceipt(native_apply(
@@ -371,8 +351,8 @@ pub fn reconcile_owned_removal(
     }
 }
 
-pub fn rollback_managed(
-    node: &TransactionNode,
+pub(crate) fn rollback_managed(
+    _node: &DeploymentNode,
     receipt: &OperationReceipt,
 ) -> Result<(), IntegrationError> {
     let OperationReceipt::Backend { payload, .. } = receipt else {
@@ -380,12 +360,11 @@ pub fn rollback_managed(
     };
     let receipt =
         receipt_from_bytes(payload).map_err(|error| IntegrationError::Drift(error.to_string()))?;
-    validate_service_receipt(node, &receipt)?;
     rollback_native(&receipt)
 }
 
 pub(crate) fn verify_managed(
-    node: &TransactionNode,
+    _node: &DeploymentNode,
     receipt: &OperationReceipt,
 ) -> Result<(), IntegrationError> {
     let OperationReceipt::Backend { payload, .. } = receipt else {
@@ -393,63 +372,7 @@ pub(crate) fn verify_managed(
     };
     let receipt =
         receipt_from_bytes(payload).map_err(|error| IntegrationError::Drift(error.to_string()))?;
-    validate_service_receipt(node, &receipt)?;
     verify_native(&receipt)
-}
-
-pub(crate) fn validate_service_receipt(
-    node: &TransactionNode,
-    receipt: &BackendReceipt,
-) -> Result<(), IntegrationError> {
-    let backend = node
-        .meta
-        .backend
-        .as_ref()
-        .ok_or(IntegrationError::Unsupported)?;
-    let expected = match backend.intent {
-        zup_transaction::BackendOperationIntent::Apply => {
-            match decode::<ApplyPayload>(&backend.payload).map_err(drift)? {
-                ApplyPayload::Service {
-                    operation,
-                    startup_inhibited,
-                } => {
-                    let (previous, installed) =
-                        crate::services::transaction_states(&operation, startup_inhibited)
-                            .map_err(drift)?;
-                    Some(BackendReceipt::Service {
-                        name: operation.name,
-                        privilege: operation.privilege,
-                        previous,
-                        installed,
-                    })
-                }
-                _ => None,
-            }
-        }
-        zup_transaction::BackendOperationIntent::Remove => {
-            match decode::<RemovePayload>(&backend.payload).map_err(drift)? {
-                RemovePayload::Owned {
-                    scope,
-                    key,
-                    owned,
-                    startup_inhibited,
-                } if matches!(owned.as_ref(), OwnedResource::Service { .. }) => Some(
-                    invert_receipt(native_owned_receipt(key, scope, &owned, startup_inhibited)?)?,
-                ),
-                _ => None,
-            }
-        }
-    };
-    if expected
-        .as_ref()
-        .is_some_and(|expected| expected != receipt)
-        || (expected.is_none() && matches!(receipt, BackendReceipt::Service { .. }))
-    {
-        return Err(IntegrationError::Drift(
-            "service receipt differs from its authorized operation".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn verify_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
@@ -496,19 +419,22 @@ fn verify_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
             }
             Ok(())
         }
-        BackendReceipt::Service {
-            name,
+        BackendReceipt::RebindPath {
+            scope,
             previous,
             installed,
             ..
         } => {
-            let Some(target) =
-                service_state_target(installed).or_else(|| service_state_target(previous))
-            else {
-                return Err(IntegrationError::Drift("service target is missing".into()));
-            };
-            let observed = crate::scm::query_service(name, target).map_err(drift)?;
-            expect("service", name, &observed_service(observed)?, installed)
+            let (kind, raw) = read_path(*scope)?;
+            if !path_type_matches(&previous.value_type, &kind)
+                || path_binding_count(&raw, &previous.value) != 0
+                || path_binding_count(&raw, &installed.value) != 1
+            {
+                return Err(IntegrationError::Drift(
+                    "search-path replacement differs from its installed binding".into(),
+                ));
+            }
+            Ok(())
         }
         BackendReceipt::Protocol {
             scope,
@@ -623,12 +549,6 @@ fn rollback_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
             installed,
             ..
         } => crate::shortcuts::rollback(launcher_path, previous, installed).map_err(drift),
-        BackendReceipt::Service {
-            name,
-            previous,
-            installed,
-            ..
-        } => crate::services::rollback(name, previous, installed).map_err(drift),
         BackendReceipt::Path {
             scope,
             entry,
@@ -641,6 +561,12 @@ fn rollback_native(receipt: &BackendReceipt) -> Result<(), IntegrationError> {
             value_type,
             ..
         } => restore_removed_path(*scope, entry, value_type),
+        BackendReceipt::RebindPath {
+            scope,
+            previous,
+            installed,
+            ..
+        } => rebind_path(*scope, installed, previous),
         BackendReceipt::Protocol {
             scope,
             scheme,
@@ -751,48 +677,25 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
             }
             _ => Ok(ReconcileResult::Ambiguous),
         },
-        BackendReceipt::Service {
-            name,
+        BackendReceipt::RebindPath {
+            scope,
             previous,
             installed,
             ..
         } => {
-            let target = service_state_target(installed).or_else(|| service_state_target(previous));
-            let Some(target) = target else {
-                return Ok(ReconcileResult::Ambiguous);
-            };
-            match crate::scm::query_service(name, target) {
-                Ok(zup_plan::ObservedServiceState::Absent) => {
-                    Ok(compare_removal(&ServiceState::Absent, previous, installed))
+            let (kind, raw) = read_path(*scope)?;
+            Ok(if !path_type_matches(&previous.value_type, &kind) {
+                ReconcileResult::Ambiguous
+            } else {
+                match (
+                    path_binding_count(&raw, &previous.value),
+                    path_binding_count(&raw, &installed.value),
+                ) {
+                    (1, 0) => ReconcileResult::Applied,
+                    (0, 1) => ReconcileResult::NotApplied,
+                    _ => ReconcileResult::Ambiguous,
                 }
-                Ok(zup_plan::ObservedServiceState::Service {
-                    native_timeouts,
-                    failure,
-                    dependencies,
-                    execution,
-                    display_name,
-                    command,
-                    start,
-                    readiness,
-                    ..
-                }) => Ok(compare_removal(
-                    &ServiceState::Registration {
-                        native_timeouts,
-                        failure,
-                        dependencies,
-                        execution,
-                        readiness,
-                        display_name,
-                        command,
-                        start,
-                    },
-                    previous,
-                    installed,
-                )),
-                Ok(zup_plan::ObservedServiceState::InvalidService) | Err(_) => {
-                    Ok(ReconcileResult::Ambiguous)
-                }
-            }
+            })
         }
         BackendReceipt::Protocol {
             scope,
@@ -851,13 +754,6 @@ fn reconcile_native(receipt: &BackendReceipt) -> Result<ReconcileResult, Integra
     }
 }
 
-fn service_state_target(state: &ServiceState) -> Option<&Target> {
-    match state {
-        ServiceState::Registration { command, .. } => Some(command.executable.target()),
-        ServiceState::Absent => None,
-    }
-}
-
 fn protocol_target(state: &ProtocolState) -> Option<&Target> {
     match state {
         ProtocolState::Registration { command, .. } => Some(command.executable.target()),
@@ -882,7 +778,7 @@ fn compare_removal<T: PartialEq>(current: &T, previous: &T, installed: &T) -> Re
     }
 }
 
-pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, IntegrationError> {
+pub fn reconcile_managed(node: &DeploymentNode) -> Result<ReconcileResult, IntegrationError> {
     let Some(operation) = node.meta.backend.as_ref() else {
         return Err(IntegrationError::Unsupported);
     };
@@ -896,29 +792,8 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
                 Ok(value) => value,
                 Err(_) => return Ok(ReconcileResult::Ambiguous),
             };
-            let entry = op.value.to_string();
-            if search_path_entry_count(&raw, &entry) == 1 {
-                native_reconcile(
-                    key,
-                    Ok::<_, IntegrationError>(NativeReconcileResult::AppliedWithReceipt(Box::new(
-                        BackendReceipt::Path {
-                            scope: op.scope,
-                            entry,
-                            value_type,
-                            privilege: op.privilege,
-                        },
-                    ))),
-                )
-            } else if !op.present {
-                Ok(ReconcileResult::NotApplied)
-            } else {
-                Ok(ReconcileResult::Ambiguous)
-            }
+            reconcile_path_binding(key, &op, &value_type, &raw)
         }
-        ApplyPayload::Service {
-            operation: op,
-            startup_inhibited,
-        } => native_reconcile(key, crate::services::reconcile(&op, startup_inhibited)),
         ApplyPayload::Protocol(op) => {
             let current =
                 match read_protocol(op.scope, op.scheme.as_str(), op.command.executable.target()) {
@@ -1026,26 +901,220 @@ pub fn reconcile_managed(node: &TransactionNode) -> Result<ReconcileResult, Inte
     }
 }
 
+fn reconcile_path_binding(
+    key: ResourceKey,
+    op: &zup_plan::PathOperation,
+    value_type: &str,
+    raw: &str,
+) -> Result<ReconcileResult, IntegrationError> {
+    let count = path_binding_count(raw, &op.value);
+    match &op.precondition {
+        zup_plan::PathPrecondition::Unclaimed { .. } => Ok(if count == 0 {
+            ReconcileResult::NotApplied
+        } else {
+            ReconcileResult::Ambiguous
+        }),
+        zup_plan::PathPrecondition::Owned { binding, .. } => {
+            if !path_type_matches(&binding.value_type, value_type) {
+                return Ok(ReconcileResult::Ambiguous);
+            }
+            if op.kind == zup_plan::PathOperationKind::RebindOwned {
+                return Ok(
+                    if path_binding_count(raw, &binding.value) == 1 && count == 0 {
+                        ReconcileResult::NotApplied
+                    } else {
+                        ReconcileResult::Ambiguous
+                    },
+                );
+            }
+            match count {
+                0 => Ok(ReconcileResult::NotApplied),
+                1 => native_apply(
+                    key,
+                    BackendReceipt::Path {
+                        scope: op.scope,
+                        entry: op.value.to_string(),
+                        value_type: binding.value_type.clone(),
+                        privilege: op.privilege,
+                    },
+                )
+                .map(ReconcileResult::AppliedWithReceipt),
+                _ => Ok(ReconcileResult::Ambiguous),
+            }
+        }
+    }
+}
+
+fn environment_lock(
+    scope: SelectedScope,
+) -> Result<zup_transaction::ResourceLock, IntegrationError> {
+    let key = "native-environment-path";
+    let lease = match scope {
+        SelectedScope::Machine => {
+            crate::machine_authority::MachineRoot::shared_lock(key).map_err(drift)?
+        }
+        SelectedScope::User => zup_transaction::ResourceLock::try_acquire(
+            &crate::host_dirs::user_data()
+                .map_err(drift)?
+                .join("zup-native-resources"),
+            key,
+        )
+        .map_err(drift)?,
+    };
+    lease.ok_or_else(|| {
+        IntegrationError::Drift(
+            "another Zup transaction is changing this scope's PATH; retry after it completes"
+                .into(),
+        )
+    })
+}
+
+fn path_type_matches(previous: &str, current: &str) -> bool {
+    current == previous || crate::search_path::lost_expansion(previous, current)
+}
+
+fn path_binding_count(raw: &str, value: &zup_core::TargetPath) -> usize {
+    crate::search_path::split(raw)
+        .into_iter()
+        .filter_map(|part| crate::search_path::to_target_path(value.target(), part))
+        .filter(|part| part.equivalent(value))
+        .count()
+}
+
+fn rebind_value(
+    raw: &str,
+    previous: &zup_core::TargetPath,
+    installed: &zup_core::TargetPath,
+) -> Result<String, IntegrationError> {
+    if previous.equivalent(installed)
+        || path_binding_count(raw, previous) != 1
+        || path_binding_count(raw, installed) != 0
+    {
+        return Err(IntegrationError::Drift(
+            "owned PATH binding is missing, duplicated, or its replacement is occupied".into(),
+        ));
+    }
+    Ok(raw
+        .split(';')
+        .map(|part| {
+            if crate::search_path::to_target_path(previous.target(), part)
+                .is_some_and(|part| part.equivalent(previous))
+            {
+                installed.to_string()
+            } else {
+                part.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";"))
+}
+
+fn rebind_path(
+    scope: SelectedScope,
+    previous: &zup_plan::PathBinding,
+    installed: &zup_plan::PathBinding,
+) -> Result<(), IntegrationError> {
+    let _lease = environment_lock(scope)?;
+    let key = environment_key(scope, EnvironmentAccess::ModifyExisting)?
+        .ok_or_else(|| IntegrationError::Drift("search-path key is missing".into()))?;
+    rebind_path_key(&key, previous, installed)
+}
+
+fn rebind_path_key(
+    key: &Key,
+    previous: &zup_plan::PathBinding,
+    installed: &zup_plan::PathBinding,
+) -> Result<(), IntegrationError> {
+    let (kind, raw) = read_path_from_key(key)?;
+    if !path_type_matches(&previous.value_type, &kind) {
+        return Err(IntegrationError::Drift(
+            "search-path value type changed".into(),
+        ));
+    }
+    let next = rebind_value(&raw, &previous.value, &installed.value)?;
+    set_path(key, &kind, &next)?;
+    if read_path_from_key(key)? != (kind, next) {
+        return Err(IntegrationError::Drift(
+            "search-path write outcome changed during readback; recovery is required".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn apply_path(
     key: &ResourceKey,
     op: &zup_plan::PathOperation,
 ) -> Result<OperationReceipt, IntegrationError> {
-    let target = op.value.target();
-    let registry_key = environment_key(op.scope, true)?
+    if op.kind == zup_plan::PathOperationKind::RebindOwned {
+        let zup_plan::PathPrecondition::Owned {
+            binding,
+            previous: zup_plan::PathPresence::Single,
+            desired: zup_plan::PathPresence::Missing,
+        } = &op.precondition
+        else {
+            return Err(IntegrationError::Drift(
+                "PATH rebinding lacks an exact owned before-image".into(),
+            ));
+        };
+        let installed = zup_plan::PathBinding {
+            value: op.value.clone(),
+            value_type: binding.value_type.clone(),
+        };
+        rebind_path(op.scope, binding, &installed)?;
+        return native_apply(
+            key.clone(),
+            BackendReceipt::RebindPath {
+                scope: op.scope,
+                previous: binding.clone(),
+                installed,
+                privilege: op.privilege,
+            },
+        );
+    }
+    let _lease = environment_lock(op.scope)?;
+    let registry_key = environment_key(op.scope, EnvironmentAccess::Insert)?
         .ok_or_else(|| IntegrationError::Registry("environment key".into()))?;
-    let (value_type, raw) = read_path_from_key(&registry_key)?;
-    if crate::search_path::contains(target, &raw, &op.value) {
+    let (current_type, raw) = read_path_from_key(&registry_key)?;
+    if path_binding_count(&raw, &op.value) != 0 {
         return Err(IntegrationError::Drift(
             "search-path entry appeared after planning".into(),
         ));
     }
+    let value_type = match (&op.kind, &op.precondition) {
+        (
+            zup_plan::PathOperationKind::Add,
+            zup_plan::PathPrecondition::Unclaimed {
+                presence: zup_plan::PathPresence::Missing,
+            },
+        ) => current_type.clone(),
+        (
+            zup_plan::PathOperationKind::RestoreOwned,
+            zup_plan::PathPrecondition::Owned {
+                binding,
+                previous: zup_plan::PathPresence::Missing,
+                desired: zup_plan::PathPresence::Missing,
+            },
+        ) if binding.value.equivalent(&op.value)
+            && (current_type == crate::search_path::VALUE_TYPE_MISSING
+                || path_type_matches(&binding.value_type, &current_type)) =>
+        {
+            binding.value_type.clone()
+        }
+        _ => {
+            return Err(IntegrationError::Drift(
+                "search-path insertion does not match its authorized before-image".into(),
+            ));
+        }
+    };
     let entry = op.value.to_string();
     let next = append_search_path_entry(&raw, &entry);
-    set_path(
-        &registry_key,
-        crate::search_path::write_value_type(&value_type),
-        &next,
-    )?;
+    let kind = crate::search_path::write_value_type(&value_type);
+    set_path(&registry_key, kind, &next)?;
+    if read_path_from_key(&registry_key)? != (kind.to_owned(), next) {
+        return Err(IntegrationError::Drift(
+            "search-path write outcome changed during readback; recovery is required".into(),
+        ));
+    }
     native_apply(
         key.clone(),
         BackendReceipt::Path {
@@ -1079,7 +1148,8 @@ fn rollback_path(
     entry: &str,
     value_type: &str,
 ) -> Result<(), IntegrationError> {
-    let Some(key) = environment_key(scope, true)? else {
+    let _lease = environment_lock(scope)?;
+    let Some(key) = environment_key(scope, EnvironmentAccess::ModifyExisting)? else {
         return Err(IntegrationError::Drift("search-path key missing".into()));
     };
     let (current_type, raw) = read_path_from_key(&key)?;
@@ -1131,7 +1201,8 @@ fn restore_removed_path(
     entry: &str,
     value_type: &str,
 ) -> Result<(), IntegrationError> {
-    let key = environment_key(scope, true)?
+    let _lease = environment_lock(scope)?;
+    let key = environment_key(scope, EnvironmentAccess::Insert)?
         .ok_or_else(|| IntegrationError::Drift("search-path key missing".into()))?;
     let (current_type, raw) = read_path_from_key(&key)?;
     if current_type != value_type && !crate::search_path::lost_expansion(value_type, &current_type)
@@ -1357,7 +1428,16 @@ fn write_apps_features(
     Ok(())
 }
 
-fn environment_key(scope: SelectedScope, create: bool) -> Result<Option<Key>, IntegrationError> {
+enum EnvironmentAccess {
+    Read,
+    Insert,
+    ModifyExisting,
+}
+
+fn environment_key(
+    scope: SelectedScope,
+    access: EnvironmentAccess,
+) -> Result<Option<Key>, IntegrationError> {
     let (root, path) = match scope {
         SelectedScope::User => (&CURRENT_USER, "Environment"),
         SelectedScope::Machine => (
@@ -1365,19 +1445,22 @@ fn environment_key(scope: SelectedScope, create: bool) -> Result<Option<Key>, In
             "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
         ),
     };
-    match if create {
-        root.create(path)
-    } else {
-        root.open(path)
-    } {
+    let result = match access {
+        EnvironmentAccess::Read => root.open(path),
+        EnvironmentAccess::Insert => root.create(path),
+        EnvironmentAccess::ModifyExisting => root.options().read().write().open(path),
+    };
+    match result {
         Ok(key) => Ok(Some(key)),
-        Err(error) if !create && is_not_found(&error) => Ok(None),
+        Err(error) if !matches!(access, EnvironmentAccess::Insert) && is_not_found(&error) => {
+            Ok(None)
+        }
         Err(error) => Err(regerr(error)),
     }
 }
 
 pub(crate) fn read_path(scope: SelectedScope) -> Result<(String, String), IntegrationError> {
-    match environment_key(scope, false)? {
+    match environment_key(scope, EnvironmentAccess::Read)? {
         Some(key) => read_path_from_key(&key),
         None => Ok((crate::search_path::VALUE_TYPE_MISSING.into(), String::new())),
     }
@@ -1674,7 +1757,7 @@ pub(crate) fn extension_from_observed(
     }
 }
 
-fn format_spec(command: &zup_plan::CommandSpec) -> String {
+fn format_spec(command: &zup_core::CommandSpec) -> String {
     format_command_line(&host_path(&command.executable), &command.arguments)
 }
 
@@ -1757,7 +1840,7 @@ pub fn notify_committed_path_change(record: &zup_transaction::TransactionRecord)
             record
                 .receipt(&node.id)
                 .is_some_and(|receipt| matches!(receipt, OperationReceipt::Backend { payload, .. }
-                    if receipt_from_bytes(payload).is_ok_and(|receipt| matches!(receipt, BackendReceipt::Path { .. } | BackendReceipt::RemovePath { .. }))))
+                    if receipt_from_bytes(payload).is_ok_and(|receipt| matches!(receipt, BackendReceipt::Path { .. } | BackendReceipt::RemovePath { .. } | BackendReceipt::RebindPath { .. }))))
         })
     {
         broadcast_environment_change();
@@ -1769,7 +1852,102 @@ mod tests {
     use super::*;
     use crate::transaction_payload::{ApplyPayload, RemovePayload, encode};
     use zup_core::{AppId, Privilege};
-    use zup_transaction::{BackendOperation, BackendOperationIntent, OperationId, Phase};
+
+    #[rstest::rstest]
+    #[case(
+        r#"; C:\Windows ;"c:/apps/a";;%TOOLS%;D:\Other;"#,
+        r"; C:\Windows ;C:\Apps\B;;%TOOLS%;D:\Other;"
+    )]
+    #[case(r"C:\Apps\A", r"C:\Apps\B")]
+    fn path_rebinding_preserves_unrelated_segments(#[case] raw: &str, #[case] expected: &str) {
+        let target = zup_core::Target::parse("windows-x64").unwrap();
+        let previous = zup_core::TargetPath::new(target, r"C:\Apps\A").unwrap();
+        let installed = zup_core::TargetPath::new(target, r"C:\Apps\B").unwrap();
+        assert_eq!(rebind_value(raw, &previous, &installed).unwrap(), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(r"C:\Windows")]
+    #[case(r"C:\Apps\A;c:/apps/a/")]
+    #[case(r"C:\Apps\A;C:\Apps\B")]
+    fn path_rebinding_refuses_uncertain_membership(#[case] raw: &str) {
+        let target = zup_core::Target::parse("windows-x64").unwrap();
+        let previous = zup_core::TargetPath::new(target, r"C:\Apps\A").unwrap();
+        let installed = zup_core::TargetPath::new(target, r"C:\Apps\B").unwrap();
+        assert!(rebind_value(raw, &previous, &installed).is_err());
+    }
+
+    #[test]
+    fn native_path_rebinding_round_trip_preserves_other_writers_entries() {
+        let location = format!(r"Software\ZupVerify\Path-{}", uuid::Uuid::now_v7().simple());
+        let key = CURRENT_USER.create(&location).unwrap();
+        let target = Target::parse("windows-x64").unwrap();
+        let binding = |path: &str| zup_plan::PathBinding {
+            value: zup_core::TargetPath::new(target, path).unwrap(),
+            value_type: crate::search_path::VALUE_TYPE_EXPAND.into(),
+        };
+        let previous = binding(r"C:\Apps\A");
+        let installed = binding(r"C:\Apps\B");
+        let original = r"%SystemRoot%;C:\Apps\A;; D:\Tools ;";
+        key.set_expand_string("Path", original).unwrap();
+        rebind_path_key(&key, &previous, &installed).unwrap();
+        assert_eq!(
+            read_path_from_key(&key).unwrap(),
+            (
+                crate::search_path::VALUE_TYPE_EXPAND.into(),
+                r"%SystemRoot%;C:\Apps\B;; D:\Tools ;".into()
+            )
+        );
+        key.set_expand_string("Path", r"%SystemRoot%;C:\Apps\B;; D:\Tools ;E:\Added")
+            .unwrap();
+        rebind_path_key(&key, &installed, &previous).unwrap();
+        assert_eq!(
+            read_path_from_key(&key).unwrap().1,
+            format!("{original}E:\\Added")
+        );
+        cleanup(&location);
+    }
+
+    #[test]
+    fn missing_path_receipt_cannot_adopt_an_unclaimed_entry() {
+        let target = Target::parse("windows-x64").unwrap();
+        let key = ResourceKey::PathEntry {
+            id: zup_core::DeclaredResourceId::Application {
+                id: zup_core::ResourceId::new("cli").unwrap(),
+            },
+        };
+        let operation = zup_plan::PathOperation {
+            key: key.clone(),
+            kind: zup_plan::PathOperationKind::Add,
+            value: zup_core::TargetPath::new(target, r"C:\Apps\B").unwrap(),
+            scope: SelectedScope::User,
+            privilege: Privilege::User,
+            precondition: zup_plan::PathPrecondition::Unclaimed {
+                presence: zup_plan::PathPresence::Missing,
+            },
+            conflict: None,
+        };
+        assert!(matches!(
+            reconcile_path_binding(
+                key.clone(),
+                &operation,
+                crate::search_path::VALUE_TYPE_EXPAND,
+                r"C:\Apps\B"
+            )
+            .unwrap(),
+            ReconcileResult::Ambiguous
+        ));
+        assert!(matches!(
+            reconcile_path_binding(
+                key,
+                &operation,
+                crate::search_path::VALUE_TYPE_EXPAND,
+                r"C:\Windows"
+            )
+            .unwrap(),
+            ReconcileResult::NotApplied
+        ));
+    }
 
     fn apps_operation(app_id: &AppId) -> AppsFeaturesOperation {
         AppsFeaturesOperation {
@@ -1789,21 +1967,21 @@ mod tests {
         }
     }
 
-    fn backend_apply_node(app_id: &AppId, operation: AppsFeaturesOperation) -> TransactionNode {
+    fn backend_apply_node(app_id: &AppId, operation: AppsFeaturesOperation) -> DeploymentNode {
         let key = crate::transaction_payload::apps_key(app_id);
         let id = match &key {
             ResourceKey::Backend { id } => id.clone(),
             other => panic!("not a backend key: {other:?}"),
         };
-        TransactionNode {
+        DeploymentNode {
             id: OperationId::resource("backend_apply", &key),
             phase: Phase::Backend,
-            kind: zup_transaction::NodeKind::BackendOperation {
+            kind: zup_plan::NodeKind::BackendOperation {
                 key: key.clone(),
                 intent: BackendOperationIntent::Apply,
             },
             declaration_order: 1,
-            meta: zup_transaction::NodeMeta {
+            meta: zup_plan::NodeMeta {
                 privilege: Some(Privilege::User),
                 backend: Some(BackendOperation {
                     key,
@@ -1819,18 +1997,18 @@ mod tests {
         }
     }
 
-    fn backend_remove_node(app_id: &AppId, operation: &AppsFeaturesOperation) -> TransactionNode {
+    fn backend_remove_node(app_id: &AppId, operation: &AppsFeaturesOperation) -> DeploymentNode {
         let key = crate::transaction_payload::apps_key(app_id);
         let id = match &key {
             ResourceKey::Backend { id } => id.clone(),
             other => panic!("not a backend key: {other:?}"),
         };
-        TransactionNode {
+        DeploymentNode {
             id: OperationId::resource("backend_remove", &key),
             phase: Phase::Backend,
-            kind: zup_transaction::NodeKind::BackendRemoval { key: key.clone() },
+            kind: zup_plan::NodeKind::BackendRemoval { key: key.clone() },
             declaration_order: 2,
-            meta: zup_transaction::NodeMeta {
+            meta: zup_plan::NodeMeta {
                 privilege: Some(Privilege::User),
                 backend: Some(BackendOperation {
                     key,
@@ -1859,71 +2037,6 @@ mod tests {
 
     fn cleanup(key_path: &str) {
         let _ = windows_registry::CURRENT_USER.remove_tree(key_path);
-    }
-
-    #[rstest::rstest]
-    #[case("name")]
-    #[case("installed")]
-    #[case("previous")]
-    #[case("privilege")]
-    fn service_receipt_is_bound_to_authorized_configuration(#[case] tamper: &str) {
-        let (app, apps) = fixture();
-        let mut node = backend_apply_node(&app, apps);
-        let operation = zup_plan::ServiceOperation {
-            key: ResourceKey::Service {
-                id: zup_core::ServiceId::new("receipt-test").unwrap(),
-            },
-            id: "receipt-test".into(),
-            name: "receipt-test".into(),
-            display_name: "Receipt test".into(),
-            command: zup_plan::CommandSpec::new(
-                zup_plan::TargetPath::new(Target::WINDOWS_X64, r"C:\Zup\service.exe").unwrap(),
-                Vec::new(),
-            ),
-            execution: zup_core::ServiceExecution::Windows {
-                account: zup_core::WindowsServiceAccount::LocalService,
-            },
-            start: zup_core::ServiceStart::Manual,
-            readiness: Default::default(),
-            failure: Default::default(),
-            lifecycle: Default::default(),
-            privilege: Privilege::System,
-            kind: zup_plan::IntegrationChangeKind::Create,
-            requires_files: Vec::new(),
-            requires_services: Vec::new(),
-            dependency_names: Vec::new(),
-            previous: zup_plan::ObservedServiceState::Absent,
-            conflict: None,
-        };
-        let mut receipt = BackendReceipt::Service {
-            name: operation.name.clone(),
-            privilege: operation.privilege,
-            previous: ServiceState::Absent,
-            installed: operation.desired_configuration(),
-        };
-        node.meta.backend.as_mut().unwrap().payload = encode(&ApplyPayload::Service {
-            operation,
-            startup_inhibited: false,
-        })
-        .unwrap();
-        validate_service_receipt(&node, &receipt).unwrap();
-        let BackendReceipt::Service {
-            name,
-            privilege,
-            previous,
-            installed,
-        } = &mut receipt
-        else {
-            unreachable!()
-        };
-        match tamper {
-            "name" => *name = "another-service".into(),
-            "installed" => *installed = ServiceState::Absent,
-            "previous" => *previous = installed.clone(),
-            "privilege" => *privilege = Privilege::User,
-            _ => unreachable!(),
-        }
-        assert!(validate_service_receipt(&node, &receipt).is_err());
     }
 
     #[test]

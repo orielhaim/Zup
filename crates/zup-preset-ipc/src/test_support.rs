@@ -60,6 +60,34 @@ pub fn install() {
     wait_until_succeeded(channel);
 }
 
+pub fn install_then_recover() {
+    let (mut channel, mut peer) = connect();
+    send(&channel, &mut peer, Action::Install);
+    loop {
+        let (next, incoming) = channel
+            .recv_within(std::time::Duration::from_secs(30))
+            .expect("the host reports the recovery requirement");
+        channel = next;
+        let Message::Snapshot(snapshot) = incoming.message else {
+            continue;
+        };
+        if snapshot.state == InstallerState::RecoveryRequired {
+            let transaction = snapshot
+                .recovery_transaction
+                .expect("the engine reported its transaction");
+            send(&channel, &mut peer, Action::Recover { transaction });
+            break;
+        }
+        assert_ne!(
+            snapshot.state,
+            InstallerState::Failed,
+            "{:?}",
+            snapshot.diagnostic
+        );
+    }
+    wait_until_succeeded(channel);
+}
+
 pub fn update() {
     let (mut channel, mut peer) = connect();
     send(&channel, &mut peer, Action::Update);

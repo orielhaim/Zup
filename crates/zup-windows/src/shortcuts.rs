@@ -1,9 +1,8 @@
 use std::fs;
+use zup_core::TargetPath;
 
 use crate::transaction_payload::{BackendReceipt, NativeReconcileResult};
-use zup_plan::{
-    IntegrationChangeKind, LauncherOperation, LauncherState, ObservedLauncherState, TargetPath,
-};
+use zup_plan::{IntegrationChangeKind, LauncherOperation, LauncherState, ObservedLauncherState};
 
 use crate::durable::move_durable;
 use crate::lowering::host_path;
@@ -100,7 +99,7 @@ fn installed(op: &LauncherOperation) -> LauncherState {
 fn write(
     launcher_path: &TargetPath,
     value: &LauncherState,
-    icon: Option<&zup_plan::TargetPath>,
+    icon: Option<&zup_core::TargetPath>,
 ) -> Result<(), ShortcutError> {
     let host = host_path(launcher_path);
     match value {
@@ -211,7 +210,7 @@ mod tests {
     use crate::lowering::target_path_from_host;
     use crate::transaction_payload::NativeReconcileResult;
     use tempfile::TempDir;
-    use zup_core::{LauncherLocation, ResourceKey, Target};
+    use zup_core::{ResourceKey, Target};
 
     #[test]
     fn native_shortcut_create_update_and_ownership_safe_rollback() {
@@ -225,8 +224,9 @@ mod tests {
         std::fs::write(host_path(&target), b"test").unwrap();
         let mut op = LauncherOperation {
             key: ResourceKey::Launcher {
-                location: LauncherLocation::Desktop,
-                name: "Acme".into(),
+                id: zup_core::DeclaredResourceId::Application {
+                    id: zup_core::ResourceId::new("main").unwrap(),
+                },
             },
             kind: IntegrationChangeKind::Create,
             launcher_path: launcher_path.clone(),

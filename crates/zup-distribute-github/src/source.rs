@@ -121,7 +121,7 @@ impl GithubContentSource {
         package: Package,
         catalog: ContentCatalog,
     ) -> Result<Self, DistributeError> {
-        let site = Origin::site(&layout.asset_url("zup-release.json")?)
+        let site = Origin::site(&layout.asset_url(&package.descriptor.document_name())?)
             .map_err(DistributeError::Repository)?;
         Ok(Self {
             name: name.into(),
@@ -660,7 +660,7 @@ pub async fn open(
     descriptor: &PackageDescriptor,
     client: &HttpClient,
 ) -> Result<Package, DistributeError> {
-    let site = Origin::site(&layout.asset_url("zup-release.json")?)?;
+    let site = Origin::site(&layout.asset_url(&descriptor.document_name())?)?;
     let urls: Vec<String> = descriptor
         .shards
         .iter()

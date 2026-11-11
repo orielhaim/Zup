@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use zup_core::PluginArtifact;
 mod component;
 
 use std::fs::{self, File};
@@ -10,7 +11,7 @@ pub use component::{ComponentError, componentize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 pub use zup_bundle::MAX_PLUGIN_SOURCE_BYTES;
-use zup_bundle::{CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES, PluginArtifact};
+use zup_bundle::{CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES};
 use zup_core::{MAX_PLUGIN_ARTIFACTS, ResolvedPlugin, Sha256Digest, Target, TargetBuildPlan};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, ContractError, EngineError, PLUGIN_API_VERSION, PluginEngine,

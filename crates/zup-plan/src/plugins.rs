@@ -37,11 +37,17 @@ pub struct PluginPlanningContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "resource", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginResource {
+    Data {
+        directory: zup_core::PersistentDirectory,
+    },
     GeneratedFile {
+        id: String,
+        replacement: zup_core::FixedReplacement,
         destination: String,
         contents: Vec<u8>,
     },
     Launcher {
+        id: String,
         location: LauncherLocation,
         name: String,
         target: String,
@@ -49,13 +55,14 @@ pub enum PluginResource {
         working_directory: Option<String>,
     },
     PathEntry {
+        id: String,
         value: String,
     },
     Service {
         failure: zup_core::ServiceFailurePolicy,
         execution: zup_core::ServiceExecution,
         id: String,
-        name: String,
+        native_name: Option<String>,
         display_name: Option<String>,
         binary: String,
         arguments: Vec<String>,
@@ -228,7 +235,6 @@ pub trait PluginExecutor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratedFile {
     pub source_relative: RelativePath,
-    pub destination: Template,
     pub size: u64,
     pub sha256: Sha256Digest,
     pub bytes: Vec<u8>,
@@ -272,7 +278,7 @@ impl CollisionIndex {
 
         for file in &plan.files {
             index.insert_manifest_file(
-                &file.destination.to_string(),
+                &file.destination().to_string(),
                 file.source_relative.as_str(),
             )?;
         }
@@ -489,11 +495,14 @@ impl CollisionIndex {
 }
 
 struct GeneratedFileInput {
+    id: String,
+    replacement: zup_core::FixedReplacement,
     destination: String,
     contents: Vec<u8>,
 }
 
 struct LauncherInput {
+    id: String,
     location: LauncherLocation,
     name: String,
     target: String,
@@ -505,7 +514,7 @@ struct ServiceInput {
     failure: zup_core::ServiceFailurePolicy,
     execution: zup_core::ServiceExecution,
     id: String,
-    name: String,
+    native_name: Option<String>,
     display_name: Option<String>,
     binary: String,
     arguments: Vec<String>,
@@ -555,16 +564,24 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
     let mut total = 0u64;
     for resource in resources {
         match resource {
-            PluginResource::GeneratedFile { destination, .. } => {
+            PluginResource::Data { directory } => {
+                add_text_size(&mut total, &serde_json::to_string(directory).ok()?)?;
+            }
+            PluginResource::GeneratedFile {
+                id, destination, ..
+            } => {
+                add_text_size(&mut total, id)?;
                 add_text_size(&mut total, destination)?;
             }
             PluginResource::Launcher {
+                id,
                 location,
                 name,
                 target,
                 arguments,
                 working_directory,
             } => {
+                add_text_size(&mut total, id)?;
                 add_text_size(&mut total, &location.to_string())?;
                 add_text_size(&mut total, name)?;
                 add_text_size(&mut total, target)?;
@@ -575,12 +592,15 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
                     add_text_size(&mut total, working_directory)?;
                 }
             }
-            PluginResource::PathEntry { value } => add_text_size(&mut total, value)?,
+            PluginResource::PathEntry { id, value } => {
+                add_text_size(&mut total, id)?;
+                add_text_size(&mut total, value)?;
+            }
             PluginResource::Service {
                 failure,
                 execution,
                 id,
-                name,
+                native_name,
                 display_name,
                 binary,
                 arguments,
@@ -599,7 +619,9 @@ fn plugin_text_size(resources: &[PluginResource]) -> Option<u64> {
                     &serde_json::to_string(execution).expect("service execution serializes"),
                 )?;
                 add_text_size(&mut total, id)?;
-                add_text_size(&mut total, name)?;
+                if let Some(name) = native_name {
+                    add_text_size(&mut total, name)?;
+                }
                 if let Some(display_name) = display_name {
                     add_text_size(&mut total, display_name)?;
                 }
@@ -709,19 +731,62 @@ pub(crate) fn merge_plugin_proposal(
     for (index, resource) in proposal.resources.into_iter().enumerate() {
         let resource_name = format!("resource[{index}]");
         match resource {
+            PluginResource::Data { directory } => {
+                if merge
+                    .plan
+                    .data
+                    .iter()
+                    .any(|existing| existing.id == directory.id)
+                {
+                    return Err(PlanError::PluginResourceRejected {
+                        plugin_id: merge.binding.id.clone(),
+                        resource: resource_name.clone(),
+                        reason: "persistent data identity is already declared".into(),
+                    });
+                }
+                if directory.location.path().is_some_and(|path| {
+                    path.contains_variable(zup_core::Variable::Payload)
+                        || path.contains_variable(zup_core::Variable::AppVersion)
+                }) {
+                    return Err(PlanError::PluginResourceRejected {
+                        plugin_id: merge.binding.id.clone(),
+                        resource: resource_name.clone(),
+                        reason: "persistent data paths must remain stable across deployments"
+                            .into(),
+                    });
+                }
+                let directory = directory.map_path(|path| {
+                    resolve_template(
+                        path,
+                        &merge.plan.app,
+                        &merge.plan.install_directory,
+                        merge
+                            .plan
+                            .generation
+                            .as_ref()
+                            .map(|generation| &generation.descriptor),
+                    )
+                })?;
+                merge.plan.data.push(directory);
+            }
             PluginResource::GeneratedFile {
+                id,
+                replacement,
                 destination,
                 contents,
             } => {
                 merge.merge_generated_file(
                     &resource_name,
                     GeneratedFileInput {
+                        id,
+                        replacement,
                         destination,
                         contents,
                     },
                 )?;
             }
             PluginResource::Launcher {
+                id,
                 location,
                 name,
                 target,
@@ -731,6 +796,7 @@ pub(crate) fn merge_plugin_proposal(
                 merge.merge_launcher(
                     &resource_name,
                     LauncherInput {
+                        id,
                         location,
                         name,
                         target,
@@ -739,14 +805,14 @@ pub(crate) fn merge_plugin_proposal(
                     },
                 )?;
             }
-            PluginResource::PathEntry { value } => {
-                merge.merge_path(&resource_name, value)?;
+            PluginResource::PathEntry { id, value } => {
+                merge.merge_path(&resource_name, id, value)?;
             }
             PluginResource::Service {
                 failure,
                 execution,
                 id,
-                name,
+                native_name,
                 display_name,
                 binary,
                 arguments,
@@ -762,7 +828,7 @@ pub(crate) fn merge_plugin_proposal(
                         failure,
                         execution,
                         id,
-                        name,
+                        native_name,
                         display_name,
                         binary,
                         arguments,
@@ -806,6 +872,28 @@ pub(crate) fn merge_plugin_proposal(
             }
         }
     }
+    for service in &mut merge.plan.services {
+        service.state_directories = merge
+            .plan
+            .data
+            .iter()
+            .filter_map(|data| match &data.location {
+                zup_core::PersistentLocation::Service { service: id }
+                    if id == &service.id
+                        && matches!(
+                            service.execution,
+                            zup_core::ServiceExecution::SystemdUser { .. }
+                                | zup_core::ServiceExecution::SystemdDynamicUser
+                        ) =>
+                {
+                    Some(crate::service_state_name(&merge.plan.app.id, id, &data.id))
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+    }
     Ok(())
 }
 
@@ -816,10 +904,24 @@ impl MergeContext<'_> {
         input: GeneratedFileInput,
     ) -> Result<(), PlanError> {
         let GeneratedFileInput {
+            id,
+            replacement,
             destination,
             contents,
         } = input;
         let plugin_id = &self.binding.id;
+        let id =
+            zup_core::ResourceId::new(id).map_err(|error| PlanError::PluginResourceRejected {
+                plugin_id: plugin_id.clone(),
+                resource: resource_name.to_owned(),
+                reason: error.to_string(),
+            })?;
+        let key = ResourceKey::File {
+            id: zup_core::FileResourceId::Plugin {
+                plugin: plugin_id.clone(),
+                id,
+            },
+        };
         check_string(plugin_id, &destination, resource_name, "destination", false)?;
         if contents.len() > MAX_PLUGIN_GENERATED_FILE_BYTES {
             return Err(PlanError::PluginResourceLimit {
@@ -855,12 +957,18 @@ impl MergeContext<'_> {
         *self.total_generated_bytes = new_total;
 
         let destination = parse_template(plugin_id, resource_name, &destination, "destination")?;
-        let destination =
-            resolve_template(&destination, &self.plan.app, &self.plan.install_directory)?;
+        let destination = resolve_template(
+            &destination,
+            &self.plan.app,
+            &self.plan.install_directory,
+            self.plan
+                .generation
+                .as_ref()
+                .map(|generation| &generation.descriptor),
+        )?;
         check_resolved_template(plugin_id, resource_name, &destination, "destination")?;
-        let destination_identity = destination.to_string();
-        let destination_hash = zup_core::hash_bytes(destination_identity.as_bytes()).to_hex();
-        let source_name = format!("{destination_hash}.bin");
+        let identity = serde_json::to_vec(&key).expect("resource keys serialize");
+        let source_name = format!("{}.bin", zup_core::hash_bytes(&identity));
         let source_relative =
             RelativePath::from_components([zup_core::PLUGIN_PAYLOAD_ROOT, source_name.as_str()])
                 .map_err(|error| PlanError::PluginResourceRejected {
@@ -879,11 +987,12 @@ impl MergeContext<'_> {
         let privilege = self.plan.scope.authorization();
         let planned_destination = destination.clone();
         self.plan.files.push(DesiredFile {
-            key: ResourceKey::File {
-                destination: destination.to_string(),
-            },
+            key,
             source_relative: source_relative.clone(),
-            destination: planned_destination.clone(),
+            placement: zup_core::PayloadPlacement::Fixed {
+                path: planned_destination.clone(),
+                replacement,
+            },
             size,
             sha256,
             privilege,
@@ -891,7 +1000,6 @@ impl MergeContext<'_> {
         });
         self.generated_files.push(GeneratedFile {
             source_relative,
-            destination: planned_destination,
             size,
             sha256,
             bytes: contents,
@@ -905,6 +1013,7 @@ impl MergeContext<'_> {
         input: LauncherInput,
     ) -> Result<(), PlanError> {
         let LauncherInput {
+            id,
             location,
             name,
             target,
@@ -912,15 +1021,38 @@ impl MergeContext<'_> {
             working_directory,
         } = input;
         let plugin_id = &self.binding.id;
+        let id =
+            zup_core::ResourceId::new(id).map_err(|error| PlanError::PluginResourceRejected {
+                plugin_id: plugin_id.clone(),
+                resource: resource_name.to_owned(),
+                reason: error.to_string(),
+            })?;
+
         let name = parse_non_empty(plugin_id, resource_name, &name, "name")?;
         let target = parse_template(plugin_id, resource_name, &target, "target")?;
-        let target = resolve_template(&target, &self.plan.app, &self.plan.install_directory)?;
+        let target = resolve_template(
+            &target,
+            &self.plan.app,
+            &self.plan.install_directory,
+            self.plan
+                .generation
+                .as_ref()
+                .map(|generation| &generation.descriptor),
+        )?;
         check_resolved_template(plugin_id, resource_name, &target, "target")?;
         let arguments = check_arguments(plugin_id, resource_name, arguments, "arguments")?;
         let working_directory = working_directory
             .map(|value| {
                 let value = parse_template(plugin_id, resource_name, &value, "working directory")?;
-                let value = resolve_template(&value, &self.plan.app, &self.plan.install_directory)?;
+                let value = resolve_template(
+                    &value,
+                    &self.plan.app,
+                    &self.plan.install_directory,
+                    self.plan
+                        .generation
+                        .as_ref()
+                        .map(|generation| &generation.descriptor),
+                )?;
                 check_resolved_template(plugin_id, resource_name, &value, "working directory")?;
                 Ok::<_, PlanError>(value)
             })
@@ -933,8 +1065,10 @@ impl MergeContext<'_> {
         )?;
         self.plan.launchers.push(DesiredLauncher {
             key: ResourceKey::Launcher {
-                location,
-                name: name.to_string(),
+                id: zup_core::DeclaredResourceId::Plugin {
+                    plugin: plugin_id.clone(),
+                    id,
+                },
             },
             location,
             name,
@@ -948,17 +1082,39 @@ impl MergeContext<'_> {
         Ok(())
     }
 
-    fn merge_path(&mut self, resource_name: &str, value: String) -> Result<(), PlanError> {
+    fn merge_path(
+        &mut self,
+        resource_name: &str,
+        id: String,
+        value: String,
+    ) -> Result<(), PlanError> {
         let plugin_id = &self.binding.id;
+        let id =
+            zup_core::ResourceId::new(id).map_err(|error| PlanError::PluginResourceRejected {
+                plugin_id: plugin_id.clone(),
+                resource: resource_name.to_owned(),
+                reason: error.to_string(),
+            })?;
         let value = parse_template(plugin_id, resource_name, &value, "value")?;
-        let value = resolve_template(&value, &self.plan.app, &self.plan.install_directory)?;
+        let value = resolve_template(
+            &value,
+            &self.plan.app,
+            &self.plan.install_directory,
+            self.plan
+                .generation
+                .as_ref()
+                .map(|generation| &generation.descriptor),
+        )?;
         check_resolved_template(plugin_id, resource_name, &value, "value")?;
         self.collisions
             .insert_path(&value.to_string(), Some(plugin_id), resource_name)?;
         let scope = self.plan.scope;
         self.plan.path_entries.push(DesiredPathEntry {
             key: ResourceKey::PathEntry {
-                value: value.to_string(),
+                id: zup_core::DeclaredResourceId::Plugin {
+                    plugin: plugin_id.clone(),
+                    id,
+                },
             },
             value,
             scope,
@@ -972,7 +1128,7 @@ impl MergeContext<'_> {
             failure,
             execution,
             id,
-            name,
+            native_name,
             display_name,
             binary,
             arguments,
@@ -984,12 +1140,29 @@ impl MergeContext<'_> {
         } = input;
         let plugin_id = &self.binding.id;
         let id: ServiceId = parse_id(plugin_id, resource_name, &id, "service id")?;
-        let name = parse_non_empty(plugin_id, resource_name, &name, "name")?;
+        let native_name = native_name
+            .map(|name| parse_non_empty(plugin_id, resource_name, &name, "native name"))
+            .transpose()?;
+        let name = execution
+            .native_name(&self.plan.app.id, &id, native_name.as_ref())
+            .map_err(|reason| PlanError::PluginResourceRejected {
+                plugin_id: plugin_id.clone(),
+                resource: resource_name.to_owned(),
+                reason: reason.into(),
+            })?;
         let display_name = display_name
             .map(|value| parse_non_empty(plugin_id, resource_name, &value, "display name"))
             .transpose()?;
         let binary = parse_template(plugin_id, resource_name, &binary, "binary")?;
-        let binary = resolve_template(&binary, &self.plan.app, &self.plan.install_directory)?;
+        let binary = resolve_template(
+            &binary,
+            &self.plan.app,
+            &self.plan.install_directory,
+            self.plan
+                .generation
+                .as_ref()
+                .map(|generation| &generation.descriptor),
+        )?;
         check_resolved_template(plugin_id, resource_name, &binary, "binary")?;
         let arguments = check_arguments(plugin_id, resource_name, arguments, "arguments")?;
         self.collisions
@@ -1004,6 +1177,7 @@ impl MergeContext<'_> {
                 reason: reason.to_owned(),
             })?;
         self.plan.services.push(DesiredService {
+            state_directories: Vec::new(),
             failure,
             execution,
             lifecycle,
@@ -1017,16 +1191,26 @@ impl MergeContext<'_> {
                 .into_iter()
                 .map(|path| {
                     let path = parse_template(plugin_id, resource_name, &path, "required file")?;
-                    resolve_template(&path, &self.plan.app, &self.plan.install_directory)
+                    resolve_template(
+                        &path,
+                        &self.plan.app,
+                        &self.plan.install_directory,
+                        self.plan
+                            .generation
+                            .as_ref()
+                            .map(|generation| &generation.descriptor),
+                    )
                 })
                 .collect::<Result<_, _>>()?,
             key: ResourceKey::Service { id: id.clone() },
+            display_name: Some(display_name.unwrap_or_else(|| {
+                NonEmptyString::new(id.as_str()).expect("service identity is nonempty")
+            })),
             id,
             name,
-            display_name,
             start,
             privilege: Privilege::System,
-            command: crate::CommandSpec::new(binary, arguments),
+            command: zup_core::CommandSpec::new(binary, arguments),
         });
         Ok(())
     }
@@ -1044,8 +1228,15 @@ impl MergeContext<'_> {
         let plugin_id = &self.binding.id;
         let scheme = parse_scheme(plugin_id, resource_name, &scheme)?;
         let executable = parse_template(plugin_id, resource_name, &executable, "executable")?;
-        let executable =
-            resolve_template(&executable, &self.plan.app, &self.plan.install_directory)?;
+        let executable = resolve_template(
+            &executable,
+            &self.plan.app,
+            &self.plan.install_directory,
+            self.plan
+                .generation
+                .as_ref()
+                .map(|generation| &generation.descriptor),
+        )?;
         check_resolved_template(plugin_id, resource_name, &executable, "executable")?;
         let args = check_arguments(plugin_id, resource_name, args, "arguments")?;
         self.collisions
@@ -1057,7 +1248,7 @@ impl MergeContext<'_> {
             scheme,
             scope: self.plan.scope,
             privilege: self.plan.scope.authorization(),
-            command: crate::CommandSpec::new(executable, args),
+            command: zup_core::CommandSpec::new(executable, args),
         });
         Ok(())
     }
@@ -1080,8 +1271,15 @@ impl MergeContext<'_> {
             .map(|value| check_optional_string(plugin_id, resource_name, &value, "description"))
             .transpose()?;
         let executable = parse_template(plugin_id, resource_name, &executable, "executable")?;
-        let executable =
-            resolve_template(&executable, &self.plan.app, &self.plan.install_directory)?;
+        let executable = resolve_template(
+            &executable,
+            &self.plan.app,
+            &self.plan.install_directory,
+            self.plan
+                .generation
+                .as_ref()
+                .map(|generation| &generation.descriptor),
+        )?;
         check_resolved_template(plugin_id, resource_name, &executable, "executable")?;
         self.collisions.insert_file_association(
             id.as_str(),
@@ -1096,7 +1294,7 @@ impl MergeContext<'_> {
             description,
             scope: self.plan.scope,
             privilege: self.plan.scope.authorization(),
-            command: crate::CommandSpec::new(executable, Vec::new()),
+            command: zup_core::CommandSpec::new(executable, Vec::new()),
         });
         Ok(())
     }
@@ -1302,10 +1500,5 @@ pub(crate) fn sort_resources(plan: &mut DesiredState, generated_files: &mut [Gen
             .cmp(&right.key)
             .then_with(|| left.extension.cmp(&right.extension))
     });
-    generated_files.sort_by(|left, right| {
-        left.destination
-            .to_string()
-            .cmp(&right.destination.to_string())
-            .then_with(|| left.source_relative.cmp(&right.source_relative))
-    });
+    generated_files.sort_by(|left, right| left.source_relative.cmp(&right.source_relative));
 }

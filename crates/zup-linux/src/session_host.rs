@@ -10,6 +10,7 @@ use crate::operation_host::LinuxOperationHost;
 #[derive(Clone)]
 pub struct LinuxSessionHost {
     pub(crate) installer: PathBuf,
+    release: Option<zup_core::ReleaseIdentity>,
     #[cfg(feature = "online")]
     pub(crate) update_stage: Option<Arc<tempfile::TempDir>>,
 }
@@ -18,6 +19,7 @@ impl LinuxSessionHost {
     pub fn open(installer: PathBuf) -> Self {
         Self {
             installer,
+            release: None,
             #[cfg(feature = "online")]
             update_stage: None,
         }
@@ -57,6 +59,7 @@ impl SessionHost for LinuxSessionHost {
         }
         let carrier =
             crate::carrier::Carrier::open(&self.installer).map_err(|error| error.to_string())?;
+        self.release = carrier.package().release_identity().cloned();
         let build = carrier
             .package()
             .build_plan()
@@ -72,6 +75,10 @@ impl SessionHost for LinuxSessionHost {
         self.installer.clone()
     }
 
+    fn release_identity(&self) -> Option<zup_core::ReleaseIdentity> {
+        self.release.clone()
+    }
+
     fn observe(
         &self,
         installer: &zup_core::Installer,
@@ -79,11 +86,20 @@ impl SessionHost for LinuxSessionHost {
         state_root: Option<&Path>,
     ) -> Result<zup_session::OperationContext, String> {
         let state_root = match state_root {
+            Some(root) if scope == SelectedScope::Machine => {
+                crate::machine::resolve_machine_state_root(
+                    Some(root),
+                    &crate::locations::MachineRoots::production(),
+                    &installer.app.id,
+                )
+                .map_err(|error| error.to_string())?
+            }
             Some(root) => root.to_path_buf(),
-            None => crate::paths::state_root(scope).map_err(|error| error.to_string())?,
+            None => crate::paths::state_root(&installer.app.id, scope)
+                .map_err(|error| error.to_string())?,
         };
-        let ledger = crate::ledger::LinuxLedgerStore::new(&state_root)
-            .load(&installer.app.id, scope)
+        let ledger = crate::ledger::LinuxInstallationStore::new(&state_root)
+            .observe(&installer.app.id, scope)
             .map_err(|error| error.to_string())?;
         Ok(zup_session::OperationContext {
             scope,
@@ -143,12 +159,15 @@ impl SessionHost for LinuxSessionHost {
                         installer.app.name
                     )
                 })?;
-                let directory = zup_transaction::maintenance_directory(
-                    &context.state_root,
-                    &installer.app.id,
-                    context.scope,
-                    &ledger.version,
-                );
+                let directory = crate::lowering::to_host_path(
+                    ledger
+                        .current
+                        .maintenance
+                        .as_ref()
+                        .ok_or("the installed preset has no verified maintenance generation")?
+                        .directory(),
+                )
+                .map_err(|error| error.to_string())?;
                 let resolved = zup_bundle::resolve_preset_content(
                     &directory,
                     recorded,
@@ -232,29 +251,45 @@ impl SessionHost for LinuxSessionHost {
 
     #[cfg(feature = "online")]
     fn update(
-        &self,
+        &mut self,
         context: &zup_session::OperationContext,
         request: &zup_runtime::UpdateRequest,
         control: &zup_runtime::OperationControl,
         status: &mut (dyn FnMut(zup_preset_protocol::UpdateState) + Send),
-    ) -> Result<zup_runtime::InstallOutcome, String> {
-        crate::update::run(self.clone(), context, request, control, status)
+    ) -> Result<zup_session::SessionOutcome, String> {
+        crate::update::run(self, context, request, control, status)
     }
 
     fn refresh_installation(
         &mut self,
         context: &zup_session::OperationContext,
     ) -> Result<Option<Arc<zup_core::TargetBuildPlan>>, String> {
-        let Some(ledger) = &context.ledger else {
+        let Some(ledger) = context
+            .ledger
+            .as_ref()
+            .filter(|record| record.is_installed())
+        else {
             return Ok(None);
         };
-        self.installer = zup_transaction::maintenance_runtime_path(
-            &context.state_root,
-            &ledger.app_id,
-            context.scope,
-            &ledger.version,
-            ledger.target.executable_suffix(),
-        );
+        let maintenance = ledger
+            .current
+            .maintenance
+            .as_ref()
+            .ok_or("installation has no verified maintenance generation")?;
+        let path = maintenance
+            .directory()
+            .join(format!("maintenance{}", ledger.target.executable_suffix()))
+            .map_err(|error| error.to_string())?;
+        if !maintenance.descriptor().files().iter().any(|file| {
+            maintenance
+                .directory()
+                .join(file.path.as_str())
+                .is_ok_and(|member| member == path)
+                && file.executable
+        }) {
+            return Err("maintenance generation does not contain its runtime executable".into());
+        }
+        self.installer = crate::lowering::to_host_path(&path).map_err(|error| error.to_string())?;
         #[cfg(feature = "online")]
         {
             self.update_stage = None;
@@ -265,7 +300,7 @@ impl SessionHost for LinuxSessionHost {
     fn recover<'a>(
         &'a self,
         context: &'a zup_session::OperationContext,
-        transaction: &'a str,
+        transaction: zup_core::TransactionId,
         control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<
         'a,

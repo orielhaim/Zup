@@ -43,7 +43,7 @@ impl WasmtimePluginExecutor {
     }
 
     pub fn load_acquired(
-        plan: &zup_bundle::PortableBuildPlan,
+        plan: &zup_core::PackagePlan,
         source: &zup_bundle::AcquiredPayloadSource,
         expected_target: &Target,
     ) -> Result<Self, LoadError> {
@@ -96,7 +96,10 @@ impl PluginExecutor for WasmtimePluginExecutor {
             Err(error) => return Err(map_invocation_error(error)),
         };
         Ok(PluginResourceProposal::new(
-            plan.resources.into_iter().map(convert_resource).collect(),
+            plan.resources
+                .into_iter()
+                .map(convert_resource)
+                .collect::<Result<_, _>>()?,
         ))
     }
 }
@@ -121,13 +124,24 @@ fn contract_context(binding: &PluginBinding, context: &PluginPlanningContext) ->
     }
 }
 
-fn convert_resource(resource: ResourceItem) -> PluginResource {
-    match resource {
+fn convert_resource(resource: ResourceItem) -> Result<PluginResource, PluginFailure> {
+    Ok(match resource {
+        ResourceItem::Data(directory) => PluginResource::Data {
+            directory: convert_data(directory)?,
+        },
         ResourceItem::GeneratedFile(file) => PluginResource::GeneratedFile {
+            id: file.id,
+            replacement: match file.replacement {
+                zup_plugin_contract::FixedReplacement::Atomic => zup_core::FixedReplacement::Atomic,
+                zup_plugin_contract::FixedReplacement::Quiescent => {
+                    zup_core::FixedReplacement::Quiescent
+                }
+            },
             destination: file.destination,
             contents: file.contents,
         },
         ResourceItem::Launcher(launcher) => PluginResource::Launcher {
+            id: launcher.id,
             location: match launcher.location {
                 ContractLauncherLocation::Menu => LauncherLocation::Menu,
                 ContractLauncherLocation::Desktop => LauncherLocation::Desktop,
@@ -137,7 +151,10 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
             arguments: launcher.arguments,
             working_directory: launcher.working_directory,
         },
-        ResourceItem::PathEntry(entry) => PluginResource::PathEntry { value: entry.value },
+        ResourceItem::PathEntry(entry) => PluginResource::PathEntry {
+            id: entry.id,
+            value: entry.value,
+        },
         ResourceItem::Service(service) => PluginResource::Service {
             failure: match service.failure {
                 zup_plugin_contract::ServiceFailurePolicy::None => {
@@ -174,8 +191,8 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
                 }
             },
             execution: match service.execution {
-                zup_plugin_contract::ServiceExecution::Windows(account) => {
-                    zup_core::ServiceExecution::Windows {
+                zup_plugin_contract::ServiceExecution::WindowsJob(account) => {
+                    zup_core::ServiceExecution::WindowsJob {
                         account: match account {
                             zup_plugin_contract::WindowsServiceAccount::LocalService => {
                                 zup_core::WindowsServiceAccount::LocalService
@@ -214,7 +231,7 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
                 zup_plugin_contract::ServiceReadiness::Notify => zup_core::ServiceReadiness::Notify,
             },
             id: service.id,
-            name: service.name,
+            native_name: service.native_name,
             display_name: service.display_name,
             binary: service.binary,
             arguments: service.arguments,
@@ -277,7 +294,7 @@ fn convert_resource(resource: ResourceItem) -> PluginResource {
             description: file_association.description,
             executable: file_association.executable,
         },
-    }
+    })
 }
 
 fn map_invocation_error(error: InvocationError) -> PluginFailure {
@@ -300,4 +317,53 @@ fn map_invocation_error(error: InvocationError) -> PluginFailure {
             PluginFailure::internal(message)
         }
     }
+}
+
+fn convert_data(
+    directory: zup_plugin_contract::DataDirectory,
+) -> Result<zup_core::PersistentDirectory, PluginFailure> {
+    use zup_plugin_contract::{DataAccess, DataCompatibility, DataLocation};
+    let reject = |error: &dyn std::fmt::Display| PluginFailure::invalid_output(error.to_string());
+    let location = match directory.location {
+        DataLocation::Path(path) => zup_core::PersistentLocation::Path {
+            path: zup_core::Template::parse(&path.path).map_err(|error| reject(&error))?,
+            access: match path.access {
+                DataAccess::Owner => zup_core::PersistentAccess::Owner,
+                DataAccess::Services(services) => zup_core::PersistentAccess::Services {
+                    services: services
+                        .into_iter()
+                        .map(zup_core::ServiceId::new)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|error| reject(&error))?
+                        .try_into()
+                        .map_err(|error: zup_core::InvalidServiceDataWriters| reject(&error))?,
+                },
+            },
+        },
+        DataLocation::Service(service) => zup_core::PersistentLocation::Service {
+            service: zup_core::ServiceId::new(service).map_err(|error| reject(&error))?,
+        },
+    };
+    let compatibility = match directory.compatibility {
+        DataCompatibility::Stable => zup_core::DataCompatibility::Stable,
+        DataCompatibility::Schema(schema) => zup_core::DataCompatibility::Schema {
+            writes: std::num::NonZeroU32::new(schema.writes).ok_or_else(|| {
+                PluginFailure::invalid_output("data schema versions must be positive")
+            })?,
+            reads: schema
+                .reads
+                .into_iter()
+                .map(|value| {
+                    std::num::NonZeroU32::new(value).ok_or_else(|| {
+                        PluginFailure::invalid_output("data schema versions must be positive")
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+        },
+    };
+    Ok(zup_core::PersistentDirectory {
+        id: zup_core::ResourceId::new(directory.id).map_err(|error| reject(&error))?,
+        location,
+        compatibility,
+    })
 }

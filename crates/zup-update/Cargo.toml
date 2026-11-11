@@ -7,12 +7,14 @@ repository.workspace = true
 description = "TUF-authenticated release graph resolution for zup"
 
 [features]
-bundle = ["dep:zup-artifact", "dep:zup-bundle", "dep:semver"]
+bundle = ["dep:zup-artifact", "dep:zup-bundle"]
 
 [dependencies]
+zup-storage.workspace = true
+private-fs.workspace = true
+serde.workspace = true
 zup-artifact = { workspace = true, optional = true }
 zup-bundle = { workspace = true, optional = true }
-semver = { workspace = true, optional = true }
 futures-util = "0.3"
 sha2.workspace = true
 serde_json.workspace = true

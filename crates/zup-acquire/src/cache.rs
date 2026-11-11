@@ -383,6 +383,7 @@ pub struct BlobPaths {
     pub partial_path: PathBuf,
     pub resume_path: PathBuf,
     pub lock_path: PathBuf,
+    namespace_lock_path: PathBuf,
 }
 
 impl BlobPaths {
@@ -450,6 +451,7 @@ impl ContentCache {
             partial_path: parent.join(format!("{stem}.partial")),
             resume_path: parent.join(format!("{stem}.resume")),
             lock_path: parent.join(format!("{stem}.lock")),
+            namespace_lock_path: self.root.join("transfers.lock"),
             final_path,
         })
     }
@@ -647,30 +649,30 @@ impl ContentCache {
         objects
     }
 
-    /// Delete one object and everything beside it, returning the wire bytes
-    /// freed.
-    ///
-    /// Deleting is a rename to a scratch name followed by a removal, so a sweep
-    /// interrupted half way leaves either the object or a scratch file the next
-    /// sweep removes. It never leaves a file whose name is a digest it does not
-    /// hash to.
-    ///
-    /// Everything beside the object goes with it, the lock file included, so a
-    /// `temporary` cache does not leave one empty file per blob the machine ever
-    /// fetched. What protects a live writer here is the retention grace period,
-    /// not the lock: eviction already removes a transfer in progress, and the
-    /// cost of that race is a re-fetch.
+    /// Remove an idle object and its partial state, returning stored bytes freed.
+    /// Transfer namespace maintenance excludes every blob-lock holder.
     pub fn remove(&self, digest: &Sha256Digest) -> Result<u64, CacheError> {
         let descriptor = ContentDescriptor::stored(ContentKind::Payload, *digest, 1);
         let paths = self.paths(&descriptor)?;
+        if !paths
+            .parent()
+            .try_exists()
+            .map_err(|error| CacheError::io(paths.parent(), error))?
+        {
+            return Ok(0);
+        }
+        self.reject_links(&paths.namespace_lock_path)?;
+        self.reject_links(&paths.lock_path)?;
+        let _lock = BlobLock::acquire(&paths)?;
         self.reject_links(&paths.final_path)?;
         let metadata = match std::fs::symlink_metadata(&paths.final_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(source) => return Err(CacheError::io(&paths.final_path, source)),
         };
-        for path in [&paths.partial_path, &paths.resume_path, &paths.lock_path] {
-            let _ = std::fs::remove_file(path);
+        for path in [&paths.partial_path, &paths.resume_path] {
+            self.reject_links(path)?;
+            remove_if_present(path)?;
         }
         std::fs::remove_file(&paths.final_path)
             .map_err(|source| CacheError::io(&paths.final_path, source))?;
@@ -720,6 +722,8 @@ impl ContentCache {
             .map_err(|source| CacheError::io(paths.parent(), source))?;
         self.reject_links(paths.parent())?;
         self.reject_links(&paths.final_path)?;
+        self.reject_links(&paths.namespace_lock_path)?;
+        self.reject_links(&paths.lock_path)?;
 
         // The lock is taken before the partial is measured so that the resume
         // point is this writer's to decide, not a race with another one.
@@ -801,12 +805,18 @@ impl ContentCache {
     /// Remove one blob and any partial state for it.
     pub fn forget(&self, descriptor: &ContentDescriptor) -> Result<(), CacheError> {
         let paths = self.paths(descriptor)?;
-        for path in [
-            &paths.final_path,
-            &paths.partial_path,
-            &paths.resume_path,
-            &paths.lock_path,
-        ] {
+        if !paths
+            .parent()
+            .try_exists()
+            .map_err(|error| CacheError::io(paths.parent(), error))?
+        {
+            return Ok(());
+        }
+        self.reject_links(&paths.namespace_lock_path)?;
+        self.reject_links(&paths.lock_path)?;
+        let _lock = BlobLock::acquire(&paths)?;
+        for path in [&paths.final_path, &paths.partial_path, &paths.resume_path] {
+            self.reject_links(path)?;
             remove_if_present(path)?;
         }
         Ok(())
@@ -818,22 +828,91 @@ impl ContentCache {
     /// kind or size they were, and it must not have to re-derive a descriptor
     /// it no longer has the catalog for.
     pub fn forget_digest(&self, digest: &Sha256Digest) -> Result<(), CacheError> {
-        let relative = blob_path(digest);
-        let final_path = self.resolve(&relative)?;
-        let hex = digest.to_hex();
-        let parent = final_path
-            .parent()
-            .ok_or(CacheError::Descriptor("a blob path has no parent"))?
-            .to_path_buf();
-        for path in [
-            final_path,
-            parent.join(format!("{hex}.partial")),
-            parent.join(format!("{hex}.resume")),
-            parent.join(format!("{hex}.lock")),
-        ] {
-            remove_if_present(&path)?;
+        self.forget(&ContentDescriptor::stored(ContentKind::Payload, *digest, 1))
+    }
+
+    pub(crate) fn collect_idle_transfers(
+        &self,
+        grace: std::time::Duration,
+    ) -> Result<(u64, u64), CacheError> {
+        let path = self.root.join("transfers.lock");
+        self.reject_links(&path)?;
+        let namespace = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| CacheError::io(&path, source))?;
+        match namespace.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok((0, 0)),
+            Err(std::fs::TryLockError::Error(source)) => return Err(CacheError::io(&path, source)),
         }
-        Ok(())
+        let now = std::time::SystemTime::now();
+        let mut removed = 0u64;
+        let mut freed = 0u64;
+        for shard in self.shards() {
+            self.reject_links(&shard)?;
+            let entries =
+                std::fs::read_dir(&shard).map_err(|source| CacheError::io(&shard, source))?;
+            let mut digests = std::collections::BTreeSet::new();
+            for entry in entries {
+                let entry = entry.map_err(|source| CacheError::io(&shard, source))?;
+                let name = entry.file_name();
+                let Some((digest, suffix)) = name.to_str().and_then(|name| name.rsplit_once('.'))
+                else {
+                    continue;
+                };
+                if !matches!(suffix, "lock" | "partial" | "resume") {
+                    continue;
+                }
+                let Some(prefix) = shard.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let Ok(digest) = format!("{prefix}{digest}").parse::<Sha256Digest>() else {
+                    continue;
+                };
+                if digest.to_hex().get(..2) != shard.file_name().and_then(|name| name.to_str()) {
+                    continue;
+                }
+                digests.insert(digest);
+            }
+            for digest in digests {
+                let paths =
+                    self.paths(&ContentDescriptor::stored(ContentKind::Payload, digest, 1))?;
+                let mut entries = Vec::new();
+                for path in [&paths.partial_path, &paths.resume_path, &paths.lock_path] {
+                    self.reject_links(path)?;
+                    match std::fs::symlink_metadata(path) {
+                        Ok(metadata) if metadata.is_file() => entries.push((path, metadata)),
+                        Ok(_) => {
+                            return Err(CacheError::invalid(
+                                path,
+                                "transfer state is not a regular file",
+                            ));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(CacheError::io(path, error)),
+                    }
+                }
+                if entries.iter().any(|(_, metadata)| {
+                    metadata
+                        .modified()
+                        .ok()
+                        .and_then(|modified| now.duration_since(modified).ok())
+                        .is_none_or(|age| age < grace)
+                }) {
+                    continue;
+                }
+                for (path, metadata) in entries {
+                    std::fs::remove_file(path).map_err(|source| CacheError::io(path, source))?;
+                    removed = removed.saturating_add(1);
+                    freed = freed.saturating_add(metadata.len());
+                }
+            }
+        }
+        Ok((removed, freed))
     }
 
     /// Every blob the cache currently holds, in ascending digest order.
@@ -869,40 +948,17 @@ impl ContentCache {
     /// digest: the ledger names destinations, and a destination holds its own
     /// copy of the bytes.
     pub fn enforce_policy(&self, protected: &[Sha256Digest]) -> Result<usize, CacheError> {
-        if self.policy == CachePolicy::Keep {
-            return Ok(0);
-        }
-        if self.policy == CachePolicy::Temporary {
-            let mut removed = 0;
-            for digest in self.digests()? {
-                if !protected.contains(&digest) {
-                    self.forget_digest(&digest)?;
-                    removed += 1;
-                }
-            }
-            return Ok(removed);
-        }
-        let retention = self
+        let state = crate::RetentionState::record(
+            self.policy,
+            zup_core::hash_bytes(b"cache-policy"),
+            std::collections::BTreeSet::new(),
+        );
+        let grace = self
             .policy
             .auto_retention()
-            .ok_or(CacheError::Descriptor("this policy prunes nothing"))?;
-        let cutoff =
-            std::time::SystemTime::now()
-                .checked_sub(retention)
-                .ok_or(CacheError::Descriptor(
-                    "the retention window is out of range",
-                ))?;
-        let root = self.root.join(BLOB_ROOT);
-        let mut removed = 0;
-        prune_directory(
-            &self.file_system,
-            &self.root,
-            &root,
-            cutoff,
-            protected,
-            &mut removed,
-        )?;
-        Ok(removed)
+            .unwrap_or(std::time::Duration::ZERO);
+        let report = crate::retention::sweep_protected(self, &state, grace, protected)?;
+        Ok(report.removed as usize)
     }
 }
 
@@ -924,11 +980,28 @@ impl ContentCache {
 /// security boundary against anything else on the machine.
 struct BlobLock {
     _file: File,
+    // Release the namespace lease only after closing the blob lock.
+    _namespace: File,
 }
 
 impl BlobLock {
     /// Take the blob's lock, or report that another writer holds it.
     fn acquire(paths: &BlobPaths) -> Result<Self, CacheError> {
+        let namespace = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&paths.namespace_lock_path)
+            .map_err(|source| CacheError::io(&paths.namespace_lock_path, source))?;
+        namespace.try_lock_shared().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => CacheError::Locked {
+                digest: "cache transfer maintenance".into(),
+            },
+            std::fs::TryLockError::Error(source) => {
+                CacheError::io(&paths.namespace_lock_path, source)
+            }
+        })?;
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -937,7 +1010,10 @@ impl BlobLock {
             .open(&paths.lock_path)
             .map_err(|source| CacheError::io(&paths.lock_path, source))?;
         match file.try_lock() {
-            Ok(()) => Ok(Self { _file: file }),
+            Ok(()) => Ok(Self {
+                _file: file,
+                _namespace: namespace,
+            }),
             Err(std::fs::TryLockError::WouldBlock) => Err(CacheError::Locked {
                 digest: paths
                     .final_path
@@ -1362,72 +1438,5 @@ fn collect_digests(
             out.push(digest);
         }
     }
-    Ok(())
-}
-
-fn prune_directory(
-    file_system: &Arc<dyn CacheFileSystem>,
-    root: &Path,
-    directory: &Path,
-    cutoff: std::time::SystemTime,
-    protected: &[Sha256Digest],
-    removed: &mut usize,
-) -> Result<(), CacheError> {
-    if file_system
-        .is_link(directory)
-        .map_err(|source| CacheError::io(directory, source))?
-    {
-        return Err(CacheError::Link {
-            path: directory.display().to_string(),
-        });
-    }
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => return Err(CacheError::io(directory, source)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|source| CacheError::io(directory, source))?;
-        let path = entry.path();
-        if path.is_dir() {
-            prune_directory(file_system, root, &path, cutoff, protected, removed)?;
-            let _ = std::fs::remove_dir(&path);
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let is_partial = name.ends_with(".partial")
-            || name.ends_with(".resume")
-            || name.ends_with(".lock")
-            || name.ends_with(".resume.tmp");
-        if is_partial {
-            // A partial nobody finished is not content and cannot be
-            // identified, so it is removed under every policy.
-            if std::fs::metadata(&path)
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                .is_some_and(|modified| modified < cutoff)
-            {
-                let _ = std::fs::remove_file(&path);
-            }
-            continue;
-        }
-        let Ok(digest) = name.parse::<Sha256Digest>() else {
-            continue;
-        };
-        if protected.contains(&digest) {
-            continue;
-        }
-        let aged = std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .is_some_and(|modified| modified < cutoff);
-        if aged {
-            let _ = std::fs::remove_file(&path);
-            *removed += 1;
-        }
-    }
-    let _ = root;
     Ok(())
 }

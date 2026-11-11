@@ -10,8 +10,9 @@ use std::{
     fs::File,
     io::{BufReader, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
+use zup_core::{PackagePlan, PayloadEntry, PluginArtifact, PrerequisiteArtifact};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,8 +26,8 @@ use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, Tar
 /// could have produced, because such a bundle is not one this writer wrote.
 pub const MAX_PLUGIN_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 use zup_core::{
-    ComponentId, Condition, Installer, MAX_PLUGIN_ARTIFACTS, PluginId, PrerequisiteId,
-    RelativePath, Sha256Digest, Target, Template, hash_reader,
+    Installer, MAX_PLUGIN_ARTIFACTS, PluginId, PrerequisiteId, RelativePath, Sha256Digest, Target,
+    hash_reader,
 };
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, MAX_AOT_BYTES, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
@@ -92,79 +93,62 @@ pub enum PackageError {
     PluginArtifact(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PluginArtifact {
-    pub plugin_id: PluginId,
-    pub source_size: u64,
-    pub source_sha256: Sha256Digest,
-    pub target: Target,
-    pub wasmtime_version: String,
-    pub aot_format_version: u32,
-    pub plugin_api_version: String,
-    pub wit_digest: Sha256Digest,
-    pub engine_fingerprint: Sha256Digest,
-    pub aot_size: u64,
-    pub aot_sha256: Sha256Digest,
-    pub blob: Sha256Digest,
-}
-
-impl PluginArtifact {
-    pub fn validate(&self) -> Result<(), PackageError> {
-        if self.plugin_id.as_str().len() > MAX_PLUGIN_ID_BYTES {
-            return Err(PackageError::PluginArtifact(
-                "plugin id exceeds the field limit".to_owned(),
-            ));
-        }
-        if self.target.as_str().len() > MAX_TARGET_BYTES {
-            return Err(PackageError::PluginArtifact(
-                "target exceeds the field limit".to_owned(),
-            ));
-        }
-        if self.wasmtime_version.len() > 32 || self.plugin_api_version.len() > 32 {
-            return Err(PackageError::PluginArtifact(
-                "contract version exceeds the field limit".to_owned(),
-            ));
-        }
-        if self.source_size == 0 || self.source_size > MAX_PLUGIN_SOURCE_BYTES {
-            return Err(PackageError::PluginArtifact(
-                "source size exceeds the component limit".to_owned(),
-            ));
-        }
-        if self.aot_size == 0 || self.aot_size > u64::try_from(MAX_AOT_BYTES).unwrap_or(u64::MAX) {
-            return Err(PackageError::PluginArtifact(
-                "AOT size is outside the component limit".to_owned(),
-            ));
-        }
-        if self.wasmtime_version != WASMTIME_VERSION
-            || self.aot_format_version != AOT_FORMAT_VERSION
-            || self.plugin_api_version != PLUGIN_API_VERSION
-        {
-            return Err(PackageError::PluginArtifact(
-                "component contract version is not supported".to_owned(),
-            ));
-        }
-        if self.wit_digest != Sha256Digest::from_bytes(wit_package_digest()) {
-            return Err(PackageError::PluginArtifact(
-                "WIT digest does not match the contract".to_owned(),
-            ));
-        }
-        zup_plugin_contract::PluginEngine::new(self.target.rust_triple())
-            .map_err(|error| PackageError::PluginArtifact(error.to_string()))?;
-        if self.engine_fingerprint
-            != Sha256Digest::from_bytes(*engine_fingerprint(self.target.rust_triple()).as_bytes())
-        {
-            return Err(PackageError::PluginArtifact(
-                "engine fingerprint does not match the target".to_owned(),
-            ));
-        }
-        if self.aot_sha256 != self.blob {
-            return Err(PackageError::PluginArtifact(
-                "AOT and blob digests differ".to_owned(),
-            ));
-        }
-        Ok(())
+pub fn validate_plugin_artifact(artifact: &PluginArtifact) -> Result<(), PackageError> {
+    if artifact.plugin_id.as_str().len() > MAX_PLUGIN_ID_BYTES {
+        return Err(PackageError::PluginArtifact(
+            "plugin id exceeds the field limit".to_owned(),
+        ));
     }
+    if artifact.target.as_str().len() > MAX_TARGET_BYTES {
+        return Err(PackageError::PluginArtifact(
+            "target exceeds the field limit".to_owned(),
+        ));
+    }
+    if artifact.wasmtime_version.len() > 32 || artifact.plugin_api_version.len() > 32 {
+        return Err(PackageError::PluginArtifact(
+            "contract version exceeds the field limit".to_owned(),
+        ));
+    }
+    if artifact.source_size == 0 || artifact.source_size > MAX_PLUGIN_SOURCE_BYTES {
+        return Err(PackageError::PluginArtifact(
+            "source size exceeds the component limit".to_owned(),
+        ));
+    }
+    if artifact.aot_size == 0
+        || artifact.aot_size > u64::try_from(MAX_AOT_BYTES).unwrap_or(u64::MAX)
+    {
+        return Err(PackageError::PluginArtifact(
+            "AOT size is outside the component limit".to_owned(),
+        ));
+    }
+    if artifact.wasmtime_version != WASMTIME_VERSION
+        || artifact.aot_format_version != AOT_FORMAT_VERSION
+        || artifact.plugin_api_version != PLUGIN_API_VERSION
+    {
+        return Err(PackageError::PluginArtifact(
+            "component contract version is not supported".to_owned(),
+        ));
+    }
+    if artifact.wit_digest != Sha256Digest::from_bytes(wit_package_digest()) {
+        return Err(PackageError::PluginArtifact(
+            "WIT digest does not match the contract".to_owned(),
+        ));
+    }
+    zup_plugin_contract::PluginEngine::new(artifact.target.rust_triple())
+        .map_err(|error| PackageError::PluginArtifact(error.to_string()))?;
+    if artifact.engine_fingerprint
+        != Sha256Digest::from_bytes(*engine_fingerprint(artifact.target.rust_triple()).as_bytes())
+    {
+        return Err(PackageError::PluginArtifact(
+            "engine fingerprint does not match the target".to_owned(),
+        ));
+    }
+    if artifact.aot_sha256 != artifact.blob {
+        return Err(PackageError::PluginArtifact(
+            "AOT and blob digests differ".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,7 +159,7 @@ pub struct CompiledPluginArtifact {
 
 impl CompiledPluginArtifact {
     pub fn new(metadata: PluginArtifact, bytes: Vec<u8>) -> Result<Self, PackageError> {
-        metadata.validate()?;
+        validate_plugin_artifact(&metadata)?;
         if bytes.len() as u64 != metadata.aot_size {
             return Err(PackageError::PluginArtifact(
                 "AOT byte length does not match metadata".to_owned(),
@@ -199,52 +183,76 @@ impl CompiledPluginArtifact {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PortableBuildPlan {
-    pub installer: Installer,
-    pub entries: Vec<PayloadEntry>,
-    #[serde(default)]
-    pub prerequisite_artifacts: Vec<PrerequisiteArtifact>,
-    /// The application-provided preset assets this installer presents.
-    ///
-    /// Not payload entries: these are the installer's own runtime data, handed to
-    /// a preset rather than installed into the application, so they have no
-    /// destination template. Their bytes live in the same content store as
-    /// everything else, addressed by the digest recorded here.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ui_assets: Vec<zup_core::PresetAsset>,
-    pub plugins: Vec<PluginArtifact>,
-    pub total_size: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PayloadEntry {
-    pub path: RelativePath,
-    pub destination: Template,
-    pub size: u64,
-    pub sha256: Sha256Digest,
-    pub blob: Sha256Digest,
-    pub component: Option<ComponentId>,
-    pub condition: Option<Condition>,
-    /// This file is intended to be executable. Portable intent, not a mode.
-    ///
-    /// Defaults to false so a package written before executable intent existed is
-    /// still readable: an absent key means "not executable", which is what every
-    /// file in an older package meant.
-    #[serde(default)]
-    pub executable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PrerequisiteArtifact {
-    pub prerequisite_id: PrerequisiteId,
-    pub path: RelativePath,
-    pub size: u64,
-    pub sha256: Sha256Digest,
-    pub blob: Sha256Digest,
+pub fn validate_payload_entries(
+    installer: &Installer,
+    entries: &[PayloadEntry],
+) -> Result<(), PackageError> {
+    let mut declarations = BTreeMap::new();
+    for mapping in &installer.files {
+        if declarations.insert(&mapping.id, mapping).is_some() {
+            return Err(PackageError::Invalid);
+        }
+    }
+    if entries.windows(2).any(|pair| pair[0].id >= pair[1].id) {
+        return Err(PackageError::Invalid);
+    }
+    let mut populated = BTreeSet::new();
+    let mut fixed_paths = BTreeSet::new();
+    let mut source_content = BTreeMap::new();
+    let mut generation = Vec::new();
+    for entry in entries {
+        if source_content
+            .insert(&entry.path, (entry.size, entry.sha256))
+            .is_some_and(|previous| previous != (entry.size, entry.sha256))
+        {
+            return Err(PackageError::Invalid);
+        }
+        let mapping = declarations
+            .get(entry.id.declaration())
+            .ok_or(PackageError::Invalid)?;
+        if mapping.placement_for(&entry.id).as_ref() != Some(&entry.placement)
+            || mapping.component != entry.component
+            || mapping.when != entry.condition
+            || mapping.requires_execution(&entry.id, installer.app.main.as_ref())
+                != entry.executable
+        {
+            return Err(PackageError::Invalid);
+        }
+        populated.insert(&mapping.id);
+        match &entry.placement {
+            zup_core::PayloadPlacement::Generation { path } => {
+                generation.push(zup_core::GenerationFile {
+                    path: path.clone(),
+                    size: entry.size,
+                    sha256: entry.sha256,
+                    executable: entry.executable,
+                })
+            }
+            zup_core::PayloadPlacement::Fixed { path, .. } => {
+                if !fixed_paths.insert(path.to_string()) {
+                    return Err(PackageError::Invalid);
+                }
+            }
+        }
+    }
+    if installer
+        .app
+        .main
+        .as_ref()
+        .is_some_and(|main| !entries.iter().any(|entry| &entry.id == main))
+    {
+        return Err(PackageError::Invalid);
+    }
+    if installer
+        .files
+        .iter()
+        .any(|mapping| !mapping.allow_empty && !populated.contains(&mapping.id))
+    {
+        return Err(PackageError::Invalid);
+    }
+    zup_core::GenerationDescriptor::new(installer.target, generation)
+        .map_err(|_| PackageError::Invalid)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,7 +270,7 @@ struct Metadata {
     release: Option<zup_core::ReleaseIdentity>,
     schema: u32,
     required_features: u64,
-    plan: PortableBuildPlan,
+    plan: PackagePlan,
     blobs: Vec<BlobIndex>,
 }
 
@@ -298,38 +306,75 @@ impl PackageIndex {
 
 #[derive(Debug, Clone)]
 enum PackageStorage {
-    File(PathBuf),
+    File(Arc<Mutex<File>>),
     Memory(Arc<Vec<u8>>),
 }
 
 impl PackageStorage {
-    fn read_range(&self, offset: u64, size: u64) -> Result<Vec<u8>, PackageError> {
+    fn open_range(&self, offset: u64, size: u64) -> Result<PackageRange, PackageError> {
         let end = offset.checked_add(size).ok_or(PackageError::Invalid)?;
-        let size_usize = usize::try_from(size).map_err(|_| PackageError::Invalid)?;
-        match self {
-            Self::File(path) => {
-                let mut file = File::open(path)?;
-                if end > file.metadata()?.len() {
-                    return Err(PackageError::Invalid);
-                }
-                file.seek(SeekFrom::Start(offset))?;
-                let mut bytes = Vec::new();
-                bytes
-                    .try_reserve_exact(size_usize)
-                    .map_err(|_| PackageError::Allocation { size })?;
-                bytes.resize(size_usize, 0);
-                file.read_exact(&mut bytes)?;
-                Ok(bytes)
-            }
-            Self::Memory(bytes) => {
-                let start = usize::try_from(offset).map_err(|_| PackageError::Invalid)?;
-                let end = usize::try_from(end).map_err(|_| PackageError::Invalid)?;
-                bytes
-                    .get(start..end)
-                    .map(<[u8]>::to_vec)
-                    .ok_or(PackageError::Invalid)
-            }
+        let length = match self {
+            Self::File(file) => file
+                .lock()
+                .map_err(|_| std::io::Error::other("package handle is unavailable"))?
+                .metadata()?
+                .len(),
+            Self::Memory(bytes) => bytes.len() as u64,
+        };
+        if end > length {
+            return Err(PackageError::Invalid);
         }
+        Ok(PackageRange {
+            storage: self.clone(),
+            position: offset,
+            end,
+        })
+    }
+
+    fn read_range(&self, offset: u64, size: u64) -> Result<Vec<u8>, PackageError> {
+        let mut reader = self.open_range(offset, size)?;
+        let size_usize = usize::try_from(size).map_err(|_| PackageError::Invalid)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(size_usize)
+            .map_err(|_| PackageError::Allocation { size })?;
+        bytes.resize(size_usize, 0);
+        reader.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+struct PackageRange {
+    storage: PackageStorage,
+    position: u64,
+    end: u64,
+}
+
+impl Read for PackageRange {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let length = output
+            .len()
+            .min(usize::try_from(self.end - self.position).unwrap_or(usize::MAX));
+        if length == 0 {
+            return Ok(0);
+        }
+        let count = match &self.storage {
+            PackageStorage::File(file) => {
+                let mut file = file
+                    .lock()
+                    .map_err(|_| std::io::Error::other("package handle is unavailable"))?;
+                file.seek(SeekFrom::Start(self.position))?;
+                file.read(&mut output[..length])?
+            }
+            PackageStorage::Memory(bytes) => {
+                let position = usize::try_from(self.position)
+                    .map_err(|_| std::io::Error::other("package offset is too large"))?;
+                output[..length].copy_from_slice(&bytes[position..position + length]);
+                length
+            }
+        };
+        self.position += count as u64;
+        Ok(count)
     }
 }
 
@@ -345,11 +390,11 @@ impl Package {
     /// Open and verify a package file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, PackageError> {
         let path = path.as_ref().to_path_buf();
-        let len = File::open(&path)?.metadata()?.len();
         let mut file = File::open(&path)?;
+        let len = file.metadata()?.len();
         let (metadata, index_size) = parse_metadata(&mut file, Some(len))?;
         let package = Self {
-            storage: PackageStorage::File(path),
+            storage: PackageStorage::File(Arc::new(Mutex::new(file))),
             metadata,
             index_size,
         };
@@ -360,11 +405,11 @@ impl Package {
     /// Open package structure without decompressing or hashing blob data.
     pub fn open_unverified(path: impl AsRef<Path>) -> Result<Self, PackageError> {
         let path = path.as_ref().to_path_buf();
-        let len = File::open(&path)?.metadata()?.len();
         let mut file = File::open(&path)?;
+        let len = file.metadata()?.len();
         let (metadata, index_size) = parse_metadata(&mut file, Some(len))?;
         Ok(Self {
-            storage: PackageStorage::File(path),
+            storage: PackageStorage::File(Arc::new(Mutex::new(file))),
             metadata,
             index_size,
         })
@@ -423,7 +468,7 @@ impl Package {
         self.metadata.release.as_ref()
     }
 
-    pub fn plan(&self) -> &PortableBuildPlan {
+    pub fn plan(&self) -> &PackagePlan {
         &self.metadata.plan
     }
 
@@ -498,7 +543,8 @@ impl Package {
                 Ok(ResolvedFile {
                     source: PathBuf::new(),
                     source_relative: entry.path.clone(),
-                    destination: entry.destination.clone(),
+                    id: entry.id.clone(),
+                    placement: entry.placement.clone(),
                     size: entry.size,
                     sha256: entry.sha256,
                     component: entry.component.clone(),
@@ -760,15 +806,14 @@ impl Package {
     fn open_blob(
         &self,
         blob: &BlobIndex,
-    ) -> Result<zstd::stream::read::Decoder<'static, BufReader<Cursor<Vec<u8>>>>, PackageError>
-    {
-        let bytes = self.storage.read_range(
+    ) -> Result<zstd::stream::read::Decoder<'static, BufReader<PackageRange>>, PackageError> {
+        let bytes = self.storage.open_range(
             self.index_size
                 .checked_add(blob.offset)
                 .ok_or(PackageError::Invalid)?,
             blob.compressed_size,
         )?;
-        Ok(zstd::stream::read::Decoder::new(Cursor::new(bytes))?)
+        Ok(zstd::stream::read::Decoder::new(bytes)?)
     }
 }
 
@@ -819,7 +864,7 @@ impl crate::PayloadSource for PackagePayloadSource {
             })?;
         let compressed = self
             .storage
-            .read_range(
+            .open_range(
                 self.index_size
                     .checked_add(blob.offset)
                     .ok_or_else(|| std::io::Error::other(PackageError::Invalid))
@@ -833,13 +878,12 @@ impl crate::PayloadSource for PackagePayloadSource {
                 path: path.to_string(),
                 source: std::io::Error::other(error.to_string()),
             })?;
-        let decoder =
-            zstd::stream::read::Decoder::new(Cursor::new(compressed)).map_err(|source| {
-                crate::PayloadError::Read {
-                    path: path.to_string(),
-                    source,
-                }
-            })?;
+        let decoder = zstd::stream::read::Decoder::new(compressed).map_err(|source| {
+            crate::PayloadError::Read {
+                path: path.to_string(),
+                source,
+            }
+        })?;
         Ok(Box::new(decoder))
     }
 }
@@ -918,20 +962,7 @@ fn parse_metadata(
         return Err(PackageError::Invalid);
     }
 
-    let mut entry_keys = BTreeSet::new();
-    for entry in &metadata.plan.entries {
-        let key = (entry.destination.to_string(), entry.path.clone());
-        if !entry_keys.insert(key) {
-            return Err(PackageError::Invalid);
-        }
-    }
-    if metadata.plan.entries.windows(2).any(|window| {
-        let left = (window[0].destination.to_string(), window[0].path.clone());
-        let right = (window[1].destination.to_string(), window[1].path.clone());
-        left >= right
-    }) {
-        return Err(PackageError::Invalid);
-    }
+    validate_payload_entries(&metadata.plan.installer, &metadata.plan.entries)?;
 
     let mut expected_plugins = BTreeMap::<String, PluginId>::new();
     for plugin in &metadata.plan.installer.plugins {
@@ -948,7 +979,7 @@ fn parse_metadata(
     let mut artifact_plugins = BTreeMap::<String, &PluginArtifact>::new();
     for artifact in &metadata.plan.plugins {
         validate_plugin_target(&metadata.plan.installer.target, artifact)?;
-        artifact.validate()?;
+        validate_plugin_artifact(artifact)?;
         let key = artifact.plugin_id.as_str().to_ascii_lowercase();
         let Some(expected_id) = expected_plugins.get(&key) else {
             return Err(PackageError::Invalid);
@@ -1155,7 +1186,7 @@ fn canonical_artifacts(
     let mut actual = BTreeSet::<String>::new();
     for artifact in &canonical {
         validate_plugin_target(&plan.installer.target, &artifact.metadata)?;
-        artifact.metadata.validate()?;
+        validate_plugin_artifact(&artifact.metadata)?;
         let key = artifact.metadata.plugin_id.as_str().to_ascii_lowercase();
         let Some(expected_id) = expected.get(&key) else {
             return Err(PackageError::Invalid);
@@ -1384,7 +1415,8 @@ impl BundleWriter {
             contents.entry(file.sha256).or_insert(bytes);
             entries.push(PayloadEntry {
                 path: file.source_relative.clone(),
-                destination: file.destination.clone(),
+                id: file.id.clone(),
+                placement: file.placement.clone(),
                 size: file.size,
                 sha256: file.sha256,
                 blob: file.sha256,
@@ -1425,12 +1457,7 @@ impl BundleWriter {
                 contents.insert(digest, artifact.bytes.clone());
             }
         }
-        entries.sort_by(|a, b| {
-            a.destination
-                .to_string()
-                .cmp(&b.destination.to_string())
-                .then(a.path.cmp(&b.path))
-        });
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
         let total_size = entries.iter().try_fold(0u64, |sum, entry| {
             sum.checked_add(entry.size).ok_or(PackageError::Invalid)
         })?;
@@ -1453,7 +1480,7 @@ impl BundleWriter {
             });
             compressed.extend_from_slice(&encoded);
         }
-        let portable_plan = PortableBuildPlan {
+        let portable_plan = PackagePlan {
             installer,
             entries,
             prerequisite_artifacts,
@@ -1514,7 +1541,8 @@ impl BundleWriter {
             let (size, digest) = verify_source(&file.source, file.size, file.sha256)?;
             entries.push(PayloadEntry {
                 path: file.source_relative.clone(),
-                destination: file.destination.clone(),
+                id: file.id.clone(),
+                placement: file.placement.clone(),
                 size,
                 sha256: file.sha256,
                 blob: digest,
@@ -1532,12 +1560,7 @@ impl BundleWriter {
             let source = asset.source.as_deref().ok_or(PackageError::Invalid)?;
             verify_source(source, asset.size, asset.sha256)?;
         }
-        entries.sort_by(|a, b| {
-            a.destination
-                .to_string()
-                .cmp(&b.destination.to_string())
-                .then(a.path.cmp(&b.path))
-        });
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
         let total_size = entries
             .iter()
             .try_fold(0u64, |sum, entry| sum.checked_add(entry.size))
@@ -1548,7 +1571,7 @@ impl BundleWriter {
                 limit: MAX_ENTRIES,
             });
         }
-        let portable_plan = PortableBuildPlan {
+        let portable_plan = PackagePlan {
             installer,
             entries,
             prerequisite_artifacts,
@@ -1592,7 +1615,7 @@ impl BundleWriter {
     /// verified cache is addressed by. `artifacts` is only the plugin *metadata*,
     /// whose AOT bytes come from the cache rather than from here.
     pub fn encode_plan_only_plan(
-        plan: &PortableBuildPlan,
+        plan: &PackagePlan,
         artifacts: &[PluginArtifact],
     ) -> Result<Vec<u8>, PackageError> {
         let mut metadata = Metadata {
@@ -1635,7 +1658,7 @@ impl BundleWriter {
     /// Every digest the plan references must be present, and nothing else is
     /// written, so the resulting package contains exactly one variant's content.
     pub fn write_plan(
-        plan: &PortableBuildPlan,
+        plan: &PackagePlan,
         compressed: &std::collections::BTreeMap<Sha256Digest, Vec<u8>>,
         release: Option<&zup_core::ReleaseIdentity>,
         output: &Path,
@@ -1686,7 +1709,7 @@ impl BundleWriter {
             release: release.cloned(),
             schema: PACKAGE_SCHEMA,
             required_features: 0,
-            plan: PortableBuildPlan {
+            plan: PackagePlan {
                 installer,
                 entries: plan.entries.clone(),
                 prerequisite_artifacts: plan.prerequisite_artifacts.clone(),
@@ -1745,7 +1768,8 @@ impl BundleWriter {
             )?;
             entries.push(PayloadEntry {
                 path: file.source_relative.clone(),
-                destination: file.destination.clone(),
+                id: file.id.clone(),
+                placement: file.placement.clone(),
                 size: file.size,
                 sha256: file.sha256,
                 blob: file.sha256,
@@ -1790,12 +1814,7 @@ impl BundleWriter {
                 });
             }
         }
-        entries.sort_by(|a, b| {
-            a.destination
-                .to_string()
-                .cmp(&b.destination.to_string())
-                .then(a.path.cmp(&b.path))
-        });
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
         let total_size = entries.iter().try_fold(0u64, |sum, entry| {
             sum.checked_add(entry.size).ok_or(PackageError::Invalid)
         })?;
@@ -1822,7 +1841,7 @@ impl BundleWriter {
             release: None,
             schema: PACKAGE_SCHEMA,
             required_features: 0,
-            plan: PortableBuildPlan {
+            plan: PackagePlan {
                 installer,
                 entries,
                 prerequisite_artifacts,
@@ -1889,6 +1908,8 @@ mod tests {
                 updates: None,
                 prerequisites: Vec::new(),
                 install: Install {
+                    generation_readers: Default::default(),
+                    data: Vec::new(),
                     scope: InstallScope::User,
                     directory: InstallDirectory {
                         user: Some(Template::parse("${location.user_data}/BundleLimits").unwrap()),
@@ -1920,6 +1941,116 @@ mod tests {
             prerequisite_size: 0,
             icons: zup_core::TargetIcons::default(),
         }
+    }
+
+    #[rstest::rstest]
+    #[case("duplicate_id")]
+    #[case("foreign_declaration")]
+    #[case("placement")]
+    #[case("fixed_replacement")]
+    #[case("executable")]
+    #[case("conflicting_source")]
+    #[case("identity_kind")]
+    #[case("main_reference")]
+    #[case("main_execution")]
+    fn payload_index_cannot_change_declared_intent(#[case] alteration: &str) {
+        let mut installer = plan_with_plugins(0).installer;
+        installer.files.push(zup_core::FileMapping {
+            id: zup_core::ResourceId::new("program").unwrap(),
+            source: "**/*".into(),
+            placement: zup_core::PayloadMapping::Generation {
+                directory: Some(RelativePath::new("bin").unwrap()),
+            },
+            component: None,
+            when: None,
+            allow_empty: false,
+            executable: false,
+        });
+        let digest = zup_core::hash_bytes(b"abc");
+        let mut entry = PayloadEntry {
+            id: zup_core::PayloadId::TreeMember {
+                declaration: zup_core::ResourceId::new("program").unwrap(),
+                member: RelativePath::new("a").unwrap(),
+            },
+            path: RelativePath::new("source/a").unwrap(),
+            placement: zup_core::PayloadPlacement::Generation {
+                path: RelativePath::new("bin/a").unwrap(),
+            },
+            size: 3,
+            sha256: digest,
+            blob: digest,
+            component: None,
+            condition: None,
+            executable: false,
+        };
+        if alteration == "fixed_replacement" {
+            installer.files[0].placement = zup_core::PayloadMapping::Fixed {
+                directory: zup_core::Template::parse("${install}/bin").unwrap(),
+                replacement: zup_core::FixedReplacement::Atomic,
+            };
+            entry.placement = zup_core::PayloadPlacement::Fixed {
+                path: zup_core::Template::parse("${install}/bin/a").unwrap(),
+                replacement: zup_core::FixedReplacement::Atomic,
+            };
+        }
+        assert!(validate_payload_entries(&installer, std::slice::from_ref(&entry)).is_ok());
+        if alteration == "main_reference" || alteration == "main_execution" {
+            installer.app.main = Some(if alteration == "main_reference" {
+                zup_core::PayloadId::File {
+                    declaration: zup_core::ResourceId::new("foreign").unwrap(),
+                }
+            } else {
+                entry.id.clone()
+            });
+            assert!(validate_payload_entries(&installer, std::slice::from_ref(&entry)).is_err());
+            return;
+        }
+        let mut altered = entry.clone();
+        match alteration {
+            "duplicate_id" => altered.path = RelativePath::new("other/source").unwrap(),
+            "identity_kind" => {
+                altered.id = zup_core::PayloadId::File {
+                    declaration: zup_core::ResourceId::new("program").unwrap(),
+                }
+            }
+            "foreign_declaration" => {
+                altered.id = zup_core::PayloadId::TreeMember {
+                    declaration: zup_core::ResourceId::new("foreign").unwrap(),
+                    member: RelativePath::new("a").unwrap(),
+                }
+            }
+            "placement" => {
+                altered.placement = zup_core::PayloadPlacement::Generation {
+                    path: RelativePath::new("outside/a").unwrap(),
+                }
+            }
+            "fixed_replacement" => {
+                let zup_core::PayloadPlacement::Fixed { replacement, .. } = &mut altered.placement
+                else {
+                    unreachable!()
+                };
+                *replacement = zup_core::FixedReplacement::Quiescent;
+            }
+            "executable" => altered.executable = true,
+            "conflicting_source" => {
+                altered.id = zup_core::PayloadId::TreeMember {
+                    declaration: zup_core::ResourceId::new("program").unwrap(),
+                    member: RelativePath::new("b").unwrap(),
+                };
+                altered.placement = zup_core::PayloadPlacement::Generation {
+                    path: RelativePath::new("bin/b").unwrap(),
+                };
+                altered.sha256 = zup_core::hash_bytes(b"def");
+                altered.blob = altered.sha256;
+            }
+            _ => unreachable!(),
+        }
+        let entries = if matches!(alteration, "duplicate_id" | "conflicting_source") {
+            vec![entry, altered]
+        } else {
+            vec![altered]
+        };
+        assert!(validate_payload_entries(&installer, &entries).is_err());
     }
 
     fn unchecked_artifact(id: &str) -> CompiledPluginArtifact {
@@ -1963,8 +2094,14 @@ mod tests {
             "the fixture only proves something if zstd expands it"
         );
         let entry = |name: &str, bytes: &[u8], digest: Sha256Digest| PayloadEntry {
+            id: zup_core::PayloadId::TreeMember {
+                declaration: zup_core::ResourceId::new("program").unwrap(),
+                member: RelativePath::new(name).unwrap(),
+            },
             path: zup_core::RelativePath::new(name).unwrap(),
-            destination: Template::parse(&format!("${{install}}/{name}")).unwrap(),
+            placement: zup_core::PayloadPlacement::Generation {
+                path: RelativePath::new(name).unwrap(),
+            },
             size: bytes.len() as u64,
             sha256: digest,
             blob: digest,
@@ -1972,8 +2109,18 @@ mod tests {
             condition: None,
             executable: false,
         };
-        let plan = PortableBuildPlan {
-            installer: plan_with_plugins(0).installer,
+        let mut installer = plan_with_plugins(0).installer;
+        installer.files.push(zup_core::FileMapping {
+            id: zup_core::ResourceId::new("program").unwrap(),
+            source: "**/*".into(),
+            placement: Default::default(),
+            component: None,
+            when: None,
+            allow_empty: false,
+            executable: false,
+        });
+        let plan = PackagePlan {
+            installer,
             entries: vec![
                 entry("empty.txt", &empty, empty_digest),
                 entry("tiny.txt", &tiny, tiny_digest),

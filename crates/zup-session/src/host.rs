@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use zup_core::{AppId, ComponentId, InstallScope, Installer, SelectedScope, TargetBuildPlan};
-use zup_plan::InstallLedger;
+use zup_plan::InstallationRecord;
 use zup_preset_protocol::UpdateState;
 use zup_runtime::{InstallOutcome, OperationHost, PreparedOperation, RuntimeBackend, RuntimeEvent};
 
@@ -22,14 +22,14 @@ pub struct SessionLaunch {
 pub struct ScopedInstallation {
     pub scope: SelectedScope,
     pub state_root: PathBuf,
-    pub ledger: Option<InstallLedger>,
+    pub ledger: Option<InstallationRecord>,
 }
 
 #[derive(Debug, Clone)]
 pub struct OperationContext {
     pub scope: SelectedScope,
     pub state_root: PathBuf,
-    pub ledger: Option<InstallLedger>,
+    pub ledger: Option<InstallationRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,9 +85,13 @@ pub fn select_scope(
         .iter()
         .copied()
         .filter(|scope| {
-            installations
-                .iter()
-                .any(|installation| installation.scope == *scope && installation.ledger.is_some())
+            installations.iter().any(|installation| {
+                installation.scope == *scope
+                    && installation
+                        .ledger
+                        .as_ref()
+                        .is_some_and(InstallationRecord::is_installed)
+            })
         })
         .collect();
     match installed.as_slice() {
@@ -110,9 +114,15 @@ pub struct PresetLaunch {
 
 pub enum UpdatePreparation {
     Cancelled,
-    UpToDate { version: String },
-    Available { version: String },
-    Ready { build: Arc<TargetBuildPlan> },
+    UpToDate {
+        version: String,
+    },
+    Available {
+        candidate: zup_core::ReleaseCandidate,
+    },
+    Ready {
+        build: Arc<TargetBuildPlan>,
+    },
 }
 
 pub trait SessionHost {
@@ -139,9 +149,19 @@ pub trait SessionHost {
         launch: &SessionLaunch,
     ) -> Result<SessionDiscovery, String> {
         let build = self.describe(executable)?;
+        if launch.state_root.is_some()
+            && launch.scope.is_none()
+            && build.installer.install.scope.scopes().len() > 1
+        {
+            return Err("a custom state root requires an explicit user or machine scope".into());
+        }
         let mut installations = Vec::new();
         for scope in build.installer.install.scope.scopes() {
-            let context = self.observe(&build.installer, *scope, launch.state_root.as_deref())?;
+            let state_root = launch
+                .state_root
+                .as_deref()
+                .filter(|_| launch.scope.is_none_or(|selected| selected == *scope));
+            let context = self.observe(&build.installer, *scope, state_root)?;
             installations.push(ScopedInstallation {
                 scope: context.scope,
                 state_root: context.state_root,
@@ -149,9 +169,12 @@ pub trait SessionHost {
             });
         }
         if launch.maintenance
-            && installations
-                .iter()
-                .all(|installation| installation.ledger.is_none())
+            && installations.iter().all(|installation| {
+                installation
+                    .ledger
+                    .as_ref()
+                    .is_none_or(|record| !record.is_installed())
+            })
         {
             return Err("the installed application was not found".into());
         }
@@ -209,7 +232,7 @@ pub trait SessionHost {
     fn recover<'a>(
         &'a self,
         _context: &'a OperationContext,
-        _transaction: &'a str,
+        _transaction: zup_core::TransactionId,
         _control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<'a, Result<InstallOutcome, zup_runtime::SessionError>> {
         Box::pin(async {
@@ -235,12 +258,12 @@ pub trait SessionHost {
     }
 
     fn update(
-        &self,
+        &mut self,
         _context: &OperationContext,
         _request: &zup_runtime::UpdateRequest,
         _control: &zup_runtime::OperationControl,
         _status: &mut (dyn FnMut(UpdateState) + Send),
-    ) -> Result<InstallOutcome, String> {
+    ) -> Result<crate::SessionOutcome, String> {
         Err("updates are not supported here".into())
     }
 
@@ -258,7 +281,11 @@ pub fn initial_state(
 ) -> HostState {
     let installer = discovery.installer();
     let launchers = zup_preset_host::surface::launchers(installer);
-    let state = match context.ledger.as_ref() {
+    let state = match context
+        .ledger
+        .as_ref()
+        .filter(|record| record.is_installed())
+    {
         Some(ledger) => {
             let maintenance =
                 zup_preset_host::surface::maintenance_state(installer, ledger, context.scope);
@@ -327,6 +354,23 @@ pub fn state_name(state: zup_runtime::RuntimeState) -> &'static str {
 pub fn automation_events(event: &RuntimeEvent) -> Vec<zup_presentation::InstallerEvent> {
     use zup_presentation::InstallerEvent;
     match event {
+        RuntimeEvent::PlanPrepared { plan } => {
+            match zup_presentation::PlanPreview::from_transaction_plan(
+                plan,
+                plan.requirements.scope,
+                None,
+            ) {
+                Ok(preview) => vec![InstallerEvent::PlanPrepared {
+                    preview: Box::new(preview),
+                }],
+                Err(error) => vec![InstallerEvent::Failed {
+                    outcome: zup_presentation::ProcessOutcome::VerificationFailure,
+                    code: 1,
+                    message: error.to_string(),
+                    diagnostic: None,
+                }],
+            }
+        }
         RuntimeEvent::StateChanged { state } => {
             if *state == zup_runtime::RuntimeState::Cancelled {
                 vec![InstallerEvent::Cancelling {

@@ -147,14 +147,8 @@ pub fn automation_events(event: &AcquisitionEvent) -> Vec<InstallerEvent> {
             state: "acquisition".to_owned(),
         }],
         AcquisitionEvent::Failed {
-            message,
-            reasons,
-            machine_unchanged,
-            ..
+            message, reasons, ..
         } => {
-            // A failure before the barrier is reported as a failure, and the
-            // guarantee that nothing was touched is stated rather than inferred -
-            // a consumer can assert it, and a human reading the log can trust it.
             let mut detail = message.clone();
             if !reasons.is_empty() {
                 detail.push_str(" · ");
@@ -162,7 +156,7 @@ pub fn automation_events(event: &AcquisitionEvent) -> Vec<InstallerEvent> {
             }
             vec![InstallerEvent::Failed {
                 outcome: ProcessOutcome::Failure,
-                code: i32::from(*machine_unchanged),
+                code: 1,
                 message: detail,
                 diagnostic: None,
             }]
@@ -253,13 +247,12 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_states_that_nothing_was_touched() {
+    fn a_failure_includes_source_diagnostics() {
         let events = automation_events(&AcquisitionEvent::Failed {
             kind: "unavailable",
             digest: None,
             message: "no source could acquire payload blob".to_owned(),
             reasons: vec!["the CDN reset twice".to_owned()],
-            machine_unchanged: true,
         });
         assert!(matches!(
             events.as_slice(),

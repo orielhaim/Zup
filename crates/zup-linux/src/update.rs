@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use zup_acquire::{AcquisitionItem, CachePolicy, ContentReason, HostProfile, ProgressSink, Verify};
+use zup_acquire::{CachePolicy, HostProfile, ProgressSink, Verify};
 use zup_core::{SelectedScope, TargetBuildPlan};
 use zup_session::{OperationContext, SessionHost};
 use zup_update::{ReleaseResolver, ResolvedRelease, TrustContext, content};
@@ -10,6 +10,7 @@ use zup_update::{ReleaseResolver, ResolvedRelease, TrustContext, content};
 struct UpdateSession {
     resolver: ReleaseResolver,
     release: ResolvedRelease,
+    candidate: zup_core::ReleaseCandidate,
     available: bool,
 }
 
@@ -39,11 +40,16 @@ impl UpdateSession {
             .as_ref()
             .ok_or("this application is not configured for updates")?;
         let cache_root = if scope == SelectedScope::Machine {
-            crate::paths::user_state_root().map_err(|error| error.to_string())?
+            crate::paths::user_state_root(&installer.app.id).map_err(|error| error.to_string())?
         } else {
             context.state_root.clone()
         };
-        let trust = TrustContext::from_update_config(config, installer.app.id.clone(), cache_root);
+        let trust = TrustContext::from_update_config(
+            config,
+            installer.app.id.clone(),
+            installer.install.scope,
+            cache_root,
+        );
         let mut profile = HostProfile::native();
         profile.frontends = vec![installer.frontend.as_str().to_owned()];
         let mut resolver = ReleaseResolver::new(trust, profile, CachePolicy::Auto, progress)
@@ -78,12 +84,19 @@ impl UpdateSession {
         if !errors.is_empty() {
             return Err(errors.join("\n"));
         }
-        let version = semver::Version::parse(&release.descriptor.version)
-            .map_err(|error| error.to_string())?;
-        let available = version > ledger.version;
+        let candidate = zup_core::ReleaseCandidate {
+            version: release
+                .descriptor
+                .version
+                .parse()
+                .map_err(|error: semver::Error| error.to_string())?,
+            release: release.descriptor.release_digest,
+        };
+        let available = candidate.is_update_for(&ledger.current.version, ledger.release_identity());
         Ok(Self {
             resolver,
             release,
+            candidate,
             available,
         })
     }
@@ -93,7 +106,7 @@ impl UpdateSession {
         cancellation: Arc<dyn zup_acquire::Cancellation>,
     ) -> Result<UpdateInstaller, String> {
         let manifest = content::parse_manifest(&self.release).map_err(|error| error.to_string())?;
-        let mut plan = content::component_closure(
+        let plan = content::component_closure(
             &self.release,
             &manifest,
             zup_update::ComponentSelection::All,
@@ -102,8 +115,6 @@ impl UpdateSession {
         let runtime = self
             .release
             .require_runtime()
-            .map_err(|error| error.to_string())?;
-        plan.extend(vec![AcquisitionItem::new(runtime, ContentReason::Runtime)])
             .map_err(|error| error.to_string())?;
         let acquired = content::barrier_with_cancellation(
             &self.resolver,
@@ -200,13 +211,6 @@ fn materialize(
     Ok(UpdateInstaller { host, build, stage })
 }
 
-struct UpdateCancellation(pub zup_runtime::CancellationHandle);
-impl zup_acquire::Cancellation for UpdateCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
-    }
-}
-
 pub(crate) fn prepare(
     host: &mut crate::LinuxSessionHost,
     build: &Arc<TargetBuildPlan>,
@@ -224,13 +228,14 @@ pub(crate) fn prepare(
     runtime.block_on(async {
         let work = async {
             let session = UpdateSession::resolve(host, build, context.scope, Some(&context.state_root), source, progress).await?;
-            let version = session.release.descriptor.version.clone();
-            if !session.available { return Ok((zup_session::UpdatePreparation::UpToDate { version }, None)); }
-            if matches!(request, zup_runtime::UpdateRequest::Check) { return Ok((zup_session::UpdatePreparation::Available { version }, None)); }
-            if let zup_runtime::UpdateRequest::Install { version: Some(expected) } = request && expected != &version {
+            let candidate = session.candidate.clone();
+            if let zup_runtime::UpdateRequest::Install { expected: Some(expected) } = request && expected != &candidate {
                 return Err("The available update changed. Check for updates again before installing.".into());
             }
-            let updated = session.acquire(Arc::new(UpdateCancellation(cancellation.clone()))).await?;
+            if !session.available { return Ok((zup_session::UpdatePreparation::UpToDate { version: candidate.version.to_string() }, None)); }
+            if matches!(request, zup_runtime::UpdateRequest::Check) { return Ok((zup_session::UpdatePreparation::Available { candidate }, None)); }
+            let query = cancellation.clone();
+            let updated = session.acquire(Arc::new(move || query.is_cancelled())).await?;
             Ok((zup_session::UpdatePreparation::Ready { build: updated.build.clone() }, Some(updated)))
         };
         tokio::pin!(work);
@@ -262,7 +267,7 @@ pub(crate) fn prepare(
         result
     }).map(|(preparation, updated)| {
         if let Some(updated) = updated {
-            host.installer = updated.host.installer;
+            *host = updated.host;
             host.update_stage = Some(Arc::new(updated.stage));
         }
         preparation
@@ -270,12 +275,12 @@ pub(crate) fn prepare(
 }
 
 pub(crate) fn run(
-    mut host: crate::LinuxSessionHost,
+    host: &mut crate::LinuxSessionHost,
     context: &OperationContext,
     request: &zup_runtime::UpdateRequest,
     control: &zup_runtime::OperationControl,
     status: &mut (dyn FnMut(zup_preset_protocol::UpdateState) + Send),
-) -> Result<zup_runtime::InstallOutcome, String> {
+) -> Result<zup_session::SessionOutcome, String> {
     use zup_preset_protocol::UpdateState;
     let executable = host.installer.clone();
     let build = host.describe(&executable)?;
@@ -285,7 +290,7 @@ pub(crate) fn run(
         detail: "Checking the authenticated update channel".into(),
     });
     let updated = prepare(
-        &mut host,
+        host,
         &build,
         &context,
         None,
@@ -300,30 +305,35 @@ pub(crate) fn run(
     let updated = match updated {
         Ok(updated) => updated,
         Err(_) if control.cancellation().is_cancelled() => {
-            return Ok(zup_runtime::InstallOutcome::Cancelled);
+            return Ok(zup_session::SessionOutcome::Deployment(
+                zup_runtime::InstallOutcome::Cancelled,
+            ));
         }
         Err(error) => return Err(error),
     };
     let build = match updated {
         zup_session::UpdatePreparation::Cancelled => {
-            return Ok(zup_runtime::InstallOutcome::Cancelled);
+            return Ok(zup_session::SessionOutcome::Deployment(
+                zup_runtime::InstallOutcome::Cancelled,
+            ));
         }
         zup_session::UpdatePreparation::Ready { build } => build,
-        zup_session::UpdatePreparation::Available { version } => {
+        zup_session::UpdatePreparation::Available { candidate } => {
             status(UpdateState::Available {
                 current: context
                     .ledger
                     .as_ref()
                     .expect("installed update")
+                    .current
                     .version
                     .to_string(),
-                available: version,
+                candidate,
             });
-            return Ok(zup_runtime::InstallOutcome::Committed);
+            return Ok(zup_session::SessionOutcome::UpdateChecked);
         }
         zup_session::UpdatePreparation::UpToDate { version } => {
             status(UpdateState::UpToDate { current: version });
-            return Ok(zup_runtime::InstallOutcome::Committed);
+            return Ok(zup_session::SessionOutcome::UpdateChecked);
         }
     };
     status(UpdateState::Installing {
@@ -342,20 +352,36 @@ pub(crate) fn run(
             cancellation: &|| control.cancellation().is_cancelled(),
         },
         &bound,
-    )
-    .map_err(|error| error.to_string())?;
+    );
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error @ zup_runtime::OperationError::RecoveryRequired(transaction)) => {
+            return Ok(zup_session::SessionOutcome::Deployment(
+                zup_runtime::InstallOutcome::RecoveryRequired {
+                    transaction: Some(transaction.0),
+                    detail: error.to_string(),
+                },
+            ));
+        }
+        Err(zup_runtime::OperationError::Cancelled) => {
+            return Ok(zup_session::SessionOutcome::Deployment(
+                zup_runtime::InstallOutcome::Cancelled,
+            ));
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
     let outcome = runtime.block_on(zup_session::run_operation(
-        &host, &context, &build, &prepared, control,
+        host, &context, &build, &prepared, control,
     ));
     let (outcome, _) = zup_session::reconcile_operation(
-        &host,
+        host,
         &context,
         &prepared,
         zup_runtime::outcome_of(outcome),
     );
-    Ok(outcome)
+    Ok(zup_session::SessionOutcome::Deployment(outcome))
 }

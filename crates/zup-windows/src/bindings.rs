@@ -68,7 +68,6 @@ pub const MOVEFILE_WRITE_THROUGH: DWORD = 0x8;
 pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 pub const TOKEN_QUERY: Dword = 0x0008;
 pub const PROCESS_QUERY_LIMITED_INFORMATION: Dword = 0x1000;
-pub const SYNCHRONIZE: Dword = 0x0010_0000;
 pub const TOKEN_USER: Dword = 1;
 pub const TOKEN_ELEVATION: Dword = 20;
 pub const SEE_MASK_NOCLOSEPROCESS: Dword = 0x0000_0040;

@@ -1,11 +1,14 @@
 use serde::{Deserialize, Serialize};
 use zup_core::{AppId, SelectedScope, Sha256Digest, Target, hash_bytes};
 
-use crate::{DesiredState, ExecutionPlan, InstallLedger, TargetPath};
+use crate::{ExecutionPlan, InstallationRecord};
 
 /// Binds decisions to their desired content and the installation generation inspected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploymentBinding {
+    pub requirements: crate::DeploymentRequirements,
+    pub installation: zup_core::InstallationId,
+    pub observed_activation: Option<crate::ActivationSelection>,
     pub app_id: AppId,
     pub target: Target,
     pub scope: SelectedScope,
@@ -18,26 +21,29 @@ pub struct DeploymentBinding {
 pub struct BindingMismatch;
 
 impl DeploymentBinding {
-    pub fn desired(
-        desired: &DesiredState<TargetPath, TargetPath>,
-        ledger: Option<&InstallLedger>,
-    ) -> Self {
+    pub fn desired(desired: &crate::BoundDeployment, ledger: Option<&InstallationRecord>) -> Self {
         Self {
+            requirements: desired.requirements.clone(),
+            installation: desired.installation,
+            observed_activation: ledger.map(|ledger| ledger.current.selection()),
             app_id: desired.app.id.clone(),
             target: desired.target,
             scope: desired.scope,
             desired_sha256: Some(fingerprint(desired)),
-            observed_transaction: ledger.map(|ledger| ledger.committed_transaction),
+            observed_transaction: ledger.map(|ledger| ledger.commit.transaction),
         }
     }
 
-    pub(crate) fn uninstall(ledger: &InstallLedger) -> Self {
+    pub(crate) fn recorded(ledger: &InstallationRecord) -> Self {
         Self {
+            requirements: ledger.current.requirements.clone(),
+            installation: ledger.id,
+            observed_activation: Some(ledger.current.selection()),
             app_id: ledger.app_id.clone(),
             target: ledger.target,
             scope: ledger.scope,
             desired_sha256: None,
-            observed_transaction: Some(ledger.committed_transaction),
+            observed_transaction: Some(ledger.commit.transaction),
         }
     }
 }
@@ -45,44 +51,47 @@ impl DeploymentBinding {
 impl ExecutionPlan {
     pub fn validate_desired(
         &self,
-        desired: Option<&DesiredState<TargetPath, TargetPath>>,
+        desired: Option<&crate::BoundDeployment>,
     ) -> Result<&DeploymentBinding, BindingMismatch> {
         let binding = self.binding.as_ref().ok_or(BindingMismatch)?;
         if let Some(desired) = desired {
             desired.validate_resolved().map_err(|_| BindingMismatch)?;
         }
-        match (self.uninstall, desired) {
-            (false, Some(desired))
-                if binding.app_id == desired.app.id
+        match (self.transition, desired) {
+            (crate::DeploymentTransition::Deploy, Some(desired))
+                if binding.requirements == desired.requirements
+                    && binding.app_id == desired.app.id
+                    && binding.installation == desired.installation
                     && binding.target == desired.target
                     && binding.scope == desired.scope
                     && binding.desired_sha256 == Some(fingerprint(desired)) => {}
-            (true, desired)
+            (crate::DeploymentTransition::Remove, desired)
                 if binding.desired_sha256.is_none()
                     && desired.is_none_or(|desired| {
                         binding.app_id == desired.app.id
                             && binding.target == desired.target
                             && binding.scope == desired.scope
                     }) => {}
+            (crate::DeploymentTransition::Maintain, None) if binding.desired_sha256.is_none() => {}
             _ => return Err(BindingMismatch),
         }
         if let Some(desired) = desired
-            && !self.uninstall
+            && !self.transition.is_remove()
         {
             let mut keys = std::collections::BTreeSet::new();
             for effect in &self.files {
                 let resource = desired
-                    .files
-                    .iter()
+                    .fixed_files()
                     .find(|file| file.key == effect.key)
                     .ok_or(BindingMismatch)?;
                 if !keys.insert(&effect.key)
-                    || effect.destination != resource.destination
+                    || &effect.destination != resource.destination()
                     || effect.source_relative != resource.source_relative
                     || effect.expected_sha256 != resource.sha256
                     || effect.expected_size != resource.size
                     || effect.privilege != resource.privilege
                     || effect.executable != resource.executable
+                    || resource.placement.fixed_replacement() != Some(effect.replacement)
                 {
                     return Err(BindingMismatch);
                 }
@@ -95,6 +104,11 @@ impl ExecutionPlan {
                     .ok_or(BindingMismatch)?;
                 if !keys.insert(&effect.key)
                     || effect.id != resource.id.as_str()
+                    || effect.registration
+                        != zup_core::NativeServiceRegistration::for_service(
+                            &resource.execution,
+                            desired.installation,
+                        )
                     || effect.name != resource.name.as_str()
                     || effect.display_name
                         != resource
@@ -126,10 +140,10 @@ impl ExecutionPlan {
                 if !keys.insert(&effect.key)
                     || effect.launcher_path != resource.launcher_path
                     || effect.icon
-                        != desired.files.iter().find_map(|file| {
-                            matches!(file.key, zup_core::ResourceKey::Maintenance { .. })
-                                .then(|| file.destination.clone())
-                        })
+                        != desired
+                            .maintenance
+                            .as_ref()
+                            .and_then(|generation| generation.maintenance_runtime())
                     || effect.target != resource.target
                     || effect.arguments != resource.arguments
                     || effect.working_directory != resource.working_directory
@@ -190,12 +204,14 @@ impl ExecutionPlan {
 
     pub fn validate_generation(
         &self,
-        ledger: Option<&InstallLedger>,
+        ledger: Option<&InstallationRecord>,
     ) -> Result<(), BindingMismatch> {
         let binding = self.binding.as_ref().ok_or(BindingMismatch)?;
-        if binding.observed_transaction != ledger.map(|ledger| ledger.committed_transaction)
+        if binding.observed_transaction != ledger.map(|ledger| ledger.commit.transaction)
+            || binding.observed_activation != ledger.map(|ledger| ledger.current.selection())
             || ledger.is_some_and(|ledger| {
-                binding.app_id != ledger.app_id
+                binding.installation != ledger.id
+                    || binding.app_id != ledger.app_id
                     || binding.target != ledger.target
                     || binding.scope != ledger.scope
             })
@@ -206,7 +222,7 @@ impl ExecutionPlan {
     }
 }
 
-fn fingerprint(desired: &DesiredState<TargetPath, TargetPath>) -> Sha256Digest {
+fn fingerprint(desired: &crate::BoundDeployment) -> Sha256Digest {
     // This contract has no map keys or fallible custom serializers.
     hash_bytes(&serde_json::to_vec(desired).expect("deployment contract serializes"))
 }

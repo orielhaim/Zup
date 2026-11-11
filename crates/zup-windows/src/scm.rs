@@ -5,6 +5,12 @@ use zup_plan::ObservedServiceState;
 
 use crate::cmdline;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScmObservation {
+    pub state: ObservedServiceState,
+    pub registration: zup_core::ObservedServiceRegistration,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ScmError {
     #[error("service manager is unavailable: {0}")]
@@ -13,9 +19,13 @@ pub enum ScmError {
     Unsupported { name: String, reason: String },
     #[error("service `{name}` could not be read: {reason}")]
     Unreadable { name: String, reason: String },
+    #[error(
+        "service `{name}` is marked for deletion; wait for its process and outstanding service handles to close, then recover"
+    )]
+    DeletionPending { name: String },
 }
 
-pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState, ScmError> {
+pub fn query_service(name: &str, target: &Target) -> Result<ScmObservation, ScmError> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .map_err(|error| ScmError::Unavailable(error.to_string()))?;
     let service = match manager.open_service(
@@ -24,7 +34,15 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
     ) {
         Ok(service) => service,
         Err(windows_service::Error::Winapi(error)) if error.raw_os_error() == Some(1060) => {
-            return Ok(ObservedServiceState::Absent);
+            return Ok(ScmObservation {
+                state: ObservedServiceState::Absent,
+                registration: zup_core::ObservedServiceRegistration::Unclaimed,
+            });
+        }
+        Err(windows_service::Error::Winapi(error)) if error.raw_os_error() == Some(1072) => {
+            return Err(ScmError::DeletionPending {
+                name: name.to_owned(),
+            });
         }
         Err(error) => {
             return Err(ScmError::Unreadable {
@@ -127,23 +145,32 @@ pub fn query_service(name: &str, target: &Target) -> Result<ObservedServiceState
             });
         }
     };
-    Ok(ObservedServiceState::Service {
-        native_timeouts: zup_core::NativeServiceTimeouts::Scm,
-        dependencies,
-        failure,
-        execution: zup_core::ServiceExecution::Windows { account },
-        readiness: Default::default(),
-        display_name,
-        command: Box::new(command),
-        start,
-        runtime_state: Some(crate::service_control::runtime(
-            service
-                .query_status()
-                .map_err(|error| ScmError::Unreadable {
-                    name: name.into(),
-                    reason: error.to_string(),
-                })?
-                .current_state,
-        )),
+    let registration =
+        crate::service_claim::observe(name, &service).map_err(|error| ScmError::Unreadable {
+            name: name.into(),
+            reason: error.to_string(),
+        })?;
+    Ok(ScmObservation {
+        registration,
+        state: ObservedServiceState::Service {
+            state_directories: Vec::new(),
+            native_timeouts: zup_core::NativeServiceTimeouts::Scm,
+            dependencies,
+            failure,
+            execution: zup_core::ServiceExecution::WindowsJob { account },
+            readiness: Default::default(),
+            display_name,
+            command: Box::new(command),
+            start,
+            runtime_state: Some(crate::service_control::runtime(
+                service
+                    .query_status()
+                    .map_err(|error| ScmError::Unreadable {
+                        name: name.into(),
+                        reason: error.to_string(),
+                    })?
+                    .current_state,
+            )),
+        },
     })
 }

@@ -111,7 +111,10 @@ impl TargetCapabilities {
         errors
     }
 
-    pub fn planned_resource_errors<P, L>(&self, plan: &crate::DesiredState<P, L>) -> Vec<String> {
+    pub fn planned_resource_errors<P, L, R>(
+        &self,
+        plan: &crate::DesiredState<P, L, R>,
+    ) -> Vec<String> {
         let menu = plan
             .launchers
             .iter()

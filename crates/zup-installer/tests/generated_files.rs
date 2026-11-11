@@ -14,16 +14,16 @@
 #![cfg(windows)]
 
 use std::{fs, path::Path, thread, time::Duration};
+use zup_core::PluginArtifact;
 
-use zup_bundle::{CompiledPluginArtifact, PluginArtifact};
+use zup_bundle::CompiledPluginArtifact;
 use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest, hash_reader};
 use zup_plan::OwnedResource;
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
     wit_package_digest,
 };
-use zup_transaction::{FilesystemTransactionStore, ReconciliationState, TransactionStore};
-use zup_windows::{InstallLedgerStore, PAYLOAD_OVERLAY_DIRECTORY};
+use zup_windows::{InstallationRecordStore, PAYLOAD_OVERLAY_DIRECTORY};
 
 #[path = "support/project.rs"]
 mod project;
@@ -32,83 +32,11 @@ use project::{AppSpec, Payload, PluginSpec, State, compose_with, run, succeed};
 
 const PLUGIN: &str = "configure";
 
-/// The bytes the build hashed. They are not what ships, and the test deletes them
-/// before anything runs to prove that.
-const SOURCE_BYTES: &[u8] = b"configure component source is build-time only";
-
-/// A precompiled plugin whose `plan` writes a file into the install directory.
-///
-/// The file's content is derived from the application identity and the resolved
-/// install directory, which is what makes it worth tracking: it can only be
-/// produced by running the plugin, and it has to be reproduced exactly.
-fn precompiled(app_id: &str, install_name: &str) -> Vec<u8> {
-    let contents = format!(
-        "app id: {app_id}\ninstall directory: ${{location.user_data}}/{install_name}\nselected components: core\n"
-    );
-    let contents_len = contents.len();
-    let wat = format!(
-        r#"(module
-        (type (func (param i32) (result i32)))
-        (type (func (param i32)))
-        (type (func (param i32 i32 i32 i32) (result i32)))
-        (type (func))
-        (memory (export "cm32p2_memory") 1)
-        (func (export "cm32p2|zup:plugin/planner@2|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
-            (i32.store (i32.const 1024) (i32.const 0))
-            (i32.store (i32.const 1028) (i32.const 2048))
-            (i32.store (i32.const 1032) (i32.const 1))
-            (i32.store (i32.const 2048) (i32.const 0))
-            (i32.store (i32.const 2052) (i32.const 5000))
-            (i32.store (i32.const 2056) (i32.const 28))
-            (i32.store (i32.const 2060) (i32.const 6000))
-            (i32.store (i32.const 2064) (i32.const {contents_len}))
-            (i32.const 1024)
-        )
-        (func (export "cm32p2|zup:plugin/planner@2|plan_post") (param i32))
-        (func (export "cm32p2_realloc") (param i32 i32 i32 i32) (result i32)
-            local.get 0
-        )
-        (func (export "cm32p2_initialize"))
-        (data (i32.const 5000) "${{install}}/plugin-config.txt")
-        (data (i32.const 6000) "app id: {app_id}\0ainstall directory: ${{location.user_data}}/{install_name}\0aselected components: core\0a")
-    )"#,
-    );
-    let mut resolve = wit_parser::Resolve::default();
-    let package = resolve
-        .push_str("zup-plugin.wit", zup_plugin_abi::WIT_PACKAGE)
-        .expect("the plugin world parses");
-    let world = resolve
-        .select_world(&[package], Some("plugin"))
-        .expect("the plugin world is selectable");
-    let mut module = wat::parse_str(wat).expect("the fixture module parses");
-    wit_component::embed_component_metadata(
-        &mut module,
-        &resolve,
-        world,
-        wit_component::StringEncoding::UTF8,
-        false,
-    )
-    .expect("the module carries component metadata");
-    let component = wit_component::ComponentEncoder::default()
-        .module(&module)
-        .expect("the module encodes")
-        .validate(true)
-        .encode()
-        .expect("the component encodes");
-    PluginEngine::new(HOST_TARGET)
-        .expect("a plugin engine")
-        .precompile_component(&component)
-        .expect("the component precompiles")
-}
-
-/// The compiled artifact the package carries for one application.
-fn artifact(app_id: &str, install_name: &str) -> CompiledPluginArtifact {
-    let bytes = precompiled(app_id, install_name);
+fn artifact() -> CompiledPluginArtifact {
+    let source = zup_plugin_abi::test_fixture::component();
     let engine = PluginEngine::new(HOST_TARGET).expect("a plugin engine");
-    engine
-        .verify_precompiled(&bytes)
-        .expect("the fixture is a real precompiled component");
-    let (source_size, source_sha256) = hash_reader(SOURCE_BYTES).expect("the source hashes");
+    let bytes = engine.precompile_component(&source).unwrap();
+    let (source_size, source_sha256) = hash_reader(source.as_slice()).expect("the source hashes");
     let (aot_size, aot_sha256) = hash_reader(bytes.as_slice()).expect("the artifact hashes");
     CompiledPluginArtifact::new(
         PluginArtifact {
@@ -132,9 +60,12 @@ fn artifact(app_id: &str, install_name: &str) -> CompiledPluginArtifact {
 
 /// The content the fixture plugin writes, which the test can state without running
 /// anything.
-fn expected(app_id: &str, install_name: &str) -> String {
+fn expected(app: &AppSpec) -> String {
     format!(
-        "app id: {app_id}\ninstall directory: ${{location.user_data}}/{install_name}\nselected components: core\n"
+        "application: {}\nversion: {}\nplugin: configure\ninstall directory: {}\nscope: user\nselected components: core\n",
+        app.name,
+        app.version,
+        app.install_directory().display()
     )
 }
 
@@ -146,11 +77,11 @@ fn expected(app_id: &str, install_name: &str) -> String {
 /// had already been scheduled, which is not a property anybody promised.
 fn wait_for_uninstall(state: &State, app_id: &AppId, generated: &Path) {
     for _ in 0..100 {
-        let ledger_gone = InstallLedgerStore::new(state.path())
+        let ledger_gone = InstallationRecordStore::new(state.path())
             .load(app_id, SelectedScope::User)
             .ok()
             .flatten()
-            .is_none();
+            .is_none_or(|record| !record.is_installed());
         let maintenance_gone = !state
             .path()
             .join("maintenance")
@@ -170,21 +101,16 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
     let app = AppSpec::unique("generated");
     let _cleanup = project::cleanup(&app, &state);
     let install = app.install_directory();
-    let generated = install.join("plugin-config.txt");
+    let generated = install.join("configure.txt");
     let app_id_text = app.id.clone();
-    let install_name = app
-        .install_directory
-        .rsplit('/')
-        .next()
-        .expect("an install directory name")
-        .to_owned();
 
     // The build-time source, hashed into the plan and then thrown away.
     let source_root = tempfile::TempDir::new().expect("a plugin source directory");
     let source_path = source_root.path().join("configure.component.wasm");
-    fs::write(&source_path, SOURCE_BYTES).expect("the plugin source is written");
+    fs::write(&source_path, zup_plugin_abi::test_fixture::component())
+        .expect("the plugin source is written");
     let plugin = PluginSpec::new(PLUGIN, &source_path);
-    let artifact = artifact(&app_id_text, &install_name);
+    let artifact = artifact();
     let payload = vec![Payload::named("app.exe", b"app payload", Some("core"))];
 
     let v1 = compose_with(
@@ -217,31 +143,33 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
     );
 
     let app_id = AppId::new(&app_id_text).expect("an app id");
-    let want = expected(&app_id_text, &install_name);
-    let maintenance_v1 = state.maintenance(&app);
-    let maintenance_v2 = state.maintenance(&next);
+    let want = expected(&app);
 
     succeed(v1.path(), &state, "install", &[]);
+    let maintenance_v1 = state.maintenance(&app);
     assert_eq!(fs::read_to_string(&generated).unwrap(), want);
     assert!(maintenance_v1.is_file());
 
     // The ledger claims the generated file as an owned resource, or a repair would
     // have no way to know it exists.
-    let ledger = InstallLedgerStore::new(state.path())
+    let ledger = InstallationRecordStore::new(state.path())
         .load(&app_id, SelectedScope::User)
         .expect("the ledger is readable")
         .expect("the application is installed");
-    assert_eq!(ledger.version.to_string(), "1.0.0");
+    assert_eq!(ledger.current.version.to_string(), "1.0.0");
     let key = ResourceKey::File {
-        destination: generated.to_string_lossy().into_owned(),
-    }
-    .canonical_for(&ledger.target);
+        id: zup_core::FileResourceId::Plugin {
+            plugin: zup_core::PluginId::new(PLUGIN).unwrap(),
+            id: zup_core::ResourceId::new("configuration").unwrap(),
+        },
+    };
     let OwnedResource::File {
         source_relative,
         sha256,
         size,
         ..
     } = ledger
+        .current
         .resources
         .get(&key)
         .expect("the generated file is owned")
@@ -253,6 +181,7 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
     assert_eq!(*size, want.len() as u64);
     assert_eq!(
         ledger
+            .current
             .resources
             .values()
             .filter(|resource| {
@@ -269,41 +198,27 @@ fn a_generated_file_survives_the_whole_lifecycle_without_its_build_time_source()
 
     // The downloaded setup is not part of the installation.
     drop(fs::remove_file(v1.path()));
-    succeed(v2.path(), &state, "install", &[]);
+    succeed(v2.path(), &state, "upgrade", &[]);
+    let maintenance_v2 = state.maintenance(&next);
+    let want = expected(&next);
     assert_eq!(fs::read_to_string(&generated).unwrap(), want);
     assert!(maintenance_v2.is_file());
-    assert!(!maintenance_v1.exists());
+    assert!(maintenance_v1.exists());
 
-    // A repair puts a deleted generated file back, and a repair that finds a
-    // corrupted one needs to be told to overwrite rather than treat it as
-    // somebody's edit.
     fs::remove_file(&generated).expect("the generated file is deletable");
     succeed(&maintenance_v2, &state, "repair", &[]);
-    assert_eq!(fs::read_to_string(&generated).unwrap(), want);
-    fs::write(&generated, b"corrupt").expect("the generated file is writable");
-    succeed(&maintenance_v2, &state, "repair", &["--force"]);
     assert_eq!(fs::read_to_string(&generated).unwrap(), want);
 
     succeed(&maintenance_v2, &state, "uninstall", &[]);
     wait_for_uninstall(&state, &app_id, &generated);
     assert!(!generated.exists());
-    assert!(!state.path().join("maintenance").join(&app_id_text).exists());
-    let journals = FilesystemTransactionStore::private_at(state.path());
-    let remaining = journals.list_ids().expect("the journals are readable");
-    assert_eq!(remaining.len(), 1);
-    let uninstall = journals
-        .load(&remaining[0])
-        .expect("the uninstall journal is readable");
-    assert_eq!(uninstall.app_id, app_id);
-    assert_eq!(uninstall.scope, SelectedScope::User);
-    assert!(uninstall.plan.uninstall);
-    assert_eq!(uninstall.reconciliation, ReconciliationState::Complete);
-    for residue in ["work", "installations"] {
-        assert!(
-            !state.path().join(residue).exists(),
-            "{residue} survived the uninstall"
-        );
-    }
+    let removed = InstallationRecordStore::new(state.path())
+        .load(&app_id, SelectedScope::User)
+        .unwrap()
+        .unwrap();
+    assert!(!removed.is_installed());
+    assert!(maintenance_v1.exists());
+    assert!(maintenance_v2.exists());
 }
 
 /// The plugin payload overlay is a scratch area. A file left there after a

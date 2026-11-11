@@ -63,7 +63,14 @@ pub struct InstallOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedDeployment {
+    pub revision: zup_core::ActivationRevision,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaintenanceState {
+    pub retained: Vec<RetainedDeployment>,
     pub installed_version: String,
     pub components: Vec<ComponentOption>,
     #[serde(default)]
@@ -156,8 +163,12 @@ impl Surface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
+    Recover,
     Install,
     Upgrade,
+    Downgrade,
+    Rollback,
+    Cleanup,
     Modify,
     Repair,
     Uninstall,
@@ -198,6 +209,7 @@ pub struct Snapshot {
     pub progress: Option<ProgressPresentation>,
     pub plan: PlanStatus,
     pub diagnostic: Option<DiagnosticPresentation>,
+    pub recovery_transaction: Option<zup_core::TransactionId>,
     pub update: Option<UpdatePresentation>,
     pub repair_drift: Vec<String>,
     pub launch: Option<LaunchTarget>,

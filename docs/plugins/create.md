@@ -46,6 +46,7 @@ struct Configure;
 impl Plugin for Configure {
     fn plan(context: Context) -> Result<Plan, Error> {
         Ok(Plan::new().generated_file(GeneratedFile::text(
+            "configuration",
             "${install}/configure.txt",
             format!("installing {} for {}", context.app_name, context.plugin_id),
         )))

@@ -76,7 +76,7 @@ pub fn app() -> App {
         name: NonEmptyString::new("Acme").unwrap(),
         version: semver::Version::parse("1.4.0").unwrap(),
         publisher: Some(NonEmptyString::new("Acme Inc.").unwrap()),
-        main: Some(Template::parse("${install}/bin/Acme.exe").unwrap()),
+        main: None,
         description: None,
     }
 }
@@ -91,6 +91,8 @@ pub fn updates() -> UpdateConfig {
 
 pub fn install() -> Install {
     Install {
+        generation_readers: Default::default(),
+        data: Vec::new(),
         scope: InstallScope::Either,
         directory: InstallDirectory {
             user: Some(Template::parse("${location.programs}/Acme").unwrap()),
@@ -113,13 +115,13 @@ fn filler(seed: &str, target: u64) -> String {
     out
 }
 
-fn plugin_metadata(target: &str) -> zup_bundle::PluginArtifact {
+fn plugin_metadata(target: &str) -> zup_core::PluginArtifact {
     let parsed = Target::parse(target).unwrap();
     let mut aot = Vec::new();
     aot.extend_from_slice(filler("plugin-aot", 7).as_bytes());
     aot.extend_from_slice(target.as_bytes());
     let digest = zup_core::Sha256Digest::from_bytes(Sha256::digest(&aot).into());
-    zup_bundle::PluginArtifact {
+    zup_core::PluginArtifact {
         plugin_id: PluginId::new("acme-plugins").unwrap(),
         source_size: 16,
         source_sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(b"source").into()),
@@ -199,17 +201,23 @@ pub fn build_target_with_preset(
 
     let mut resolved_files = Vec::new();
     let mut total = 0u64;
-    for (name, content, path) in &files {
+    for (index, (name, content, path)) in files.iter().enumerate() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, content).unwrap();
         let size = content.len() as u64;
         total += size;
-        resolved_files.push(zup_build::ResolvedFile {
+        resolved_files.push(zup_core::ResolvedFile {
+            id: zup_core::PayloadId::TreeMember {
+                declaration: zup_core::ResourceId::new(format!("payload-{index}")).unwrap(),
+                member: zup_core::RelativePath::new(name.as_str()).unwrap(),
+            },
             source: path.clone(),
             source_relative: zup_core::RelativePath::new(name.as_str()).unwrap(),
-            destination: Template::parse(&format!("${{install}}/{name}")).unwrap(),
+            placement: zup_core::PayloadPlacement::Generation {
+                path: zup_core::RelativePath::new(name.as_str()).unwrap(),
+            },
             size,
             sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content.as_bytes()).into()),
             component: target
@@ -223,19 +231,16 @@ pub fn build_target_with_preset(
     let mut installer_files: Vec<FileMapping> = resolved_files
         .iter()
         .map(|file| FileMapping {
+            id: file.id.declaration().clone(),
             source: "embedded".to_owned(),
-            destination: file.destination.clone(),
+            placement: zup_core::PayloadMapping::default(),
             component: file.component.clone(),
             when: None,
             allow_empty: false,
             executable: false,
         })
         .collect();
-    installer_files.sort_by(|left, right| {
-        left.destination
-            .to_string()
-            .cmp(&right.destination.to_string())
-    });
+    installer_files.sort_by(|left, right| left.id.cmp(&right.id));
 
     let plugins = target
         .plugin
@@ -319,7 +324,7 @@ pub fn build_target_with_preset(
         file_associations: Vec::new(),
     };
 
-    let plan = zup_build::TargetBuildPlan {
+    let plan = zup_core::TargetBuildPlan {
         installer,
         prerequisites: Vec::new(),
         plugins: Vec::new(),

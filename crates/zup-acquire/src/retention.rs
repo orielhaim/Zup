@@ -130,6 +130,9 @@ impl RetentionState {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionReport {
+    pub busy: u64,
+    pub transfer_entries_removed: u64,
+    pub transfer_bytes_freed: u64,
     /// Objects examined.
     pub examined: u64,
     /// Objects kept because the installation references them.
@@ -145,7 +148,7 @@ pub struct RetentionReport {
 impl RetentionReport {
     /// Whether the sweep changed anything.
     pub const fn is_empty(&self) -> bool {
-        self.removed == 0
+        self.removed == 0 && self.transfer_entries_removed == 0
     }
 }
 
@@ -154,28 +157,27 @@ pub fn retention_path(cache_root: &Path) -> PathBuf {
     cache_root.join(RETENTION_FILE)
 }
 
-/// Read a cache's retention record, or a default when it has none.
-///
-/// A missing or unreadable record is not an error: a machine that never
-/// recorded one is a machine under the default policy, and refusing to sweep
-/// because of that would leak disk forever.
-pub fn read_retention(cache_root: &Path) -> RetentionState {
-    let fallback = RetentionState {
-        schema: RETENTION_SCHEMA,
-        policy: CachePolicy::default().as_str().to_owned(),
-        release: None,
-        pinned: None,
-    };
-    let Ok(bytes) = std::fs::read(retention_path(cache_root)) else {
-        return fallback;
-    };
+/// Read the recorded policy. Missing or unreadable authority refuses collection.
+pub fn read_retention(cache_root: &Path) -> Result<RetentionState, CacheError> {
+    let path = retention_path(cache_root);
+    let file = std::fs::File::open(&path).map_err(|error| CacheError::io(&path, error))?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.take(MAX_RETENTION_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| CacheError::io(&path, error))?;
     if bytes.len() as u64 > MAX_RETENTION_BYTES {
-        return fallback;
+        return Err(CacheError::invalid(
+            path,
+            "retention state exceeds its size limit",
+        ));
     }
-    serde_json::from_slice::<RetentionState>(&bytes)
-        .ok()
-        .filter(|state| state.validate().is_ok())
-        .unwrap_or(fallback)
+    let state: RetentionState = serde_json::from_slice(&bytes)
+        .map_err(|error| CacheError::invalid(&path, error.to_string()))?;
+    state
+        .validate()
+        .map_err(|error| CacheError::invalid(path, error))?;
+    Ok(state)
 }
 
 /// Write a cache's retention record durably enough to survive a crash.
@@ -183,6 +185,29 @@ pub fn read_retention(cache_root: &Path) -> RetentionState {
 /// A retention record that fails to write is a performance outcome, never a
 /// correctness one: the worst case is a sweep that keeps more than it should.
 pub fn write_retention(cache_root: &Path, state: &RetentionState) -> Result<(), CacheError> {
+    let _lock = retention_lock(cache_root)?;
+    publish_retention(cache_root, state)
+}
+
+fn retention_lock(root: &Path) -> Result<std::fs::File, CacheError> {
+    let path = root.join("retention.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| CacheError::io(&path, error))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(CacheError::Locked {
+            digest: "retention policy".into(),
+        }),
+        Err(std::fs::TryLockError::Error(error)) => Err(CacheError::io(path, error)),
+    }
+}
+
+fn publish_retention(cache_root: &Path, state: &RetentionState) -> Result<(), CacheError> {
     state
         .validate()
         .map_err(|detail| CacheError::invalid(retention_path(cache_root), detail))?;
@@ -215,7 +240,33 @@ pub fn write_retention(cache_root: &Path, state: &RetentionState) -> Result<(), 
 /// running right now may hold a reference no sweep can see. So an object is
 /// exempt when the policy retains it *and* it is inside the window, or when it is
 /// merely inside the grace.
-pub fn sweep(cache: &ContentCache, state: &RetentionState, grace: Duration) -> RetentionReport {
+pub fn sweep(
+    cache: &ContentCache,
+    state: &RetentionState,
+    grace: Duration,
+) -> Result<RetentionReport, CacheError> {
+    sweep_protected(cache, state, grace, &[])
+}
+
+pub(crate) fn sweep_protected(
+    cache: &ContentCache,
+    state: &RetentionState,
+    grace: Duration,
+    protected: &[Sha256Digest],
+) -> Result<RetentionReport, CacheError> {
+    let _lock = retention_lock(cache.root())?;
+    sweep_locked(cache, state, grace, protected)
+}
+
+fn sweep_locked(
+    cache: &ContentCache,
+    state: &RetentionState,
+    grace: Duration,
+    protected: &[Sha256Digest],
+) -> Result<RetentionReport, CacheError> {
+    state
+        .validate()
+        .map_err(|error| CacheError::invalid(retention_path(cache.root()), error))?;
     let mut report = RetentionReport::default();
     let pinned = state.pinned();
     let window = state.window().unwrap_or(Duration::ZERO);
@@ -225,7 +276,11 @@ pub fn sweep(cache: &ContentCache, state: &RetentionState, grace: Duration) -> R
         let age = object
             .modified
             .and_then(|modified| now.duration_since(modified).ok());
-        let fresh = age.is_some_and(|age| age < grace);
+        if protected.contains(&object.digest) {
+            report.pinned += 1;
+            continue;
+        }
+        let fresh = age.is_none_or(|age| age < grace);
         if fresh {
             report.fresh += 1;
             continue;
@@ -237,12 +292,19 @@ pub fn sweep(cache: &ContentCache, state: &RetentionState, grace: Duration) -> R
             report.pinned += 1;
             continue;
         }
-        if let Ok(freed) = cache.remove(&object.digest) {
-            report.removed += 1;
-            report.freed = report.freed.saturating_add(freed);
+        match cache.remove(&object.digest) {
+            Ok(freed) => {
+                report.removed += 1;
+                report.freed = report.freed.saturating_add(freed);
+            }
+            Err(CacheError::Locked { .. }) => report.busy += 1,
+            Err(error) => return Err(error),
         }
     }
-    report
+    (report.transfer_entries_removed, report.transfer_bytes_freed) =
+        cache.collect_idle_transfers(grace)?;
+    report.freed = report.freed.saturating_add(report.transfer_bytes_freed);
+    Ok(report)
 }
 
 /// Apply a policy to a cache root without holding the cache open.
@@ -251,7 +313,18 @@ pub fn sweep(cache: &ContentCache, state: &RetentionState, grace: Duration) -> R
 /// construct a session to make a decision about disk.
 pub fn sweep_root(cache_root: &Path, grace: Duration) -> Result<RetentionReport, CacheError> {
     let cache = ContentCache::open(cache_root, CachePolicy::Auto)?;
-    Ok(sweep(&cache, &read_retention(cache_root), grace))
+    let _lock = retention_lock(cache_root)?;
+    sweep_locked(&cache, &read_retention(cache_root)?, grace, &[])
+}
+
+pub fn maintain_cache(
+    cache: &ContentCache,
+    state: &RetentionState,
+    grace: Duration,
+) -> Result<RetentionReport, CacheError> {
+    let _lock = retention_lock(cache.root())?;
+    publish_retention(cache.root(), state)?;
+    sweep_locked(cache, state, grace, &[])
 }
 
 /// How long an unreferenced object is kept under the default grace.

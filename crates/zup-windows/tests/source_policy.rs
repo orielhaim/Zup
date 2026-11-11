@@ -6,10 +6,10 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zup_build::{
-    BuildError, PortableSourceFilePolicy, Sha256Digest, SourceFilePolicy, materialize_with_policy,
-};
-use zup_manifest::{Manifest, TargetOverrides, compile, parse, select_targets};
+use zup_build::{BuildError, materialize_with_policy};
+use zup_core::TargetOverrides;
+use zup_core::{PortableSourceFilePolicy, Sha256Digest, SourceFilePolicy};
+use zup_manifest::{Manifest, compile, parse, select_targets};
 use zup_windows::WindowsSourceFilePolicy;
 
 #[path = "fixture/junction.rs"]
@@ -43,8 +43,9 @@ scope = "user"
 user = "${{location.user_data}}/Acme"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 
 [[prerequisites]]
 id = "runtime"
@@ -73,7 +74,7 @@ fn materialize_target(
     dir: &Path,
     manifest: &Manifest,
     policy: &dyn SourceFilePolicy,
-) -> Result<zup_build::TargetBuildPlan, BuildError> {
+) -> Result<zup_core::TargetBuildPlan, BuildError> {
     let overrides = TargetOverrides::default();
     let config = select_targets(manifest, &["default"], &overrides)
         .unwrap()

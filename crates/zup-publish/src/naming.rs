@@ -1,141 +1,93 @@
 use zup_acquire::RelativeContentPath;
+use zup_core::Sha256Digest;
 
 pub const ASSET_NAME_MAX: usize = 255;
-
 pub const DOCUMENT_PREFIX: &str = "zup-";
-
 pub const DOCUMENT_SUFFIX: &str = ".json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocumentKind<'a> {
-    TufMetadata {
-        version_role: &'a str,
-    },
-    Release {
-        channel: &'a str,
-        version: Option<&'a str>,
-    },
-    Catalog {
-        channel: &'a str,
-    },
-    Variant {
-        variant: &'a str,
-    },
-    Package {
-        variant: &'a str,
-    },
-}
-
-impl DocumentKind<'_> {
-    pub fn channel(&self) -> Option<&str> {
-        match self {
-            Self::TufMetadata { .. } | Self::Package { .. } | Self::Variant { .. } => None,
-            Self::Release { channel, .. } | Self::Catalog { channel } => Some(channel),
-        }
-    }
+    TufMetadata { version_role: &'a str },
+    Channel { channel: &'a str },
+    Content { digest: Sha256Digest },
+    Package { variant: &'a str },
 }
 
 pub fn document_name(kind: &DocumentKind<'_>) -> String {
     let body = match kind {
         DocumentKind::TufMetadata { version_role } => format!("tuf-{version_role}"),
-        DocumentKind::Release {
-            channel,
-            version: None,
-        } => format!("release-{channel}"),
-        DocumentKind::Release {
-            channel,
-            version: Some(version),
-        } => format!("release-{channel}-{version}"),
-        DocumentKind::Catalog { channel } => format!("catalog-{channel}"),
-        DocumentKind::Variant { variant } => format!("variant-{variant}"),
+        DocumentKind::Channel { channel } => format!("release-{channel}"),
+        DocumentKind::Content { digest } => format!("document-{}", digest.to_hex()),
         DocumentKind::Package { variant } => format!("package-{variant}"),
     };
     format!("{DOCUMENT_PREFIX}{body}{DOCUMENT_SUFFIX}")
 }
 
 pub fn document_path(name: &str) -> Result<RelativeContentPath, String> {
+    check_asset_name(name)?;
     let body = name
         .strip_prefix(DOCUMENT_PREFIX)
         .and_then(|body| body.strip_suffix(DOCUMENT_SUFFIX))
-        .ok_or_else(|| format!("`{name}` is not a zup release document name"))?;
-    let path = if let Some(version_role) = body.strip_prefix("tuf-") {
-        format!("metadata/{version_role}{DOCUMENT_SUFFIX}")
-    } else if let Some(rest) = body.strip_prefix("release-") {
-        match rest.split_once('-') {
-            Some((channel, version)) if looks_like_version(version) => {
-                format!("releases/{channel}/versions/{version}{DOCUMENT_SUFFIX}")
-            }
-            _ => format!("releases/{rest}{DOCUMENT_SUFFIX}"),
+        .ok_or_else(|| format!("`{name}` is not a zup document name"))?;
+    let path = if let Some(role) = body.strip_prefix("tuf-").filter(|role| !role.is_empty()) {
+        format!("metadata/{role}.json")
+    } else if let Some(channel) = body.strip_prefix("release-") {
+        zup_acquire::check_channel(channel).map_err(str::to_owned)?;
+        zup_acquire::release_path(channel)
+            .map_err(str::to_owned)?
+            .to_string()
+    } else if let Some(hex) = body.strip_prefix("document-") {
+        let digest: Sha256Digest = hex
+            .parse()
+            .map_err(|_| "document name has an invalid SHA-256 digest".to_owned())?;
+        if digest.to_hex() != hex {
+            return Err("document name must use a lowercase digest".into());
         }
-    } else if let Some(channel) = body.strip_prefix("catalog-") {
-        format!("releases/{channel}/catalog{DOCUMENT_SUFFIX}")
-    } else if let Some(variant) = body.strip_prefix("variant-") {
-        format!("releases/_/variants/{variant}{DOCUMENT_SUFFIX}")
+        zup_acquire::document_path(&digest).to_string()
     } else if let Some(variant) = body.strip_prefix("package-") {
-        format!("releases/_/packages/{variant}{DOCUMENT_SUFFIX}")
+        zup_acquire::check_segment(variant).map_err(str::to_owned)?;
+        format!("releases/_/packages/{variant}.json")
     } else {
-        return Err(format!("`{name}` is not a zup release document name"));
+        return Err(format!("`{name}` is not a zup document name"));
     };
-    RelativeContentPath::parse(&path).map_err(|reason| reason.to_owned())
-}
-
-fn looks_like_version(segment: &str) -> bool {
-    let Some((head, _)) = segment.split_once('.') else {
-        return false;
-    };
-    !head.is_empty() && head.bytes().all(|byte| byte.is_ascii_digit())
+    RelativeContentPath::parse(&path).map_err(str::to_owned)
 }
 
 pub fn asset_name(path: &RelativeContentPath) -> Result<String, String> {
-    let path = path.to_string();
-    if let Some(rest) = path.strip_prefix("metadata/") {
-        if let Some(version_role) = rest.strip_suffix(DOCUMENT_SUFFIX) {
-            return Ok(document_name(&DocumentKind::TufMetadata { version_role }));
+    let text = path.to_string();
+    let kind = if let Some(role) = text
+        .strip_prefix("metadata/")
+        .and_then(|role| role.strip_suffix(DOCUMENT_SUFFIX))
+        .filter(|role| !role.is_empty())
+    {
+        DocumentKind::TufMetadata { version_role: role }
+    } else if let Some(hex) = text.strip_prefix("documents/sha256/") {
+        let hex = hex.replace('/', "");
+        let digest: Sha256Digest = hex
+            .parse()
+            .map_err(|_| "document path has an invalid SHA-256 digest".to_owned())?;
+        if zup_acquire::document_path(&digest) != *path {
+            return Err("document path is not canonical".into());
         }
-        return Err(format!("`{path}` is not a zup release document"));
-    }
-    if let Some(rest) = path.strip_prefix("releases/") {
-        if let Some(channel) = rest.strip_suffix(DOCUMENT_SUFFIX) {
-            return Ok(document_name(&DocumentKind::Release {
-                channel,
-                version: None,
-            }));
-        }
-        let Some((channel, tail)) = rest.split_once('/') else {
-            return Err(format!("`{path}` is not a zup release document"));
-        };
-        if let Some(version) = tail
-            .strip_prefix("versions/")
-            .and_then(|v| v.strip_suffix(DOCUMENT_SUFFIX))
-        {
-            return Ok(document_name(&DocumentKind::Release {
-                channel,
-                version: Some(version),
-            }));
-        }
-        if tail == format!("catalog{DOCUMENT_SUFFIX}") {
-            return Ok(document_name(&DocumentKind::Catalog { channel }));
-        }
-        if let Some(variant) = tail
-            .strip_prefix("variants/")
-            .and_then(|v| v.strip_suffix(DOCUMENT_SUFFIX))
-        {
-            return Ok(document_name(&DocumentKind::Variant { variant }));
-        }
-        if let Some(variant) = tail
-            .strip_prefix("packages/")
-            .and_then(|v| v.strip_suffix(DOCUMENT_SUFFIX))
-        {
-            return Ok(document_name(&DocumentKind::Package { variant }));
-        }
-    }
-    if path.starts_with("blobs/") {
-        return Err(format!(
-            "`{path}` is one content object; a release publishes content as packages, \
-             not as one asset per object"
-        ));
-    }
-    Err(format!("`{path}` is not a zup release document"))
+        DocumentKind::Content { digest }
+    } else if let Some(variant) = text
+        .strip_prefix("releases/_/packages/")
+        .and_then(|variant| variant.strip_suffix(DOCUMENT_SUFFIX))
+    {
+        zup_acquire::check_segment(variant).map_err(str::to_owned)?;
+        DocumentKind::Package { variant }
+    } else if let Some(channel) = text
+        .strip_prefix("releases/")
+        .and_then(|channel| channel.strip_suffix(DOCUMENT_SUFFIX))
+    {
+        zup_acquire::check_channel(channel).map_err(str::to_owned)?;
+        DocumentKind::Channel { channel }
+    } else {
+        return Err(format!("`{text}` is not a zup document path"));
+    };
+    let name = document_name(&kind);
+    check_asset_name(&name)?;
+    Ok(name)
 }
 
 pub fn package_name(application: &str, variant: &str) -> String {

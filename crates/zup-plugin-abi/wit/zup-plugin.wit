@@ -22,12 +22,20 @@ interface planner {
     desktop,
   }
 
+  enum fixed-replacement {
+    atomic,
+    quiescent,
+  }
+
   record generated-file {
+    id: string,
+    replacement: fixed-replacement,
     destination: string,
     contents: list<u8>,
   }
 
   record launcher {
+    id: string,
     location: launcher-location,
     name: string,
     target: string,
@@ -36,6 +44,7 @@ interface planner {
   }
 
   record path-entry {
+    id: string,
     value: string,
   }
 
@@ -95,7 +104,7 @@ interface planner {
   }
 
   variant service-execution {
-    windows(windows-service-account),
+    windows-job(windows-service-account),
     systemd-dynamic-user,
     systemd-user(systemd-user),
     openrc-user(systemd-user),
@@ -129,7 +138,7 @@ interface planner {
     failure: service-failure-policy,
     execution: service-execution,
     id: string,
-    name: string,
+    native-name: option<string>,
     display-name: option<string>,
     binary: string,
     arguments: list<string>,
@@ -158,7 +167,39 @@ interface planner {
     executable: string,
   }
 
+  variant data-access {
+    owner,
+    services(list<string>),
+  }
+
+  record data-path {
+    path: string,
+    access: data-access,
+  }
+
+  variant data-location {
+    path(data-path),
+    service(string),
+  }
+
+  record data-schema {
+    writes: u32,
+    reads: list<u32>,
+  }
+
+  variant data-compatibility {
+    stable,
+    schema(data-schema),
+  }
+
+  record data-directory {
+    id: string,
+    location: data-location,
+    compatibility: data-compatibility,
+  }
+
   variant resource-item {
+    data(data-directory),
     generated-file(generated-file),
     launcher(launcher),
     path-entry(path-entry),

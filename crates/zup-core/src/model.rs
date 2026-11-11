@@ -25,9 +25,34 @@ pub struct App {
     #[serde(default)]
     pub publisher: Option<NonEmptyString>,
     #[serde(default)]
-    pub main: Option<Template>,
+    #[serde(deserialize_with = "deserialize_main")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<MainReference>"))]
+    pub main: Option<crate::PayloadId>,
     #[serde(default)]
     pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(untagged)]
+enum MainReference {
+    Id(crate::PayloadId),
+    Member(crate::RelativePath),
+}
+
+fn deserialize_main<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::PayloadId>, D::Error> {
+    Ok(
+        Option::<MainReference>::deserialize(deserializer)?.map(|reference| match reference {
+            MainReference::Id(id) => id,
+            MainReference::Member(member) => crate::PayloadId::TreeMember {
+                declaration: crate::ResourceId::new("application")
+                    .expect("valid application resource id"),
+                member,
+            },
+        }),
+    )
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,12 +112,12 @@ impl std::fmt::Display for Frontend {
 pub struct Install {
     pub scope: InstallScope,
     #[serde(default)]
+    pub generation_readers: crate::GenerationReaders,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<crate::PersistentDirectory>,
+    #[serde(default)]
     pub directory: InstallDirectory,
-    #[serde(
-        default,
-        alias = "allow_install_directory",
-        alias = "allow_install_dir"
-    )]
+    #[serde(default)]
     pub allow_directory_override: bool,
 }
 
@@ -261,8 +286,10 @@ pub struct PluginBinding {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FileMapping {
+    pub id: crate::ResourceId,
     pub source: String,
-    pub destination: Template,
+    #[serde(default)]
+    pub placement: crate::PayloadMapping,
     #[serde(default)]
     pub component: Option<ComponentId>,
     #[serde(default)]
@@ -271,19 +298,83 @@ pub struct FileMapping {
     /// Allow a pattern that matches zero files. Default: reject.
     pub allow_empty: bool,
     #[serde(default)]
-    /// This file is intended to be executable.
-    ///
-    /// The intent is portable; how it is honoured is not. A backend that has
-    /// filesystem modes applies one, and a backend that does not has nothing to
-    /// change. What is *not* portable is a raw mode, so there is deliberately no
-    /// way to write `0755` here: a build machine on Windows has no meaningful mode
-    /// bits to preserve, and a mode authored on Linux would silently disagree with
-    /// the same manifest built elsewhere.
-    ///
-    /// Not inferred from the file's bytes either. A script, a data file and an ELF
-    /// are each identifiable without permission bits, but a file happening to be
-    /// ELF does not make it something a user should be able to run.
+    /// Additional executable payloads. The application main is executable automatically.
     pub executable: bool,
+}
+
+impl FileMapping {
+    pub fn member_id(&self, member: &crate::RelativePath) -> crate::PayloadId {
+        match self.placement {
+            crate::PayloadMapping::GenerationFile { .. }
+            | crate::PayloadMapping::FixedFile { .. } => crate::PayloadId::File {
+                declaration: self.id.clone(),
+            },
+            crate::PayloadMapping::Generation { .. } | crate::PayloadMapping::Fixed { .. } => {
+                crate::PayloadId::TreeMember {
+                    declaration: self.id.clone(),
+                    member: member.clone(),
+                }
+            }
+        }
+    }
+
+    pub fn placement_for(&self, id: &crate::PayloadId) -> Option<crate::PayloadPlacement> {
+        if id.declaration() != &self.id {
+            return None;
+        }
+        match (&self.placement, id) {
+            (crate::PayloadMapping::GenerationFile { path }, crate::PayloadId::File { .. }) => {
+                Some(crate::PayloadPlacement::Generation { path: path.clone() })
+            }
+            (
+                crate::PayloadMapping::FixedFile { path, replacement },
+                crate::PayloadId::File { .. },
+            ) => Some(crate::PayloadPlacement::Fixed {
+                path: path.clone(),
+                replacement: *replacement,
+            }),
+            (
+                crate::PayloadMapping::Generation { .. } | crate::PayloadMapping::Fixed { .. },
+                crate::PayloadId::TreeMember { member, .. },
+            ) => Some(self.member_placement(member)),
+            _ => None,
+        }
+    }
+
+    pub fn requires_execution(
+        &self,
+        id: &crate::PayloadId,
+        main: Option<&crate::PayloadId>,
+    ) -> bool {
+        self.executable || main == Some(id)
+    }
+    pub fn member_placement(&self, member: &crate::RelativePath) -> crate::PayloadPlacement {
+        match &self.placement {
+            crate::PayloadMapping::GenerationFile { path } => {
+                crate::PayloadPlacement::Generation { path: path.clone() }
+            }
+            crate::PayloadMapping::FixedFile { path, replacement } => {
+                crate::PayloadPlacement::Fixed {
+                    path: path.clone(),
+                    replacement: *replacement,
+                }
+            }
+            crate::PayloadMapping::Generation { directory } => {
+                crate::PayloadPlacement::Generation {
+                    path: directory
+                        .as_ref()
+                        .map_or_else(|| member.clone(), |base| base.join(member)),
+                }
+            }
+            crate::PayloadMapping::Fixed {
+                directory,
+                replacement,
+            } => crate::PayloadPlacement::Fixed {
+                path: directory.join_relative(member),
+                replacement: *replacement,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -308,6 +399,7 @@ impl std::fmt::Display for LauncherLocation {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Launcher {
+    pub id: crate::ResourceId,
     pub location: LauncherLocation,
     pub name: NonEmptyString,
     pub target: Template,
@@ -325,6 +417,7 @@ pub struct Launcher {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PathEntry {
+    pub id: crate::ResourceId,
     pub value: Template,
     #[serde(default)]
     pub component: Option<ComponentId>,
@@ -350,7 +443,8 @@ pub struct Service {
     pub failure: crate::ServiceFailurePolicy,
     pub execution: crate::ServiceExecution,
     pub id: ServiceId,
-    pub name: NonEmptyString,
+    #[serde(default)]
+    pub native_name: Option<NonEmptyString>,
     #[serde(default)]
     pub display_name: Option<NonEmptyString>,
     pub binary: Template,

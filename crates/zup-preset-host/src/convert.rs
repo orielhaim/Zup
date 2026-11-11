@@ -69,6 +69,7 @@ pub fn plan(value: &zup_presentation::PlanPreview) -> PlanPreview {
         selected_components: components(&value.selected_components),
         estimated_bytes: value.estimated_bytes,
         download_bytes: value.download_bytes,
+        storage: value.storage,
         requires_authorization: value.requires_authorization,
         groups: value.groups.iter().map(group).collect(),
         requirements: value.requirements.clone(),

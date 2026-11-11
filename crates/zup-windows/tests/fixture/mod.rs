@@ -13,13 +13,15 @@ pub fn app() -> App {
         name: NonEmptyString::new("Acme").unwrap(),
         version: semver::Version::parse("1.4.0").unwrap(),
         publisher: Some(NonEmptyString::new("Acme Inc.").unwrap()),
-        main: Some(Template::parse("${install}/bin/Acme.exe").unwrap()),
+        main: None,
         description: None,
     }
 }
 
 fn install() -> Install {
     Install {
+        generation_readers: Default::default(),
+        data: Vec::new(),
         scope: InstallScope::Either,
         directory: InstallDirectory {
             user: Some(Template::parse("${location.programs}/Acme").unwrap()),
@@ -141,10 +143,21 @@ fn build(
         std::fs::write(path, content).expect("fixture file");
         let size = content.len() as u64;
         total += size;
-        resolved_files.push(zup_build::ResolvedFile {
+        resolved_files.push(zup_core::ResolvedFile {
             source: path.clone(),
             source_relative: zup_core::RelativePath::new(name.as_str()).unwrap(),
-            destination: Template::parse(&format!("${{install}}/{name}")).unwrap(),
+            id: zup_core::PayloadId::TreeMember {
+                declaration: zup_core::ResourceId::new(if name.ends_with(".exe") {
+                    "executables"
+                } else {
+                    "resources"
+                })
+                .unwrap(),
+                member: zup_core::RelativePath::new(name).unwrap(),
+            },
+            placement: zup_core::PayloadPlacement::Generation {
+                path: zup_core::RelativePath::new(name).unwrap(),
+            },
             size,
             sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content.as_bytes()).into()),
             component: None,
@@ -153,24 +166,20 @@ fn build(
         });
     }
 
-    let mut installer_files: Vec<FileMapping> = resolved_files
-        .iter()
-        .map(|file| FileMapping {
+    let installer_files: Vec<FileMapping> = [("executables", true), ("resources", false)]
+        .into_iter()
+        .map(|(id, executable)| FileMapping {
+            id: zup_core::ResourceId::new(id).unwrap(),
             source: "embedded".to_owned(),
-            destination: file.destination.clone(),
+            placement: zup_core::PayloadMapping::default(),
             component: None,
             when: None,
             allow_empty: false,
-            executable: file.executable,
+            executable,
         })
         .collect();
-    installer_files.sort_by(|left, right| {
-        left.destination
-            .to_string()
-            .cmp(&right.destination.to_string())
-    });
 
-    let plan = zup_build::TargetBuildPlan {
+    let plan = zup_core::TargetBuildPlan {
         installer: zup_core::Installer {
             preset: None,
             app: app(),

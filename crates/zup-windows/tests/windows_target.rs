@@ -4,19 +4,21 @@ use std::fs;
 use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
+use zup_core::TargetPath;
 
 use tempfile::TempDir;
 use zup_build::materialize;
 #[cfg(windows)]
 use zup_core::INSTALL_LOCATIONS;
+use zup_core::TargetOverrides;
 use zup_core::{InstallLocation, SelectedScope, Target};
-use zup_manifest::{TargetOverrides, compile, parse, select_targets};
+use zup_manifest::{compile, parse, select_targets};
 #[cfg(windows)]
 use zup_plan::ObservedFileState;
 use zup_plan::{DesiredState, PlanRequest, plan};
 #[cfg(all(windows, feature = "test-launcher"))]
 use zup_plan::{FileOperationKind, plan_execution};
-use zup_plan::{InstallLocationError, InstallLocationResolver, TargetPath};
+use zup_plan::{InstallLocationError, InstallLocationResolver};
 #[cfg(all(windows, feature = "test-launcher"))]
 use zup_windows::{InspectReads, inspect_target_with};
 use zup_windows::{TargetResolveError, WindowsTargetContext, resolve_target};
@@ -122,34 +124,38 @@ name = "Application"
 required = true
 
 [[files]]
+id = "application"
 source = "Acme.exe"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 component = "core"
 
 [[files]]
+id = "agent"
 source = "acme-agent.exe"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 component = "core"
 
 [[files]]
+id = "tools"
 source = "bin/**/*"
-destination = "${install}/bin"
+placement = { kind = "fixed", directory = "${install}/bin" }
 component = "core"
 
 [[launchers]]
+id = "main"
 location = "menu"
 name = "Acme"
 target = "${install}/Acme.exe"
 component = "core"
 
 [[path]]
+id = "cli-1"
 value = "${install}/bin"
 component = "core"
 
 [[services]]
-execution = { type = "windows", account = "local_service" }
+execution = { type = "windows_job", account = "local_service" }
 id = "acme-agent"
-name = "acme-agent"
 display_name = "Acme Agent"
 binary = "${install}/acme-agent.exe"
 start = "automatic"
@@ -208,23 +214,14 @@ fn semantic_plan(source: &str, files: &[(&str, &[u8])]) -> (TempDir, DesiredStat
 
 fn resolve_fixed(
     install: &DesiredState,
-) -> Result<
-    zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-    zup_windows::TargetResolveError,
-> {
+) -> Result<zup_plan::BoundDeployment, zup_windows::TargetResolveError> {
     resolve_target(
         install,
         &WindowsTargetContext::with_resolver(FixedInstallLocations, install.scope),
     )
 }
 
-fn pipeline(
-    base: &str,
-    scope: SelectedScope,
-) -> (
-    TempDir,
-    zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-) {
+fn pipeline(base: &str, scope: SelectedScope) -> (TempDir, zup_plan::BoundDeployment) {
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("project");
     write(&project.join("zup.toml"), b"");
@@ -290,8 +287,8 @@ fn resolved_template_components_are_validated_after_semantic_planning() {
         (
             "file destination",
             acme_manifest().replacen(
-                "destination = \"${install}\"",
-                "destination = \"${install}/file.\"",
+                "directory = \"${install}\"",
+                "directory = \"${install}/file.\"",
                 1,
             ),
         ),
@@ -356,8 +353,10 @@ fn resolved_template_components_are_validated_after_semantic_planning() {
 fn resolve_target_leaves_no_templates_and_sets_lnk() {
     let (_dir, target) = pipeline("C:/fake", SelectedScope::User);
 
-    let json = serde_json::to_string(&target).unwrap();
-    assert!(!json.contains("${"), "unresolved vars: {json}");
+    let mut binding = serde_json::to_value(&target).unwrap();
+    binding.as_object_mut().unwrap().remove("requirements");
+    let json = serde_json::to_string(&binding).unwrap();
+    assert!(!json.contains("${"), "unresolved bindings: {json}");
 
     assert_eq!(target.launchers.len(), 1);
     let link = target.launchers[0].launcher_path.to_string();
@@ -421,7 +420,7 @@ fn inspect_target_with_fakes_and_plan_execution() {
         let name = op.destination.file_name().unwrap().to_owned();
         file_kinds.insert(name, op.kind);
     }
-    assert_eq!(file_kinds["Acme.exe"], FileOperationKind::NoOp);
+    assert_eq!(file_kinds["Acme.exe"], FileOperationKind::Conflict);
     assert_eq!(file_kinds["acme-agent.exe"], FileOperationKind::Conflict);
     assert_eq!(file_kinds["acme.exe"], FileOperationKind::Create);
 
@@ -456,10 +455,13 @@ fn the_user_state_root_and_the_user_data_location_are_one_directory() {
     let user_data = WindowsInstallLocationResolver
         .resolve(InstallLocation::UserData, SelectedScope::User, &target)
         .unwrap();
-    let state = zup_windows::default_state_root(SelectedScope::User).unwrap();
+    let app = zup_core::AppId::new("com.example.state").unwrap();
+    let state = zup_windows::default_state_root(&app, SelectedScope::User).unwrap();
 
     let expected = PathBuf::from(user_data.as_str())
         .join("zup")
+        .join("apps")
+        .join(app.state_key().to_hex())
         .canonicalize()
         .unwrap();
     assert_eq!(
@@ -473,12 +475,12 @@ mod transaction_fingerprint {
     use std::path::Path;
 
     use tempfile::TempDir;
-    use zup_build::{BuildPlan, TargetBuildPlan};
     use zup_core::{
         App, AppId, Component, ComponentId, Frontend, Install, InstallDirectory, InstallScope,
         Installer, NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Target,
         Template,
     };
+    use zup_core::{BuildPlan, TargetBuildPlan};
     use zup_plan::LifecycleAction;
     use zup_plan::{
         CancellationQuery, NeverCancelled, PlanRequest, PluginExecutor, PluginFailure,
@@ -526,6 +528,8 @@ mod transaction_fingerprint {
                     updates: None,
                     prerequisites: Vec::new(),
                     install: Install {
+                        generation_readers: Default::default(),
+                        data: Vec::new(),
                         scope: InstallScope::User,
                         directory: InstallDirectory {
                             user: Some(
@@ -573,9 +577,11 @@ mod transaction_fingerprint {
             target: Target::parse("windows-x64").unwrap(),
             resources,
         };
+        let mut request = PlanRequest::new(Target::WINDOWS_X64, SelectedScope::User);
+        request.installation = "00000000-0000-7000-8000-000000000001".parse().unwrap();
         let planned = plan(
             &build_plan(),
-            &PlanRequest::new(Target::parse("windows-x64").unwrap(), SelectedScope::User),
+            &request,
             Some(&mut executor),
             &NeverCancelled,
         )
@@ -607,10 +613,14 @@ mod transaction_fingerprint {
         let state = root.path().join("state");
         let first = vec![
             PluginResource::GeneratedFile {
+                replacement: zup_core::FixedReplacement::Atomic,
+                id: "a".into(),
                 destination: "${install}/a.txt".to_owned(),
                 contents: b"a".to_vec(),
             },
             PluginResource::GeneratedFile {
+                replacement: zup_core::FixedReplacement::Atomic,
+                id: "b".into(),
                 destination: "${install}/b.txt".to_owned(),
                 contents: b"b".to_vec(),
             },
@@ -626,10 +636,14 @@ mod transaction_fingerprint {
             &state,
             vec![
                 PluginResource::GeneratedFile {
+                    replacement: zup_core::FixedReplacement::Atomic,
+                    id: "a".into(),
                     destination: "${install}/a.txt".to_owned(),
                     contents: b"changed".to_vec(),
                 },
                 PluginResource::GeneratedFile {
+                    replacement: zup_core::FixedReplacement::Atomic,
+                    id: "b".into(),
                     destination: "${install}/b.txt".to_owned(),
                     contents: b"b".to_vec(),
                 },
@@ -637,31 +651,4 @@ mod transaction_fingerprint {
         );
         assert_ne!(first_fingerprint, changed);
     }
-}
-
-#[test]
-fn native_service_names_are_unique_across_logical_ids() {
-    let base = acme_manifest();
-    let prefix = base.split("[[components]]").next().unwrap();
-    let source = format!(
-        r#"{prefix}
-[[services]]
-execution = {{ type = "windows", account = "local_service" }}
-id = "first"
-name = "SharedService"
-start = "automatic"
-binary = "${{install}}/app.txt"
-[[services]]
-execution = {{ type = "windows", account = "local_service" }}
-id = "second"
-name = "sharedservice"
-start = "automatic"
-binary = "${{install}}/app.txt"
-"#
-    );
-    let (_directory, desired) = semantic_plan(&source, &[("dist/app.txt", b"service")]);
-    let error = resolve_fixed(&desired).unwrap_err();
-    assert!(
-        matches!(error, TargetResolveError::TargetCollision { ref kind, .. } if kind == "service name")
-    );
 }

@@ -1,14 +1,14 @@
 mod common;
 
-use common::{file_with, target};
-use zup_transaction::{NodeKind, TransactionInput, compile_transaction};
+use common::file_with;
+use zup_plan::{NodeKind, compile_deployment};
 
-fn plan_for(executable: bool) -> zup_transaction::TransactionPlan {
-    let mut input = TransactionInput::new(target());
+fn plan_for(executable: bool) -> zup_plan::DeploymentPlan {
+    let mut input = common::effects();
     input
         .files
         .push(file_with("tool", b"#!/bin/sh\n", executable));
-    compile_transaction(&input).expect("a plan")
+    compile_deployment(&input).expect("a plan")
 }
 
 #[rstest::rstest]
@@ -16,7 +16,7 @@ fn plan_for(executable: bool) -> zup_transaction::TransactionPlan {
 #[case::data(false)]
 fn file_intent_survives_transaction_compilation_and_journaling(#[case] executable: bool) {
     let plan = plan_for(executable);
-    let recovered: zup_transaction::TransactionPlan =
+    let recovered: zup_plan::DeploymentPlan =
         serde_json::from_slice(&serde_json::to_vec(&plan).unwrap()).unwrap();
     for plan in [&plan, &recovered] {
         let staged = plan
@@ -57,7 +57,7 @@ fn missing_file_execution_intent_is_rejected() {
             .expect("meta")
             .remove("executable");
     }
-    let recovered: zup_transaction::TransactionPlan =
+    let recovered: zup_plan::DeploymentPlan =
         serde_json::from_value(json).expect("a plan without the key deserializes");
     assert!(
         recovered.validate().is_err(),
@@ -67,14 +67,14 @@ fn missing_file_execution_intent_is_rejected() {
 
 #[test]
 fn the_intent_does_not_change_where_a_file_lands() {
-    let destination_of = |plan: &zup_transaction::TransactionPlan| {
+    let destination_of = |plan: &zup_plan::DeploymentPlan| {
         plan.nodes
             .iter()
             .find_map(|node| match &node.kind {
                 NodeKind::FileMutation {
-                    key: zup_core::ResourceKey::File { destination },
+                    key: zup_core::ResourceKey::File { .. },
                     ..
-                } => Some(destination.clone()),
+                } => node.meta.destination.as_ref().map(ToString::to_string),
                 _ => None,
             })
             .expect("a file mutation")

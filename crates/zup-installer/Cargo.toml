@@ -108,10 +108,7 @@ rstest.workspace = true
 uuid.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
-zup-plugin-abi = { workspace = true }
-wat = "1"
+zup-plugin-abi = { workspace = true, features = ["test-fixture"] }
 windows-registry.workspace = true
-wit-component.workspace = true
-wit-parser.workspace = true
 zup-plugin-contract = { workspace = true, features = ["compiler"] }
 zup-toolchain.workspace = true

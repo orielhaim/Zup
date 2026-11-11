@@ -1,8 +1,7 @@
-//! Pure delta planner: DesiredState<crate::TargetPath, crate::TargetPath> + HostSnapshot → ExecutionPlan.
+//! Pure delta planner: crate::BoundDeployment + HostSnapshot → ExecutionPlan.
 
 use std::collections::BTreeMap;
 
-use crate::DesiredState;
 use miette::Diagnostic;
 use thiserror::Error;
 use tracing::{info, info_span};
@@ -18,7 +17,7 @@ use crate::operation::{
     ProtocolOperation, ServiceOperation,
 };
 use crate::{
-    ExtensionState, FileAssociationState, InstallLedger, LauncherState, OwnedResource,
+    ExtensionState, FileAssociationState, InstallationRecord, LauncherState, OwnedResource,
     ProtocolState,
 };
 
@@ -47,16 +46,17 @@ pub enum ExecutionPlanError {
 
 /// Compare desired and observed state. Pure - zero I/O.
 pub fn plan_execution(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
 ) -> Result<ExecutionPlan, ExecutionPlanError> {
     let _span = info_span!("plan_execution").entered();
 
     target.validate_resolved()?;
     validate_snapshot(target, snapshot)?;
     if ledger.is_some_and(|ledger| {
-        ledger.schema != crate::INSTALL_LEDGER_SCHEMA
+        ledger.validate().is_err()
+            || ledger.id != target.installation
             || ledger.app_id != target.app.id
             || ledger.scope != target.scope
             || ledger.target != target.target
@@ -82,7 +82,7 @@ pub fn plan_execution(
         binding: Some(crate::DeploymentBinding::desired(target, ledger)),
         selected_components: target.selected_components.clone(),
         install_directory: Some(target.install_directory.clone()),
-        uninstall: false,
+        transition: crate::DeploymentTransition::Deploy,
         removals: Vec::new(),
         files,
         launchers,
@@ -98,36 +98,45 @@ fn key_debug(key: &ResourceKey) -> String {
 }
 
 fn validate_snapshot(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
 ) -> Result<(), ExecutionPlanError> {
     // Files: key + destination identity.
     let mut seen = BTreeMap::new();
     for observed in &snapshot.files {
+        if let ObservedFileState::File { object, .. } = observed.state
+            && object.operating_system() != target.target.operating_system()
+        {
+            return Err(ExecutionPlanError::SnapshotResourceMismatch {
+                key: key_debug(&observed.key),
+                reason: "native file identity belongs to a different operating system".into(),
+            });
+        }
         if seen.insert(&observed.key, observed).is_some() {
             return Err(ExecutionPlanError::DuplicateSnapshotObservation {
                 key: key_debug(&observed.key),
             });
         }
     }
-    for desired in &target.files {
+    for desired in target.fixed_files() {
         let Some(observed) = seen.get(&desired.key) else {
             return Err(ExecutionPlanError::MissingSnapshotObservation {
                 key: key_debug(&desired.key),
             });
         };
-        if observed.path != desired.destination {
+        if &observed.path != desired.destination() {
             return Err(ExecutionPlanError::SnapshotResourceMismatch {
                 key: key_debug(&desired.key),
                 reason: format!(
                     "destination mismatch: `{}` vs `{}`",
-                    observed.path, desired.destination
+                    observed.path,
+                    desired.destination()
                 ),
             });
         }
     }
     for key in seen.keys() {
-        if !target.files.iter().any(|f| &f.key == *key) {
+        if !target.fixed_files().any(|f| &f.key == *key) {
             return Err(ExecutionPlanError::SnapshotResourceMismatch {
                 key: key_debug(key),
                 reason: "unexpected file observation".to_owned(),
@@ -299,9 +308,9 @@ fn check_pairs(
 }
 
 fn plan_files(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
 ) -> Vec<FileOperation> {
     let mut out = Vec::with_capacity(target.files.len());
     let observations: BTreeMap<_, _> = snapshot
@@ -309,34 +318,38 @@ fn plan_files(
         .iter()
         .map(|observed| (&observed.key, observed))
         .collect();
-    for desired in target.files.iter() {
+    for desired in target.fixed_files() {
         let observed = observations[&desired.key];
-        let owned = ledger.and_then(|ledger| ledger.resources.get(&desired.key));
+        let owned = ledger.and_then(|ledger| ledger.current.resources.get(&desired.key));
         let installed = match owned {
             Some(OwnedResource::File {
+                instance,
                 destination,
                 sha256,
                 size,
                 ..
-            }) if destination.equivalent(&desired.destination) => Some((*size, *sha256)),
+            }) if destination.equivalent(desired.destination()) => {
+                Some((instance.object, *size, *sha256))
+            }
             _ => None,
         };
         let declaration_matches = !matches!(owned, Some(OwnedResource::File { executable, .. }) if *executable != desired.executable);
 
         let (kind, precondition, conflict) = if owned.is_some() && installed.is_none()
-            || installed.is_some_and(|identity| !matches!(&observed.state, ObservedFileState::File { size, sha256, .. } if (*size, *sha256) == identity))
+            || installed.is_some_and(|identity| !matches!(&observed.state, ObservedFileState::File { object, size, sha256, .. } if (*object, *size, *sha256) == identity))
         {
             (FileOperationKind::Drift, FilePrecondition::Absent, Some(Conflict::File { path: observed.path.to_string() }))
         } else { match &observed.state {
             ObservedFileState::Absent => {
                 (FileOperationKind::Create, FilePrecondition::Absent, None)
             }
-            ObservedFileState::File { size, sha256, executable } => {
+            ObservedFileState::File { object, size, sha256, executable } => {
                 let precondition = FilePrecondition::Exact {
+                    object: *object,
                     size: *size,
                     sha256: *sha256,
                 };
-                if *sha256 == desired.sha256 && executable.is_none_or(|current| current == desired.executable) && declaration_matches {
+                if installed.is_some() && *size == desired.size && *sha256 == desired.sha256 && executable.is_none_or(|current| current == desired.executable) && declaration_matches {
                     (FileOperationKind::NoOp, precondition, None)
                 } else if installed.is_some() {
                     (FileOperationKind::Replace, precondition, None)
@@ -357,8 +370,12 @@ fn plan_files(
 
         out.push(FileOperation {
             key: desired.key.clone(),
+            replacement: desired
+                .placement
+                .fixed_replacement()
+                .expect("fixed file selection"),
             kind,
-            destination: desired.destination.clone(),
+            destination: desired.destination().clone(),
             source_relative: desired.source_relative.clone(),
             precondition,
             expected_sha256: desired.sha256,
@@ -372,13 +389,14 @@ fn plan_files(
 }
 
 fn plan_launchers(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
 ) -> Vec<LauncherOperation> {
-    let icon = target.files.iter().find_map(|file| {
-        matches!(file.key, ResourceKey::Maintenance { .. }).then(|| file.destination.clone())
-    });
+    let icon = target
+        .maintenance
+        .as_ref()
+        .and_then(|generation| generation.maintenance_runtime());
     let mut out = Vec::with_capacity(target.launchers.len());
     let observations: BTreeMap<_, _> = snapshot
         .launchers
@@ -387,7 +405,7 @@ fn plan_launchers(
         .collect();
     for desired in target.launchers.iter() {
         let observed = observations[&desired.key];
-        let owned = ledger.and_then(|l| l.resources.get(&desired.key));
+        let owned = ledger.and_then(|l| l.current.resources.get(&desired.key));
         let installed = match owned {
             Some(OwnedResource::Launcher {
                 launcher_path,
@@ -480,9 +498,9 @@ fn plan_launchers(
 }
 
 fn plan_paths(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
 ) -> Vec<PathOperation> {
     let mut out = Vec::with_capacity(target.path_entries.len());
     let observations: BTreeMap<_, _> = snapshot
@@ -492,29 +510,59 @@ fn plan_paths(
         .collect();
     for desired in target.path_entries.iter() {
         let observed = observations[&desired.key];
-        let owned = matches!(ledger.and_then(|l| l.resources.get(&desired.key)), Some(OwnedResource::PathEntry { value, .. }) if value.equivalent(&desired.value));
-        // Membership of an already target-normalized entry. Splitting, case
-        // folding, and host formatting happened in the inspecting adapter.
-        let present = observed.search_path.contains(&desired.value);
-        let (kind, conflict) = match present {
-            true => (PathOperationKind::Present, None),
-            false if owned => (
-                PathOperationKind::Drift,
-                Some(Conflict::PathEntryConflict {
-                    value: desired.value.to_string(),
-                    reason: "previously owned search-path entry is missing".into(),
-                }),
-            ),
-            false => (PathOperationKind::Add, None),
+        let presence = |path: &crate::TargetPath| match observed
+            .search_path
+            .entries()
+            .iter()
+            .filter(|entry| entry.equivalent(path))
+            .count()
+        {
+            0 => crate::PathPresence::Missing,
+            1 => crate::PathPresence::Single,
+            _ => crate::PathPresence::Multiple,
         };
+        let current = presence(&desired.value);
+        let precondition =
+            match ledger.and_then(|ledger| ledger.current.resources.get(&desired.key)) {
+                Some(OwnedResource::PathEntry {
+                    value, value_type, ..
+                }) => crate::PathPrecondition::Owned {
+                    binding: crate::PathBinding {
+                        value: value.clone(),
+                        value_type: value_type.clone(),
+                    },
+                    previous: presence(value),
+                    desired: current,
+                },
+                _ => crate::PathPrecondition::Unclaimed { presence: current },
+            };
+        let kind = match &precondition {
+            crate::PathPrecondition::Unclaimed {
+                presence: crate::PathPresence::Missing,
+            } => PathOperationKind::Add,
+            crate::PathPrecondition::Unclaimed { .. } => PathOperationKind::Present,
+            crate::PathPrecondition::Owned {
+                binding,
+                previous: crate::PathPresence::Single,
+                desired: crate::PathPresence::Single,
+            } if binding.value.equivalent(&desired.value) => PathOperationKind::Present,
+            crate::PathPrecondition::Owned {
+                binding,
+                previous: crate::PathPresence::Single,
+                desired: crate::PathPresence::Missing,
+            } if !binding.value.equivalent(&desired.value) => PathOperationKind::RebindOwned,
+            crate::PathPrecondition::Owned { .. } => PathOperationKind::Drift,
+        };
+        let conflict = (kind == PathOperationKind::Drift).then(|| Conflict::PathEntryConflict {
+            value: desired.value.to_string(), reason: "owned search-path binding is missing, duplicated, or conflicts with its requested replacement".into(),
+        });
         out.push(PathOperation {
             key: desired.key.clone(),
             kind,
             value: desired.value.clone(),
             scope: desired.scope,
             privilege: desired.privilege,
-            present,
-            previously_owned: owned,
+            precondition,
             conflict,
         });
     }
@@ -522,9 +570,9 @@ fn plan_paths(
 }
 
 fn plan_services(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
 ) -> Vec<ServiceOperation> {
     let mut out = Vec::with_capacity(target.services.len());
     let observations: BTreeMap<_, _> = snapshot
@@ -533,16 +581,26 @@ fn plan_services(
         .map(|observed| (&observed.key, observed))
         .collect();
     for desired in target.services.iter() {
+        let registration = zup_core::NativeServiceRegistration::for_service(
+            &desired.execution,
+            target.installation,
+        );
         let observed = observations[&desired.key];
-        let owned = ledger.and_then(|l| l.resources.get(&desired.key));
+        let owned = ledger.and_then(|l| l.current.resources.get(&desired.key));
+        let registration_matches = match &desired.key {
+            ResourceKey::Service { id } => observed.registration.matches(registration, id),
+            _ => false,
+        };
         let installed = match owned {
-            Some(OwnedResource::Service {
+            Some(OwnedResource::Service(crate::OwnedService {
                 name, installed, ..
-            }) if name == desired.name.as_str() => Some(installed.as_ref()),
+            })) if name == desired.name.as_str() => Some(installed.as_ref()),
             _ => None,
         };
         let current = observed.state.configuration();
         let (kind, conflict) = if owned.is_some() && installed.is_none()
+            || owned.is_some_and(|owned| !matches!(owned, OwnedResource::Service(crate::OwnedService { registration: previous, .. }) if *previous == registration))
+            || owned.is_some() && observed.state != ObservedServiceState::Absent && !registration_matches
             || installed.is_some_and(|installed| Some(installed) != current.as_ref())
         {
             (
@@ -584,7 +642,7 @@ fn plan_services(
                         && commands_match(command, &desired.command)
                         && *start == desired.start
                         && *readiness == desired.readiness
-                        && owned.is_none_or(|owned| matches!(owned, OwnedResource::Service { requires_files, requires_services, timeouts, .. } if requires_files == &desired.requires_files && requires_services == &desired.requires_services && *timeouts == desired.lifecycle.timeouts_for(&desired.execution)));
+                        && owned.is_none_or(|owned| matches!(owned, OwnedResource::Service(crate::OwnedService { requires_files, requires_services, timeouts, .. }) if requires_files == &desired.requires_files && requires_services == &desired.requires_services && *timeouts == desired.lifecycle.timeouts_for(&desired.execution)));
                     if matches && installed.is_some() {
                         (IntegrationChangeKind::NoOp, None)
                     } else {
@@ -606,6 +664,8 @@ fn plan_services(
         };
 
         out.push(ServiceOperation {
+            state_directories: desired.state_directories.clone(),
+            registration,
             failure: desired.failure,
             execution: desired.execution.clone(),
             lifecycle: desired.lifecycle.resolved(&desired.execution),
@@ -633,9 +693,9 @@ fn plan_services(
 }
 
 fn plan_protocols(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
 ) -> Vec<ProtocolOperation> {
     let mut out = Vec::with_capacity(target.protocols.len());
     let observations: BTreeMap<_, _> = snapshot
@@ -645,7 +705,7 @@ fn plan_protocols(
         .collect();
     for desired in target.protocols.iter() {
         let observed = observations[&desired.key];
-        let owned = ledger.and_then(|l| l.resources.get(&desired.key));
+        let owned = ledger.and_then(|l| l.current.resources.get(&desired.key));
         let observed_owned = matches!(owned, Some(OwnedResource::Protocol { installed, .. }) if protocol_observed_matches(installed, &observed.state));
         let has_ownership = matches!(owned, Some(OwnedResource::Protocol { .. }));
         let (kind, conflict) = match &observed.state {
@@ -717,9 +777,9 @@ fn plan_protocols(
 }
 
 fn plan_file_associations(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
 ) -> Vec<FileAssociationOperation> {
     let mut out = Vec::with_capacity(target.file_associations.len());
     let observations: BTreeMap<_, _> = snapshot
@@ -732,8 +792,8 @@ fn plan_file_associations(
         let ext_key = ResourceKey::FileAssociationExtension {
             extension: desired.extension.clone(),
         };
-        let owned_id = ledger.and_then(|l| l.resources.get(&desired.key));
-        let owned_ext = ledger.and_then(|l| l.resources.get(&ext_key));
+        let owned_id = ledger.and_then(|l| l.current.resources.get(&desired.key));
+        let owned_ext = ledger.and_then(|l| l.current.resources.get(&ext_key));
         let id_owned_matches = matches!(owned_id, Some(OwnedResource::FileAssociation { installed, .. }) if file_association_observed_matches(installed, &observed.association_state));
         let ext_owned_matches = matches!(owned_ext, Some(OwnedResource::Extension { installed, .. }) if extension_observed_matches(installed, &observed.extension_state));
         let desired_desc = desired.description.clone();
@@ -890,6 +950,6 @@ fn extension_observed_matches(
 }
 
 /// Semantic command equality (target-aware path semantics; args exact).
-fn commands_match(a: &crate::CommandSpec, b: &crate::CommandSpec) -> bool {
+fn commands_match(a: &zup_core::CommandSpec, b: &zup_core::CommandSpec) -> bool {
     a.executable.equivalent(&b.executable) && a.arguments == b.arguments
 }

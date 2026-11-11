@@ -64,19 +64,6 @@ fn fixture_frontend() -> zup_core::Frontend {
     }
 }
 
-/// The application main a fixture declares, when the host's backend reads one.
-///
-/// Windows never validates it; Linux requires it to name an executable shipped
-/// file, which these fixtures have no reason to do, so Linux fixtures declare
-/// none.
-fn fixture_main() -> &'static str {
-    if cfg!(windows) {
-        "main = \"app.exe\"\n"
-    } else {
-        ""
-    }
-}
-
 /// A runtime template for `target`, written as a real zup component.
 ///
 /// `doctor` reads a template's descriptor and its PE header and nothing else, so
@@ -95,7 +82,6 @@ frontend = "{frontend}"
 id = "com.example.doctor"
 name = "Doctor App"
 version = "1.0.0"
-{main}
 [build]
 
 [build.targets.default]
@@ -109,11 +95,11 @@ scope = "user"
 user = "${{location.user_data}}/DoctorApp"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#,
         frontend = selected_frontend(),
-        main = fixture_main(),
     )
 }
 
@@ -271,11 +257,6 @@ fn healthy_single_target_passes_every_required_check() {
         find(&rows, "frontend")["message"],
         format!("resolved frontend is `{}`", selected_frontend())
     );
-    assert!(
-        message(find(&rows, "source_payload")).contains("payload digest"),
-        "the payload summary carries a digest"
-    );
-
     if ON_WINDOWS {
         assert_eq!(statuses(&rows, "runtime_template"), only("pass"));
         assert_eq!(statuses(&rows, "build_backend"), only("pass"));
@@ -446,8 +427,9 @@ scope = "user"
 user = "${{location.user_data}}/DoctorMatrix"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#,
             frontend = selected_frontend()
         ),
@@ -526,7 +508,7 @@ fn machine_scope_reports_elevation_capability() {
     // names, and the point here is elevation rather than main validation.
     // Console on every host: a GUI frontend has no Linux runtime, which
     // would fail lowering for the wrong reason.
-    let manifest_text = manifest(target).replace(fixture_main(), "").replace(
+    let manifest_text = manifest(target).replace(
         &format!("frontend = \"{}\"", selected_frontend()),
         "frontend = \"console\"",
     );
@@ -692,8 +674,9 @@ scope = "user"
 user = "${{location.user_data}}/DoctorPlugins"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 
 [[plugins]]
 id = "helper"

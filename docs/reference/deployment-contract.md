@@ -1,32 +1,139 @@
 # Deployment contract
 
-All frontends and plugins use the same pipeline:
+Zup owns deployment. Applications, native services, shell registrations, and CLI
+entrypoints run without a Zup process or library.
 
-`BuildPlan → DesiredState → ExecutionPlan → TransactionPlan`
+Compiled package requirements and plugin output become a resolved desired state.
+Lifecycle planning compares that state with native observations and recorded
+ownership. One validated `DeploymentPlan` graph authorizes preparation, activation,
+publication, compensation, and post-commit cleanup. Every frontend and privileged
+worker uses that graph.
 
-| Stage             | Responsibility                                                                                       |
-| ----------------- | ---------------------------------------------------------------------------------------------------- |
-| `BuildPlan`       | Compiled declarations, payload identity, and target capabilities.                                    |
-| `DesiredState`    | Selected components, resolved paths, and typed resources, including plugin output.                   |
-| `ExecutionPlan`   | Changes against observations and committed ownership, bound to the observed installation generation. |
-| `TransactionPlan` | Operations, preconditions, dependencies, staging, and compensation order.                            |
+## Placement and identity
 
-## Ownership and authority
+Application payloads use immutable generations by default. Their content identity
+includes verified bytes and execution-relevant metadata, independently of the
+human-readable version. A physical materialization has its own identity. Repair
+creates a new materialization instead of altering a committed generation.
 
-Resource keys, paths, content, executable intent, and privileges must agree across stages. Windows path comparisons use Windows semantics on every build host. Unknown resources are not absent resources.
+Fixed files have explicit physical destinations and replacement policies.
+Persistent directories have separate ownership and data compatibility contracts.
+Native registrations refer to exact generation paths where relocation permits it.
+A failed operation never changes a resource's placement policy.
 
-Matching an existing resource does not confer ownership. Only committed receipts establish ownership. Uninstall uses that ledger without rerunning plugins or resolving current declarations. Modified and foreign resources are preserved; forced repair requires explicit `RepairOwned` intent.
+Logical resource identities establish ownership. Paths locate resources; matching
+paths or bytes do not establish ownership. Execution rechecks protected provenance,
+native object identities, permissions, and content before changing owned files.
+User-writable intent cannot authorize machine resources.
 
-Execution rechecks ownership, generation, and live preconditions under the installation lock. Privileged workers verify authenticated content and derive authorized effects themselves. User-writable state cannot authorize machine resources.
+## Activation and publication
 
-## Execution and recovery
+Generation acquisition and verification precede effects that expose its content.
+Dependencies order affected services, persistent data access, fixed-file changes,
+native registrations, and runtime verification. Unchanged services do not restart
+because unrelated content changed.
 
-Content is staged and verified before durable mutation intent. Affected services stop before their files change; startup and readiness verify before commit. Compensation stops the new runtime, restores configuration and files, then restores the previous runtime when safe.
+The protected `InstallationRecord` publication and readback is the commit point.
+Its latest commit identity is separate from the active snapshot's original
+transaction and activation revision. Metadata maintenance preserves that snapshot.
+A missing journal acknowledgment is reconciled against the published record.
+Uncertain publication cannot trigger blind compensation.
 
-Effects have stable operation IDs, durable intent, and receipts. Recovery re-observes native state before retrying uncertain effects. Ambiguity requires intervention. A committed transaction can still need ledger publication or cleanup; it must reconcile rather than replay installation. External process side effects are not atomic or reversible.
+## Recovery and cleanup
+
+Operations persist intent before native mutations and receipts after observation.
+Recovery reobserves uncertain effects. It refuses ambiguous ownership or runtime
+state. Executable rollback does not reverse arbitrary process side effects or
+incompatible database writes.
+
+Cleanup retires rollback roots in the same authoritative record publication.
+Irreversible deletion runs afterward. A cleanup failure leaves the deployment
+committed and the cleanup recoverable; it does not roll back the active version.
+Busy resources and generations without a sufficient reader contract are retained
+with an explicit deferred result.
+
+Materialization leaves a verified tree in private preparation storage. Sealing
+first persists publication intent, then publishes access and the final directory
+name. An interrupted access transition can resume only against the recorded
+native identities and the exact private/public access profiles. Activation and
+native registrations wait for the sealed tree. Windows file ACLs have no
+inheritance flags; directory ACLs explicitly control inheritance.
+
+Generation sealing records the native identity of every file and directory.
+Verification, activation, and collection compare those identities with the protected
+seal. Identical bytes in a replacement object do not preserve ownership. Collection
+records its deletion census before changing permissions or removing entries. Native fences exclude declared consumers before
+deletion. Recovery accepts only recorded remaining members and rejects substituted,
+additional, or redirected entries. Persistent data is outside this collection tree.
 
 ## Preview and automation
 
-Authoring previews describe desired state without inspecting the machine and report `machine_state_observed: false`. Runtime previews use native observations; execution still rejects stale observations.
+Authoring previews describe requirements without claiming machine observations.
+Runtime previews show actual typed effects and their authorization requirements.
+Privileged workers independently derive their graph from authenticated intent and
+current protected state before execution. The client reviews the worker's prepared
+plan before it creates a transaction.
 
-Progress carries typed phases and outcomes through workers and frontends. Presentation labels never determine engine behavior.
+Progress reports staging, verification, activation, recovery, and cleanup. Cleanup
+reports whether it removed content or retained it because a safety condition could
+not be established.
+
+Observed previews report separate logical byte counts for new generations, fixed
+staging, verified reuse, retained fixed recovery files, and cleanup candidates.
+Additional payload space is the sum of new generations and fixed staging. Existing
+recovery files are retained rather than copied again. Cleanup candidates are not
+credited against preparation space because collection may be deferred. These
+counts exclude compressed downloads, caches, filesystem allocation overhead, and
+mutable application data; they are not a free-space guarantee.
+
+Explicit recovery reports successful completion for both a committed transaction
+and a transaction whose compensation completed. A deployment attempt that had to
+roll back still reports failure. The structured result distinguishes these cases.
+
+## Native entrypoint paths
+
+`${payload}` resolves to the exact selected generation directory when Zup builds
+native registrations. Use it for launcher targets, service binaries, and PATH
+entries. It is not a mutable `current` link. A running process keeps its original
+application directory when a later deployment changes registrations. Newly opened
+shells observe updated PATH registration; existing shell environments may retain
+an older generation path. Retention and the declared reader contract govern when
+that generation can be collected.
+
+## Windows service process scope
+
+SCM reports the service's main process. It does not establish that child processes
+have exited. Managed Windows services therefore declare
+`execution = { type = "windows_job", account = "local_service" }` and receive their scope name
+as a whole argument such as `"${job.worker}"` for service `worker`.
+The job name is an installation-specific locator, never an ownership credential.
+
+The service creates a new native Job Object before starting workers or reporting
+Running. An existing object is an error. It assigns itself, enables
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and permits neither breakaway flag.
+Before doing application work, it protects the DACL and closes its initial
+all-access handle. Final permissions grant SYSTEM, Administrators, and the exact
+service SID only query, terminate, READ_CONTROL, and SYNCHRONIZE. An OWNER_RIGHTS
+entry grants only READ_CONTROL. The owner is the configured service account.
+Handles must not be inherited or exported. Workers must use normal inherited job
+membership; brokered or deliberately escaped workers violate this contract.
+
+Zup independently checks those permissions and limits, the exact SCM process's
+membership and creation time, and its registered generation path. During an
+approved transition it retains a non-inheritable query handle, closes native
+startup admission, and requires the main process and all job members to exit
+before replacing protected inputs. An empty old scope is released before the
+next service start. No Zup process is needed after installation.
+
+A missing job name after an interrupted stop is insufficient recovery evidence.
+Recovery uses a protected verified-empty receipt, the retained original scope,
+or a later native boot sequence together with a changed SCM identity and a
+closed, stopped registration. Unsupported process telemetry, changed permissions,
+remaining workers, or ambiguous identity require recovery instead of replacement.
+The telemetry structure is documented by Microsoft, but its native acquisition
+route is capability-tested and can be unavailable. The boot-environment GUID is
+not used as a boot-session identity.
+
+See Microsoft's [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects),
+[job access rights](https://learn.microsoft.com/en-us/windows/win32/procthread/job-object-security-and-access-rights),
+and [process telemetry structure](https://learn.microsoft.com/en-us/windows/win32/devnotes/process_telemetry_id_information_type).

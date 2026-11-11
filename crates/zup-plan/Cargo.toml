@@ -7,8 +7,9 @@ repository.workspace = true
 description = "Desired-state installation planner for zup"
 
 [dependencies]
+petgraph.workspace = true
+sha2.workspace = true
 serde_json.workspace = true
-typed-path.workspace = true
 semver.workspace = true
 miette.workspace = true
 serde.workspace = true

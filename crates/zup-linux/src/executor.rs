@@ -1,16 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use zup_core::TargetPath;
+use zup_core::TransactionId;
 use zup_plan::RemovalKind;
+use zup_plan::{DeploymentNode, DeploymentPlan, FileRemoval, NodeKind, OperationId};
 
 use zup_bundle::{PayloadError, PayloadSource};
 use zup_core::{RelativePath, ResourceKey, Sha256Digest, hash_reader};
-use zup_plan::{HostSnapshot, ObservedFile, ObservedFileState, TargetPath};
+use zup_plan::{HostSnapshot, ObservedFile, ObservedFileState};
 
 use zup_plan::{FileOperationKind, FilePrecondition};
-use zup_transaction::{
-    FileRemoval, NodeKind, OperationExecutor, OperationId, OperationReceipt, ReconcileResult,
-    TransactionId, TransactionNode, TransactionPlan,
-};
+use zup_transaction::{OperationExecutor, OperationReceipt, ReconcileResult};
 
 use crate::error::{ExecError, PathError};
 use crate::fs::{
@@ -21,7 +22,7 @@ use crate::lowering::to_host_path;
 
 #[derive(Debug, Clone)]
 pub struct FileOperation {
-    pub destination: zup_plan::TargetPath,
+    pub destination: zup_core::TargetPath,
 
     pub host_path: PathBuf,
 
@@ -37,6 +38,21 @@ pub struct FileIntent {
     pub executable: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ExpectedFile {
+    object: zup_core::NativeObjectIdentity,
+    size: u64,
+    sha256: Sha256Digest,
+}
+
+impl ExpectedFile {
+    fn matches(self, current: &StreamedRegular) -> bool {
+        current.object() == self.object
+            && current.size == self.size
+            && current.sha256 == self.sha256
+    }
+}
+
 impl FileIntent {
     fn mode_for(self, executable_mode: rustix::fs::Mode) -> rustix::fs::Mode {
         if self.executable {
@@ -48,6 +64,12 @@ impl FileIntent {
 }
 
 pub struct LinuxFileExecutor {
+    state: Option<crate::state::StateAuthority>,
+    persistent:
+        Option<zup_transaction::PersistentStorage<crate::persistent::LinuxPersistentFilesystem>>,
+    caches: BTreeMap<OperationId, crate::refresh::PreparedCache>,
+    generations:
+        Option<zup_transaction::GenerationStorage<crate::generation::LinuxGenerationFilesystem>>,
     openrc_executables: std::collections::BTreeSet<PathBuf>,
     service_units: Vec<String>,
     files: BTreeMap<String, FileOperation>,
@@ -125,6 +147,10 @@ impl ServiceSupport {
 impl Default for LinuxFileExecutor {
     fn default() -> Self {
         Self {
+            state: None,
+            persistent: None,
+            caches: BTreeMap::new(),
+            generations: None,
             openrc_executables: Default::default(),
             service_units: Vec::new(),
             files: BTreeMap::new(),
@@ -170,6 +196,49 @@ impl LinuxFileExecutor {
         self
     }
 
+    pub fn set_state_authority(
+        &mut self,
+        root: PathBuf,
+        app: zup_core::AppId,
+        scope: zup_core::SelectedScope,
+    ) {
+        let state = crate::state::StateAuthority { root, app, scope };
+        self.state = Some(state.clone());
+        self.persistent = Some(zup_transaction::PersistentStorage(
+            crate::persistent::LinuxPersistentFilesystem(state.clone()),
+        ));
+        self.generations = Some(zup_transaction::GenerationStorage::new(
+            crate::generation::LinuxGenerationFilesystem::new(state),
+        ));
+    }
+
+    fn persistent_storage(
+        &self,
+    ) -> Result<
+        &zup_transaction::PersistentStorage<crate::persistent::LinuxPersistentFilesystem>,
+        ExecError,
+    > {
+        self.persistent.as_ref().ok_or_else(|| {
+            ExecError::refused(
+                "persistent data",
+                "protected transaction storage is required",
+            )
+        })
+    }
+
+    fn generation_storage(
+        &self,
+    ) -> Result<
+        &zup_transaction::GenerationStorage<crate::generation::LinuxGenerationFilesystem>,
+        ExecError,
+    > {
+        self.generations.as_ref().ok_or_else(|| {
+            ExecError::Executor(
+                "generation effects require the protected installation state authority".into(),
+            )
+        })
+    }
+
     pub fn set_transaction_id(&mut self, id: TransactionId) {
         self.transaction = Some(id);
     }
@@ -184,7 +253,7 @@ impl LinuxFileExecutor {
         self.files.insert(id.to_string(), file);
     }
 
-    pub fn register_plan(&mut self, plan: &TransactionPlan) -> Result<(), ExecError> {
+    pub fn register_plan(&mut self, plan: &DeploymentPlan) -> Result<(), ExecError> {
         self.openrc_executables.clear();
         for node in &plan.nodes {
             if let NodeKind::ServiceControl { operation } = &node.kind
@@ -197,9 +266,9 @@ impl LinuxFileExecutor {
                 self.openrc_executables
                     .insert(to_host_path(&command.executable)?);
             }
-            if is_service_node(node)
-                && let crate::service_ops::ServicePayload::Apply { service, .. } =
-                    crate::service_exec::payload_for(node)?
+            if let NodeKind::NativeService { operation } = &node.kind
+                && let zup_plan::NativeServiceOperation::Configure { service, .. } =
+                    operation.as_ref()
                 && matches!(
                     service.execution,
                     zup_core::ServiceExecution::OpenrcUser { .. }
@@ -220,30 +289,23 @@ impl LinuxFileExecutor {
         self.service_units.sort();
         self.service_units.dedup();
         for node in &plan.nodes {
-            let key = match &node.kind {
-                NodeKind::StageFile { key }
-                | NodeKind::FileMutation { key, .. }
-                | NodeKind::FileRemoval { key } => key,
-                _ => continue,
-            };
-            let destination_text = match key {
-                ResourceKey::File { destination } => destination,
-                ResourceKey::Maintenance { destination, .. } => destination,
-                other => {
-                    return Err(ExecError::PlanDrift {
+            if !matches!(
+                node.kind,
+                NodeKind::StageFile { .. }
+                    | NodeKind::FileMutation { .. }
+                    | NodeKind::FileRemoval { .. }
+            ) {
+                continue;
+            }
+            let destination =
+                node.file_destination()
+                    .cloned()
+                    .ok_or_else(|| ExecError::PlanDrift {
                         path: node.id.to_string(),
-                        reason: format!("{other:?} is not a file resource"),
-                    });
-                }
-            };
-            let destination = TargetPath::new(plan.target, destination_text).map_err(|error| {
-                ExecError::PlanDrift {
-                    path: destination_text.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
+                        reason: "file effect has no validated physical placement".into(),
+                    })?;
             let host_path = to_host_path(&destination).map_err(|error| ExecError::PlanDrift {
-                path: destination_text.clone(),
+                path: destination.to_string(),
                 reason: error.to_string(),
             })?;
 
@@ -333,18 +395,76 @@ impl LinuxFileExecutor {
         let staged = directory.path().join(&name);
         self.validate_openrc_executable(&file, &directory, &name)?;
         Ok(OperationReceipt::StageFile {
+            object: directory.stream_regular(&name)?.object(),
             staged_path: staged.display().to_string(),
             size: file.intent.size,
-            sha256: file.intent.sha256.to_hex(),
+            sha256: file.intent.sha256,
         })
     }
 
-    pub fn prepare(&mut self, node: &TransactionNode) -> Result<(), ExecError> {
+    fn cache(
+        &mut self,
+        node: &DeploymentNode,
+    ) -> Result<&crate::refresh::PreparedCache, ExecError> {
+        let NodeKind::NativeCache { operation } = &node.kind else {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "operation is not a native cache effect",
+            ));
+        };
+        if !self.caches.contains_key(&node.id) {
+            self.caches.insert(
+                node.id.clone(),
+                crate::refresh::PreparedCache::prepare(operation)?,
+            );
+        }
+        Ok(&self.caches[&node.id])
+    }
+
+    pub fn prepare(&mut self, node: &DeploymentNode) -> Result<(), ExecError> {
         match &node.kind {
+            NodeKind::Cleanup { operation } => {
+                let state = self.state.as_ref().ok_or_else(|| {
+                    ExecError::refused(
+                        node.id.as_str(),
+                        "cleanup requires protected transaction authority",
+                    )
+                })?;
+                let source = state.source(self.transaction_id()?)?;
+                operation
+                    .validate(source.target)
+                    .map_err(|reason| ExecError::refused(node.id.as_str(), reason))
+            }
+            NodeKind::PersistentDirectory { operation } => {
+                if let zup_plan::PersistentBinding::SystemdState(binding) =
+                    &operation.intent.binding
+                {
+                    return crate::persistent::validate_native(binding);
+                }
+                zup_transaction::PersistentFilesystem::parent(
+                    &self.persistent_storage()?.0,
+                    operation,
+                )
+                .map(|_| ())
+            }
+            NodeKind::NativeService { operation } => self
+                .native_service_context()?
+                .prepare_registration(operation),
+            NodeKind::NativeCache { .. } => self.cache(node).map(|_| ()),
+            NodeKind::Retention { .. }
+            | NodeKind::ReserveInstallation
+            | NodeKind::PublishInstallation => Err(ExecError::refused(
+                node.id.as_str(),
+                "installation publication belongs to the coordinator",
+            )),
+            NodeKind::Generation { intent, .. } => intent
+                .validate(intent.materialization.descriptor().target())
+                .map_err(|error| ExecError::refused(node.id.as_str(), error.to_string())),
             NodeKind::ServiceControl { operation } => operation
                 .validate()
                 .map_err(|reason| ExecError::refused(&operation.native_name, reason)),
             NodeKind::Barrier => Ok(()),
+            NodeKind::RetainFile { .. } => Ok(()),
             NodeKind::StageFile { .. } => {
                 let _ = self.file(node.id.as_str())?;
                 Self::payload_identity(node)?;
@@ -361,9 +481,11 @@ impl LinuxFileExecutor {
                                 .into(),
                         }),
                     },
-                    FilePrecondition::Exact { size, sha256 } => {
-                        verify_precondition(&file.host_path, size, sha256)
-                    }
+                    FilePrecondition::Exact {
+                        object,
+                        size,
+                        sha256,
+                    } => verify_precondition(&file.host_path, object, size, sha256),
                 }
             }
             NodeKind::FileRemoval { key } => {
@@ -391,41 +513,82 @@ impl LinuxFileExecutor {
                 }
                 Ok(())
             }
-            NodeKind::BackendOperation { .. } => {
-                if is_service_node(node) {
-                    return self.prepare_service(node);
-                }
-
-                let request = refresh_request(node)?;
-                crate::refresh::preflight(&request)?;
-                Ok(())
-            }
-            NodeKind::BackendRemoval { .. } => {
-                if is_service_node(node) {
-                    return self.prepare_service(node);
-                }
-                Err(ExecError::PlanDrift {
-                    path: node.id.to_string(),
-                    reason: "a backend removal is not a Linux operation".into(),
-                })
-            }
+            NodeKind::BackendOperation { .. } => Err(ExecError::refused(
+                node.id.as_str(),
+                "unsupported Linux backend operation",
+            )),
+            NodeKind::BackendRemoval { .. } => Err(ExecError::PlanDrift {
+                path: node.id.to_string(),
+                reason: "a backend removal is not a Linux operation".into(),
+            }),
         }
     }
 
-    fn stage_node(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
+    fn retained_reader(
+        &self,
+        node: &DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+        size: u64,
+        sha256: Sha256Digest,
+    ) -> Result<Option<zup_bundle::PayloadReader>, ExecError> {
+        let Some(storage) = &self.persistent else {
+            return Ok(None);
+        };
+        storage.0.0.validate(transaction)?;
+        let root = &storage.0.0.root;
+        let installed = crate::ledger::LinuxInstallationStore::new(root)
+            .load(&transaction.app_id, transaction.scope)?;
+        let Some(installed) = installed else {
+            return Ok(None);
+        };
+        let store = zup_transaction::FilesystemTransactionStore::private_at(root);
+        let sources = zup_transaction::retained_file_sources(&store, &installed, transaction, node)
+            .map_err(|error| ExecError::refused("retained content", error.to_string()))?;
+        for source in sources {
+            let path = crate::to_host_path(&source.path)?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| ExecError::refused("retained content", "source has no parent"))?;
+            crate::fs::verify_ancestor_trust(parent, rustix::process::geteuid().as_raw())?;
+            let (directory, name) = crate::fs::open_parent(&path)?;
+            if let Ok(mut file) = stream_expected(&directory, &name, &path, size, sha256)
+                && file.object() == source.object
+                && file.uid == rustix::process::geteuid().as_raw()
+                && file.mode & 0o022 == 0
+            {
+                use std::io::Seek;
+                file.file
+                    .rewind()
+                    .map_err(|error| ExecError::refused("retained content", error.to_string()))?;
+                return Ok(Some(Box::new(file.file)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn stage_node(
+        &mut self,
+        node: &DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, ExecError> {
         let file = self.file(node.id.as_str())?.clone();
         let (source, sha256, size) = Self::payload_identity(node)?;
-        let payload = self.payload.as_ref().ok_or_else(|| ExecError::PlanDrift {
-            path: node.id.to_string(),
-            reason: "no payload source is attached".into(),
-        })?;
         let mut reader =
-            payload
-                .open(&source, &sha256, size)
-                .map_err(|error| ExecError::Payload {
-                    path: source.to_string(),
-                    source: error,
-                })?;
+            if let Some(reader) = self.retained_reader(node, transaction, size, sha256)? {
+                reader
+            } else {
+                self.payload
+                    .as_ref()
+                    .ok_or_else(|| ExecError::PlanDrift {
+                        path: node.id.to_string(),
+                        reason: "no authenticated content source is available".into(),
+                    })?
+                    .open(&source, &sha256, size)
+                    .map_err(|error| ExecError::Payload {
+                        path: source.to_string(),
+                        source: error,
+                    })?
+            };
         let name = staged_name(&node.id);
         let (directory, _, created) =
             crate::fs::ensure_parent(&file.host_path, self.install_dir_mode)?;
@@ -451,9 +614,10 @@ impl LinuxFileExecutor {
         let staged = directory.path().join(&name);
         self.validate_openrc_executable(&file, &directory, &name)?;
         Ok(OperationReceipt::StageFile {
+            object: directory.stream_regular(&name)?.object(),
             staged_path: staged.display().to_string(),
             size: file.intent.size,
-            sha256: file.intent.sha256.to_hex(),
+            sha256: file.intent.sha256,
         })
     }
 
@@ -474,7 +638,7 @@ impl LinuxFileExecutor {
     }
 
     fn payload_identity(
-        node: &TransactionNode,
+        node: &DeploymentNode,
     ) -> Result<(RelativePath, Sha256Digest, u64), ExecError> {
         let missing = || ExecError::PlanDrift {
             path: node.id.to_string(),
@@ -487,18 +651,91 @@ impl LinuxFileExecutor {
         ))
     }
 
-    pub fn apply(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
+    fn payload_boundary(&self, node: &DeploymentNode) -> Result<Option<OwnedDirectory>, ExecError> {
+        let Some((state, destination)) = self.state.as_ref().zip(node.file_destination()) else {
+            return Ok(None);
+        };
+        if node.meta.privilege != Some(state.scope.authorization()) {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "file authority differs from its protected installation state",
+            ));
+        }
+        let path = to_host_path(destination)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| ExecError::refused(node.id.as_str(), "file has no parent"))?;
+        state.payload_directory(parent).map(Some)
+    }
+
+    pub fn apply(
+        &mut self,
+        node: &DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, ExecError> {
+        if let Some(state) = &self.state {
+            state.validate(transaction)?;
+        }
+        let _state_boundary = self.payload_boundary(node)?;
+        if self.transaction_id()? != transaction.transaction_id
+            || !transaction.plan.nodes.contains(node)
+        {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "operation is not part of this authenticated transaction",
+            ));
+        }
         match &node.kind {
+            NodeKind::Cleanup { .. } => crate::cleanup::apply(
+                self.state.as_ref().ok_or_else(|| {
+                    ExecError::refused(
+                        node.id.as_str(),
+                        "cleanup requires protected transaction storage",
+                    )
+                })?,
+                node,
+                transaction,
+            ),
+            NodeKind::PersistentDirectory { operation } => self
+                .persistent_storage()?
+                .apply(operation, transaction)
+                .map(|owned| OperationReceipt::PersistentDirectory(Box::new(owned))),
+            NodeKind::NativeService { operation } => {
+                let source_retained = operation
+                    .source_node(&transaction.plan.nodes)
+                    .map_err(|error| ExecError::refused(node.id.as_str(), error.to_string()))?
+                    .is_some_and(|source| matches!(source.kind, NodeKind::RetainFile { .. }));
+                self.native_service_context()?
+                    .apply_registration(operation, source_retained)
+            }
+            NodeKind::NativeCache { operation } => self.cache(node)?.run(operation),
+            NodeKind::Retention { .. }
+            | NodeKind::ReserveInstallation
+            | NodeKind::PublishInstallation => Err(ExecError::refused(
+                node.id.as_str(),
+                "installation publication belongs to the coordinator",
+            )),
+            NodeKind::Generation { operation, intent } => self.generation_storage()?.apply(
+                *operation,
+                intent,
+                self.transaction_id()?,
+                self.payload.as_deref(),
+            ),
             NodeKind::ServiceControl { operation } => zup_transaction::apply_service_control(
                 &mut self.native_service_context()?,
                 operation,
             )
             .map_err(|reason| ExecError::refused(&operation.native_name, reason)),
             NodeKind::Barrier => Ok(OperationReceipt::Control),
-            NodeKind::StageFile { .. } => self.stage_node(node),
+            NodeKind::RetainFile { .. } => self.retain_file(node),
+            NodeKind::StageFile { .. } => self.stage_node(node, transaction),
             NodeKind::FileMutation { delta, .. } => match delta {
-                FileOperationKind::Create | FileOperationKind::RestoreOwned => self.create(node),
-                FileOperationKind::Replace | FileOperationKind::RepairOwned => self.replace(node),
+                FileOperationKind::Create | FileOperationKind::RestoreOwned => {
+                    self.create(node, transaction)
+                }
+                FileOperationKind::Replace | FileOperationKind::RepairOwned => {
+                    self.replace(node, transaction)
+                }
                 FileOperationKind::NoOp => Ok(OperationReceipt::Control),
                 other => Err(ExecError::PlanDrift {
                     path: node.id.to_string(),
@@ -506,35 +743,66 @@ impl LinuxFileExecutor {
                 }),
             },
             NodeKind::FileRemoval { .. } => self.remove(node),
-            NodeKind::BackendOperation { .. } => {
-                if is_service_node(node) {
-                    return self.apply_service(node);
-                }
-                let request = refresh_request(node)?;
-                crate::refresh::run_refresh(&request)?;
-                Ok(OperationReceipt::Backend {
-                    key: request.key(),
-                    payload: request.encode(),
-                })
-            }
-            NodeKind::BackendRemoval { .. } => {
-                if is_service_node(node) {
-                    return self.apply_service(node);
-                }
-                Err(ExecError::PlanDrift {
-                    path: node.id.to_string(),
-                    reason: "a backend removal is not a Linux operation".into(),
-                })
-            }
+            NodeKind::BackendOperation { .. } => Err(ExecError::refused(
+                node.id.as_str(),
+                "unsupported Linux backend operation",
+            )),
+            NodeKind::BackendRemoval { .. } => Err(ExecError::PlanDrift {
+                path: node.id.to_string(),
+                reason: "a backend removal is not a Linux operation".into(),
+            }),
         }
     }
 
     pub fn verify(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), ExecError> {
         match receipt {
+            OperationReceipt::Cleanup { .. } => crate::cleanup::verify(
+                self.state.as_ref().ok_or_else(|| {
+                    ExecError::refused(
+                        node.id.as_str(),
+                        "cleanup requires protected transaction storage",
+                    )
+                })?,
+                self.transaction_id()?,
+                node,
+                receipt,
+            ),
+            OperationReceipt::PersistentDirectory(owned) => {
+                let NodeKind::PersistentDirectory { operation } = &node.kind else {
+                    return Err(ExecError::refused(
+                        node.id.as_str(),
+                        "persistent directory receipt requires its typed operation",
+                    ));
+                };
+                self.persistent_storage()?.verify(operation, owned)
+            }
+            OperationReceipt::NativeService(_)
+            | OperationReceipt::NativeServiceCompensation { .. } => {
+                let operation = crate::native_service::operation(node)?;
+                self.native_service_context()?
+                    .verify_registration(operation, receipt)
+            }
+            OperationReceipt::NativeCache { .. } => {
+                let operation = cache_intent(node, receipt)?;
+                self.cache(node)?.verify(operation, receipt)
+            }
+            OperationReceipt::RetainedFile { .. } => {
+                if self.retain_file(node)? != *receipt {
+                    return Err(ExecError::refused(
+                        node.id.as_str(),
+                        "retained file differs from its authorized observation",
+                    ));
+                }
+                Ok(())
+            }
+            OperationReceipt::Generation(receipt) => {
+                let intent = generation_intent(node, receipt)?;
+                self.generation_storage()?.verify(intent, receipt)
+            }
             OperationReceipt::ServiceControl(receipt) => zup_transaction::verify_service_control(
                 &mut self.native_service_context()?,
                 receipt,
@@ -545,48 +813,31 @@ impl LinuxFileExecutor {
                 installed_sha256,
                 installed_size,
                 executable,
+                object,
+                ..
+            }
+            | OperationReceipt::ReplaceFile {
+                destination,
+                new_sha256: installed_sha256,
+                new_size: installed_size,
+                executable,
+                object,
                 ..
             } => {
                 let expected = FileIntent {
-                    sha256: installed_sha256
-                        .parse()
-                        .map_err(|_| ExecError::RollbackDrift {
-                            path: destination.clone(),
-                            reason: "invalid journal digest".into(),
-                        })?,
+                    sha256: *installed_sha256,
                     size: *installed_size,
                     executable: *executable,
                 };
-                verify_installed(
-                    Path::new(destination),
-                    expected,
-                    self.executable_mode_for(expected),
-                )
-            }
-            OperationReceipt::ReplaceFile {
-                destination,
-                new_sha256,
-                new_size,
-                executable,
-                ..
-            } => {
-                let expected = FileIntent {
-                    sha256: new_sha256.parse().map_err(|_| ExecError::RollbackDrift {
-                        path: destination.clone(),
-                        reason: "invalid journal digest".into(),
-                    })?,
-                    size: *new_size,
-                    executable: *executable,
-                };
-                verify_installed(
+                let current = verify_installed(
                     Path::new(destination),
                     expected,
                     self.executable_mode_for(expected),
                 )?;
-                if !receipt_backup_valid(receipt) {
+                if current.object() != *object || !receipt_backup_valid(receipt) {
                     return Err(ExecError::Verification {
                         path: destination.clone(),
-                        reason: "the backup a rollback would need is gone".into(),
+                        reason: "the published file or its rollback instance has changed".into(),
                     });
                 }
                 Ok(())
@@ -610,30 +861,53 @@ impl LinuxFileExecutor {
                 Ok(())
             }
             OperationReceipt::Control | OperationReceipt::StageFile { .. } => Ok(()),
-            OperationReceipt::Backend { key, payload } => {
-                if is_service_key(key) {
-                    return self.verify_service_receipt(node, key, payload);
-                }
-
-                let request = crate::refresh::RefreshRequest::decode(payload)?;
-                crate::refresh::preflight(&request)?;
-                match std::fs::symlink_metadata(&request.directory) {
-                    Ok(metadata) if metadata.is_dir() => Ok(()),
-                    _ => Err(ExecError::Verification {
-                        path: request.directory.clone(),
-                        reason: "the refreshed database directory is not there".into(),
-                    }),
-                }
-            }
+            OperationReceipt::Backend { .. } => Err(ExecError::refused(
+                node.id.as_str(),
+                "unsupported Linux backend receipt",
+            )),
         }
     }
 
     pub fn rollback(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), ExecError> {
+        let _state_boundary = self.payload_boundary(node)?;
+        if matches!(
+            node.kind,
+            NodeKind::FileMutation {
+                delta: FileOperationKind::RepairOwned,
+                ..
+            }
+        ) {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "repair displaced an externally modified file; automatic restoration is unsafe; retained instances require recovery",
+            ));
+        }
         match receipt {
+            OperationReceipt::Cleanup { .. } => Err(ExecError::refused(
+                node.id.as_str(),
+                "committed cleanup cannot be compensated",
+            )),
+            OperationReceipt::PersistentDirectory(_) => self.verify(node, receipt),
+            OperationReceipt::NativeService(_)
+            | OperationReceipt::NativeServiceCompensation { .. } => {
+                let operation = crate::native_service::operation(node)?;
+                self.native_service_context()?
+                    .rollback_registration(operation, receipt)
+            }
+            OperationReceipt::NativeCache { .. } => {
+                let operation = cache_intent(node, receipt)?;
+                self.cache(node)?.run(operation).map(|_| ())
+            }
+            OperationReceipt::RetainedFile { .. } => Ok(()),
+            OperationReceipt::Generation(receipt) => {
+                let intent = generation_intent(node, receipt)?;
+                self.generation_storage()?
+                    .retain_after_compensation(intent, receipt)
+            }
             OperationReceipt::ServiceControl(receipt) => zup_transaction::rollback_service_control(
                 &mut self.native_service_context()?,
                 receipt,
@@ -644,7 +918,8 @@ impl LinuxFileExecutor {
                 installed_sha256,
                 installed_size,
                 executable,
-                created_directories,
+                created_directories: _,
+                object,
             } => {
                 let path = PathBuf::from(destination);
                 let file = self.file(node.id.as_str())?.clone();
@@ -655,12 +930,7 @@ impl LinuxFileExecutor {
                     });
                 }
                 let expected = FileIntent {
-                    sha256: installed_sha256
-                        .parse()
-                        .map_err(|_| ExecError::RollbackDrift {
-                            path: destination.clone(),
-                            reason: "invalid journal digest".into(),
-                        })?,
+                    sha256: *installed_sha256,
                     size: *installed_size,
                     executable: *executable,
                 };
@@ -680,7 +950,7 @@ impl LinuxFileExecutor {
                             path: path.display().to_string(),
                             reason: "the file is no longer the one this transaction wrote".into(),
                         })?;
-                        if current.mode != expected_mode {
+                        if current.mode != expected_mode || current.object() != *object {
                             return Err(ExecError::RollbackDrift {
                                 path: path.display().to_string(),
                                 reason: "the file is no longer the one this transaction wrote"
@@ -690,25 +960,6 @@ impl LinuxFileExecutor {
                         directory.remove_file(&name)?;
                         directory.sync()?;
 
-                        for created in created_directories.iter().rev() {
-                            let created = Path::new(created);
-                            let Some(parent) = created.parent() else {
-                                continue;
-                            };
-                            let Some(leaf) = created
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .filter(|name| !name.is_empty())
-                            else {
-                                continue;
-                            };
-                            if leaf.contains('/') || leaf.contains('\0') {
-                                continue;
-                            }
-                            if let Ok(parent) = OwnedDirectory::open(parent) {
-                                let _ = parent.remove_empty_directory(&leaf);
-                            }
-                        }
                         Ok(())
                     }
                     Some(_) => Err(ExecError::RollbackDrift {
@@ -726,6 +977,8 @@ impl LinuxFileExecutor {
                 new_sha256,
                 new_size,
                 executable,
+                object,
+                previous_object,
             } => {
                 let path = PathBuf::from(destination);
                 let file = self.file(node.id.as_str())?.clone();
@@ -736,20 +989,12 @@ impl LinuxFileExecutor {
                     });
                 }
                 let previous = FileIntent {
-                    sha256: previous_sha256
-                        .parse()
-                        .map_err(|_| ExecError::RollbackDrift {
-                            path: destination.clone(),
-                            reason: "invalid journal digest".into(),
-                        })?,
+                    sha256: *previous_sha256,
                     size: *previous_size,
                     executable: previous_mode & 0o111 != 0,
                 };
                 let new = FileIntent {
-                    sha256: new_sha256.parse().map_err(|_| ExecError::RollbackDrift {
-                        path: destination.clone(),
-                        reason: "invalid journal digest".into(),
-                    })?,
+                    sha256: *new_sha256,
                     size: *new_size,
                     executable: *executable,
                 };
@@ -768,10 +1013,16 @@ impl LinuxFileExecutor {
                     &directory,
                     &name,
                     &path,
-                    previous.size,
-                    previous.sha256,
-                    new.size,
-                    new.sha256,
+                    ExpectedFile {
+                        object: *previous_object,
+                        size: previous.size,
+                        sha256: previous.sha256,
+                    },
+                    ExpectedFile {
+                        object: *object,
+                        size: new.size,
+                        sha256: new.sha256,
+                    },
                 )? {
                     Current::Absent => {
                         let saved = stream_expected(
@@ -785,7 +1036,12 @@ impl LinuxFileExecutor {
                             path: path.display().to_string(),
                             reason: "the backup no longer holds the previous file".into(),
                         })?;
-                        let _ = saved;
+                        if saved.object() != *previous_object {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "the backup is not the original owned instance".into(),
+                            });
+                        }
                         directory
                             .rename_noreplace(&backup, &name)
                             .map_err(ExecError::from)
@@ -800,11 +1056,25 @@ impl LinuxFileExecutor {
                                 }
                                 other => other,
                             })?;
-                        verify_previous(&path, previous.size, previous.sha256, *previous_mode)?;
+                        let restored =
+                            verify_previous(&path, previous.size, previous.sha256, *previous_mode)?;
+                        if restored.object() != *previous_object {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "the restored file is not the original owned instance"
+                                    .into(),
+                            });
+                        }
                         Ok(())
                     }
                     Current::MatchesPrevious => {
-                        if backup_holds(&directory, &backup, previous.size, previous.sha256) {
+                        if backup_holds(
+                            &directory,
+                            &backup,
+                            *previous_object,
+                            previous.size,
+                            previous.sha256,
+                        ) {
                             let _ = directory.remove_file(&backup);
                             let _ = directory.sync();
                         }
@@ -823,7 +1093,14 @@ impl LinuxFileExecutor {
                             directory.chmod_regular(&name, mode_from(*previous_mode))?;
                             let _ = directory.sync();
                         }
-                        verify_installed(&path, previous, *previous_mode)?;
+                        let restored = verify_installed(&path, previous, *previous_mode)?;
+                        if restored.object() != *previous_object {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "the restored file is not the original owned instance"
+                                    .into(),
+                            });
+                        }
                         Ok(())
                     }
                     Current::MatchesNew => {
@@ -838,6 +1115,12 @@ impl LinuxFileExecutor {
                             path: path.display().to_string(),
                             reason: "the backup no longer holds the previous file".into(),
                         })?;
+                        if saved.object() != *previous_object {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "the backup is not the original owned instance".into(),
+                            });
+                        }
                         if directory.try_exchange(&name, &backup)? {
                             directory.sync()?;
                             let restored = stream_expected(
@@ -858,21 +1141,35 @@ impl LinuxFileExecutor {
                                     reason: "the destination changed during rollback".into(),
                                 });
                             }
-                            let _ = directory.remove_file(&backup);
-                            let _ = directory.sync();
-                        } else {
-                            let temporary = rollback_temp_name(&transaction, node.id.as_str());
-                            Quarantine {
-                                directory: &directory,
-                                display: &path,
+                            let displaced =
+                                stream_expected(&directory, &backup, &path, new.size, new.sha256)?;
+                            if displaced.object() != *object {
+                                return Err(ExecError::RollbackDrift {
+                                    path: directory.path().join(&backup).display().to_string(),
+                                    reason: "the displaced file is not the published instance"
+                                        .into(),
+                                });
                             }
-                            .reverse_restore(&name, &backup, &temporary, new.size, new.sha256)?;
+                            directory.remove_file(&backup)?;
+                            directory.sync()?;
+                        } else {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "filesystem cannot atomically restore the owned instance; recovery requires an authenticated quiescence boundary".into(),
+                            });
                         }
                         if saved.mode != *previous_mode {
                             directory.chmod_regular(&name, mode_from(*previous_mode))?;
                             let _ = directory.sync();
                         }
-                        verify_installed(&path, previous, *previous_mode)?;
+                        let restored = verify_installed(&path, previous, *previous_mode)?;
+                        if restored.object() != *previous_object {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "the restored file is not the original owned instance"
+                                    .into(),
+                            });
+                        }
                         Ok(())
                     }
                     Current::Foreign => Err(ExecError::RollbackDrift {
@@ -887,6 +1184,7 @@ impl LinuxFileExecutor {
                 sha256,
                 size,
                 mode,
+                object,
             } => {
                 let file = self.file(node.id.as_str())?.clone();
                 if *destination != file.destination {
@@ -921,9 +1219,9 @@ impl LinuxFileExecutor {
                     "removed",
                 )?;
 
-                match removed_state(&directory, &name, &path, *size, *sha256)? {
+                match removed_state(&directory, &name, &path, *object, *size, *sha256)? {
                     Restored::Already => {
-                        if backup_holds(&directory, &backup, *size, *sha256) {
+                        if backup_holds(&directory, &backup, *object, *size, *sha256) {
                             let _ = directory.remove_file(&backup);
                             let _ = directory.sync();
                         }
@@ -944,7 +1242,12 @@ impl LinuxFileExecutor {
                                 path: path.display().to_string(),
                                 reason: "the backup no longer holds the removed file".into(),
                             })?;
-                        let _ = saved;
+                        if saved.object() != *object {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "the backup is not the removed owned instance".into(),
+                            });
+                        }
                         directory
                             .rename_noreplace(&backup, &name)
                             .map_err(ExecError::from)
@@ -959,7 +1262,14 @@ impl LinuxFileExecutor {
                                 }
                                 other => other,
                             })?;
-                        verify_previous(&path, *size, *sha256, *mode)?;
+                        let restored = verify_previous(&path, *size, *sha256, *mode)?;
+                        if restored.object() != *object {
+                            return Err(ExecError::RollbackDrift {
+                                path: path.display().to_string(),
+                                reason: "the restored file is not the removed owned instance"
+                                    .into(),
+                            });
+                        }
                         Ok(())
                     }
                     Restored::Foreign => Err(ExecError::RollbackDrift {
@@ -968,31 +1278,70 @@ impl LinuxFileExecutor {
                     }),
                 }
             }
-            OperationReceipt::Control | OperationReceipt::StageFile { .. } => {
-                if matches!(receipt, OperationReceipt::StageFile { .. }) {
-                    self.discard_staged(node);
-                }
-                Ok(())
-            }
-            OperationReceipt::Backend { key, payload } => {
-                if is_service_key(key) {
-                    return self.rollback_service(node, key, payload);
-                }
-
-                Ok(())
-            }
+            OperationReceipt::StageFile { object, .. } => self.discard_staged(node, *object),
+            OperationReceipt::Control => Ok(()),
+            OperationReceipt::Backend { .. } => Ok(()),
         }
     }
 
     pub fn reconcile(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
         receipt: Option<&OperationReceipt>,
+        transaction: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, ExecError> {
+        if let Some(state) = &self.state {
+            state.validate(transaction)?;
+        }
+        let _state_boundary = self.payload_boundary(node)?;
+        if self.transaction_id()? != transaction.transaction_id
+            || !transaction.plan.nodes.contains(node)
+        {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "operation is not part of this authenticated transaction",
+            ));
+        }
         let Some(receipt) = receipt else {
-            return self.reconcile_interrupted(node);
+            return self.reconcile_interrupted(node, transaction);
         };
         match receipt {
+            OperationReceipt::Cleanup { .. } => self
+                .verify(node, receipt)
+                .map(|()| ReconcileResult::AppliedWithReceipt(receipt.clone())),
+            OperationReceipt::PersistentDirectory(_) => self
+                .verify(node, receipt)
+                .map(|_| ReconcileResult::AppliedWithReceipt(receipt.clone())),
+            OperationReceipt::NativeService(_)
+            | OperationReceipt::NativeServiceCompensation { .. } => {
+                let operation = crate::native_service::operation(node)?;
+                Ok(
+                    if self
+                        .native_service_context()?
+                        .verify_registration(operation, receipt)
+                        .is_ok()
+                    {
+                        ReconcileResult::AppliedWithReceipt(receipt.clone())
+                    } else {
+                        ReconcileResult::Ambiguous
+                    },
+                )
+            }
+            OperationReceipt::NativeCache { .. } => {
+                let _ = cache_intent(node, receipt)?;
+                Ok(ReconcileResult::AppliedWithReceipt(receipt.clone()))
+            }
+            OperationReceipt::RetainedFile { .. } => Ok(if self.verify(node, receipt).is_ok() {
+                ReconcileResult::AppliedWithReceipt(receipt.clone())
+            } else {
+                ReconcileResult::Ambiguous
+            }),
+            OperationReceipt::Generation(receipt) => {
+                let intent = generation_intent(node, receipt)?;
+                self.generation_storage()?
+                    .verify(intent, receipt)
+                    .map(|()| ReconcileResult::Applied)
+            }
             OperationReceipt::ServiceControl(receipt) => {
                 zup_transaction::reconcile_service_control(
                     &mut self.native_service_context()?,
@@ -1006,6 +1355,7 @@ impl LinuxFileExecutor {
                 installed_sha256,
                 installed_size,
                 executable,
+                object,
                 ..
             }
             | OperationReceipt::ReplaceFile {
@@ -1013,24 +1363,20 @@ impl LinuxFileExecutor {
                 new_sha256: installed_sha256,
                 new_size: installed_size,
                 executable,
+                object,
                 ..
             } => {
                 let expected = FileIntent {
-                    sha256: installed_sha256
-                        .parse()
-                        .map_err(|_| ExecError::RollbackDrift {
-                            path: destination.clone(),
-                            reason: "invalid journal digest".into(),
-                        })?,
+                    sha256: *installed_sha256,
                     size: *installed_size,
                     executable: *executable,
                 };
                 let expected_mode = (expected.mode_for(self.executable_mode)).bits() & 0o7777;
                 match observe(Path::new(destination))? {
-                    None => Ok(ReconcileResult::NotApplied),
+                    None => Ok(ReconcileResult::Ambiguous),
                     Some(_)
                         if verify_installed(Path::new(destination), expected, expected_mode)
-                            .is_ok()
+                            .is_ok_and(|current| current.object() == *object)
                             && receipt_backup_valid(receipt) =>
                     {
                         Ok(ReconcileResult::AppliedWithReceipt(receipt.clone()))
@@ -1038,21 +1384,13 @@ impl LinuxFileExecutor {
                     Some(_) => Ok(ReconcileResult::Ambiguous),
                 }
             }
-            OperationReceipt::RemoveFile {
-                destination,
-                sha256,
-                size,
-                ..
-            } => {
+            OperationReceipt::RemoveFile { destination, .. } => {
                 let path = PathBuf::from(destination.to_string());
                 match observe(&path)? {
                     None if receipt_backup_valid(receipt) => {
                         Ok(ReconcileResult::AppliedWithReceipt(receipt.clone()))
                     }
                     None => Ok(ReconcileResult::Ambiguous),
-                    Some((found_size, found)) if found_size == *size && found == *sha256 => {
-                        Ok(ReconcileResult::NotApplied)
-                    }
                     Some(_) => Ok(ReconcileResult::Ambiguous),
                 }
             }
@@ -1060,20 +1398,46 @@ impl LinuxFileExecutor {
                 Ok(ReconcileResult::AppliedWithReceipt(receipt.clone()))
             }
 
-            OperationReceipt::Backend { key, .. } => {
-                if is_service_key(key) {
-                    return self.reconcile_service(node, Some(receipt));
-                }
-                Ok(ReconcileResult::NotApplied)
-            }
+            OperationReceipt::Backend { .. } => Ok(ReconcileResult::NotApplied),
         }
     }
 
     fn reconcile_interrupted(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
+        evidence: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, ExecError> {
         match &node.kind {
+            NodeKind::Cleanup { .. } => crate::cleanup::apply(
+                self.state.as_ref().ok_or_else(|| {
+                    ExecError::refused(
+                        node.id.as_str(),
+                        "cleanup requires protected transaction storage",
+                    )
+                })?,
+                node,
+                evidence,
+            )
+            .map(ReconcileResult::AppliedWithReceipt),
+            NodeKind::PersistentDirectory { operation } => {
+                self.persistent_storage()?.reconcile(operation, evidence)
+            }
+            NodeKind::NativeService { operation } => self
+                .native_service_context()?
+                .reconcile_registration(operation),
+            NodeKind::NativeCache { operation } => Ok(ReconcileResult::AppliedWithReceipt(
+                OperationReceipt::NativeCache {
+                    intent: operation.fingerprint(),
+                    completion: zup_transaction::NativeCacheCompletion::CompensationOnly,
+                },
+            )),
+            NodeKind::Retention { .. }
+            | NodeKind::ReserveInstallation
+            | NodeKind::PublishInstallation => Ok(ReconcileResult::Ambiguous),
+            NodeKind::Generation { operation, intent } => {
+                self.generation_storage()?
+                    .reconcile(*operation, intent, self.transaction_id()?)
+            }
             NodeKind::ServiceControl { operation } => zup_transaction::reconcile_service_control(
                 &mut self.native_service_context()?,
                 operation,
@@ -1081,14 +1445,28 @@ impl LinuxFileExecutor {
             )
             .map_err(|reason| ExecError::refused(&operation.native_name, reason)),
             NodeKind::Barrier => Ok(ReconcileResult::Applied),
+            NodeKind::RetainFile { .. } => Ok(match self.retain_file(node) {
+                Ok(receipt) => ReconcileResult::AppliedWithReceipt(receipt),
+                Err(_) => ReconcileResult::NotApplied,
+            }),
 
-            NodeKind::StageFile { .. } => Ok(ReconcileResult::NotApplied),
+            NodeKind::StageFile { .. } => {
+                let file = self.file(node.id.as_str())?;
+                match crate::fs::open_parent(&file.host_path) {
+                    Err(error) if error.is_not_found() => Ok(ReconcileResult::NotApplied),
+                    Err(error) => Err(error.into()),
+                    Ok((parent, _)) => match parent.kind_or_absent(&staged_name(&node.id))? {
+                        None => Ok(ReconcileResult::NotApplied),
+                        Some(_) => Ok(ReconcileResult::Ambiguous),
+                    },
+                }
+            }
             NodeKind::FileMutation { delta, .. } => match delta {
                 FileOperationKind::Create | FileOperationKind::RestoreOwned => {
-                    self.reconcile_interrupted_create(node)
+                    self.reconcile_interrupted_create(node, evidence)
                 }
                 FileOperationKind::Replace | FileOperationKind::RepairOwned => {
-                    self.reconcile_interrupted_replace(node)
+                    self.reconcile_interrupted_replace(node, evidence)
                 }
                 FileOperationKind::NoOp => Ok(ReconcileResult::NotApplied),
                 FileOperationKind::Conflict | FileOperationKind::Drift => {
@@ -1097,48 +1475,73 @@ impl LinuxFileExecutor {
             },
             NodeKind::FileRemoval { .. } => self.reconcile_interrupted_removal(node),
 
-            NodeKind::BackendOperation { .. } => {
-                if is_service_node(node) {
-                    return self.reconcile_service(node, None);
-                }
-                Ok(ReconcileResult::NotApplied)
-            }
-            NodeKind::BackendRemoval { .. } => {
-                if is_service_node(node) {
-                    return self.reconcile_service(node, None);
-                }
-                Ok(ReconcileResult::Ambiguous)
-            }
+            NodeKind::BackendOperation { .. } => Ok(ReconcileResult::Ambiguous),
+            NodeKind::BackendRemoval { .. } => Ok(ReconcileResult::Ambiguous),
         }
     }
 
     fn reconcile_interrupted_create(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
+        evidence: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, ExecError> {
+        let key = mutation_key(node)?;
+        let Some(OperationReceipt::StageFile {
+            object: staged_object,
+            ..
+        }) = evidence.receipt(&OperationId::stage_file(&key))
+        else {
+            return Ok(ReconcileResult::Ambiguous);
+        };
+        if evidence.transaction_id != self.transaction_id()? {
+            return Ok(ReconcileResult::Ambiguous);
+        }
         let file = self.file(node.id.as_str())?.clone();
         let expected_mode = self.executable_mode_for(file.intent);
         match observe(&file.host_path)? {
             None => Ok(ReconcileResult::NotApplied),
-            Some(_) if verify_installed(&file.host_path, file.intent, expected_mode).is_ok() => Ok(
-                ReconcileResult::AppliedWithReceipt(OperationReceipt::CreateFile {
-                    destination: file.host_path.display().to_string(),
-                    installed_sha256: file.intent.sha256.to_hex(),
-                    installed_size: file.intent.size,
-                    executable: file.intent.executable,
-                    created_directories: Vec::new(),
-                }),
-            ),
+            Some(_)
+                if verify_installed(&file.host_path, file.intent, expected_mode)
+                    .is_ok_and(|file| file.object() == *staged_object) =>
+            {
+                Ok(ReconcileResult::AppliedWithReceipt(
+                    OperationReceipt::CreateFile {
+                        object: *staged_object,
+                        destination: file.host_path.display().to_string(),
+                        installed_sha256: file.intent.sha256,
+                        installed_size: file.intent.size,
+                        executable: file.intent.executable,
+                        created_directories: Vec::new(),
+                    },
+                ))
+            }
             Some(_) => Ok(ReconcileResult::Ambiguous),
         }
     }
 
     fn reconcile_interrupted_replace(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
+        evidence: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, ExecError> {
+        let key = mutation_key(node)?;
+        let Some(OperationReceipt::StageFile {
+            object: staged_object,
+            ..
+        }) = evidence.receipt(&OperationId::stage_file(&key))
+        else {
+            return Ok(ReconcileResult::Ambiguous);
+        };
+        if evidence.transaction_id != self.transaction_id()? {
+            return Ok(ReconcileResult::Ambiguous);
+        }
         let file = self.file(node.id.as_str())?.clone();
-        let FilePrecondition::Exact { size, sha256 } = file.precondition else {
+        let FilePrecondition::Exact {
+            object,
+            size,
+            sha256,
+        } = file.precondition
+        else {
             return Ok(ReconcileResult::Ambiguous);
         };
         let Ok(transaction) = self.transaction_id() else {
@@ -1158,15 +1561,33 @@ impl LinuxFileExecutor {
         let staged_name = staged_name(&OperationId::stage_file(&key));
         let new_mode = self.executable_mode_for(file.intent);
         let backup_old = match directory.stream_regular(&backup_name) {
-            Ok(backup) if backup.size == size && backup.sha256 == sha256 => Some(backup.mode),
+            Ok(backup)
+                if backup.size == size
+                    && backup.sha256 == sha256
+                    && object
+                        == (zup_core::NativeObjectIdentity::Linux {
+                            device: backup.dev,
+                            inode: backup.ino,
+                        }) =>
+            {
+                Some(backup.mode)
+            }
             _ => None,
         };
         let staged = directory.stream_regular(&staged_name).ok();
-        let staged_old = staged
-            .as_ref()
-            .is_some_and(|staged| staged.size == size && staged.sha256 == sha256);
+        let staged_old = staged.as_ref().is_some_and(|staged| {
+            staged.size == size
+                && staged.sha256 == sha256
+                && object
+                    == (zup_core::NativeObjectIdentity::Linux {
+                        device: staged.dev,
+                        inode: staged.ino,
+                    })
+        });
         let staged_new = staged.as_ref().is_some_and(|staged| {
-            staged.size == file.intent.size && staged.sha256 == file.intent.sha256
+            staged.object() == *staged_object
+                && staged.size == file.intent.size
+                && staged.sha256 == file.intent.sha256
         });
         match observe(&file.host_path)? {
             None => match (backup_old, staged_new) {
@@ -1182,10 +1603,12 @@ impl LinuxFileExecutor {
                         Err(_) => return Ok(ReconcileResult::Ambiguous),
                     }
                     match verify_installed(&file.host_path, file.intent, new_mode) {
-                        Ok(()) => Ok(ReconcileResult::AppliedWithReceipt(
-                            OperationReceipt::ReplaceFile {
+                        Ok(found) if found.object() == *staged_object => Ok(
+                            ReconcileResult::AppliedWithReceipt(OperationReceipt::ReplaceFile {
+                                previous_object: object,
+                                object: directory.stream_regular(&name)?.object(),
                                 destination: file.host_path.display().to_string(),
-                                previous_sha256: sha256.to_hex(),
+                                previous_sha256: sha256,
                                 previous_size: size,
                                 previous_mode,
                                 backup_path: directory
@@ -1193,12 +1616,12 @@ impl LinuxFileExecutor {
                                     .join(&backup_name)
                                     .display()
                                     .to_string(),
-                                new_sha256: file.intent.sha256.to_hex(),
+                                new_sha256: file.intent.sha256,
                                 new_size: file.intent.size,
                                 executable: file.intent.executable,
-                            },
-                        )),
-                        Err(_) => Ok(ReconcileResult::Ambiguous),
+                            }),
+                        ),
+                        _ => Ok(ReconcileResult::Ambiguous),
                     }
                 }
                 (Some(previous_mode), false) => {
@@ -1206,23 +1629,33 @@ impl LinuxFileExecutor {
                         Ok(()) => {}
                         Err(_) => return Ok(ReconcileResult::Ambiguous),
                     }
-                    match verify_previous(&file.host_path, size, sha256, previous_mode) {
+                    match verify_previous(&file.host_path, size, sha256, previous_mode)
+                        .and_then(|_| verify_precondition(&file.host_path, object, size, sha256))
+                    {
                         Ok(()) => Ok(ReconcileResult::NotApplied),
                         Err(_) => Ok(ReconcileResult::Ambiguous),
                     }
                 }
-                _ => Ok(ReconcileResult::NotApplied),
+                _ => Ok(ReconcileResult::Ambiguous),
             },
-            Some(_) if verify_installed(&file.host_path, file.intent, new_mode).is_ok() => {
+            Some(_) if verify_precondition(&file.host_path, object, size, sha256).is_ok() => {
+                Ok(ReconcileResult::NotApplied)
+            }
+            Some(_)
+                if verify_installed(&file.host_path, file.intent, new_mode)
+                    .is_ok_and(|file| file.object() == *staged_object) =>
+            {
                 if let Some(previous_mode) = backup_old {
                     return Ok(ReconcileResult::AppliedWithReceipt(
                         OperationReceipt::ReplaceFile {
+                            previous_object: object,
+                            object: directory.stream_regular(&name)?.object(),
                             destination: file.host_path.display().to_string(),
-                            previous_sha256: sha256.to_hex(),
+                            previous_sha256: sha256,
                             previous_size: size,
                             previous_mode,
                             backup_path: directory.path().join(&backup_name).display().to_string(),
-                            new_sha256: file.intent.sha256.to_hex(),
+                            new_sha256: file.intent.sha256,
                             new_size: file.intent.size,
                             executable: file.intent.executable,
                         },
@@ -1241,12 +1674,14 @@ impl LinuxFileExecutor {
                     })?;
                     return Ok(ReconcileResult::AppliedWithReceipt(
                         OperationReceipt::ReplaceFile {
+                            previous_object: object,
+                            object: directory.stream_regular(&name)?.object(),
                             destination: file.host_path.display().to_string(),
-                            previous_sha256: sha256.to_hex(),
+                            previous_sha256: sha256,
                             previous_size: size,
                             previous_mode: backup.mode,
                             backup_path: directory.path().join(&backup_name).display().to_string(),
-                            new_sha256: file.intent.sha256.to_hex(),
+                            new_sha256: file.intent.sha256,
                             new_size: file.intent.size,
                             executable: file.intent.executable,
                         },
@@ -1260,7 +1695,7 @@ impl LinuxFileExecutor {
 
     fn reconcile_interrupted_removal(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
     ) -> Result<ReconcileResult, ExecError> {
         let removal = removal_identity(node)?.clone();
         let file = self.file(node.id.as_str())?.clone();
@@ -1288,6 +1723,7 @@ impl LinuxFileExecutor {
             None => match backup_mode {
                 Some(mode) => Ok(ReconcileResult::AppliedWithReceipt(
                     OperationReceipt::RemoveFile {
+                        object: removal.instance.object,
                         destination: removal.destination.clone(),
                         backup_path: as_target(
                             &removal.destination,
@@ -1307,7 +1743,54 @@ impl LinuxFileExecutor {
         }
     }
 
-    fn create(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
+    fn retain_file(&self, node: &DeploymentNode) -> Result<OperationReceipt, ExecError> {
+        let invalid = || {
+            ExecError::refused(
+                node.id.as_str(),
+                "retained file has no exact owned content contract",
+            )
+        };
+        if !matches!(node.kind, NodeKind::RetainFile { .. }) {
+            return Err(invalid());
+        }
+        let destination = node.file_destination().ok_or_else(invalid)?;
+        let Some(FilePrecondition::Exact {
+            object,
+            size,
+            sha256,
+        }) = node.meta.file_precondition
+        else {
+            return Err(invalid());
+        };
+        if node.meta.expected_size != Some(size) || node.meta.expected_sha256 != Some(sha256) {
+            return Err(invalid());
+        }
+        let intent = FileIntent {
+            size,
+            sha256,
+            executable: node.meta.executable.ok_or_else(invalid)?,
+        };
+        let path = to_host_path(destination)?;
+        let observed = verify_installed(&path, intent, self.executable_mode_for(intent))?;
+        if observed.object() != object {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "retained path is not the owned native instance",
+            ));
+        }
+        Ok(OperationReceipt::RetainedFile {
+            object,
+            destination: destination.clone(),
+            size,
+            sha256,
+        })
+    }
+
+    fn create(
+        &mut self,
+        node: &DeploymentNode,
+        evidence: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, ExecError> {
         let file = self.file(node.id.as_str())?.clone();
         if file.precondition != FilePrecondition::Absent {
             return Err(ExecError::PlanDrift {
@@ -1337,24 +1820,46 @@ impl LinuxFileExecutor {
                 .into());
             }
         }
-        self.ensure_staged(node, &file, &directory, &staged_name)?;
-        directory.chmod_regular(&staged_name, mode)?;
+        let staged = self.ensure_staged(node, &file, &directory, &staged_name, evidence)?;
+        rustix::fs::fchmod(&staged.file, mode)
+            .map_err(|error| PathError::errno(&directory.path().join(&staged_name), error))?;
+        staged
+            .file
+            .sync_all()
+            .map_err(|error| PathError::io(&directory.path().join(&staged_name), error))?;
+        let object = staged.object();
         directory.publish_exclusive(&name, &staged_name)?;
 
         let expected_mode = (mode).bits() & 0o7777;
-        verify_installed(&file.host_path, file.intent, expected_mode)?;
+        let published = verify_installed(&file.host_path, file.intent, expected_mode)?;
+        if published.object() != object {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "published file is not the staged instance",
+            ));
+        }
         Ok(OperationReceipt::CreateFile {
+            object,
             destination: file.host_path.display().to_string(),
-            installed_sha256: file.intent.sha256.to_hex(),
+            installed_sha256: file.intent.sha256,
             installed_size: file.intent.size,
             executable: file.intent.executable,
             created_directories,
         })
     }
 
-    fn replace(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
+    fn replace(
+        &mut self,
+        node: &DeploymentNode,
+        evidence: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, ExecError> {
         let file = self.file(node.id.as_str())?.clone();
-        let FilePrecondition::Exact { size, sha256 } = file.precondition else {
+        let FilePrecondition::Exact {
+            object,
+            size,
+            sha256,
+        } = file.precondition
+        else {
             return Err(ExecError::PlanDrift {
                 path: file.host_path.display().to_string(),
                 reason: "a replace must state the exact previous state".into(),
@@ -1368,12 +1873,27 @@ impl LinuxFileExecutor {
 
         let (directory, name) = crate::fs::open_parent(&file.host_path)?;
         let previous = stream_expected(&directory, &name, &file.host_path, size, sha256)?;
+        if object
+            != (zup_core::NativeObjectIdentity::Linux {
+                device: previous.dev,
+                inode: previous.ino,
+            })
+        {
+            return Err(ExecError::PlanDrift {
+                path: file.host_path.display().to_string(),
+                reason: "target object changed since snapshot".into(),
+            });
+        }
         occupy_backup_slot(&directory, &backup_name, &file.host_path)?;
 
-        self.ensure_staged(node, &file, &directory, &staged_name)?;
-        directory.chmod_regular(&staged_name, mode)?;
+        let staged_stat = self.ensure_staged(node, &file, &directory, &staged_name, evidence)?;
+        rustix::fs::fchmod(&staged_stat.file, mode)
+            .map_err(|error| PathError::errno(&directory.path().join(&staged_name), error))?;
+        staged_stat
+            .file
+            .sync_all()
+            .map_err(|error| PathError::io(&directory.path().join(&staged_name), error))?;
         directory.sync()?;
-        let staged_stat = directory.stat_child(&staged_name)?;
 
         if directory.try_exchange(&staged_name, &name)? {
             directory.sync()?;
@@ -1429,23 +1949,15 @@ impl LinuxFileExecutor {
                 }
             }
         } else {
-            Quarantine {
-                directory: &directory,
-                display: &file.host_path,
-            }
-            .forward_replace(
-                &name,
-                &staged_name,
-                &backup_name,
-                &previous,
-                file.intent,
-                mode.bits() & 0o7777,
-            )?;
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "filesystem lacks atomic exchange; a temporary path gap requires an authenticated quiescence boundary",
+            ));
         }
 
         let backup_path = directory.path().join(&backup_name);
         verify_installed(&file.host_path, file.intent, mode.bits() & 0o7777)?;
-        if !backup_holds(&directory, &backup_name, size, sha256) {
+        if !backup_holds(&directory, &backup_name, previous.object(), size, sha256) {
             return Err(ExecError::Verification {
                 path: file.host_path.display().to_string(),
                 reason: "the replacement applied but its backup cannot be confirmed".into(),
@@ -1453,18 +1965,20 @@ impl LinuxFileExecutor {
         }
 
         Ok(OperationReceipt::ReplaceFile {
+            previous_object: previous.object(),
+            object: staged_stat.object(),
             destination: file.host_path.display().to_string(),
-            previous_sha256: sha256.to_hex(),
+            previous_sha256: sha256,
             previous_size: size,
             previous_mode: previous.mode,
             backup_path: backup_path.display().to_string(),
-            new_sha256: file.intent.sha256.to_hex(),
+            new_sha256: file.intent.sha256,
             new_size: file.intent.size,
             executable: file.intent.executable,
         })
     }
 
-    fn remove(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
+    fn remove(&mut self, node: &DeploymentNode) -> Result<OperationReceipt, ExecError> {
         let file = self.file(node.id.as_str())?.clone();
         let removal = removal_identity(node)?.clone();
         self.check_removal_target(&file, &removal)?;
@@ -1473,7 +1987,13 @@ impl LinuxFileExecutor {
         let backup_name = backup_name(&transaction, node.id.as_str(), "removed");
         match directory.kind_or_absent(&name)? {
             None => {
-                if backup_holds(&directory, &backup_name, removal.size, removal.sha256) {
+                if backup_holds(
+                    &directory,
+                    &backup_name,
+                    removal.instance.object,
+                    removal.size,
+                    removal.sha256,
+                ) {
                     let backup_path = directory.path().join(&backup_name);
                     let backup = directory.stream_regular(&backup_name).map_err(|_| {
                         ExecError::Verification {
@@ -1482,6 +2002,7 @@ impl LinuxFileExecutor {
                         }
                     })?;
                     return Ok(OperationReceipt::RemoveFile {
+                        object: removal.instance.object,
                         destination: file.destination.clone(),
                         backup_path: as_target(&file.destination, &backup_path)?,
                         sha256: removal.sha256,
@@ -1508,6 +2029,13 @@ impl LinuxFileExecutor {
             removal.size,
             removal.sha256,
         )?;
+
+        if previous.object() != removal.instance.object {
+            return Err(ExecError::PlanDrift {
+                path: file.host_path.display().to_string(),
+                reason: "owned file object changed before removal".into(),
+            });
+        }
 
         directory
             .rename_noreplace(&name, &backup_name)
@@ -1549,6 +2077,7 @@ impl LinuxFileExecutor {
 
         let backup_path = directory.path().join(&backup_name);
         Ok(OperationReceipt::RemoveFile {
+            object: removal.instance.object,
             destination: file.destination.clone(),
 
             backup_path: as_target(&file.destination, &backup_path)?,
@@ -1559,76 +2088,84 @@ impl LinuxFileExecutor {
     }
 
     fn ensure_staged(
-        &mut self,
-        node: &TransactionNode,
+        &self,
+        node: &DeploymentNode,
         file: &FileOperation,
         directory: &OwnedDirectory,
         staged_name: &str,
-    ) -> Result<(), ExecError> {
-        if let Ok(staged) = directory.stream_regular(staged_name)
-            && staged.size == file.intent.size
-            && staged.sha256 == file.intent.sha256
+        evidence: &zup_transaction::TransactionRecord,
+    ) -> Result<StreamedRegular, ExecError> {
+        let key = mutation_key(node)?;
+        let Some(OperationReceipt::StageFile {
+            object,
+            staged_path,
+            size,
+            sha256,
+        }) = evidence.receipt(&OperationId::stage_file(&key))
+        else {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "the durable staged-file receipt is missing",
+            ));
+        };
+        if evidence.transaction_id != self.transaction_id()?
+            || Path::new(staged_path) != directory.path().join(staged_name)
+            || *size != file.intent.size
+            || *sha256 != file.intent.sha256
         {
-            return Ok(());
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "staged-file evidence does not authorize this publication",
+            ));
         }
-        let (source, sha256, size) = Self::payload_identity(node)?;
-        let payload = self.payload.as_ref().ok_or_else(|| ExecError::PlanDrift {
-            path: node.id.to_string(),
-            reason: "no payload source is attached".into(),
-        })?;
-        let mut reader =
-            payload
-                .open(&source, &sha256, size)
-                .map_err(|error| ExecError::Payload {
-                    path: source.to_string(),
-                    source: error,
-                })?;
-        let (found_size, found) = directory
-            .write_stream_durable(staged_name, &mut reader, size, crate::fs::STATE_FILE_MODE)
-            .map_err(|error| match error {
-                PathError::Refused { path, reason } => ExecError::Payload {
-                    path: source.to_string(),
-                    source: PayloadError::Read {
-                        path,
-                        source: std::io::Error::other(reason),
-                    },
-                },
-                other => other.into(),
-            })?;
-        if found_size != file.intent.size
-            || found != file.intent.sha256
-            || found_size != size
-            || found != sha256
-        {
-            return Err(ExecError::Payload {
-                path: source.to_string(),
-                source: PayloadError::DigestMismatch {
-                    path: source.to_string(),
-                },
-            });
+        let staged = directory.stream_regular(staged_name)?;
+        if staged.object() != *object || staged.size != *size || staged.sha256 != *sha256 {
+            return Err(ExecError::refused(
+                node.id.as_str(),
+                "the staged file is no longer the recorded instance",
+            ));
         }
-        Ok(())
+        Ok(staged)
     }
 
-    fn discard_staged(&mut self, node: &TransactionNode) {
-        let Ok(file) = self.file(node.id.as_str()).cloned() else {
-            return;
-        };
+    fn discard_staged(
+        &mut self,
+        node: &DeploymentNode,
+        object: zup_core::NativeObjectIdentity,
+    ) -> Result<(), ExecError> {
+        let file = self.file(node.id.as_str())?;
         let key = match &node.kind {
-            NodeKind::StageFile { key } => key.clone(),
-            NodeKind::FileMutation { key, .. } => key.clone(),
-            _ => return,
+            NodeKind::StageFile { key } | NodeKind::FileMutation { key, .. } => key,
+            _ => {
+                return Err(ExecError::refused(
+                    node.id.as_str(),
+                    "not a staged file operation",
+                ));
+            }
         };
-        let staged_name = staged_name(&OperationId::stage_file(&key));
-        let Ok((directory, _)) = crate::fs::open_parent(&file.host_path) else {
-            return;
-        };
-        if let Ok(staged) = directory.stream_regular(&staged_name)
-            && staged.size == file.intent.size
-            && staged.sha256 == file.intent.sha256
-        {
-            let _ = directory.remove_file(&staged_name);
-            let _ = directory.sync();
+        let staged_name = staged_name(&OperationId::stage_file(key));
+        let (directory, _) = crate::fs::open_parent(&file.host_path)?;
+        match directory.kind_or_absent(&staged_name)? {
+            None => Ok(()),
+            Some(EntryKind::Regular) => {
+                let staged = directory.stream_regular(&staged_name)?;
+                if staged.object() != object
+                    || staged.size != file.intent.size
+                    || staged.sha256 != file.intent.sha256
+                {
+                    return Err(ExecError::RollbackDrift {
+                        path: directory.path().join(&staged_name).display().to_string(),
+                        reason: "the staged file is no longer the recorded instance".into(),
+                    });
+                }
+                directory.remove_file(&staged_name)?;
+                directory.sync()?;
+                Ok(())
+            }
+            Some(_) => Err(ExecError::RollbackDrift {
+                path: directory.path().join(&staged_name).display().to_string(),
+                reason: "the staged file is no longer a regular file".into(),
+            }),
         }
     }
 
@@ -1657,42 +2194,66 @@ impl LinuxFileExecutor {
     }
 }
 
-fn refresh_request(node: &TransactionNode) -> Result<crate::refresh::RefreshRequest, ExecError> {
-    let missing = || ExecError::PlanDrift {
-        path: node.id.to_string(),
-        reason: "a refresh node without its request".into(),
-    };
-    let backend = node.meta.backend.clone().ok_or_else(missing)?;
-    let request = crate::refresh::RefreshRequest::decode(&backend.payload).map_err(|error| {
-        ExecError::PlanDrift {
-            path: node.id.to_string(),
-            reason: error.to_string(),
+fn cache_intent<'a>(
+    node: &'a DeploymentNode,
+    receipt: &OperationReceipt,
+) -> Result<&'a zup_plan::NativeCacheOperation, ExecError> {
+    match (&node.kind, receipt) {
+        (NodeKind::NativeCache { operation }, OperationReceipt::NativeCache { intent, .. })
+            if operation.fingerprint() == *intent =>
+        {
+            Ok(operation)
         }
-    })?;
-    if backend.key != request.key() || backend.id != request.backend_id() {
-        return Err(ExecError::PlanDrift {
-            path: node.id.to_string(),
-            reason: "a refresh node whose identity is not its request".into(),
-        });
+        _ => Err(ExecError::refused(
+            node.id.as_str(),
+            "native cache receipt differs from deployment intent",
+        )),
     }
-    Ok(request)
 }
 
 impl OperationExecutor for LinuxFileExecutor {
     type Error = ExecError;
 
+    fn prepare_compensation(
+        &mut self,
+        operation: &DeploymentNode,
+        receipt: &OperationReceipt,
+    ) -> Result<OperationReceipt, ExecError> {
+        match receipt {
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::prepare_service_compensation(
+                    &mut self.native_service_context()?,
+                    receipt,
+                )
+                .map(|receipt| OperationReceipt::ServiceControl(Box::new(receipt)))
+                .map_err(|reason| ExecError::refused(operation.id.as_str(), reason))
+            }
+            _ => Ok(receipt.clone()),
+        }
+    }
+
     fn reconcile_rollback(
         &mut self,
-        _operation: &TransactionNode,
+        _operation: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<zup_transaction::RollbackReconcileResult, Self::Error> {
         use zup_transaction::RollbackReconcileResult;
+        if let OperationReceipt::PersistentDirectory(_) = receipt {
+            self.verify(_operation, receipt)?;
+            return Ok(RollbackReconcileResult::Restored);
+        }
         if let OperationReceipt::ServiceControl(receipt) = receipt {
             return zup_transaction::reconcile_service_rollback(
                 &mut self.native_service_context()?,
                 receipt,
             )
             .map_err(|reason| ExecError::refused(&receipt.operation.native_name, reason));
+        }
+        if let OperationReceipt::Generation(receipt) = receipt {
+            let intent = generation_intent(_operation, receipt)?;
+            self.generation_storage()?
+                .retain_after_compensation(intent, receipt)?;
+            return Ok(RollbackReconcileResult::Restored);
         }
         Ok(match receipt {
             // These compensators verify journal-bound paths and both content generations
@@ -1701,22 +2262,30 @@ impl OperationExecutor for LinuxFileExecutor {
             | OperationReceipt::CreateFile { .. }
             | OperationReceipt::ReplaceFile { .. }
             | OperationReceipt::RemoveFile { .. } => RollbackReconcileResult::Retry,
+            OperationReceipt::NativeCache { .. } => {
+                cache_intent(_operation, receipt)?;
+                RollbackReconcileResult::Retry
+            }
             OperationReceipt::Control => RollbackReconcileResult::Restored,
             _ => RollbackReconcileResult::Ambiguous,
         })
     }
 
-    fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error> {
+    fn prepare(&mut self, operation: &DeploymentNode) -> Result<(), Self::Error> {
         LinuxFileExecutor::prepare(self, operation)
     }
 
-    fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error> {
-        LinuxFileExecutor::apply(self, operation)
+    fn apply(
+        &mut self,
+        operation: &DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, Self::Error> {
+        LinuxFileExecutor::apply(self, operation, transaction)
     }
 
     fn verify(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         LinuxFileExecutor::verify(self, operation, receipt)
@@ -1724,7 +2293,7 @@ impl OperationExecutor for LinuxFileExecutor {
 
     fn rollback(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         LinuxFileExecutor::rollback(self, operation, receipt)
@@ -1732,28 +2301,45 @@ impl OperationExecutor for LinuxFileExecutor {
 
     fn reconcile(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         receipt: Option<&OperationReceipt>,
+        transaction: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, Self::Error> {
-        LinuxFileExecutor::reconcile(self, operation, receipt)
+        LinuxFileExecutor::reconcile(self, operation, receipt, transaction)
+    }
+}
+
+fn generation_intent<'a>(
+    node: &'a DeploymentNode,
+    receipt: &zup_transaction::GenerationReceipt,
+) -> Result<&'a zup_plan::GenerationIntent, ExecError> {
+    match &node.kind {
+        NodeKind::Generation { operation, intent } if receipt.matches(*operation, intent) => {
+            Ok(intent)
+        }
+        _ => Err(ExecError::refused(
+            node.id.as_str(),
+            "generation receipt does not match the authorized effect",
+        )),
     }
 }
 
 fn verify_precondition(
     destination: &Path,
+    object: zup_core::NativeObjectIdentity,
     size: u64,
     sha256: Sha256Digest,
 ) -> Result<(), ExecError> {
-    let Some((found_size, found)) = observe(destination)? else {
-        return Err(PathError::Missing {
-            path: destination.display().to_string(),
-        }
-        .into());
+    let (directory, name) = crate::fs::open_parent(destination)?;
+    let current = stream_expected(&directory, &name, destination, size, sha256)?;
+    let found = zup_core::NativeObjectIdentity::Linux {
+        device: current.dev,
+        inode: current.ino,
     };
-    if found_size != size || found != sha256 {
+    if found != object {
         return Err(ExecError::PlanDrift {
             path: destination.display().to_string(),
-            reason: format!("expected {size} bytes / {sha256}, found {found_size} bytes / {found}"),
+            reason: "target object changed since snapshot".into(),
         });
     }
     Ok(())
@@ -1763,7 +2349,7 @@ fn verify_installed(
     destination: &Path,
     intent: FileIntent,
     expected_mode: u32,
-) -> Result<(), ExecError> {
+) -> Result<StreamedRegular, ExecError> {
     let (directory, name) = crate::fs::open_parent(destination)?;
     let current = directory
         .stream_regular(&name)
@@ -1771,6 +2357,7 @@ fn verify_installed(
             path: destination.display().to_string(),
             reason: "the published file is not there".into(),
         })?;
+    verify_payload_authority(&current, destination)?;
     if current.size != intent.size || current.sha256 != intent.sha256 {
         return Err(ExecError::Verification {
             path: destination.display().to_string(),
@@ -1790,7 +2377,7 @@ fn verify_installed(
             ),
         });
     }
-    Ok(())
+    Ok(current)
 }
 
 fn verify_previous(
@@ -1798,7 +2385,7 @@ fn verify_previous(
     size: u64,
     sha256: Sha256Digest,
     mode: u32,
-) -> Result<(), ExecError> {
+) -> Result<StreamedRegular, ExecError> {
     verify_installed(
         path,
         FileIntent {
@@ -1839,7 +2426,7 @@ fn observe(destination: &Path) -> Result<Option<(u64, Sha256Digest)>, ExecError>
     }
 }
 
-fn removal_identity(node: &TransactionNode) -> Result<&FileRemoval, ExecError> {
+fn removal_identity(node: &DeploymentNode) -> Result<&FileRemoval, ExecError> {
     node.meta
         .removal
         .as_ref()
@@ -1865,6 +2452,7 @@ fn stream_expected(
                 reason: "the required file is not a regular file".into(),
             },
         })?;
+    verify_payload_authority(&current, display)?;
     if current.size != size || current.sha256 != sha256 {
         return Err(ExecError::PlanDrift {
             path: display.display().to_string(),
@@ -1877,9 +2465,27 @@ fn stream_expected(
     Ok(current)
 }
 
-fn backup_holds(directory: &OwnedDirectory, backup: &str, size: u64, sha256: Sha256Digest) -> bool {
+fn verify_payload_authority(file: &StreamedRegular, path: &Path) -> Result<(), ExecError> {
+    if file.uid != rustix::process::geteuid().as_raw() || file.mode & 0o7022 != 0 {
+        return Err(ExecError::Verification {
+            path: path.display().to_string(),
+            reason: "payload requires the installation owner, no foreign write permissions, and no special permission bits".into(),
+        });
+    }
+    Ok(())
+}
+
+fn backup_holds(
+    directory: &OwnedDirectory,
+    backup: &str,
+    object: zup_core::NativeObjectIdentity,
+    size: u64,
+    sha256: Sha256Digest,
+) -> bool {
     match directory.stream_regular(backup) {
-        Ok(current) => current.size == size && current.sha256 == sha256,
+        Ok(current) => {
+            current.object() == object && current.size == size && current.sha256 == sha256
+        }
         Err(_) => false,
     }
 }
@@ -1899,124 +2505,6 @@ fn occupy_backup_slot(
     }
 }
 
-struct Quarantine<'a> {
-    directory: &'a OwnedDirectory,
-    display: &'a Path,
-}
-
-impl Quarantine<'_> {
-    fn forward_replace(
-        &self,
-        name: &str,
-        staged: &str,
-        backup: &str,
-        previous: &StreamedRegular,
-        new: FileIntent,
-        new_mode: u32,
-    ) -> Result<(), ExecError> {
-        let display = self.display.display().to_string();
-        let verification = |reason: &str| ExecError::Verification {
-            path: display.clone(),
-            reason: reason.into(),
-        };
-        self.directory
-            .rename_noreplace(name, backup)
-            .map_err(|error| match error {
-                PathError::AlreadyExists { .. } => verification("the backup slot is occupied"),
-                other => other.into(),
-            })?;
-        let moved = self
-            .directory
-            .stream_regular(backup)
-            .map_err(|_| verification("the replaced entry cannot be confirmed"))?;
-        if moved.dev != previous.dev
-            || moved.ino != previous.ino
-            || moved.size != previous.size
-            || moved.sha256 != previous.sha256
-        {
-            let _ = self.directory.rename_noreplace(backup, name);
-            return Err(verification(
-                "the destination changed while it was replaced",
-            ));
-        }
-        match self.directory.kind_or_absent(name)? {
-            None => {}
-            Some(_) => {
-                let _ = self.directory.rename_noreplace(backup, name);
-                return Err(verification(
-                    "the destination changed while it was replaced",
-                ));
-            }
-        }
-        self.directory
-            .rename_noreplace(staged, name)
-            .map_err(|error| match error {
-                PathError::AlreadyExists { .. } => {
-                    verification("the destination reappeared while it was replaced")
-                }
-                other => other.into(),
-            })?;
-        verify_installed(self.display, new, new_mode)
-    }
-
-    fn reverse_restore(
-        &self,
-        name: &str,
-        backup: &str,
-        temporary: &str,
-        new_size: u64,
-        new_sha256: Sha256Digest,
-    ) -> Result<(), ExecError> {
-        let drift = |reason: &str| ExecError::RollbackDrift {
-            path: self.display.display().to_string(),
-            reason: reason.into(),
-        };
-        // A name and a file type never prove a previous attempt parked this
-        // slot, so any occupant fails closed. The NOREPLACE rename below is
-        // the atomic backstop for a squat racing this check.
-        match self.directory.kind_or_absent(temporary)? {
-            None => {}
-            Some(_) => return Err(drift("the rollback slot is occupied")),
-        }
-        let dest_stat = self
-            .directory
-            .stat_child(name)
-            .map_err(|_| drift("the destination cannot be read"))?;
-        self.directory
-            .rename_noreplace(name, temporary)
-            .map_err(|error| match error {
-                PathError::AlreadyExists { .. } => drift("the rollback slot is occupied"),
-                _ => drift("the destination cannot be parked"),
-            })?;
-        let parked = self
-            .directory
-            .stream_regular(temporary)
-            .map_err(|_| drift("the parked entry cannot be confirmed"))?;
-        if parked.dev != dest_stat.dev
-            || parked.ino != dest_stat.ino
-            || parked.size != new_size
-            || parked.sha256 != new_sha256
-        {
-            let _ = self.directory.rename_noreplace(temporary, name);
-            return Err(drift("the destination changed during rollback"));
-        }
-        self.directory
-            .rename_noreplace(backup, name)
-            .map_err(|error| match error {
-                PathError::AlreadyExists { .. } => {
-                    drift("the destination reappeared during rollback")
-                }
-                _ => drift("the backup cannot be restored"),
-            })?;
-        // The parked entry was created by the NOREPLACE rename above and its
-        // identity re-verified; unlinkat cannot condition on identity, so this
-        // trusts the pinned directory like every other mutation does.
-        let _ = self.directory.remove_file(temporary);
-        let _ = self.directory.sync();
-        Ok(())
-    }
-}
-
 fn mode_from(mode: u32) -> rustix::fs::Mode {
     rustix::fs::Mode::from_bits_truncate(mode & 0o7777)
 }
@@ -2024,14 +2512,6 @@ fn mode_from(mode: u32) -> rustix::fs::Mode {
 pub(crate) fn backup_name(transaction: &TransactionId, id: &str, prefix: &str) -> String {
     format!(
         "{prefix}-{}-{}.bin",
-        short_digest(&transaction.to_string()),
-        short_digest(id)
-    )
-}
-
-fn rollback_temp_name(transaction: &TransactionId, id: &str) -> String {
-    format!(
-        "rollback-{}-{}.tmp",
         short_digest(&transaction.to_string()),
         short_digest(id)
     )
@@ -2104,10 +2584,8 @@ fn current_state(
     directory: &OwnedDirectory,
     name: &str,
     display: &Path,
-    previous_size: u64,
-    previous_sha256: Sha256Digest,
-    new_size: u64,
-    new_sha256: Sha256Digest,
+    previous: ExpectedFile,
+    new: ExpectedFile,
 ) -> Result<Current, ExecError> {
     match directory.kind_or_absent(name)? {
         None => Ok(Current::Absent),
@@ -2118,9 +2596,9 @@ fn current_state(
                     path: display.display().to_string(),
                     reason: "the file cannot be read".into(),
                 })?;
-            if current.size == previous_size && current.sha256 == previous_sha256 {
+            if previous.matches(&current) {
                 Ok(Current::MatchesPrevious)
-            } else if current.size == new_size && current.sha256 == new_sha256 {
+            } else if new.matches(&current) {
                 Ok(Current::MatchesNew)
             } else {
                 Ok(Current::Foreign)
@@ -2140,6 +2618,7 @@ fn removed_state(
     directory: &OwnedDirectory,
     name: &str,
     display: &Path,
+    object: zup_core::NativeObjectIdentity,
     size: u64,
     sha256: Sha256Digest,
 ) -> Result<Restored, ExecError> {
@@ -2152,7 +2631,7 @@ fn removed_state(
                     path: display.display().to_string(),
                     reason: "the file cannot be read".into(),
                 })?;
-            if current.size == size && current.sha256 == sha256 {
+            if current.object() == object && current.size == size && current.sha256 == sha256 {
                 Ok(Restored::Already)
             } else {
                 Ok(Restored::Foreign)
@@ -2164,8 +2643,16 @@ fn removed_state(
 
 fn receipt_backup_valid(receipt: &OperationReceipt) -> bool {
     match receipt {
+        OperationReceipt::Cleanup { .. } => false,
+        OperationReceipt::PersistentDirectory(_) => false,
+        OperationReceipt::NativeService(_) | OperationReceipt::NativeServiceCompensation { .. } => {
+            false
+        }
+        OperationReceipt::NativeCache { .. } => true,
+        OperationReceipt::Generation(_) => true,
         OperationReceipt::ServiceControl(_) => true,
         OperationReceipt::CreateFile { .. }
+        | OperationReceipt::RetainedFile { .. }
         | OperationReceipt::Control
         | OperationReceipt::StageFile { .. }
         | OperationReceipt::Backend { .. } => true,
@@ -2174,11 +2661,10 @@ fn receipt_backup_valid(receipt: &OperationReceipt) -> bool {
             backup_path,
             previous_sha256,
             previous_size,
+            previous_object,
             ..
         } => {
-            let Ok(previous) = previous_sha256.parse() else {
-                return false;
-            };
+            let previous = *previous_sha256;
             let path = PathBuf::from(destination);
             let backup = PathBuf::from(backup_path);
             let Some(parent) = backup
@@ -2197,12 +2683,19 @@ fn receipt_backup_valid(receipt: &OperationReceipt) -> bool {
                 return false;
             };
             let _ = path;
-            backup_holds(&directory, &leaf, *previous_size, previous)
+            backup_holds(
+                &directory,
+                &leaf,
+                *previous_object,
+                *previous_size,
+                previous,
+            )
         }
         OperationReceipt::RemoveFile {
             backup_path,
             sha256,
             size,
+            object,
             ..
         } => {
             let Ok(backup) = to_host_path(backup_path) else {
@@ -2223,12 +2716,12 @@ fn receipt_backup_valid(receipt: &OperationReceipt) -> bool {
             else {
                 return false;
             };
-            backup_holds(&directory, &leaf, *size, *sha256)
+            backup_holds(&directory, &leaf, *object, *size, *sha256)
         }
     }
 }
 
-fn mutation_key(node: &TransactionNode) -> Result<ResourceKey, ExecError> {
+fn mutation_key(node: &DeploymentNode) -> Result<ResourceKey, ExecError> {
     match &node.kind {
         NodeKind::FileMutation { key, .. } => Ok(key.clone()),
         _ => Err(ExecError::PlanDrift {
@@ -2239,10 +2732,10 @@ fn mutation_key(node: &TransactionNode) -> Result<ResourceKey, ExecError> {
 }
 
 fn as_target(
-    anchor: &zup_plan::TargetPath,
+    anchor: &zup_core::TargetPath,
     host_path: &Path,
-) -> Result<zup_plan::TargetPath, ExecError> {
-    zup_plan::TargetPath::new(*anchor.target(), &*host_path.to_string_lossy()).map_err(|error| {
+) -> Result<zup_core::TargetPath, ExecError> {
+    zup_core::TargetPath::new(*anchor.target(), &*host_path.to_string_lossy()).map_err(|error| {
         ExecError::PlanDrift {
             path: host_path.display().to_string(),
             reason: error.to_string(),
@@ -2257,24 +2750,6 @@ fn staged_name(id: &OperationId) -> String {
 fn short_digest(value: &str) -> String {
     let (_, digest) = hash_reader(value.as_bytes()).expect("a string hashes");
     digest.to_hex()[..16].to_owned()
-}
-
-fn is_service_node(node: &TransactionNode) -> bool {
-    node.meta.backend.as_ref().is_some_and(|backend| {
-        backend
-            .id
-            .as_str()
-            .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX)
-    })
-}
-
-fn is_service_key(key: &ResourceKey) -> bool {
-    match key {
-        ResourceKey::Backend { id } => id
-            .as_str()
-            .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX),
-        _ => false,
-    }
 }
 
 impl LinuxFileExecutor {
@@ -2300,414 +2775,52 @@ impl LinuxFileExecutor {
             },
         ))
     }
-
-    fn service_context(&mut self) -> Result<crate::service_exec::ServiceContext<'_>, ExecError> {
-        let Some(support) = self.services.as_mut() else {
-            return Err(ExecError::PlanDrift {
-                path: "<service>".into(),
-                reason: "a service operation without service support".into(),
-            });
-        };
-        Ok(crate::service_exec::ServiceContext {
-            controlled_units: &self.service_units,
-            roots: &support.roots,
-            systemd: &support.systemd,
-            manager: support
-                .manager
-                .as_mut()
-                .ok_or_else(|| {
-                    ExecError::refused("", "systemd operation cannot execute on OpenRC")
-                })?
-                .as_mut(),
-            expected_uid: support.expected_uid,
-        })
-    }
-
-    fn prepare_service(&mut self, node: &TransactionNode) -> Result<(), ExecError> {
-        use crate::service_ops::ServicePayload;
-        let payload = crate::service_exec::payload_for(node)?;
-        if let Some(openrc) = self
-            .services
-            .as_ref()
-            .and_then(|support| support.openrc.as_ref())
-        {
-            if let ServicePayload::Apply { service, .. } = &payload {
-                let path = to_host_path(&service.command.executable)?;
-                if !self.files.values().any(|file| file.host_path == path) {
-                    let (directory, name) = crate::fs::open_parent(&path)?;
-                    crate::openrc::validate_executable(
-                        &directory.read_regular(&name)?,
-                        service.command.executable.target(),
-                    )
-                    .map_err(|reason| ExecError::refused(&service.name, reason))?;
-                }
-            }
-            return openrc.prepare(&payload);
-        }
-        match payload {
-            ServicePayload::Apply { service, .. } => {
-                let context = self.service_context()?;
-
-                let derived = service_unit_for(&service)?;
-                let canonical = crate::machine::authorize_systemd_unit(&derived, context.systemd)
-                    .map_err(|error| ExecError::PlanDrift {
-                    path: derived.clone(),
-                    reason: error.to_string(),
-                })?;
-                crate::service_ops::refuse_source_symlink(&derived, &canonical)?;
-                crate::service_ops::check_collisions(
-                    &derived,
-                    &canonical,
-                    &crate::service_ops::load_path_dirs(),
-                    Some(&service),
-                )?;
-
-                let manager = context.manager;
-                crate::service_ops::require_exec_baseline(manager).map_err(|error| {
-                    ExecError::PlanDrift {
-                        path: derived.clone(),
-                        reason: error.to_string(),
-                    }
-                })?;
-                manager
-                    .unit_file_state(&derived)
-                    .map_err(|error| ExecError::PlanDrift {
-                        path: derived.clone(),
-                        reason: format!("systemd is unavailable: {error}"),
-                    })?;
-                Ok(())
-            }
-            ServicePayload::Remove { unit, .. } => {
-                let context = self.service_context()?;
-                let canonical = crate::machine::authorize_systemd_unit(&unit, context.systemd)
-                    .map_err(|error| ExecError::PlanDrift {
-                        path: unit.clone(),
-                        reason: error.to_string(),
-                    })?;
-                crate::service_ops::refuse_source_symlink(&unit, &canonical)?;
-                let manager = context.manager;
-                manager
-                    .unit_file_state(&unit)
-                    .map_err(|error| ExecError::PlanDrift {
-                        path: unit.clone(),
-                        reason: format!("systemd is unavailable: {error}"),
-                    })?;
-                Ok(())
-            }
-        }
-    }
-
-    fn apply_service(&mut self, node: &TransactionNode) -> Result<OperationReceipt, ExecError> {
-        use crate::service_ops::ServicePayload;
-        let payload = crate::service_exec::payload_for(node)?.execution_payload()?;
-        if let Some(openrc) = self
-            .services
-            .as_mut()
-            .and_then(|support| support.openrc.as_mut())
-        {
-            let receipt = openrc.apply(&payload)?;
-            return Ok(OperationReceipt::Backend {
-                key: node
-                    .meta
-                    .backend
-                    .as_ref()
-                    .ok_or_else(|| ExecError::refused("", "missing backend metadata"))?
-                    .key
-                    .clone(),
-                payload: serde_json::to_vec(&receipt)
-                    .map_err(|error| ExecError::refused("", error.to_string()))?,
-            });
-        }
-        match payload {
-            payload @ ServicePayload::Apply { .. } => {
-                let backend = node
-                    .meta
-                    .backend
-                    .clone()
-                    .expect("a service node holds a payload");
-                let mut context = self.service_context()?;
-                let receipt = crate::service_exec::apply(&payload, &mut context)?;
-                Ok(OperationReceipt::Backend {
-                    key: backend.key,
-                    payload: serde_json::to_vec(&receipt).map_err(|_| ExecError::PlanDrift {
-                        path: node.id.to_string(),
-                        reason: "a service receipt does not serialize".into(),
-                    })?,
-                })
-            }
-            ServicePayload::Remove {
-                key, unit, owned, ..
-            } => {
-                let backend = node
-                    .meta
-                    .backend
-                    .clone()
-                    .expect("a service node holds a payload");
-                let mut context = self.service_context()?;
-                let receipt = crate::service_exec::apply_remove(&key, &unit, &owned, &mut context)?;
-                Ok(OperationReceipt::Backend {
-                    key: backend.key,
-                    payload: serde_json::to_vec(&receipt).map_err(|_| ExecError::PlanDrift {
-                        path: node.id.to_string(),
-                        reason: "a service receipt does not serialize".into(),
-                    })?,
-                })
-            }
-        }
-    }
-
-    fn verify_service_receipt(
-        &mut self,
-        node: &TransactionNode,
-        key: &ResourceKey,
-        payload: &[u8],
-    ) -> Result<(), ExecError> {
-        let receipt: crate::service_ops::ServiceReceipt =
-            serde_json::from_slice(payload).map_err(|_| ExecError::Verification {
-                path: format!("{key:?}"),
-                reason: "a service receipt does not parse".into(),
-            })?;
-        let operation = crate::service_exec::payload_for(node)?;
-        crate::service_ops::validate_receipt(&operation, &receipt)?;
-        if let Some(openrc) = self
-            .services
-            .as_ref()
-            .and_then(|support| support.openrc.as_ref())
-        {
-            return openrc.verify(&receipt);
-        }
-        let mut context = self.service_context()?;
-        if receipt.installed_source_sha256.is_none() {
-            crate::service_exec::verify_remove_receipt(&receipt, &mut context)?;
-        } else {
-            crate::service_exec::verify_receipt(&receipt, &mut context)?;
-        }
-        Ok(())
-    }
-
-    fn rollback_service(
-        &mut self,
-        node: &TransactionNode,
-        key: &ResourceKey,
-        payload: &[u8],
-    ) -> Result<(), ExecError> {
-        use crate::service_ops::ServicePayload;
-        let receipt: crate::service_ops::ServiceReceipt =
-            serde_json::from_slice(payload).map_err(|_| ExecError::RollbackDrift {
-                path: format!("{key:?}"),
-                reason: "a service receipt does not parse".into(),
-            })?;
-        let operation = crate::service_exec::payload_for(node)?;
-        crate::service_ops::validate_receipt(&operation, &receipt)?;
-        let operation = operation.execution_payload()?;
-        if let Some(openrc) = self
-            .services
-            .as_mut()
-            .and_then(|support| support.openrc.as_mut())
-        {
-            return openrc.rollback(&operation, &receipt);
-        }
-        let mut context = self.service_context()?;
-        match &operation {
-            ServicePayload::Apply { .. } => {
-                crate::service_exec::rollback_apply(&operation, &receipt, &mut context)?;
-                Ok(())
-            }
-            ServicePayload::Remove {
-                key, unit, owned, ..
-            } => {
-                crate::service_exec::rollback_remove(key, unit, owned, &receipt, &mut context)?;
-                Ok(())
-            }
-        }
-    }
-
-    fn reconcile_service(
-        &mut self,
-        node: &TransactionNode,
-        receipt: Option<&OperationReceipt>,
-    ) -> Result<ReconcileResult, ExecError> {
-        use crate::service_ops::ServicePayload;
-        let operation = crate::service_exec::payload_for(node)?;
-        let decoded = receipt
-            .map(|receipt| match receipt {
-                OperationReceipt::Backend { payload, .. } => serde_json::from_slice::<
-                    crate::service_ops::ServiceReceipt,
-                >(payload)
-                .map_err(|_| ExecError::RollbackDrift {
-                    path: node.id.to_string(),
-                    reason: "a service receipt does not parse".into(),
-                }),
-                _ => Err(ExecError::RollbackDrift {
-                    path: node.id.to_string(),
-                    reason: "a service node without a service receipt".into(),
-                }),
-            })
-            .transpose()?;
-
-        if let Some(receipt) = &decoded {
-            crate::service_ops::validate_receipt(&operation, receipt)?;
-        }
-        let operation = operation.execution_payload()?;
-
-        let round_trip = |receipt: crate::service_ops::ServiceReceipt| {
-            serde_json::to_vec(&receipt)
-                .map(|payload| OperationReceipt::Backend {
-                    key: node
-                        .meta
-                        .backend
-                        .clone()
-                        .expect("a service node holds a payload")
-                        .key,
-                    payload,
-                })
-                .map_err(|_| ExecError::RollbackDrift {
-                    path: node.id.to_string(),
-                    reason: "a service receipt does not serialize".into(),
-                })
-        };
-        if let Some(openrc) = self
-            .services
-            .as_ref()
-            .and_then(|support| support.openrc.as_ref())
-        {
-            return openrc.reconcile(&operation, decoded.as_ref());
-        }
-        let mut context = self.service_context()?;
-        match &operation {
-            ServicePayload::Apply {
-                service,
-                previous_policy,
-                previous_source,
-                ..
-            } => {
-                let (outcome, receipt) = crate::service_exec::reconcile_apply(
-                    service,
-                    previous_policy,
-                    previous_source.as_deref(),
-                    decoded.as_ref(),
-                    &mut context,
-                )?;
-                Ok(match outcome {
-                    crate::service_exec::ServiceReconcile::Applied => {
-                        ReconcileResult::AppliedWithReceipt(round_trip(
-                            receipt.expect("an applied reconciliation holds a receipt"),
-                        )?)
-                    }
-                    crate::service_exec::ServiceReconcile::NotApplied => {
-                        ReconcileResult::NotApplied
-                    }
-                    crate::service_exec::ServiceReconcile::Incomplete => {
-                        ReconcileResult::Incomplete
-                    }
-                    crate::service_exec::ServiceReconcile::Ambiguous => ReconcileResult::Ambiguous,
-                })
-            }
-            ServicePayload::Remove { unit, owned, .. } => {
-                let (outcome, receipt) = crate::service_exec::reconcile_remove(
-                    unit,
-                    owned,
-                    decoded.as_ref(),
-                    &mut context,
-                )?;
-                Ok(match outcome {
-                    crate::service_exec::ServiceReconcile::Applied => {
-                        ReconcileResult::AppliedWithReceipt(round_trip(
-                            receipt.expect("an applied reconciliation holds a receipt"),
-                        )?)
-                    }
-                    crate::service_exec::ServiceReconcile::NotApplied => {
-                        ReconcileResult::NotApplied
-                    }
-                    crate::service_exec::ServiceReconcile::Incomplete => {
-                        ReconcileResult::Incomplete
-                    }
-                    crate::service_exec::ServiceReconcile::Ambiguous => ReconcileResult::Ambiguous,
-                })
-            }
-        }
-    }
 }
 
-fn service_unit_for(service: &zup_plan::ServiceOperation) -> Result<String, ExecError> {
-    let id = zup_core::ServiceId::new(&service.id).map_err(|error| ExecError::PlanDrift {
-        path: service.name.clone(),
-        reason: format!("service id: {error}"),
-    })?;
-    crate::services::unit_name(&id).map_err(|error| ExecError::PlanDrift {
-        path: service.name.clone(),
-        reason: error.to_string(),
-    })
-}
-
-pub fn snapshot_target(
-    target: &zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-) -> HostSnapshot {
+pub fn snapshot_target(target: &zup_plan::BoundDeployment) -> HostSnapshot {
     let mut snapshot = HostSnapshot::default();
-    for file in &target.files {
-        let state = observe_file(file);
+    for file in target.fixed_files() {
         snapshot.files.push(ObservedFile {
             key: file.key.clone(),
-            path: file.destination.clone(),
-            state,
+            path: file.destination().clone(),
+            state: observe_file(file),
         });
     }
     snapshot
 }
 
-fn observe_file(file: &zup_plan::DesiredFile<zup_plan::TargetPath>) -> ObservedFileState {
-    let host = match to_host_path(&file.destination) {
+fn observe_file(file: &zup_plan::DesiredFile<zup_core::TargetPath>) -> ObservedFileState {
+    let host = match to_host_path(file.destination()) {
         Ok(host) => host,
-
         Err(_) => return ObservedFileState::NonFile,
     };
-    let parent = match host
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        Some(parent) => parent,
-        None => return ObservedFileState::NonFile,
-    };
-    let directory = match OwnedDirectory::open(parent) {
-        Ok(directory) => directory,
-
-        Err(_) => return ObservedFileState::Absent,
-    };
-    let name = match host
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-    {
-        Some(name) if !name.is_empty() => name,
-        _ => return ObservedFileState::NonFile,
+    let (directory, name) = match crate::fs::open_parent(&host) {
+        Ok(parent) => parent,
+        Err(error) if error.is_not_found() => return ObservedFileState::Absent,
+        Err(_) => return ObservedFileState::NonFile,
     };
     match directory.kind_or_absent(&name) {
         Ok(None) => ObservedFileState::Absent,
         Ok(Some(EntryKind::Regular)) => match directory.stream_regular(&name) {
             Ok(current) => ObservedFileState::File {
+                object: current.object(),
                 size: current.size,
                 sha256: current.sha256,
                 executable: Some(current.mode & 0o100 != 0),
             },
             Err(_) => ObservedFileState::NonFile,
         },
-
-        Ok(Some(_)) => ObservedFileState::NonFile,
-        Err(_) => ObservedFileState::NonFile,
+        _ => ObservedFileState::NonFile,
     }
 }
 
 #[cfg(test)]
-mod fallback_tests {
+mod file_protocol_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use zup_core::hash_reader;
 
     fn digest(bytes: &[u8]) -> Sha256Digest {
         hash_reader(bytes).expect("bytes hash").1
-    }
-
-    fn transaction() -> TransactionId {
-        TransactionId::new_v7()
     }
 
     #[rstest::rstest]
@@ -2744,7 +2857,7 @@ mod fallback_tests {
     ) {
         let target = zup_core::Target::parse("linux-x64").expect("a target");
         let host = |path: &Path| {
-            zup_plan::TargetPath::new(target, path.to_string_lossy()).expect("a path")
+            zup_core::TargetPath::new(target, path.to_string_lossy()).expect("a path")
         };
         executor.register(
             &OperationId::new("op-replace"),
@@ -2757,6 +2870,14 @@ mod fallback_tests {
                     executable: false,
                 },
                 precondition: FilePrecondition::Exact {
+                    object: {
+                        use std::os::unix::fs::MetadataExt;
+                        let metadata = std::fs::symlink_metadata(destination).unwrap();
+                        zup_core::NativeObjectIdentity::Linux {
+                            device: metadata.dev(),
+                            inode: metadata.ino(),
+                        }
+                    },
                     size: old.len() as u64,
                     sha256: digest(old),
                 },
@@ -2764,347 +2885,18 @@ mod fallback_tests {
         );
     }
 
-    fn replace_node() -> TransactionNode {
-        TransactionNode {
-            id: OperationId::new("op-replace"),
-            phase: zup_transaction::Phase::FileMutation,
-            kind: NodeKind::FileMutation {
-                key: ResourceKey::File {
-                    destination: String::from("/tmp/whatever"),
-                },
-                delta: FileOperationKind::Replace,
-            },
-            declaration_order: 0,
-            meta: Default::default(),
-        }
-    }
-
-    fn plant_staged(install: &Path, key: &ResourceKey, bytes: &[u8]) {
-        let path = install.join(staged_test_name(key));
-        std::fs::write(&path, bytes).expect("a staged file");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-            .expect("staged mode");
-    }
-
-    fn staged_test_name(key: &ResourceKey) -> String {
-        format!(
-            "staged-{}",
-            short_digest(OperationId::stage_file(key).as_str())
-        )
-    }
-
-    fn replace_key() -> ResourceKey {
-        ResourceKey::File {
-            destination: String::from("/tmp/whatever"),
-        }
-    }
-
-    fn quarantine_of<'a>(directory: &'a OwnedDirectory, display: &'a Path) -> Quarantine<'a> {
-        Quarantine { directory, display }
-    }
-
     #[test]
-    fn quarantine_forward_preserves_and_publishes_without_an_exchange() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v1").expect("write v1");
-        plant_staged(&install, &replace_key(), b"v2");
-
-        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
-        let previous = stream_expected(&directory, &name, &destination, 2, digest(b"v1"))
-            .expect("the previous file verifies");
-        quarantine_of(&directory, &destination)
-            .forward_replace(
-                &name,
-                &staged_test_name(&replace_key()),
-                "backup-test",
-                &previous,
-                FileIntent {
-                    sha256: digest(b"v2"),
-                    size: 2,
-                    executable: false,
-                },
-                0o644,
-            )
-            .expect("the quarantine publishes");
-        assert_eq!(std::fs::read(&destination).expect("read"), b"v2");
+    fn an_occupied_backup_slot_is_refused_without_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("application.bin");
+        std::fs::write(&path, b"owned").unwrap();
+        std::fs::write(root.path().join("occupied"), b"foreign").unwrap();
+        let (parent, _) = crate::fs::open_parent(&path).unwrap();
+        assert!(occupy_backup_slot(&parent, "occupied", &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"owned");
         assert_eq!(
-            std::fs::read(install.join("backup-test")).expect("read"),
-            b"v1",
-            "the quarantined entry holds the previous contents for rollback"
-        );
-    }
-
-    #[test]
-    fn quarantine_forward_detects_a_swapped_destination() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v1").expect("write v1");
-        plant_staged(&install, &replace_key(), b"v2");
-
-        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
-        let previous = stream_expected(&directory, &name, &destination, 2, digest(b"v1"))
-            .expect("the previous file verifies");
-        std::fs::write(&destination, b"vX").expect("a concurrent swap");
-
-        let error = quarantine_of(&directory, &destination)
-            .forward_replace(
-                &name,
-                &staged_test_name(&replace_key()),
-                "backup-test",
-                &previous,
-                FileIntent {
-                    sha256: digest(b"v2"),
-                    size: 2,
-                    executable: false,
-                },
-                0o644,
-            )
-            .expect_err("a swapped destination never publishes");
-        assert!(
-            matches!(error, ExecError::Verification { .. }),
-            "the refusal names the race: {error}"
-        );
-        assert_eq!(
-            std::fs::read(&destination).expect("read"),
-            b"vX",
-            "the swapped file is restored, not overwritten"
-        );
-    }
-
-    #[test]
-    fn quarantine_forward_refuses_an_occupied_backup_slot() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v1").expect("write v1");
-        plant_staged(&install, &replace_key(), b"v2");
-        std::fs::write(install.join("backup-test"), b"planted").expect("a plant");
-
-        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
-        let previous = stream_expected(&directory, &name, &destination, 2, digest(b"v1"))
-            .expect("the previous file verifies");
-        assert!(
-            quarantine_of(&directory, &destination)
-                .forward_replace(
-                    &name,
-                    &staged_test_name(&replace_key()),
-                    "backup-test",
-                    &previous,
-                    FileIntent {
-                        sha256: digest(b"v2"),
-                        size: 2,
-                        executable: false,
-                    },
-                    0o644,
-                )
-                .is_err(),
-            "an occupied slot fails closed"
-        );
-        assert_eq!(
-            std::fs::read(install.join("backup-test")).expect("read"),
-            b"planted",
-            "the occupant is never deleted"
-        );
-        assert_eq!(
-            std::fs::read(&destination).expect("read"),
-            b"v1",
-            "the destination is untouched"
-        );
-    }
-
-    #[test]
-    fn quarantine_reverse_restores_without_an_exchange() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v2").expect("write v2");
-        std::fs::write(install.join("backup-test"), b"v1").expect("a backup");
-
-        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
-        quarantine_of(&directory, &destination)
-            .reverse_restore(&name, "backup-test", "rollback-test.tmp", 2, digest(b"v2"))
-            .expect("the quarantine restores");
-        assert_eq!(std::fs::read(&destination).expect("read"), b"v1");
-        assert!(
-            !install.join("rollback-test.tmp").exists(),
-            "the parking slot is cleaned"
-        );
-    }
-
-    #[test]
-    fn quarantine_reverse_refuses_a_regular_file_in_the_parking_slot() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v2").expect("write v2");
-        std::fs::write(install.join("backup-test"), b"v1").expect("a backup");
-        std::fs::write(install.join("rollback-test.tmp"), b"squat").expect("a plant");
-
-        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
-        assert!(
-            quarantine_of(&directory, &destination)
-                .reverse_restore(&name, "backup-test", "rollback-test.tmp", 2, digest(b"v2"))
-                .is_err(),
-            "an occupied parking slot fails closed"
-        );
-        assert_eq!(
-            std::fs::read(install.join("rollback-test.tmp")).expect("read"),
-            b"squat",
-            "the occupant is never deleted"
-        );
-        assert_eq!(
-            std::fs::read(&destination).expect("read"),
-            b"v2",
-            "the destination is untouched"
-        );
-        assert_eq!(
-            std::fs::read(install.join("backup-test")).expect("read"),
-            b"v1",
-            "the backup is untouched"
-        );
-    }
-
-    #[test]
-    fn a_retry_after_parking_preserves_the_parked_entry() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v1").expect("write v1");
-
-        let transaction = transaction();
-        let mut executor = LinuxFileExecutor::new();
-        executor.set_transaction_id(transaction);
-        register_replace(&mut executor, &destination, b"v1", b"v2");
-        plant_staged(&install, &replace_key(), b"v2");
-        let receipt = executor.replace(&replace_node()).expect("replace");
-        let temporary = rollback_temp_name(&transaction, "op-replace");
-        std::fs::rename(&destination, install.join(&temporary)).expect("a crash after parking");
-
-        executor
-            .rollback(&replace_node(), &receipt)
-            .expect("recovery completes from the backup");
-        assert_eq!(
-            std::fs::read(&destination).expect("read"),
-            b"v1",
-            "the backup restores the destination"
-        );
-        assert_eq!(
-            std::fs::read(install.join(&temporary)).expect("read"),
-            b"v2",
-            "the parked entry is preserved, never cleaned blindly"
-        );
-    }
-
-    #[test]
-    fn quarantine_reverse_refuses_a_foreign_parking_slot() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v2").expect("write v2");
-        std::fs::write(install.join("backup-test"), b"v1").expect("a backup");
-        std::fs::create_dir_all(install.join("rollback-test.tmp")).expect("a foreign dir");
-
-        let (directory, name) = crate::fs::open_parent(&destination).expect("the parent opens");
-        assert!(
-            quarantine_of(&directory, &destination)
-                .reverse_restore(&name, "backup-test", "rollback-test.tmp", 2, digest(b"v2"))
-                .is_err(),
-            "a foreign parking slot fails closed"
-        );
-        assert_eq!(
-            std::fs::read(&destination).expect("read"),
-            b"v2",
-            "the destination is untouched"
-        );
-        assert_eq!(
-            std::fs::read(install.join("backup-test")).expect("read"),
-            b"v1",
-            "the backup is untouched"
-        );
-    }
-
-    #[test]
-    fn a_foreign_backup_name_collision_is_refused_without_deletion() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v1").expect("write v1");
-
-        let transaction = transaction();
-        let planted = backup_name(&transaction, "op-replace", "backup");
-        std::fs::write(install.join(&planted), b"unrelated").expect("a plant");
-
-        let mut executor = LinuxFileExecutor::new();
-        executor.set_transaction_id(transaction);
-        register_replace(&mut executor, &destination, b"v1", b"v2");
-        plant_staged(&install, &replace_key(), b"v2");
-
-        let error = executor
-            .replace(&replace_node())
-            .expect_err("an occupied backup slot fails closed");
-        assert!(
-            matches!(
-                error,
-                ExecError::Verification { .. } | ExecError::PlanDrift { .. }
-            ),
-            "the refusal is explicit: {error}"
-        );
-        assert_eq!(
-            std::fs::read(install.join(&planted)).expect("read"),
-            b"unrelated",
-            "the unknown file is never deleted"
-        );
-        assert_eq!(
-            std::fs::read(&destination).expect("read"),
-            b"v1",
-            "the destination is untouched"
-        );
-    }
-
-    #[test]
-    fn backups_from_another_transaction_are_never_touched() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        let destination = install.join("app.dat");
-        std::fs::write(&destination, b"v1").expect("write v1");
-
-        let first = transaction();
-        let mut executor = LinuxFileExecutor::new();
-        executor.set_transaction_id(first);
-        register_replace(&mut executor, &destination, b"v1", b"v2");
-        plant_staged(&install, &replace_key(), b"v2");
-        let receipt = executor.replace(&replace_node()).expect("replace");
-        let OperationReceipt::ReplaceFile {
-            ref backup_path, ..
-        } = receipt
-        else {
-            panic!("a replace reports its backup");
-        };
-        assert_eq!(std::fs::read(&destination).expect("read"), b"v2");
-
-        let second = transaction();
-        assert_ne!(first, second);
-        executor.set_transaction_id(second);
-        executor
-            .rollback(&replace_node(), &receipt)
-            .expect_err("a receipt from another transaction binds nothing here");
-        assert_eq!(std::fs::read(&destination).expect("read"), b"v2");
-        assert_eq!(
-            std::fs::read(Path::new(&backup_path)).expect("read"),
-            b"v1",
-            "the first transaction's backup survives a foreign rollback"
+            std::fs::read(root.path().join("occupied")).unwrap(),
+            b"foreign"
         );
     }
 }
@@ -3114,11 +2906,15 @@ mod snapshot_tests {
     use super::*;
     use zup_core::{AppId, NonEmptyString, Privilege, RelativePath, SelectedScope, Target};
 
-    fn target_with(
-        files: Vec<(String, zup_plan::TargetPath)>,
-    ) -> zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
+    fn target_with(files: Vec<(String, zup_core::TargetPath)>) -> zup_plan::BoundDeployment {
         let target = Target::parse("linux-x64").expect("a target");
         zup_plan::DesiredState {
+            generation_readers: Default::default(),
+            data: Vec::new(),
+            requirements: (),
+            maintenance: None,
+            installation: zup_core::InstallationId::new_v7(),
+            generation: None,
             app: zup_core::App {
                 id: AppId::new("com.example.tool").expect("an id"),
                 name: NonEmptyString::new("Tool").expect("a name"),
@@ -3129,7 +2925,7 @@ mod snapshot_tests {
             },
             target,
             scope: SelectedScope::User,
-            install_directory: zup_plan::TargetPath::new(target, "/tmp/zup-snapshot-test/tool")
+            install_directory: zup_core::TargetPath::new(target, "/tmp/zup-snapshot-test/tool")
                 .expect("a path"),
             selected_components: Vec::new(),
             prerequisites: Vec::new(),
@@ -3137,10 +2933,17 @@ mod snapshot_tests {
                 .into_iter()
                 .map(|(name, destination)| zup_plan::DesiredFile {
                     key: zup_core::ResourceKey::File {
-                        destination: destination.to_string(),
+                        id: zup_core::FileResourceId::Payload {
+                            id: zup_core::PayloadId::File {
+                                declaration: zup_core::ResourceId::new(&name).unwrap(),
+                            },
+                        },
                     },
                     source_relative: RelativePath::new(&name).expect("a path"),
-                    destination,
+                    placement: zup_core::PayloadPlacement::Fixed {
+                        replacement: zup_core::FixedReplacement::Atomic,
+                        path: destination,
+                    },
                     size: 0,
                     sha256: zup_core::hash_bytes(b""),
                     privilege: Privilege::User,
@@ -3155,10 +2958,12 @@ mod snapshot_tests {
 
             preset: None,
         }
+        .bind_fixed()
+        .expect("fixed deployment requirements")
     }
 
-    fn destination(root: &std::path::Path, name: &str) -> zup_plan::TargetPath {
-        zup_plan::TargetPath::new(
+    fn destination(root: &std::path::Path, name: &str) -> zup_core::TargetPath {
+        zup_core::TargetPath::new(
             Target::parse("linux-x64").expect("a target"),
             root.join(name).to_string_lossy(),
         )
@@ -3214,6 +3019,56 @@ enum NativeServiceContext<'a> {
     Openrc(&'a mut crate::openrc_native::Openrc),
 }
 impl NativeServiceContext<'_> {
+    fn prepare_registration(
+        &mut self,
+        operation: &zup_plan::NativeServiceOperation,
+    ) -> Result<(), ExecError> {
+        match self {
+            Self::Systemd(context) => crate::native_service::prepare(context, operation),
+            Self::Openrc(manager) => manager.prepare_registration(operation),
+        }
+    }
+    fn apply_registration(
+        &mut self,
+        operation: &zup_plan::NativeServiceOperation,
+        source_retained: bool,
+    ) -> Result<OperationReceipt, ExecError> {
+        match self {
+            Self::Systemd(context) => {
+                crate::native_service::apply(context, operation, source_retained)
+            }
+            Self::Openrc(manager) => manager.apply_registration(operation),
+        }
+    }
+    fn verify_registration(
+        &mut self,
+        operation: &zup_plan::NativeServiceOperation,
+        receipt: &OperationReceipt,
+    ) -> Result<(), ExecError> {
+        match self {
+            Self::Systemd(context) => crate::native_service::verify(context, operation, receipt),
+            Self::Openrc(manager) => manager.verify_registration(operation, receipt),
+        }
+    }
+    fn rollback_registration(
+        &mut self,
+        operation: &zup_plan::NativeServiceOperation,
+        receipt: &OperationReceipt,
+    ) -> Result<(), ExecError> {
+        match self {
+            Self::Systemd(context) => crate::native_service::rollback(context, operation, receipt),
+            Self::Openrc(manager) => manager.rollback_registration(operation, receipt),
+        }
+    }
+    fn reconcile_registration(
+        &mut self,
+        operation: &zup_plan::NativeServiceOperation,
+    ) -> Result<ReconcileResult, ExecError> {
+        match self {
+            Self::Systemd(context) => crate::native_service::reconcile(context, operation),
+            Self::Openrc(manager) => manager.reconcile_registration(operation),
+        }
+    }
     fn manager(&mut self) -> &mut dyn zup_transaction::NativeServiceManager {
         match self {
             Self::Systemd(context) => context,
@@ -3222,15 +3077,23 @@ impl NativeServiceContext<'_> {
     }
 }
 impl zup_transaction::NativeServiceManager for NativeServiceContext<'_> {
+    fn reconcile_control_request(
+        &mut self,
+        operation: &zup_plan::ServiceControlOperation,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        self.manager()
+            .reconcile_control_request(operation, deadline)
+    }
     fn finish_startup_inhibition(
         &mut self,
-        operation: &zup_transaction::ServiceControlOperation,
+        operation: &zup_plan::ServiceControlOperation,
     ) -> Result<(), String> {
         self.manager().finish_startup_inhibition(operation)
     }
     fn stopped_runtime_is_quiescent(
         &mut self,
-        operation: &zup_transaction::ServiceControlOperation,
+        operation: &zup_plan::ServiceControlOperation,
         configuration: &zup_plan::ServiceState,
     ) -> Result<bool, String> {
         self.manager()
@@ -3238,14 +3101,14 @@ impl zup_transaction::NativeServiceManager for NativeServiceContext<'_> {
     }
     fn observe(
         &mut self,
-        operation: &zup_transaction::ServiceControlOperation,
+        operation: &zup_plan::ServiceControlOperation,
     ) -> Result<zup_transaction::ServiceObservation, String> {
         self.manager().observe(operation)
     }
     fn transition(
         &mut self,
-        operation: &zup_transaction::ServiceControlOperation,
-        state: zup_transaction::ServiceTerminalState,
+        operation: &zup_plan::ServiceControlOperation,
+        state: zup_plan::ServiceTerminalState,
         expected: &zup_transaction::ServiceObservation,
         deadline: std::time::Instant,
     ) -> Result<zup_transaction::ServiceObservation, String> {
@@ -3254,7 +3117,7 @@ impl zup_transaction::NativeServiceManager for NativeServiceContext<'_> {
     }
     fn stopped_start_can_be_compensated(
         &mut self,
-        operation: &zup_transaction::ServiceControlOperation,
+        operation: &zup_plan::ServiceControlOperation,
     ) -> Result<bool, String> {
         self.manager().stopped_start_can_be_compensated(operation)
     }

@@ -73,8 +73,10 @@ fn release(web: &Path) -> ReleaseDescriptor {
 
 fn catalog(web: &Path) -> ContentCatalog {
     ContentCatalog::parse(
-        &std::fs::read(web.join("releases").join("stable").join("catalog.json"))
-            .expect("the catalog is staged"),
+        &std::fs::read(
+            web.join(zup_acquire::document_path(&release(web).catalog.digest).to_string()),
+        )
+        .expect("the catalog is staged"),
     )
     .expect("the catalog parses")
 }
@@ -255,8 +257,11 @@ fn the_release_names_a_window_by_content_and_never_by_filename() {
     stage(dir.path(), &graph);
     let web = dir.path().join("web");
 
-    for name in ["releases/stable.json", "releases/stable/catalog.json"] {
-        let text = std::fs::read_to_string(web.join(name)).expect("the document is staged");
+    for name in [
+        "releases/stable.json".to_string(),
+        zup_acquire::document_path(&release(&web).catalog.digest).to_string(),
+    ] {
+        let text = std::fs::read_to_string(web.join(&name)).expect("the document is staged");
         assert!(
             !text.contains(".exe"),
             "{name} carries a filename, which is a composition decision, not release data"

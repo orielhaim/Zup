@@ -1,80 +1,62 @@
-use zup_transaction::{
-    NativeServiceManager, ServiceControlOperation, ServiceObservation, ServiceTerminalState,
-};
+use zup_plan::{ServiceControlOperation, ServiceTerminalState};
+use zup_transaction::{NativeServiceManager, ServiceObservation};
 
 pub fn validate_binding(
-    plan: &zup_transaction::TransactionPlan,
+    plan: &zup_plan::DeploymentPlan,
     operation: &ServiceControlOperation,
-    ledger: Option<&zup_plan::InstallLedger>,
+    ledger: Option<&zup_plan::InstallationRecord>,
 ) -> Result<(), String> {
-    let mut protected_files = match ledger.and_then(|ledger| ledger.resources.get(&operation.key)) {
-        Some(zup_plan::OwnedResource::Service { requires_files, .. }) => requires_files.clone(),
+    let mut protected_files = match ledger
+        .and_then(|ledger| ledger.current.resources.get(&operation.key))
+    {
+        Some(zup_plan::OwnedResource::Service(zup_plan::OwnedService {
+            requires_files, ..
+        })) => requires_files.clone(),
         _ => Vec::new(),
     };
-    for node in &plan.nodes {
-        if let Some(backend) = &node.meta.backend
-            && let Ok(crate::service_ops::ServicePayload::Apply { service, .. }) =
-                crate::service_ops::decode_payload(&backend.payload)
-            && service.key == operation.key
-        {
-            protected_files.extend(service.requires_files);
-        }
+    for service in declarations(plan).filter(|service| service.key == operation.key) {
+        protected_files.extend(service.requires_files);
     }
-    zup_transaction::validate_runtime_preservation(plan, operation, &protected_files)?;
-    let zup_core::ResourceKey::Service { id } = &operation.key else {
+    zup_plan::validate_runtime_preservation(plan, operation, &protected_files)?;
+    let zup_core::ResourceKey::Service { .. } = &operation.key else {
         return Err("service resource required".into());
     };
-    if operation.privilege != zup_core::Privilege::System
-        || (if matches!(
-            operation.configuration,
-            zup_plan::ServiceState::Registration {
-                execution: zup_core::ServiceExecution::OpenrcUser { .. },
-                ..
-            }
-        ) {
-            crate::openrc::service_name(id)
-        } else {
-            crate::services::unit_name(id).map_err(|e| e.to_string())?
-        }) != operation.native_name
-    {
+    if operation.privilege != zup_core::Privilege::System {
         return Err("service authority mismatch".into());
     }
-    if let Some(zup_plan::OwnedResource::Service {
+    if let Some(zup_plan::OwnedResource::Service(zup_plan::OwnedService {
         installed,
         timeouts,
+        name,
         ..
-    }) = ledger.and_then(|ledger| ledger.resources.get(&operation.key))
+    })) = ledger.and_then(|ledger| ledger.current.resources.get(&operation.key))
+        && *name == operation.native_name
         && installed.as_ref() == &operation.owned_configuration
         && *timeouts == operation.timeouts
         && (installed.as_ref() == &operation.configuration
-            || operation.stage == zup_transaction::ServiceControlStage::Quiesce
+            || operation.stage == zup_plan::ServiceControlStage::Quiesce
                 && operation.before_configuration == **installed
-                && zup_transaction::disabled_startup(installed).as_ref()
-                    == Some(&operation.configuration))
+                && zup_plan::disabled_startup(installed).as_ref() == Some(&operation.configuration))
     {
         return Ok(());
     }
-    for node in &plan.nodes {
-        let Some(backend) = &node.meta.backend else {
-            continue;
-        };
-        let Ok(crate::service_ops::ServicePayload::Apply { service, .. }) =
-            crate::service_ops::decode_payload(&backend.payload)
-        else {
-            continue;
-        };
+    for service in declarations(plan) {
         let installed = service.desired_configuration();
         let repairing_live_configuration = operation.intent
-            == zup_transaction::ServiceControlIntent::Preserve
-            && operation.stage == zup_transaction::ServiceControlStage::Quiesce
+            == zup_plan::ServiceControlIntent::Preserve
+            && operation.stage == zup_plan::ServiceControlStage::Quiesce
             && service.kind == zup_plan::IntegrationChangeKind::RepairOwned
             && service.previous.configuration().as_ref() == Some(&operation.configuration)
             && installed == operation.owned_configuration;
         if service.key == operation.key
+            && service.name == operation.native_name
             && operation.timeouts
-                == if operation.stage == zup_transaction::ServiceControlStage::Quiesce {
-                    match ledger.and_then(|ledger| ledger.resources.get(&service.key)) {
-                        Some(zup_plan::OwnedResource::Service { timeouts, .. }) => *timeouts,
+                == if operation.stage == zup_plan::ServiceControlStage::Quiesce {
+                    match ledger.and_then(|ledger| ledger.current.resources.get(&service.key)) {
+                        Some(zup_plan::OwnedResource::Service(zup_plan::OwnedService {
+                            timeouts,
+                            ..
+                        })) => *timeouts,
                         _ => service.lifecycle.timeouts_for(&service.execution),
                     }
                 } else {
@@ -89,6 +71,19 @@ pub fn validate_binding(
         }
     }
     Err("service control is not bound to an owned registration transition".into())
+}
+
+fn declarations(
+    plan: &zup_plan::DeploymentPlan,
+) -> impl Iterator<Item = zup_plan::ServiceOperation> + '_ {
+    plan.nodes.iter().filter_map(|node| {
+        if let zup_plan::NodeKind::NativeService { operation } = &node.kind
+            && let zup_plan::NativeServiceOperation::Configure { service, .. } = operation.as_ref()
+        {
+            return Some(service.as_ref().clone());
+        }
+        None
+    })
 }
 
 impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
@@ -173,13 +168,10 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
         operation: &ServiceControlOperation,
     ) -> Result<ServiceObservation, String> {
         operation.validate()?;
-        let zup_core::ResourceKey::Service { id } = &operation.key else {
+        let zup_core::ResourceKey::Service { .. } = &operation.key else {
             return Err("service resource required".into());
         };
-        let unit = crate::services::unit_name(id).map_err(|e| e.to_string())?;
-        if unit != operation.native_name {
-            return Err("service native identity mismatch".into());
-        }
+        let unit = operation.native_name.clone();
         let canonical = crate::machine::authorize_systemd_unit(&unit, self.systemd)
             .map_err(|e| e.to_string())?;
         crate::service_exec::refuse_foreign_integration(&unit, &canonical)
@@ -199,7 +191,7 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
             unreachable!()
         };
         let expected = crate::services::render_registration(&unit, &operation.configuration)?;
-        if operation.intent == zup_transaction::ServiceControlIntent::Transition
+        if operation.intent == zup_plan::ServiceControlIntent::Transition
             && operation.timeouts.native() != *native_timeouts
         {
             return Err("service timing policy differs from its registration".into());
@@ -257,10 +249,12 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
             );
         }
         Ok(ServiceObservation {
+            registration: zup_core::ObservedServiceRegistration::SourceFile,
             configuration,
             runtime: runtime.state,
             manager_generation: runtime.manager_generation,
             execution_generation: runtime.execution_generation,
+            process_scope: zup_plan::ServiceScopeObservation::NativeManager,
         })
     }
 
@@ -280,8 +274,8 @@ impl NativeServiceManager for crate::service_exec::ServiceContext<'_> {
         }
         if state == ServiceTerminalState::Stopped {
             if current.runtime == zup_plan::ServiceRuntimeState::Running
-                || operation.stage == zup_transaction::ServiceControlStage::Quiesce
-                    && zup_transaction::requires_startup_inhibition(&operation.before_configuration)
+                || operation.stage == zup_plan::ServiceControlStage::Quiesce
+                    && zup_plan::requires_startup_inhibition(&operation.before_configuration)
             {
                 self.manager
                     .retain_unit(&operation.native_name)

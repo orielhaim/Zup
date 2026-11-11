@@ -1,5 +1,6 @@
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use zup_core::PluginArtifact;
 
 use rstest::rstest;
 use semver::Version;
@@ -7,8 +8,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
-use zup_build::TargetBuildPlan;
-use zup_bundle::{BundleWriter, CompiledPluginArtifact, Package, PluginArtifact};
+use zup_bundle::{BundleWriter, CompiledPluginArtifact, Package};
+use zup_core::TargetBuildPlan;
 use zup_core::{
     App, AppId, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
     NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Target, Template,
@@ -42,11 +43,6 @@ fn component_for_body(body: &str) -> Vec<u8> {
             (func (export "cm32p2_initialize"))
             (data (i32.const 2048) "bad")
             (data (i32.const 2064) "failure")
-            (data (i32.const 3000) "file")
-            (data (i32.const 3064) "failure")
-            (data (i32.const 4000) "\01\02\03")
-            (data (i32.const 5000) "${{install}}/plugin-config.txt")
-            (data (i32.const 6000) "app id: com.example.runtime\0ainstall directory: ${{location.user_data}}/Runtime\0aselected components: core\0a")
         )"#
     );
     let mut resolve = Resolve::default();
@@ -63,7 +59,7 @@ fn component_for_body(body: &str) -> Vec<u8> {
 }
 
 fn fixture(name: &str) -> Vec<u8> {
-    if name == "all" {
+    if matches!(name, "all" | "configure") {
         return PluginEngine::new(HOST_TARGET)
             .unwrap()
             .precompile_component(&zup_plugin_abi::test_fixture::component())
@@ -81,9 +77,6 @@ fn fixture(name: &str) -> Vec<u8> {
         }
         "output" => {
             r#"(drop (memory.grow (i32.const 129))) (i32.store (i32.const 1024) (i32.const 1)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 8388609)) (i32.store (i32.const 1036) (i32.const 0)) (i32.store (i32.const 1040) (i32.const 0)) (i32.const 1024)"#
-        }
-        "configure" => {
-            r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 1)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 5000)) (i32.store (i32.const 2056) (i32.const 28)) (i32.store (i32.const 2060) (i32.const 6000)) (i32.store (i32.const 2064) (i32.const 103)) (i32.const 1024)"#
         }
         _ => panic!("unknown fixture"),
     };
@@ -118,6 +111,8 @@ fn installer() -> Installer {
         updates: None,
         prerequisites: Vec::new(),
         install: Install {
+            generation_readers: Default::default(),
+            data: Vec::new(),
             scope: InstallScope::User,
             directory: InstallDirectory {
                 user: Some(Template::parse("${location.user_data}/Runtime").unwrap()),
@@ -222,16 +217,20 @@ fn configure_fixture_is_one_deterministic_generated_file_without_imports() {
         .unwrap();
     assert_eq!(first.resources.len(), 1);
     let PluginResource::GeneratedFile {
+        replacement,
+        id,
         destination,
         contents,
     } = &first.resources[0]
     else {
         panic!("configure fixture returned a non-file resource");
     };
-    assert_eq!(destination, "${install}/plugin-config.txt");
+    assert_eq!(*replacement, zup_core::FixedReplacement::Quiescent);
+    assert_eq!(id, "configuration");
+    assert_eq!(destination, "${install}/configure.txt");
     assert_eq!(
         contents,
-        b"app id: com.example.runtime\ninstall directory: ${location.user_data}/Runtime\nselected components: core\n"
+        b"application: Runtime\nversion: 1.0.0\nplugin: helper\ninstall directory: ${location.user_data}/Runtime\nscope: user\nselected components: core\n"
     );
     let second = executor
         .plan(&installer.plugins[0], &context, &NeverCancelled)
@@ -250,7 +249,7 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
     let proposal = executor
         .plan(&installer.plugins[0], &context, &NeverCancelled)
         .unwrap();
-    assert_eq!(proposal.resources.len(), 6);
+    assert_eq!(proposal.resources.len(), 7);
     assert!(matches!(
         proposal.resources[0],
         PluginResource::GeneratedFile { .. }
@@ -263,13 +262,14 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
         proposal.resources[2],
         PluginResource::PathEntry { .. }
     ));
+    assert!(proposal.resources.iter().any(|resource| matches!(resource, PluginResource::Data { directory } if directory.id.as_str() == "settings")));
     let PluginResource::Service {
         lifecycle,
         readiness,
         requires_files,
         requires_services,
         ..
-    } = &proposal.resources[3]
+    } = &proposal.resources[4]
     else {
         panic!("service resource required");
     };
@@ -306,11 +306,11 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
         }
     );
     assert!(matches!(
-        proposal.resources[4],
+        proposal.resources[5],
         PluginResource::Protocol { .. }
     ));
     assert!(matches!(
-        proposal.resources[5],
+        proposal.resources[6],
         PluginResource::FileAssociation { .. }
     ));
 }

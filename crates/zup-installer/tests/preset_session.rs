@@ -59,6 +59,8 @@ fn installer() -> Installer {
         frontend: zup_core::Frontend::Gui,
         updates: None,
         install: Install {
+            generation_readers: Default::default(),
+            data: Vec::new(),
             scope: InstallScope::User,
             directory: InstallDirectory {
                 user: Some(Template::parse("${location.programs}/Acme").expect("a template")),
@@ -110,6 +112,7 @@ fn install_state(installer: &Installer) -> HostState {
 /// A one-word account of a decision, so a failure names which step was refused.
 fn describe(decision: HostDecision) -> String {
     match decision {
+        HostDecision::Recover { .. } => "recover".into(),
         HostDecision::Run { .. } => "run".into(),
         HostDecision::Plan(_) => "plan".into(),
         HostDecision::Update(_) => "update".into(),

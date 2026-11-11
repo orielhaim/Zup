@@ -61,8 +61,9 @@ scope = "user"
 [install.directory]
 user = "${location.user_data}/Build"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#
             .replace("windows-x64", HOST_TARGET)
             .as_str(),
@@ -333,8 +334,9 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/Plugin"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 [[plugins]]
 id = "helper"
 source = "plugins/helper.wasm"

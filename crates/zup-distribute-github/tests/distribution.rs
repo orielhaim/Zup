@@ -11,8 +11,7 @@ use std::sync::Arc;
 
 use common::{Blob, Origin, blobs, catalog_entry, descriptor as blob_descriptor};
 use zup_acquire::{
-    ArtifactSource, CachePolicy, ContentCache, ContentDescriptor, NeverCancelled,
-    RelativeContentPath, SourceChain,
+    ArtifactSource, CachePolicy, ContentCache, ContentDescriptor, NeverCancelled, SourceChain,
 };
 use zup_distribute_github::{
     Document, FileRef, PackageDescriptor, PackageHeader, ReleaseLayout, ShardRef, Writer,
@@ -639,9 +638,8 @@ fn a_package_is_not_a_zup_bundle_and_says_so() {
 fn a_release_root_path_never_becomes_an_asset_name() {
     // A blob path is content, not a document, and a publisher that flattened one
     // would produce a release with ten thousand assets.
-    let path = RelativeContentPath::parse("blobs/sha256/ab/abcdef").expect("a valid content path");
-    let error = zup_publish::asset_name(&path).expect_err("a blob is not publishable");
-    assert!(error.contains("one asset per object"), "{error}");
+    let path = zup_acquire::blob_path(&zup_core::hash_bytes(b"fixture"));
+    assert!(zup_publish::asset_name(&path).is_err());
 }
 
 #[test]

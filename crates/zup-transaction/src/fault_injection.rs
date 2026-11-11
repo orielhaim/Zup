@@ -1,6 +1,30 @@
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Boundary {
+    HistoryArchived,
+    HistoryMemberRemoved,
+    HistoryJournalMemberRemoved,
+    HistoryDirectoryRemoved,
+    CollectionPrepared,
+    CollectionImageWritable,
+    CollectionDeleting,
+    CollectionMemberRemoved,
+    CollectionCompleted,
+    InstallationReserved,
+    FixedInstanceRetired,
+    FixedInstancePublished,
+    FixedRollbackDisplaced,
+    FixedRollbackRestored,
+    PersistentCreationRequested,
+    PersistentDirectoryCreated,
+    PersistentCreationRecorded,
+    MaterializationDirectoryCreated,
+    MaterializationStreamInterrupted,
+    MaterializationPreparationRecorded,
+    MaterializationPublicationRequested,
+    MaterializationMemberExposed,
+    MaterializationAccessPublished,
+    MaterializationDirectoryPublished,
     IntentBefore,
     IntentPersisted,
     NativeRequestBefore,
@@ -16,8 +40,10 @@ pub enum Boundary {
     RolledBackPersisted,
     CommitBefore,
     Committed,
-    LedgerPublishBefore,
-    LedgerPublished,
+    InstallationPublicationRequested,
+    InstallationPublished,
+    ReconciliationBefore,
+    Reconciled,
 }
 
 #[cfg(feature = "test-faults")]

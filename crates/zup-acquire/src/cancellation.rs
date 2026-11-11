@@ -13,6 +13,12 @@ pub trait Cancellation: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
+impl<F: Fn() -> bool + Send + Sync> Cancellation for F {
+    fn is_cancelled(&self) -> bool {
+        self()
+    }
+}
+
 /// A caller that never cancels.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NeverCancelled;

@@ -4,8 +4,8 @@
 //! Nothing here names an operating-system facility: a service is a service
 //! wherever it lives, and a registration is a registration.
 
-use crate::{CommandSpec, TargetPath};
 use serde::{Deserialize, Serialize};
+use zup_core::{CommandSpec, TargetPath};
 use zup_core::{ProtocolScheme, ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest};
 
 /// Observed state of one desired target file.
@@ -22,6 +22,7 @@ pub struct ObservedFile {
 pub enum ObservedFileState {
     Absent,
     File {
+        object: zup_core::NativeObjectIdentity,
         size: u64,
         sha256: Sha256Digest,
         executable: Option<bool>,
@@ -114,6 +115,7 @@ pub struct ObservedPathEntry {
 /// Observed state of one desired service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedService {
+    pub registration: zup_core::ObservedServiceRegistration,
     pub key: ResourceKey,
     pub id: ServiceId,
     pub state: ObservedServiceState,
@@ -126,6 +128,7 @@ pub enum ObservedServiceState {
     Absent,
     InvalidService,
     Service {
+        state_directories: Vec<zup_core::RelativePath>,
         native_timeouts: zup_core::NativeServiceTimeouts,
         dependencies: Vec<String>,
         failure: zup_core::ServiceFailurePolicy,
@@ -144,6 +147,7 @@ impl ObservedServiceState {
             Self::Absent => Some(crate::ServiceState::Absent),
             Self::InvalidService => None,
             Self::Service {
+                state_directories,
                 native_timeouts,
                 failure,
                 dependencies,
@@ -154,6 +158,7 @@ impl ObservedServiceState {
                 readiness,
                 ..
             } => Some(crate::ServiceState::Registration {
+                state_directories: state_directories.clone(),
                 native_timeouts: *native_timeouts,
                 failure: *failure,
                 dependencies: dependencies.clone(),
@@ -245,7 +250,7 @@ pub enum ObservedExtensionState {
 
 /// Immutable snapshot of observed host state for planned resources.
 ///
-/// Every collection follows `DesiredState<crate::TargetPath, crate::TargetPath>` ordering. Inspection never mutates.
+/// Every collection follows `crate::BoundDeployment` ordering. Inspection never mutates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HostSnapshot {
     pub files: Vec<ObservedFile>,

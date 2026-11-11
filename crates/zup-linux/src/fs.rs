@@ -102,6 +102,24 @@ pub struct StreamedRegular {
     pub uid: u32,
 }
 
+impl StreamedRegular {
+    pub fn object(&self) -> zup_core::NativeObjectIdentity {
+        zup_core::NativeObjectIdentity::Linux {
+            device: self.dev,
+            inode: self.ino,
+        }
+    }
+}
+
+impl ChildStat {
+    pub fn object(self) -> zup_core::NativeObjectIdentity {
+        zup_core::NativeObjectIdentity::Linux {
+            device: self.dev,
+            inode: self.ino,
+        }
+    }
+}
+
 impl OwnedDirectory {
     pub fn open(path: &Path) -> Result<Self, PathError> {
         let (directory, _) = walk(path, Mode::empty(), false)?;
@@ -120,6 +138,37 @@ impl OwnedDirectory {
             path: self.path.clone(),
             file: std::fs::File::from(file),
         })
+    }
+
+    pub(crate) fn reject_ancestor(
+        &self,
+        object: zup_core::NativeObjectIdentity,
+    ) -> Result<(), PathError> {
+        let mut current = rustix::fs::openat(self.as_fd(), ".", DIR_FLAGS, Mode::empty())
+            .map_err(|error| PathError::errno(&self.path, error))?;
+        loop {
+            let stat =
+                rustix::fs::fstat(&current).map_err(|error| PathError::errno(&self.path, error))?;
+            if object
+                == (zup_core::NativeObjectIdentity::Linux {
+                    device: stat.st_dev,
+                    inode: stat.st_ino,
+                })
+            {
+                return Err(PathError::Refused {
+                    path: self.path.display().to_string(),
+                    reason: "application resources cannot occupy deployment engine state".into(),
+                });
+            }
+            let parent = rustix::fs::openat(&current, "..", DIR_FLAGS, Mode::empty())
+                .map_err(|error| PathError::errno(&self.path, error))?;
+            let upper =
+                rustix::fs::fstat(&parent).map_err(|error| PathError::errno(&self.path, error))?;
+            if (stat.st_dev, stat.st_ino) == (upper.st_dev, upper.st_ino) {
+                return Ok(());
+            }
+            current = parent;
+        }
     }
 
     pub fn create_exclusive_directory(
@@ -247,8 +296,37 @@ impl OwnedDirectory {
                 expected: "regular file",
             });
         }
+        if stat.st_nlink != 1 {
+            return Err(PathError::Refused {
+                path: display.display().to_string(),
+                reason: "payload file has multiple filesystem links".into(),
+            });
+        }
+        let expected_size = u64::try_from(stat.st_size).map_err(|_| PathError::Refused {
+            path: display.display().to_string(),
+            reason: "regular file has an invalid length".into(),
+        })?;
         let (size, sha256) =
-            zup_core::hash_reader(&mut file).map_err(|error| PathError::io(&display, error))?;
+            zup_core::hash_reader((&mut file).take(expected_size.saturating_add(1)))
+                .map_err(|error| PathError::io(&display, error))?;
+        let after =
+            rustix::fs::fstat(file.as_fd()).map_err(|error| PathError::errno(&display, error))?;
+        if after.st_nlink != 1
+            || size != expected_size
+            || stat.st_size != after.st_size
+            || stat.st_mode != after.st_mode
+            || stat.st_uid != after.st_uid
+            || stat.st_gid != after.st_gid
+            || stat.st_mtime != after.st_mtime
+            || stat.st_mtime_nsec != after.st_mtime_nsec
+            || stat.st_ctime != after.st_ctime
+            || stat.st_ctime_nsec != after.st_ctime_nsec
+        {
+            return Err(PathError::Refused {
+                path: display.display().to_string(),
+                reason: "file changed while being inspected".into(),
+            });
+        }
         Ok(StreamedRegular {
             file,
             size,
@@ -278,14 +356,32 @@ impl OwnedDirectory {
     }
 
     pub fn rename_noreplace(&self, from: &str, to: &str) -> Result<(), PathError> {
+        self.rename_noreplace_to(from, self, to)
+    }
+
+    pub(crate) fn rename_noreplace_to(
+        &self,
+        from: &str,
+        destination: &Self,
+        to: &str,
+    ) -> Result<(), PathError> {
         check_child_name(from)?;
         check_child_name(to)?;
-        match renameat_with(self.as_fd(), from, self.as_fd(), to, RenameFlags::NOREPLACE) {
-            Ok(()) => self.sync(),
+        match renameat_with(
+            self.as_fd(),
+            from,
+            destination.as_fd(),
+            to,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {
+                self.sync()?;
+                destination.sync()
+            }
             Err(rustix::io::Errno::EXIST) => Err(PathError::AlreadyExists {
-                path: self.display_child(to).display().to_string(),
+                path: destination.display_child(to).display().to_string(),
             }),
-            Err(error) => Err(PathError::errno(&self.display_child(to), error)),
+            Err(error) => Err(PathError::errno(&destination.display_child(to), error)),
         }
     }
 
@@ -1377,6 +1473,20 @@ mod tests {
         assert!(
             owned.kind_or_absent("scratch").expect("stat").is_none(),
             "the link itself is gone"
+        );
+    }
+
+    #[test]
+    fn payload_observation_refuses_a_shared_inode() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = OwnedDirectory::open(root.path()).unwrap();
+        std::fs::write(root.path().join("payload"), b"application").unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        std::fs::hard_link(root.path().join("payload"), foreign.path().join("alias")).unwrap();
+        assert!(directory.stream_regular("payload").is_err());
+        assert_eq!(
+            std::fs::read(foreign.path().join("alias")).unwrap(),
+            b"application"
         );
     }
 

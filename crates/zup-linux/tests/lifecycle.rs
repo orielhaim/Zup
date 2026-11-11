@@ -3,7 +3,7 @@
 
 use zup_compose::CARRIER_FOOTER_LEN as FOOTER_LEN;
 use zup_core::{AppId, SelectedScope};
-use zup_linux::{LinuxLedgerStore, LinuxOutcome, LinuxRunRequest, run};
+use zup_linux::{LinuxInstallationStore, LinuxOutcome, LinuxRunRequest, run};
 
 use zup_linux::test_support::{
     IsolatedUser, compose_fixture, mode_of, run_installer, run_tool, tool_script, v1_files,
@@ -40,23 +40,21 @@ fn fresh_install_runs_the_application() {
         "keep-v1"
     );
 
-    let ledger = LinuxLedgerStore::new(&user.state)
+    let ledger = LinuxInstallationStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
         )
         .expect("the ledger reads")
         .expect("an installation is recorded");
-    assert_eq!(ledger.version.to_string(), "1.0.0");
-    assert!(!ledger.resources.is_empty(), "ownership is recorded");
-
-    let maintenance = zup_transaction::maintenance_runtime_path(
-        &user.state,
-        &AppId::new("com.example.tool").expect("an id"),
-        SelectedScope::User,
-        &semver::Version::parse("1.0.0").expect("a version"),
-        "",
+    assert_eq!(ledger.current.version.to_string(), "1.0.0");
+    assert!(
+        !ledger.current.resources.is_empty(),
+        "ownership is recorded"
     );
+
+    let maintenance =
+        zup_linux::test_support::maintenance_path(&user.state, SelectedScope::User, "1.0.0");
     assert!(
         maintenance.exists(),
         "a maintenance generation is persisted"
@@ -109,30 +107,32 @@ fn upgrade_moves_the_installation_to_v2() {
         b"the user's",
         "the upgrade does not touch what it does not own"
     );
-    let ledger = LinuxLedgerStore::new(&user.state)
+    let ledger = LinuxInstallationStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
         )
         .expect("the ledger reads")
         .expect("an installation is recorded");
-    assert_eq!(ledger.version.to_string(), "1.1.0", "the ledger records v2");
+    assert_eq!(
+        ledger.current.version.to_string(),
+        "1.1.0",
+        "the ledger records v2"
+    );
 
     let generation = |version: &str| {
-        zup_transaction::maintenance_directory(
-            &user.state,
-            &AppId::new("com.example.tool").expect("an id"),
-            SelectedScope::User,
-            &semver::Version::parse(version).expect("a version"),
-        )
+        zup_linux::test_support::maintenance_path(&user.state, SelectedScope::User, version)
+            .parent()
+            .unwrap()
+            .to_owned()
     };
     assert!(
         generation("1.1.0").exists(),
         "the new generation is current"
     );
     assert!(
-        !generation("1.0.0").exists(),
-        "the old generation is retired by policy"
+        generation("1.0.0").exists(),
+        "the prior maintenance generation remains available for recovery"
     );
 }
 
@@ -224,6 +224,9 @@ fn uninstall_uses_ownership_after_source_components_are_removed() {
             .join(file.source_relative.as_str());
         file.component = Some(component.clone());
     }
+    for mapping in &mut build.installer.files {
+        mapping.component = Some(component.clone());
+    }
     let v1 = scratch.path().join("v1");
     zup_linux::test_support::compose_installer(
         std::path::Path::new(zup_linux::test_support::inert_template()),
@@ -255,25 +258,21 @@ fn uninstall_uses_ownership_after_source_components_are_removed() {
         install.exists(),
         "a directory with content of its own stays"
     );
-    let ledger = LinuxLedgerStore::new(&user.state)
+    let ledger = LinuxInstallationStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
         )
         .expect("the ledger reads");
-    assert!(ledger.is_none(), "the ledger is removed");
-    let maintenance = zup_transaction::maintenance_root(
-        &user.state,
-        &AppId::new("com.example.tool").expect("an id"),
-        SelectedScope::User,
-    );
     assert!(
-        !maintenance.exists()
-            || maintenance
-                .read_dir()
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(true),
-        "maintenance content is removed"
+        ledger.is_some_and(|record| !record.is_installed() && record.current.resources.is_empty()),
+        "the tombstone holds no active ownership"
+    );
+    let maintenance =
+        zup_linux::test_support::maintenance_path(&user.state, SelectedScope::User, "1.0.0");
+    assert!(
+        maintenance.exists(),
+        "retained maintenance content remains available until safe reclamation is established"
     );
 }
 
@@ -352,13 +351,8 @@ fn repair_runs_from_the_maintenance_copy_without_the_download() {
 
     std::fs::remove_file(&installer).expect("the download is deleted");
 
-    let maintenance = zup_transaction::maintenance_runtime_path(
-        &user.state,
-        &AppId::new("com.example.tool").expect("an id"),
-        SelectedScope::User,
-        &semver::Version::parse("1.0.0").expect("a version"),
-        "",
-    );
+    let maintenance =
+        zup_linux::test_support::maintenance_path(&user.state, SelectedScope::User, "1.0.0");
     let install = user.programs().join("tool");
     std::fs::remove_file(install.join("keep.dat")).expect("delete");
 

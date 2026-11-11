@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use tempfile::TempDir;
 use zup_core::AppId;
+use zup_core::TransactionId;
+use zup_plan::OperationId;
 use zup_transaction::{
-    CorruptReason, FilesystemTransactionStore, NodeState, OperationId, StoreError, TransactionId,
-    TransactionRecord, TransactionStore,
+    CorruptReason, FilesystemTransactionStore, NodeState, StoreError, TransactionRecord,
+    TransactionStore,
 };
 
 mod common;
@@ -15,8 +17,32 @@ use common::sample_plan;
 
 fn store() -> (TempDir, FilesystemTransactionStore) {
     let dir = TempDir::new().unwrap();
-    let s = FilesystemTransactionStore::private_at(dir.path());
+    let s = FilesystemTransactionStore::private_at(dir.path().join("state"));
     (dir, s)
+}
+
+#[rstest]
+#[case::unknown_identity(false)]
+#[case::missing_journal(true)]
+fn transaction_discovery_refuses_unknown_entries(#[case] valid_identity: bool) {
+    let (directory, store) = store();
+    let existing = record();
+    store.create(&existing).unwrap();
+    let foreign = if valid_identity {
+        TransactionId::new_v7().to_string()
+    } else {
+        "invalid-identity".into()
+    };
+    let path = directory.path().join("state/transactions").join(foreign);
+    std::fs::create_dir(&path).unwrap();
+    let observed = store.list_ids().and_then(|ids| {
+        ids.iter()
+            .map(|id| store.load(id))
+            .collect::<Result<Vec<_>, _>>()
+    });
+    assert!(observed.is_err());
+    assert!(path.exists());
+    assert_eq!(store.load(&existing.transaction_id).unwrap(), existing);
 }
 
 fn record() -> TransactionRecord {
@@ -72,7 +98,7 @@ struct RendezvousStore {
 impl RendezvousStore {
     fn new(root: &std::path::Path, contenders: usize) -> Self {
         Self {
-            inner: FilesystemTransactionStore::private_at(root),
+            inner: FilesystemTransactionStore::private_at(root.join("state")),
             contenders,
             loads: Mutex::new(0),
             arrived: Condvar::new(),
@@ -83,6 +109,12 @@ impl RendezvousStore {
 }
 
 impl TransactionStore for RendezvousStore {
+    fn reserve_installation(
+        &self,
+        record: &TransactionRecord,
+    ) -> Result<zup_transaction::InstallationReservation, zup_transaction::StoreError> {
+        self.inner.reserve_installation(record)
+    }
     fn create(&self, record: &TransactionRecord) -> Result<(), StoreError> {
         self.inner.create(record)
     }
@@ -129,7 +161,7 @@ struct RevisionRaceStore {
 impl RevisionRaceStore {
     fn new(root: &std::path::Path, interloper: OperationId, budget: usize) -> Self {
         Self {
-            inner: FilesystemTransactionStore::private_at(root),
+            inner: FilesystemTransactionStore::private_at(root.join("state")),
             interloper,
             budget: AtomicUsize::new(budget),
             conflicts: AtomicUsize::new(0),
@@ -138,6 +170,12 @@ impl RevisionRaceStore {
 }
 
 impl TransactionStore for RevisionRaceStore {
+    fn reserve_installation(
+        &self,
+        record: &TransactionRecord,
+    ) -> Result<zup_transaction::InstallationReservation, zup_transaction::StoreError> {
+        self.inner.reserve_installation(record)
+    }
     fn create(&self, record: &TransactionRecord) -> Result<(), StoreError> {
         self.inner.create(record)
     }
@@ -224,9 +262,11 @@ fn stale_cas_rejected() {
 #[test]
 fn concurrent_updaters_on_one_record_both_land() {
     let (dir, store) = store();
-    let rec = record();
+    let mut rec = record();
     let id = rec.transaction_id;
     store.create(&rec).unwrap();
+    common::reserve(&store, &mut rec);
+    let base_revision = rec.revision;
     let contenders: Vec<OperationId> = mutating_nodes(&rec).into_iter().take(2).collect();
     assert_eq!(contenders.len(), 2, "sample plan needs two mutating nodes");
 
@@ -276,16 +316,17 @@ fn concurrent_updaters_on_one_record_both_land() {
         store.conflicts.load(Ordering::SeqCst) >= 1,
         "the two updaters must actually have raced"
     );
-    let final_record = FilesystemTransactionStore::private_at(dir.path())
+    let final_record = FilesystemTransactionStore::private_at(dir.path().join("state"))
         .load(&id)
         .unwrap();
     assert_eq!(
-        final_record.revision, 2,
+        final_record.revision,
+        base_revision + 2,
         "one revision per committed update, not one per attempt"
     );
     assert_eq!(
         landed,
-        vec![1, 2],
+        vec![base_revision + 1, base_revision + 2],
         "each updater commits its own revision, in some order"
     );
     for op in &contenders {
@@ -302,9 +343,11 @@ fn concurrent_updaters_on_one_record_both_land() {
 #[test]
 fn update_retries_a_lost_swap_instead_of_failing() {
     let (dir, store) = store();
-    let rec = record();
+    let mut rec = record();
     let id = rec.transaction_id;
     store.create(&rec).unwrap();
+    common::reserve(&store, &mut rec);
+    let base_revision = rec.revision;
     let target = mutating_nodes(&rec).remove(0);
     let budget = 2;
     let racer = RevisionRaceStore::new(dir.path(), first_barrier(&rec), budget);
@@ -339,7 +382,7 @@ fn update_retries_a_lost_swap_instead_of_failing() {
     );
     assert_eq!(
         committed.revision,
-        budget as u64 + 1,
+        base_revision + budget as u64 + 1,
         "each stolen revision is re-read over, and the retry commits on top"
     );
     let final_record = store.load(&id).unwrap();
@@ -393,7 +436,7 @@ fn read_json(path: &std::path::Path) -> serde_json::Value {
 
 fn record_path(dir: &TempDir, id: &TransactionId) -> std::path::PathBuf {
     dir.path()
-        .join("transactions")
+        .join("state/transactions")
         .join(id.to_string())
         .join("transaction.json")
 }
@@ -460,9 +503,11 @@ fn a_journal_cannot_be_relocated_under_another_transaction_identity() {
     let other = TransactionId::new_v7();
     std::fs::rename(
         root.path()
-            .join("transactions")
+            .join("state/transactions")
             .join(original.transaction_id.to_string()),
-        root.path().join("transactions").join(other.to_string()),
+        root.path()
+            .join("state/transactions")
+            .join(other.to_string()),
     )
     .unwrap();
     assert!(matches!(
@@ -471,10 +516,17 @@ fn a_journal_cannot_be_relocated_under_another_transaction_identity() {
     ));
 }
 
+enum ReceiptMutation {
+    Destination,
+    Content,
+    Object,
+}
+
 #[rstest]
-#[case::foreign_destination(true)]
-#[case::foreign_content(false)]
-fn receipts_must_describe_the_planned_file(#[case] destination: bool) {
+#[case(ReceiptMutation::Destination)]
+#[case(ReceiptMutation::Content)]
+#[case(ReceiptMutation::Object)]
+fn receipts_must_describe_the_planned_file(#[case] mutation: ReceiptMutation) {
     let (_root, store) = store();
     let settled = zup_transaction::TransactionCoordinator::new(store)
         .begin(
@@ -484,7 +536,10 @@ fn receipts_must_describe_the_planned_file(#[case] destination: bool) {
             sample_plan(),
         )
         .unwrap()
-        .execute(&mut common::fake::FakeExecutor::new())
+        .execute(
+            &mut common::fake::FakeExecutor::new(),
+            &common::Publisher::default(),
+        )
         .unwrap();
     let mut record = settled.record;
     let receipt = record
@@ -505,13 +560,19 @@ fn receipts_must_describe_the_planned_file(#[case] destination: bool) {
     if let zup_transaction::OperationReceipt::CreateFile {
         destination: path,
         installed_size,
+        object,
         ..
     } = receipt.as_mut()
     {
-        if destination {
-            *path = r"C:\foreign\owned-by-someone-else".into();
-        } else {
-            *installed_size += 1;
+        match mutation {
+            ReceiptMutation::Destination => *path = r"C:\foreign\owned-by-someone-else".into(),
+            ReceiptMutation::Content => *installed_size += 1,
+            ReceiptMutation::Object => {
+                *object = zup_core::NativeObjectIdentity::Windows {
+                    volume: 1,
+                    file: [99; 16],
+                }
+            }
         }
     }
     assert_eq!(record.validate(), Err(CorruptReason::InvalidReceipt));

@@ -166,7 +166,7 @@ fn staged_path(output: &Path, index: usize) -> PathBuf {
 }
 
 pub fn read_blob(tree: &Path, digest: &Sha256Digest) -> Option<Vec<u8>> {
-    let relative = zup_acquire::WebLayout::blob(digest).to_string();
+    let relative = zup_acquire::blob_path(digest).to_string();
     let mut path = tree.to_path_buf();
     for segment in relative.split('/') {
         path.push(segment);

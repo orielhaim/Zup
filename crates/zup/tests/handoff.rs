@@ -1,18 +1,4 @@
-//! The handoff, bounded and refused.
-//!
-//! A thin bootstrapper resolves a release, verifies a native runtime, and starts
-//! it. Two things about that moment are worth pinning.
-//!
-//! - **The bound.** A handoff is a few hundred bytes, and everything the runtime
-//!   does before it draws anything is reading that document and hashing one file.
-//!   The window appears afterwards, so those are the whole of what a user waits
-//!   for.
-//! - **The claim.** The bootstrapper is the untrusted half of the pair, because
-//!   it is the half that talked to a network. Every substitution it could attempt
-//!   is attempted here and refused.
-//!
-//! The runtime identity is a real file on disk and the release is a real signed
-//! document tree, so nothing here is a stand-in for the thing it asserts.
+//! Cache-graph consistency checks for runtime handoffs. These tests do not establish TUF authorization.
 
 #![cfg(windows)]
 
@@ -43,16 +29,7 @@ fn payload(seed: u64, size: usize) -> Vec<u8> {
     out
 }
 
-/// A real image on disk to stand in for the runtime.
-///
-/// A real PE, because two of the checks are about the image rather than about a
-/// digest: `verify` reads this executable's own machine and subsystem, and a file
-/// of random bytes would fail that for the wrong reason. The test binary is a
-/// real native console PE, which is exactly what a native runtime is.
-///
-/// `salt` produces a *different* image that is still a valid PE - appending to
-/// the end of an image leaves its headers intact - so a substitution is a genuine
-/// second file rather than the same bytes under a second name.
+/// Appending a salt preserves PE headers while producing a different image digest.
 fn runtime_image(root: &Path, name: &str, salt: u64) -> PathBuf {
     let path = root.join(name);
     let mut bytes = std::fs::read(std::env::current_exe().expect("the test executable"))
@@ -116,8 +93,9 @@ scope = "user"
 [install.directory]
 user = "${location.programs}/Handoff"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#
         .replace("windows-x64", zup_plugin_contract::HOST_TARGET),
     )
@@ -130,21 +108,15 @@ destination = "${install}"
 
     let source = std::fs::read_to_string(project.join("zup.toml")).expect("a manifest");
     let manifest = zup_manifest::parse(&source).expect("the manifest parses");
-    let config = zup_manifest::select_targets(
-        &manifest,
-        &["x64"],
-        &zup_manifest::TargetOverrides::default(),
-    )
-    .expect("a selection")
-    .into_iter()
-    .next()
-    .expect("one target");
-    let installer = zup_manifest::compile(
-        &manifest,
-        &config,
-        &zup_manifest::TargetOverrides::default(),
-    )
-    .expect("a compiled installer");
+    let config =
+        zup_manifest::select_targets(&manifest, &["x64"], &zup_core::TargetOverrides::default())
+            .expect("a selection")
+            .into_iter()
+            .next()
+            .expect("one target");
+    let installer =
+        zup_manifest::compile(&manifest, &config, &zup_core::TargetOverrides::default())
+            .expect("a compiled installer");
     let build = zup_build::materialize(
         &project.join("zup.toml"),
         &manifest,
@@ -263,6 +235,11 @@ fn fixture(files: usize) -> Fixture {
 fn handoff_for(fixture: &Fixture) -> RuntimeHandoff {
     let variant = &fixture.release.variants[0];
     RuntimeHandoff {
+        repository: "https://example.invalid".into(),
+        pin: zup_core::ReleasePin::Release {
+            version: fixture.release.version.parse().unwrap(),
+            document: fixture.document,
+        },
         schema: zup_acquire::HANDOFF_SCHEMA,
         app_id: fixture.release.app_id.clone(),
         release: fixture.release.release_digest,
@@ -310,13 +287,9 @@ fn accepting_a_handoff_proves_the_image_the_release_names() {
         std::fs::File::open(&fixture.runtime).expect("the runtime is readable"),
     )
     .expect("the runtime hashes");
-    let verified = zup_windows::verify(&fixture.runtime, &fixture.cache, &accepted)
+    let verified = zup_windows::verify_handoff_content(&fixture.runtime, &fixture.cache, &accepted)
         .unwrap_or_else(|error| panic!("the runtime is the one the release names: {error}"));
 
-    // The window appears only after this, so what a user waits for between
-    // double-clicking and seeing the installer is the reading of this document and
-    // one pass over the image. Both are bounded by the architecture, not by the
-    // release, which is why a handoff carries digests rather than contents.
     assert!(
         bytes < 4096,
         "a handoff is a few hundred bytes, not a plan: {bytes}"
@@ -341,7 +314,7 @@ fn a_bootstrapper_cannot_substitute_anything_the_release_authenticated() {
     let fixture = fixture(8);
     let honest = handoff_for(&fixture);
     let path = write_handoff(&fixture, &honest);
-    zup_windows::verify(&fixture.runtime, &fixture.cache, &honest)
+    zup_windows::verify_handoff_content(&fixture.runtime, &fixture.cache, &honest)
         .unwrap_or_else(|error| panic!("the honest handoff verifies: {error}"));
 
     // 1. A different runtime image. The release names this image's digest, so a
@@ -350,34 +323,34 @@ fn a_bootstrapper_cannot_substitute_anything_the_release_authenticated() {
     let stranger = zup_windows::own_digest(&other).expect("the stranger hashes");
     let mut substituted = honest.clone();
     substituted.runtime = stranger;
-    let error = zup_windows::verify(&other, &fixture.cache, &substituted)
+    let error = zup_windows::verify_handoff_content(&other, &fixture.cache, &substituted)
         .expect_err("a substituted runtime is refused");
-    assert!(error.left_machine_unchanged());
+
     println!("\nsubstitutions");
     println!("  runtime           refused: {error}");
 
     // 2. A different variant. The release has to name it, and it does not.
     let mut substituted = honest.clone();
     substituted.variant = "aarch64".to_owned();
-    let error =
-        zup_windows::verify(&fixture.runtime, &fixture.cache, &substituted).expect_err("refused");
-    assert!(error.left_machine_unchanged());
+    let error = zup_windows::verify_handoff_content(&fixture.runtime, &fixture.cache, &substituted)
+        .expect_err("refused");
+
     println!("  variant           refused: {error}");
 
     // 3. A different catalog. The release authenticates the catalog's digest.
     let mut substituted = honest.clone();
     substituted.catalog = Sha256Digest::from_bytes([9; 32]);
-    let error =
-        zup_windows::verify(&fixture.runtime, &fixture.cache, &substituted).expect_err("refused");
-    assert!(error.left_machine_unchanged());
+    let error = zup_windows::verify_handoff_content(&fixture.runtime, &fixture.cache, &substituted)
+        .expect_err("refused");
+
     println!("  catalog           refused: {error}");
 
     // 4. A different manifest. The variant descriptor names it.
     let mut substituted = honest.clone();
     substituted.manifest = Sha256Digest::from_bytes([8; 32]);
-    let error =
-        zup_windows::verify(&fixture.runtime, &fixture.cache, &substituted).expect_err("refused");
-    assert!(error.left_machine_unchanged());
+    let error = zup_windows::verify_handoff_content(&fixture.runtime, &fixture.cache, &substituted)
+        .expect_err("refused");
+
     println!("  manifest          refused: {error}");
 
     // 5. A different target. The release's variant descriptor carries it.
@@ -387,9 +360,9 @@ fn a_bootstrapper_cannot_substitute_anything_the_release_authenticated() {
     } else {
         zup_core::Target::WINDOWS_ARM64
     };
-    let error =
-        zup_windows::verify(&fixture.runtime, &fixture.cache, &substituted).expect_err("refused");
-    assert!(error.left_machine_unchanged());
+    let error = zup_windows::verify_handoff_content(&fixture.runtime, &fixture.cache, &substituted)
+        .expect_err("refused");
+
     println!("  target            refused: {error}");
 
     // 6. A different document, which is the one field a bootstrapper chooses
@@ -397,9 +370,9 @@ fn a_bootstrapper_cannot_substitute_anything_the_release_authenticated() {
     //    release the handoff names.
     let mut substituted = honest.clone();
     substituted.document = digest_of(&fixture.manifest_bytes);
-    let error =
-        zup_windows::verify(&fixture.runtime, &fixture.cache, &substituted).expect_err("refused");
-    assert!(error.left_machine_unchanged());
+    let error = zup_windows::verify_handoff_content(&fixture.runtime, &fixture.cache, &substituted)
+        .expect_err("refused");
+
     println!("  document key      refused: {error}");
 
     // 7. A handoff that does not match the digest the launcher passed. Two
@@ -412,7 +385,7 @@ fn a_bootstrapper_cannot_substitute_anything_the_release_authenticated() {
 
     // And the honest one still verifies afterwards, so none of those refusals left
     // anything behind.
-    zup_windows::verify(&fixture.runtime, &fixture.cache, &honest)
+    zup_windows::verify_handoff_content(&fixture.runtime, &fixture.cache, &honest)
         .unwrap_or_else(|error| panic!("the honest handoff still verifies: {error}"));
     let _ = path;
 }

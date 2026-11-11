@@ -1,18 +1,17 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::Path;
+use zup_plan::{DeploymentPlan, compile_deployment};
 
 use thiserror::Error;
 use zup_core::{AppId, Frontend, Privilege, ResourceKey, SelectedScope, hash_reader};
 use zup_plan::{
-    DesiredState, InstallLedger, LauncherState, LifecycleAction, ObservedLauncherState,
+    InstallationRecord, LauncherState, LifecycleAction, ObservedLauncherState,
     ObservedServiceState, OwnedResource, ServiceState, plan_lifecycle,
 };
 
-use zup_transaction::{TransactionPlan, compile_transaction};
-
 use crate::inspect::{InspectError, inspect_target};
-use crate::ledger::{InstallLedgerStore, LedgerError};
+use crate::ledger::{InstallationRecordStore, LedgerError};
 use crate::lowering::host_path;
 
 use crate::transaction_payload::{
@@ -42,9 +41,9 @@ pub fn plan_target_lifecycle(
     action: LifecycleAction,
     app_id: &AppId,
     scope: SelectedScope,
-    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
+    target: Option<&zup_plan::BoundDeployment>,
     state_root: &Path,
-) -> Result<TransactionPlan, WindowsPlanError> {
+) -> Result<DeploymentPlan, WindowsPlanError> {
     plan_target_lifecycle_with_frontend(action, app_id, scope, target, state_root, Frontend::Gui)
 }
 
@@ -52,10 +51,10 @@ pub fn plan_target_lifecycle_with_frontend(
     action: LifecycleAction,
     app_id: &AppId,
     scope: SelectedScope,
-    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
+    target: Option<&zup_plan::BoundDeployment>,
     state_root: &Path,
     frontend: Frontend,
-) -> Result<TransactionPlan, WindowsPlanError> {
+) -> Result<DeploymentPlan, WindowsPlanError> {
     if let Some(target) = target {
         if target.target.operating_system() != zup_core::TargetOperatingSystem::Windows {
             return Err(WindowsPlanError::UnsupportedTarget);
@@ -64,7 +63,7 @@ pub fn plan_target_lifecycle_with_frontend(
             return Err(WindowsPlanError::TargetMismatch);
         }
     }
-    let ledger = InstallLedgerStore::new(state_root).load(app_id, scope)?;
+    let ledger = InstallationRecordStore::new(state_root).load(app_id, scope)?;
     let (snapshot, matches) = observe_target(target, ledger.as_ref())?;
     let execution = plan_lifecycle(action, target, snapshot.as_ref(), ledger.as_ref(), &matches)?;
     let input = transaction_input(
@@ -76,13 +75,12 @@ pub fn plan_target_lifecycle_with_frontend(
         frontend,
         app_id,
     )?;
-    compile_transaction(&input)
-        .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))
+    compile_deployment(&input).map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))
 }
 
 pub(crate) fn observe_target(
-    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-    ledger: Option<&InstallLedger>,
+    target: Option<&zup_plan::BoundDeployment>,
+    ledger: Option<&InstallationRecord>,
 ) -> Result<(Option<zup_plan::HostSnapshot>, BTreeMap<ResourceKey, bool>), WindowsPlanError> {
     let snapshot = target.map(inspect_target).transpose()?;
     let matches = ledger
@@ -95,13 +93,13 @@ pub(crate) fn observe_target(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn transaction_input(
     execution: &zup_plan::ExecutionPlan,
-    target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-    ledger: Option<&InstallLedger>,
+    target: Option<&zup_plan::BoundDeployment>,
+    ledger: Option<&InstallationRecord>,
     scope: SelectedScope,
     state_root: &Path,
     frontend: Frontend,
     app_id: &AppId,
-) -> Result<zup_transaction::TransactionInput, WindowsPlanError> {
+) -> Result<zup_plan::DeploymentEffects, WindowsPlanError> {
     let key_path = format!(
         "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
         app_id
@@ -110,7 +108,7 @@ pub(crate) fn transaction_input(
         .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?;
     let owned = ledger
         .as_ref()
-        .and_then(|ledger| ledger.resources.get(&apps_key(app_id)))
+        .and_then(|ledger| ledger.current.resources.get(&apps_key(app_id)))
         .and_then(|resource| match resource {
             OwnedResource::Backend {
                 id,
@@ -128,9 +126,8 @@ pub(crate) fn transaction_input(
     let desired = target
         .and_then(|target| {
             target
-                .files
-                .iter()
-                .find(|file| matches!(file.key, ResourceKey::Maintenance { .. }))
+                .maintenance
+                .as_ref()
                 .map(|_| apps_state(target, scope, state_root, frontend))
         })
         .transpose()?;
@@ -138,10 +135,9 @@ pub(crate) fn transaction_input(
     let maintenance_privilege = target
         .and_then(|target| {
             target
-                .files
-                .iter()
-                .find(|file| matches!(file.key, ResourceKey::Maintenance { .. }))
-                .map(|file| file.privilege)
+                .maintenance
+                .as_ref()
+                .map(|_| target.scope.authorization())
         })
         .unwrap_or(owned_privilege);
     let apps = AppsPlanningInput {
@@ -151,24 +147,28 @@ pub(crate) fn transaction_input(
         owned,
         desired,
         key_path,
-        uninstall: execution.uninstall,
+        transition: execution.transition,
     };
     let input = compile_execution_plan(execution, target, scope, app_id, ledger, apps)?;
     Ok(input)
 }
 
 fn apps_state(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: &zup_plan::BoundDeployment,
     scope: SelectedScope,
     state_root: &Path,
     frontend: Frontend,
 ) -> Result<AppsFeaturesState, WindowsPlanError> {
     let maintenance = target
-        .files
-        .iter()
-        .find(|file| matches!(file.key, ResourceKey::Maintenance { .. }))
-        .expect("maintenance file selected by caller");
-    let maintenance_path = host_path(&maintenance.destination);
+        .maintenance
+        .as_ref()
+        .and_then(|generation| generation.maintenance_runtime())
+        .ok_or_else(|| {
+            WindowsPlanError::OwnedInspection(
+                "maintenance generation has no runtime executable".into(),
+            )
+        })?;
+    let maintenance_path = host_path(&maintenance);
     let scope_name = match scope {
         SelectedScope::User => "user",
         SelectedScope::Machine => "machine",
@@ -246,10 +246,10 @@ fn apps_state(
 }
 
 fn inspect_owned_matches(
-    ledger: &InstallLedger,
+    ledger: &InstallationRecord,
 ) -> Result<BTreeMap<ResourceKey, bool>, WindowsPlanError> {
     let mut matches = BTreeMap::new();
-    for (key, owned) in &ledger.resources {
+    for (key, owned) in &ledger.current.resources {
         let found = match owned {
             OwnedResource::File {
                 destination,
@@ -299,12 +299,19 @@ fn inspect_owned_matches(
                 (kind == *value_type || crate::search_path::lost_expansion(value_type, &kind))
                     && crate::search_path::contains(&ledger.target, &raw, &entry)
             }
-            OwnedResource::Service {
-                name, installed, ..
-            } => {
-                match crate::scm::query_service(name, &ledger.target)
-                    .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?
-                {
+            OwnedResource::Service(zup_plan::OwnedService {
+                registration,
+                name,
+                installed,
+                ..
+            }) => {
+                let observed = crate::scm::query_service(name, &ledger.target)
+                    .map_err(|error| WindowsPlanError::OwnedInspection(error.to_string()))?;
+                let ownership_matches = match key {
+                    ResourceKey::Service { id } => observed.registration.matches(*registration, id),
+                    _ => false,
+                };
+                match observed.state {
                     ObservedServiceState::InvalidService => false,
                     ObservedServiceState::Absent => **installed == ServiceState::Absent,
                     ObservedServiceState::Service {
@@ -318,17 +325,19 @@ fn inspect_owned_matches(
                         readiness,
                         ..
                     } => {
-                        **installed
-                            == ServiceState::Registration {
-                                native_timeouts,
-                                failure,
-                                dependencies,
-                                execution,
-                                readiness,
-                                display_name,
-                                command,
-                                start,
-                            }
+                        ownership_matches
+                            && **installed
+                                == ServiceState::Registration {
+                                    state_directories: Vec::new(),
+                                    native_timeouts,
+                                    failure,
+                                    dependencies,
+                                    execution,
+                                    readiness,
+                                    display_name,
+                                    command,
+                                    start,
+                                }
                     }
                 }
             }

@@ -1,17 +1,21 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use zup_storage::PublishError;
 
+use crate::OperationReceipt;
 use jiff::Timestamp;
 use miette::Diagnostic;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zup_core::{AppId, SelectedScope, Sha256Digest, Target};
+use zup_plan::NodeKind;
 
-use crate::id::{OperationId, TransactionId};
-use crate::plan::TransactionPlan;
+use zup_core::TransactionId;
+use zup_plan::DeploymentPlan;
+use zup_plan::OperationId;
 
-pub const JOURNAL_SCHEMA: u32 = 4;
+pub const JOURNAL_SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,10 +108,17 @@ pub enum NodeState {
         receipt: Box<crate::executor::OperationReceipt>,
     },
     RolledBack,
+    Compensated {
+        receipt: Box<crate::executor::OperationReceipt>,
+    },
     Failed,
 }
 
 impl NodeState {
+    pub fn is_rolled_back(&self) -> bool {
+        matches!(self, Self::RolledBack | Self::Compensated { .. })
+    }
+
     pub fn transition(self, next: Self) -> Result<Self, NodeStateError> {
         use NodeState::*;
         let ok = matches!(
@@ -118,16 +129,30 @@ impl NodeState {
                 | (Running, Pending)
                 | (Applied { .. }, Verified { .. })
                 | (Applied { .. }, RollingBack { .. })
-                | (Applied { .. }, RolledBack)
+                | (Applied { .. }, Compensated { .. })
                 | (Verified { .. }, RollingBack { .. })
-                | (RollingBack { .. }, RolledBack)
+                | (RollingBack { .. }, Compensated { .. })
                 | (RollingBack { .. }, Failed)
                 | (Failed, RollingBack { .. })
                 | (Failed, RolledBack)
                 | (Pending, RollingBack { .. })
                 | (Pending, RolledBack)
+        ) || matches!(
+            (&self, &next),
+            (RollingBack { receipt: before }, RollingBack { receipt: after })
+                if matches!((before.as_ref(), after.as_ref()),
+                    (crate::OperationReceipt::ServiceControl(before), crate::OperationReceipt::ServiceControl(after))
+                        if before.operation == after.operation
+                            && matches!(after.authority, crate::ServiceControlAuthority::ReobservedQuiescent { .. }))
         );
-        if ok {
+        let preserves_evidence = match (&self, &next) {
+            (
+                Applied { receipt: before } | RollingBack { receipt: before },
+                Compensated { receipt: after },
+            ) => before == after,
+            _ => true,
+        };
+        if ok && preserves_evidence {
             Ok(next)
         } else {
             Err(NodeStateError {
@@ -147,6 +172,8 @@ pub struct NodeStateError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionRecord {
+    pub reservation: Option<crate::InstallationReservation>,
+    pub publication: crate::PublicationState,
     pub failure: Option<TransactionFailure>,
     pub rollback_failure: Option<TransactionFailure>,
     pub recovery_failure: Option<TransactionFailure>,
@@ -161,19 +188,40 @@ pub struct TransactionRecord {
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub plan_hash: Sha256Digest,
-    pub plan: TransactionPlan,
+    pub plan: DeploymentPlan,
     pub phase: TransactionPhase,
     pub revision: u64,
     pub nodes: BTreeMap<OperationId, NodeState>,
 }
 
 impl TransactionRecord {
+    pub fn recovery_detail(&self) -> String {
+        let detail = self
+            .recovery_failure
+            .as_ref()
+            .or(self.rollback_failure.as_ref())
+            .or(self.failure.as_ref())
+            .map(|failure| failure.message.as_str());
+        if self.phase == TransactionPhase::Committed {
+            format!(
+                "Deployment committed; {}",
+                detail.unwrap_or("post-commit work requires recovery")
+            )
+        } else {
+            detail
+                .unwrap_or(
+                    "Transaction effects require recovery before another operation can proceed",
+                )
+                .to_owned()
+        }
+    }
+
     pub fn new(
         transaction_id: TransactionId,
         app_id: AppId,
         scope: SelectedScope,
         app_version: Version,
-        plan: TransactionPlan,
+        plan: DeploymentPlan,
     ) -> Self {
         let now = Timestamp::now();
         let target = plan.target;
@@ -183,6 +231,8 @@ impl TransactionRecord {
             nodes.insert(node.id.clone(), NodeState::Pending);
         }
         Self {
+            reservation: None,
+            publication: crate::PublicationState::NotRequested,
             failure: None,
             rollback_failure: None,
             recovery_failure: None,
@@ -204,7 +254,107 @@ impl TransactionRecord {
         }
     }
 
+    pub fn cleanup_complete(&self) -> bool {
+        self.plan
+            .nodes
+            .iter()
+            .filter(|node| node.kind.is_post_commit())
+            .all(|node| matches!(self.nodes.get(&node.id), Some(NodeState::Verified { .. })))
+    }
+
     pub fn validate(&self) -> Result<(), CorruptReason> {
+        if self.plan.requirements.app.id != self.app_id
+            || self.plan.requirements.app.version != self.app_version
+            || self.plan.requirements.scope != self.scope
+        {
+            return Err(CorruptReason::InvalidPlan);
+        }
+        let reserved = self
+            .nodes
+            .get(&zup_plan::OperationId::new(zup_plan::OperationId::RESERVE));
+        if self
+            .reservation
+            .as_ref()
+            .is_some_and(|reservation| !reservation.matches(self))
+            || match (&self.reservation, reserved) {
+                (
+                    None,
+                    Some(
+                        NodeState::Pending
+                        | NodeState::Running
+                        | NodeState::Failed
+                        | NodeState::RolledBack,
+                    ),
+                ) => false,
+                (Some(_), Some(NodeState::Applied { receipt })) => {
+                    **receipt != crate::OperationReceipt::Control
+                }
+                (Some(_), Some(NodeState::RolledBack | NodeState::Compensated { .. })) => false,
+                _ => true,
+            }
+        {
+            return Err(CorruptReason::InvalidPhase);
+        }
+        if self.reservation.is_none()
+            && self.plan.nodes.iter().any(|node| {
+                !matches!(node.kind, zup_plan::NodeKind::ReserveInstallation)
+                    && node.id.as_str() != zup_plan::OperationId::BEGIN
+                    && !matches!(
+                        self.nodes.get(&node.id),
+                        Some(NodeState::Pending | NodeState::RolledBack | NodeState::Failed)
+                    )
+            })
+        {
+            return Err(CorruptReason::InvalidPhase);
+        }
+        let publication_node = self
+            .nodes
+            .get(&zup_plan::OperationId::new(zup_plan::OperationId::COMMIT));
+        let publication_valid = match self.publication {
+            crate::PublicationState::NotRequested => matches!(
+                publication_node,
+                Some(NodeState::Pending | NodeState::RolledBack)
+            ),
+            crate::PublicationState::Requested { .. } => {
+                matches!(publication_node, Some(NodeState::Running))
+            }
+            crate::PublicationState::Published { .. } => matches!(publication_node,
+                Some(NodeState::Applied { receipt }) if **receipt == crate::OperationReceipt::Control),
+        };
+        if !publication_valid {
+            return Err(CorruptReason::InvalidPhase);
+        }
+        if !matches!(self.publication, crate::PublicationState::NotRequested)
+            && self
+                .plan
+                .nodes
+                .iter()
+                .filter(|node| {
+                    !node.kind.is_post_commit()
+                        && !matches!(node.kind, zup_plan::NodeKind::PublishInstallation)
+                })
+                .any(|node| match self.nodes.get(&node.id) {
+                    Some(NodeState::Verified { .. }) => !node.kind.requires_verification(),
+                    Some(NodeState::Applied { .. }) => node.kind.requires_verification(),
+                    _ => true,
+                })
+        {
+            return Err(CorruptReason::InvalidPhase);
+        }
+        if (self.phase == TransactionPhase::Committed
+            && !matches!(self.publication, crate::PublicationState::Published { .. }))
+            || (!matches!(self.publication, crate::PublicationState::NotRequested)
+                && !matches!(
+                    self.phase,
+                    TransactionPhase::Applying
+                        | TransactionPhase::Committed
+                        | TransactionPhase::RecoveryRequired {
+                            resume: RecoveryPhase::Applying
+                        }
+                ))
+        {
+            return Err(CorruptReason::InvalidPhase);
+        }
         for failure in [
             &self.failure,
             &self.rollback_failure,
@@ -224,7 +374,7 @@ impl TransactionRecord {
             }
         }
         if self.reconciliation == crate::ReconciliationState::Complete
-            && self.phase != TransactionPhase::Committed
+            && (self.phase != TransactionPhase::Committed || !self.cleanup_complete())
         {
             return Err(CorruptReason::InvalidPhase);
         }
@@ -263,11 +413,34 @@ impl TransactionRecord {
             let Some(state) = self.nodes.get(&node.id) else {
                 return Err(CorruptReason::NodeStateMismatch);
             };
+            if matches!(state, NodeState::Verified { receipt }
+            if matches!(receipt.as_ref(), OperationReceipt::NativeServiceCompensation { .. } | OperationReceipt::NativeCache {
+                completion: crate::NativeCacheCompletion::CompensationOnly, ..
+            })) {
+                return Err(CorruptReason::InvalidReceipt);
+            }
+            if let NodeKind::PersistentDirectory { operation } = &node.kind
+                && let Some(OperationReceipt::PersistentDirectory(receipt)) = self.receipt(&node.id)
+                && operation.intent.previous.is_none()
+                && receipt.owned.origin != self.transaction_id
+            {
+                return Err(CorruptReason::InvalidReceipt);
+            }
             if let NodeState::Applied { receipt }
             | NodeState::Verified { receipt }
-            | NodeState::RollingBack { receipt } = state
+            | NodeState::RollingBack { receipt }
+            | NodeState::Compensated { receipt } = state
                 && (receipt.validate().is_err()
                     || !receipt_matches_node(node, receipt, self.target))
+            {
+                return Err(CorruptReason::InvalidReceipt);
+            }
+            if let NodeKind::FileMutation { key, .. } = &node.kind
+                && let Some(receipt) = self.receipt(&node.id)
+                && let OperationReceipt::CreateFile { object, .. }
+                | OperationReceipt::ReplaceFile { object, .. } = receipt
+                && !matches!(self.receipt(&zup_plan::OperationId::stage_file(key)),
+                    Some(OperationReceipt::StageFile { object: staged, .. }) if staged == object)
             {
                 return Err(CorruptReason::InvalidReceipt);
             }
@@ -295,7 +468,8 @@ impl TransactionRecord {
         match self.nodes.get(id) {
             Some(NodeState::Applied { receipt })
             | Some(NodeState::Verified { receipt })
-            | Some(NodeState::RollingBack { receipt }) => Some(receipt),
+            | Some(NodeState::RollingBack { receipt })
+            | Some(NodeState::Compensated { receipt }) => Some(receipt),
             _ => None,
         }
     }
@@ -310,19 +484,41 @@ pub struct TransactionFailure {
 
 fn phase_accepts(
     phase: TransactionPhase,
-    node: &crate::plan::TransactionNode,
+    node: &zup_plan::DeploymentNode,
     state: &NodeState,
 ) -> bool {
-    use crate::plan::NodeKind;
-    match phase {
-        TransactionPhase::Prepared => match &node.kind {
-            NodeKind::Barrier | NodeKind::StageFile { .. } => matches!(
+    use zup_plan::NodeKind;
+    if node.kind.is_post_commit() {
+        return match phase {
+            TransactionPhase::Committed => matches!(
                 state,
                 NodeState::Pending
                     | NodeState::Running
                     | NodeState::Applied { .. }
+                    | NodeState::Verified { .. }
+            ),
+            _ => matches!(state, NodeState::Pending),
+        };
+    }
+    match phase {
+        TransactionPhase::Prepared => match &node.kind {
+            NodeKind::RetainFile { .. } => matches!(
+                state,
+                NodeState::Pending
+                    | NodeState::Running
+                    | NodeState::Applied { .. }
+                    | NodeState::Verified { .. }
                     | NodeState::Failed
             ),
+            NodeKind::ReserveInstallation | NodeKind::Barrier | NodeKind::StageFile { .. } => {
+                matches!(
+                    state,
+                    NodeState::Pending
+                        | NodeState::Running
+                        | NodeState::Applied { .. }
+                        | NodeState::Failed
+                )
+            }
             _ => matches!(state, NodeState::Pending),
         },
         TransactionPhase::Applying | TransactionPhase::RollingBack => true,
@@ -335,32 +531,41 @@ fn phase_accepts(
         }
         TransactionPhase::RolledBack => matches!(
             state,
-            NodeState::Pending | NodeState::RolledBack | NodeState::Failed
+            NodeState::Pending
+                | NodeState::RolledBack
+                | NodeState::Compensated { .. }
+                | NodeState::Failed
         ),
         TransactionPhase::RecoveryRequired { .. } => true,
     }
 }
 
 fn receipt_matches_node(
-    node: &crate::plan::TransactionNode,
+    node: &zup_plan::DeploymentNode,
     receipt: &crate::executor::OperationReceipt,
     target: zup_core::Target,
 ) -> bool {
     use crate::executor::OperationReceipt;
-    use crate::plan::NodeKind;
-    let expected_content = |size: u64, digest: &str| {
-        node.meta.expected_size == Some(size)
-            && digest.parse::<zup_core::Sha256Digest>().ok() == node.meta.expected_sha256
+    use zup_plan::NodeKind;
+    let object = match receipt {
+        OperationReceipt::StageFile { object, .. }
+        | OperationReceipt::RetainedFile { object, .. }
+        | OperationReceipt::CreateFile { object, .. }
+        | OperationReceipt::ReplaceFile { object, .. }
+        | OperationReceipt::RemoveFile { object, .. } => Some(object),
+        _ => None,
     };
-    let destination_matches = |key: &zup_core::ResourceKey, destination: &str| match key {
-        zup_core::ResourceKey::File {
-            destination: expected,
-        }
-        | zup_core::ResourceKey::Maintenance {
-            destination: expected,
-            ..
-        } => expected == destination,
-        _ => false,
+    if object.is_some_and(|object| object.operating_system() != target.operating_system()) {
+        return false;
+    }
+    let expected_content = |size: u64, digest: &zup_core::Sha256Digest| {
+        node.meta.expected_size == Some(size) && Some(*digest) == node.meta.expected_sha256
+    };
+    let destination_matches = |_key: &zup_core::ResourceKey, destination: &str| {
+        node.meta.destination.as_ref().is_some_and(|expected| {
+            zup_core::TargetPath::new(target, destination)
+                .is_ok_and(|observed| expected.equivalent(&observed))
+        })
     };
     if let OperationReceipt::CreateFile {
         destination,
@@ -368,11 +573,11 @@ fn receipt_matches_node(
         ..
     } = receipt
     {
-        let Ok(destination) = zup_plan::TargetPath::new(target, destination) else {
+        let Ok(destination) = zup_core::TargetPath::new(target, destination) else {
             return false;
         };
         if created_directories.iter().any(|directory| {
-            !zup_plan::TargetPath::new(target, directory).is_ok_and(|directory| {
+            !zup_core::TargetPath::new(target, directory).is_ok_and(|directory| {
                 directory.parent().is_some()
                     && directory != destination
                     && destination.starts_with(&directory)
@@ -382,6 +587,21 @@ fn receipt_matches_node(
         }
     }
     let content_matches = match (&node.kind, receipt) {
+        (
+            NodeKind::RetainFile { .. },
+            OperationReceipt::RetainedFile {
+                object,
+                destination,
+                size,
+                sha256,
+            },
+        ) => {
+            destination.target() == &target
+                && node.meta.destination.as_ref() == Some(destination)
+                && expected_content(*size, sha256)
+                && matches!(node.meta.file_precondition, Some(zup_plan::FilePrecondition::Exact { object: expected, size: expected_size, sha256: expected_hash })
+                    if expected == *object && expected_size == *size && expected_hash == *sha256)
+        }
         (NodeKind::StageFile { .. }, OperationReceipt::StageFile { size, sha256, .. }) => {
             expected_content(*size, sha256)
         }
@@ -402,6 +622,7 @@ fn receipt_matches_node(
         (
             NodeKind::FileMutation { key, .. },
             OperationReceipt::ReplaceFile {
+                previous_object,
                 destination,
                 new_sha256,
                 new_size,
@@ -414,12 +635,13 @@ fn receipt_matches_node(
             destination_matches(key, destination)
                 && expected_content(*new_size, new_sha256)
                 && node.meta.executable.unwrap_or(false) == *executable
-                && matches!(node.meta.file_precondition, Some(zup_plan::FilePrecondition::Exact { size, sha256 })
-                    if size == *previous_size && previous_sha256.parse::<zup_core::Sha256Digest>().ok() == Some(sha256))
+                && matches!(node.meta.file_precondition, Some(zup_plan::FilePrecondition::Exact { object, size, sha256 })
+                    if object == *previous_object && size == *previous_size && *previous_sha256 == sha256)
         }
         (
             NodeKind::FileRemoval { .. },
             OperationReceipt::RemoveFile {
+                object,
                 destination,
                 sha256,
                 size,
@@ -427,6 +649,7 @@ fn receipt_matches_node(
             },
         ) => node.meta.removal.as_ref().is_some_and(|removal| {
             removal.destination == *destination
+                && removal.instance.object == *object
                 && removal.sha256 == *sha256
                 && removal.size == *size
         }),
@@ -436,11 +659,58 @@ fn receipt_matches_node(
         return false;
     }
     match (&node.kind, receipt) {
+        (NodeKind::Cleanup { operation }, OperationReceipt::Cleanup { intent, .. }) => {
+            *intent == operation.fingerprint()
+        }
+        (
+            NodeKind::PersistentDirectory { operation },
+            OperationReceipt::PersistentDirectory(receipt),
+        ) => {
+            let owned = &receipt.owned;
+            receipt.stage == operation.stage
+                && owned.installation == operation.intent.installation
+                && owned.directory == operation.intent.directory
+                && owned.ownership.binding() == operation.intent.binding
+                && operation.intent.previous.as_ref().is_none_or(|previous| {
+                    previous.ownership == owned.ownership && previous.origin == owned.origin
+                })
+        }
+        (
+            NodeKind::NativeCache { operation },
+            OperationReceipt::NativeCache { intent, completion },
+        ) => {
+            *intent == operation.fingerprint()
+                && match completion {
+                    crate::NativeCacheCompletion::CompensationOnly => true,
+                    crate::NativeCacheCompletion::Completed { tool, .. } => {
+                        tool.target() == operation.directory.target()
+                            && tool.as_str()
+                                == format!("/usr/bin/{}", operation.kind.executable_name())
+                    }
+                }
+        }
+        (NodeKind::Generation { operation, intent }, OperationReceipt::Generation(receipt)) => {
+            receipt.matches(*operation, intent)
+        }
         (NodeKind::ServiceControl { operation }, OperationReceipt::ServiceControl(receipt)) => {
             operation.as_ref() == &receipt.operation
         }
-        (NodeKind::Barrier, OperationReceipt::Control) => true,
+        (NodeKind::NativeService { operation }, OperationReceipt::NativeService(receipt)) => {
+            receipt.matches(operation)
+        }
+        (
+            NodeKind::NativeService { operation },
+            OperationReceipt::NativeServiceCompensation { intent },
+        ) => operation.source_key().is_some() && *intent == operation.fingerprint(),
+        (
+            NodeKind::Retention { .. }
+            | NodeKind::ReserveInstallation
+            | NodeKind::Barrier
+            | NodeKind::PublishInstallation,
+            OperationReceipt::Control,
+        ) => true,
         (NodeKind::StageFile { .. }, OperationReceipt::StageFile { .. }) => true,
+        (NodeKind::RetainFile { .. }, OperationReceipt::RetainedFile { .. }) => true,
         (
             NodeKind::FileMutation {
                 delta:
@@ -502,6 +772,13 @@ pub enum CorruptReason {
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum StoreError {
+    #[error(
+        "installation {installation} is reserved for a different application, scope, target, or directory"
+    )]
+    #[diagnostic(code(zup_transaction::installation_conflict))]
+    InstallationConflict {
+        installation: zup_core::InstallationId,
+    },
     #[error("invalid transaction directory name `{name}`")]
     #[diagnostic(code(zup_transaction::invalid_directory))]
     InvalidDirectory { name: String },
@@ -545,48 +822,4 @@ pub enum StoreError {
         #[source]
         source: PublishError,
     },
-}
-
-/// Outcome of an atomic journal write after the filesystem reports it.
-///
-/// `NotPublished` means the namespace was unchanged. `Indeterminate` means the
-/// publication syscall may have become visible, or a later validation failed,
-/// and a fresh verified read plus directory sync could not prove the attempted
-/// bytes are the durable private object.
-#[derive(Debug, Error)]
-pub enum PublishError {
-    #[error("not published: {detail}")]
-    NotPublished {
-        detail: String,
-        kind: Option<std::io::ErrorKind>,
-    },
-
-    #[error("publication indeterminate (may_have_published={may_have_published}): {detail}")]
-    Indeterminate {
-        may_have_published: bool,
-        detail: String,
-    },
-}
-
-/// What a storage backend observed after a publication attempt that may have
-/// become visible. Success requires the security check, the exact bytes, and
-/// a completed parent-directory durability barrier. A matching read does not
-/// stand in for that barrier.
-pub struct VisiblePublish {
-    pub security_ok: bool,
-    pub bytes_match: bool,
-    pub directory_durable: bool,
-}
-
-pub fn settle_visible(visible: VisiblePublish) -> Result<(), PublishError> {
-    if visible.security_ok && visible.bytes_match && visible.directory_durable {
-        return Ok(());
-    }
-    Err(PublishError::Indeterminate {
-        may_have_published: true,
-        detail: format!(
-            "security={} bytes={} directory_durable={}",
-            visible.security_ok, visible.bytes_match, visible.directory_durable
-        ),
-    })
 }

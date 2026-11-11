@@ -1,4 +1,4 @@
-use zup_publish::format_bytes;
+use zup_core::format_bytes;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NotesPolicy {

@@ -5,10 +5,11 @@ use zup_sdk::plugin::prelude::*;
 #[test]
 fn a_plugin_plan_is_built_from_declarations() {
     let plan = Plan::new().generated_file(GeneratedFile::text(
+        "configuration",
         "${install}/installed-by.txt",
         "installed by test",
     ));
-    let plan = plan.launcher(Launcher::menu("Test Settings", "${launcher}"));
+    let plan = plan.launcher(Launcher::menu("main", "Test Settings", "${launcher}"));
     let _ = plan;
 }
 

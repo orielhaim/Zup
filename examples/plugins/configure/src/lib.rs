@@ -30,12 +30,13 @@ impl Plugin for Configure {
         );
 
         let mut plan =
-            Plan::new().generated_file(GeneratedFile::text("${install}/configure.txt", report));
+            Plan::new().generated_file(GeneratedFile::text("configuration", "${install}/configure.txt", report).replacement(FixedReplacement::Quiescent));
         let resources = components.iter().any(|component| component == "resources");
         if resources {
             plan = plan
-                .launcher(Launcher::menu("Worker", "${install}/worker"))
-                .path_entry(Path::new("${install}/bin"));
+                .launcher(Launcher::menu("main", "Worker", "${install}/worker"))
+                .path_entry(PathEntry::new("cli", "${install}/bin"))
+                .data(DataDirectory::path("settings", "${location.shared_data}/${app.id}"));
         }
         if resources || components.iter().any(|component| component == "service") {
             if context.scope != Scope::Machine {
@@ -52,7 +53,6 @@ impl Plugin for Configure {
                 plan = plan.service(
                     Service::new(
                         id.clone(),
-                        "Storage",
                         if linux {
                             "${install}/worker"
                         } else {
@@ -61,9 +61,13 @@ impl Plugin for Configure {
                         if linux {
                             ServiceExecution::SystemdDynamicUser
                         } else {
-                            ServiceExecution::Windows(WindowsServiceAccount::LocalService)
+                            ServiceExecution::WindowsJob(WindowsServiceAccount::LocalService)
                         },
                     )
+                    .with_display_name("Storage")
+                    .with_arguments(if linux { Vec::new() } else {
+                        vec!["--job".to_owned(), format!("${{job.{id}}}")]
+                    })
                     .with_readiness(if linux {
                         ServiceReadiness::Notify
                     } else {
@@ -113,7 +117,6 @@ impl Plugin for Configure {
             plan = plan.service(
                 Service::new(
                     format!("{}.worker", context.app_id),
-                    "Worker",
                     if linux {
                         "${install}/worker"
                     } else {
@@ -122,9 +125,13 @@ impl Plugin for Configure {
                     if linux {
                         ServiceExecution::SystemdDynamicUser
                     } else {
-                        ServiceExecution::Windows(WindowsServiceAccount::LocalService)
+                        ServiceExecution::WindowsJob(WindowsServiceAccount::LocalService)
                     },
                 )
+                .with_display_name("Worker")
+                .with_arguments(if linux { Vec::new() } else {
+                    vec!["--job".to_owned(), format!("${{job.{}.worker}}", context.app_id)]
+                })
                 .with_readiness(if linux {
                     ServiceReadiness::Notify
                 } else {
@@ -134,7 +141,7 @@ impl Plugin for Configure {
                 .with_required_services(dependencies)
                 .with_required_files(["${install}/configure.txt"])
                 .with_lifecycle(ServiceLifecycle {
-                    install: InitialServiceState::Running,
+                        install: InitialServiceState::Running,
                     change: ChangedServiceState::Preserve,
                     timeouts: Some(if linux {
                         ServiceTimeouts::Systemd(SystemdTimeouts {

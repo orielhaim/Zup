@@ -47,13 +47,15 @@ scope = "user"
 user = "${location.programs}/tool"
 
 [[files]]
+id = "tool"
 source = "tool"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 executable = true
 
 [[files]]
+id = "keep"
 source = "keep.dat"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#;
 
 const TOOL: &str = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"tool 1.0.0\"; exit 0; fi\necho \"tool: unknown command $1\" >&2\nexit 1\n";
@@ -277,14 +279,14 @@ fn a_public_build_installs_runs_and_uninstalls() {
         b"keep-v1"
     );
 
-    let ledger = zup_linux::LinuxLedgerStore::new(&user.state)
+    let ledger = zup_linux::LinuxInstallationStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
         )
         .expect("the ledger reads")
         .expect("an installation is recorded");
-    assert_eq!(ledger.version.to_string(), "1.0.0");
+    assert_eq!(ledger.current.version.to_string(), "1.0.0");
 
     let uninstalled = user.installer(&installer, &["uninstall"]);
     assert!(
@@ -293,7 +295,7 @@ fn a_public_build_installs_runs_and_uninstalls() {
         String::from_utf8_lossy(&uninstalled.stderr)
     );
     assert!(!tool.exists(), "the payload is gone");
-    let ledger = zup_linux::LinuxLedgerStore::new(&user.state)
+    let ledger = zup_linux::LinuxInstallationStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,

@@ -19,6 +19,7 @@ New-Item -ItemType Directory -Path $dist | Out-Null
 $utf8 = [Text.UTF8Encoding]::new($false)
 $names = @{ storage = "zup-$suffix-storage"; api = "zup-$suffix-api" }
 $installed = $false
+$verified = $false
 $lastSetup = $null
 $checks = [Collections.Generic.List[string]]::new()
 
@@ -57,19 +58,20 @@ function Build-Installer([int]$Version, [string]$Configuration, [switch]$FailSta
     foreach ($name in @('storage', 'api')) {
         $dependency = if ($name -eq 'api') { "requires_services = [`"$($names.storage)`"]" } else { '' }
         $failure = if ($RecoveryPolicy) { 'failure = { type = "windows", delay_seconds = 2, restart_attempts = 2, reset_seconds = 60 }' } else { '' }
+        $jobReference = '${job.' + $names[$name] + '}'
         $declarations += @"
 
 [[services]]
 id = "$($names[$name])"
-name = "$($names[$name])"
+native_name = "$($names[$name])"
 display_name = "$($names[$name])$DisplaySuffix"
 binary = "`${install}/$name.exe"
-arguments = ["$($names[$name])"]
+arguments = ["$($names[$name])", "normal", "--job", "$jobReference"]
 requires_files = ["`${install}/shared.conf"]
 $dependency
 $failure
 start = "$Startup"
-execution = { type = "windows", account = "local_service" }
+execution = { type = "windows_job", account = "local_service" }
 lifecycle = { install = "$InitialState", change = "preserve" }
 "@
     }
@@ -79,7 +81,7 @@ schema = 1
 frontend = "headless"
 [app]
 id = "$application"
-name = "Native SCM installer verification"
+native_name = "Native SCM installer verification"
 version = "$AppVersion"
 [build.targets.default]
 target = "windows-x64"
@@ -89,12 +91,14 @@ scope = "machine"
 [install.directory]
 machine = "`${location.programs}/$application"
 [[files]]
+id = "application"
 source = "*.exe"
-destination = "`${install}"
+placement = { kind = "fixed", directory = "`${install}", replacement = "quiescent" }
 executable = true
 [[files]]
+id = "shared"
 source = "shared.conf"
-destination = "`${install}"
+placement = { kind = "fixed", directory = "`${install}", replacement = "quiescent" }
 $declarations
 "@, $utf8)
     $setup = Join-Path $root "setup-$Version.exe"
@@ -229,12 +233,38 @@ try {
         if (Get-Service -Name $names[$name] -ErrorAction SilentlyContinue) { throw 'Uninstall retained a service.' }
     }
     $checks.Add('uninstall')
-    @{ result = 'passed'; application = $application; native_recovery_policy = [bool]$RecoveryPolicy; checks = $checks.ToArray() } | ConvertTo-Json -Depth 4
+    $historyCounts = [Collections.Generic.List[int]]::new()
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stateKey = -join ($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes("zup:application-state:1`0$application")) | ForEach-Object { $_.ToString('x2') })
+    } finally { $hash.Dispose() }
+    $transactions = Join-Path $env:ProgramData "zup/apps/$stateKey/transactions"
+    for ($index = 0; $index -lt 6; $index++) {
+        $null = Invoke-Native $lastSetup @('cleanup', '--keep', '0', '--scope', 'machine', '--non-interactive', '--yes', '--output', 'json')
+        $historyCounts.Add(@(Get-ChildItem -LiteralPath $transactions -Filter transaction.json -Recurse -File).Count)
+    }
+    if ($historyCounts[5] -gt $historyCounts[4] -or $historyCounts[4] -gt $historyCounts[3]) {
+        throw "Settled machine cleanup accumulated journals: $historyCounts"
+    }
+    $maintenance = Join-Path $env:ProgramFiles "$application/.zup/maintenance"
+    if ((Test-Path -LiteralPath $maintenance) -and @(Get-ChildItem -LiteralPath $maintenance -Directory).Count) {
+        throw 'Removed fixed-only application retained maintenance generations after explicit cleanup.'
+    }
+    $checks.Add('machine_retired_payload_and_history_collection')
+    $verified = $true
+    @{ result = 'passed'; application = $application; native_recovery_policy = [bool]$RecoveryPolicy; history_counts = $historyCounts.ToArray(); checks = $checks.ToArray() } | ConvertTo-Json -Depth 4
 } finally {
     if ($installed -and $lastSetup) {
         $cleanup = Deploy $lastSetup 'uninstall' -AllowFailure
         if ($cleanup.code -ne 0) { Write-Warning "Cleanup requires recovery: $($cleanup.output). Retained $root" }
+    } elseif ($verified) {
+        $fixture = Get-Item -LiteralPath $root
+        $programs = (Get-Item -LiteralPath $env:ProgramFiles).FullName
+        if ($fixture.Parent.FullName -ne $programs -or $fixture.Name -ne "ZupInstallerTest-$suffix" -or ($fixture.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'The disposable fixture cleanup boundary changed.'
+        }
+        Remove-Item -LiteralPath $fixture.FullName -Recurse -Force
     } else {
-        Remove-Item -LiteralPath $root -Recurse -Force
+        Write-Warning "Verification failed; retained disposable fixture $root for recovery."
     }
 }

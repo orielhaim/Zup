@@ -4,9 +4,9 @@ use crate::observe::{
     ObservedExtensionState, ObservedFileAssociationState, ObservedLauncherState,
     ObservedProtocolState, ObservedServiceState,
 };
-use crate::{CommandSpec, TargetPath};
 use serde::{Deserialize, Serialize};
 use zup_core::SelectedScope;
+use zup_core::{CommandSpec, TargetPath};
 use zup_core::{Privilege, ProtocolScheme, RelativePath, ResourceKey, ServiceStart, Sha256Digest};
 
 /// File payload decision.
@@ -27,7 +27,11 @@ pub enum FileOperationKind {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum FilePrecondition {
     Absent,
-    Exact { size: u64, sha256: Sha256Digest },
+    Exact {
+        object: zup_core::NativeObjectIdentity,
+        size: u64,
+        sha256: Sha256Digest,
+    },
 }
 
 /// Launcher decision (no Replace until ownership is proven).
@@ -49,7 +53,7 @@ pub enum IntegrationChangeKind {
 pub enum PathOperationKind {
     Add,
     Present,
-    UpdateOwned,
+    RebindOwned,
     RestoreOwned,
     Conflict,
     Drift,
@@ -95,6 +99,7 @@ pub enum Conflict {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileOperation {
     pub key: ResourceKey,
+    pub replacement: zup_core::FixedReplacement,
     pub kind: FileOperationKind,
     pub destination: TargetPath,
     pub source_relative: RelativePath,
@@ -126,24 +131,51 @@ pub struct LauncherOperation {
     pub icon: Option<TargetPath>,
 }
 
-/// One search-path entry decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathBinding {
+    pub value: TargetPath,
+    pub value_type: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathPresence {
+    Missing,
+    Single,
+    Multiple,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "ownership", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PathPrecondition {
+    Unclaimed {
+        presence: PathPresence,
+    },
+    Owned {
+        binding: PathBinding,
+        previous: PathPresence,
+        desired: PathPresence,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PathOperation {
     pub key: ResourceKey,
     pub kind: PathOperationKind,
     pub value: TargetPath,
-    /// Persistent search path that owns the entry, decided by the plan.
     pub scope: SelectedScope,
     pub privilege: Privilege,
-    /// Whether the owning search path already held the entry at planning time.
-    pub present: bool,
-    pub previously_owned: bool,
+    pub precondition: PathPrecondition,
     pub conflict: Option<Conflict>,
 }
 
 /// One service decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceOperation {
+    pub state_directories: Vec<zup_core::RelativePath>,
+    pub registration: zup_core::NativeServiceRegistration,
     pub failure: zup_core::ServiceFailurePolicy,
     pub execution: zup_core::ServiceExecution,
     pub key: ResourceKey,
@@ -163,7 +195,27 @@ pub struct ServiceOperation {
     pub conflict: Option<Conflict>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ServiceCompensationError {
+    #[error(
+        "repair displaced an externally modified service configuration; retain the repaired registration and recover before resuming its previous runtime"
+    )]
+    Repair,
+    #[error("the previous service configuration is unrecognized and cannot be restored safely")]
+    UnrecognizedConfiguration,
+}
+
 impl ServiceOperation {
+    pub fn validate_compensation(&self) -> Result<(), ServiceCompensationError> {
+        if self.kind == IntegrationChangeKind::RepairOwned {
+            return Err(ServiceCompensationError::Repair);
+        }
+        if self.previous.configuration().is_none() {
+            return Err(ServiceCompensationError::UnrecognizedConfiguration);
+        }
+        Ok(())
+    }
+
     pub fn preserves_runtime(&self) -> bool {
         self.desired_configuration()
             .update_from(
@@ -177,6 +229,7 @@ impl ServiceOperation {
 
     pub fn desired_configuration(&self) -> crate::ServiceState {
         crate::ServiceState::Registration {
+            state_directories: self.state_directories.clone(),
             native_timeouts: self.lifecycle.timeouts_for(&self.execution).native(),
             dependencies: self.dependency_names.clone(),
             failure: self.failure,
@@ -194,7 +247,9 @@ impl ServiceOperation {
         owned: Option<&crate::OwnedResource>,
     ) -> bool {
         let previous = match owned {
-            Some(crate::OwnedResource::Service { requires_files, .. }) => requires_files.as_slice(),
+            Some(crate::OwnedResource::Service(crate::OwnedService { requires_files, .. })) => {
+                requires_files.as_slice()
+            }
             _ => &[],
         };
         std::iter::once(&self.command.executable)
@@ -245,7 +300,7 @@ pub struct ExecutionPlan {
     pub selected_components: Vec<zup_core::ComponentId>,
     #[serde(default)]
     pub install_directory: Option<TargetPath>,
-    pub uninstall: bool,
+    pub transition: crate::DeploymentTransition,
     pub removals: Vec<RemovalOperation>,
     pub files: Vec<FileOperation>,
     pub launchers: Vec<LauncherOperation>,

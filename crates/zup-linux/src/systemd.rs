@@ -111,6 +111,7 @@ pub struct UnitInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitRuntime {
+    pub state_directories: Vec<String>,
     pub argv: Option<Vec<String>>,
     pub dependencies: Vec<String>,
     pub native_timeouts: Option<zup_core::NativeServiceTimeouts>,
@@ -145,7 +146,7 @@ pub trait SystemdManager {
     fn control(
         &mut self,
         unit: &str,
-        state: zup_transaction::ServiceTerminalState,
+        state: zup_plan::ServiceTerminalState,
         timeout: Duration,
         controlled_units: &[String],
     ) -> Result<(), IpcError> {
@@ -672,7 +673,15 @@ impl SystemdManager for RealSystemd {
                 ("deactivating", _) => Runtime::StopPending,
                 _ => Runtime::Unknown,
             };
+            let state_directories = if execution.is_some() {
+                let directories = service.state_directory().await.map_err(failed)?;
+                if !directories.is_empty() && service.state_directory_mode().await.map_err(failed)? != 0o700 {
+                    return Err(IpcError::SystemdRefused { unit: unit.into(), reason: "native state directory mode differs from the owned policy".into() });
+                }
+                directories
+            } else { Vec::new() };
             Ok(UnitRuntime {
+                state_directories,
                 argv,
                 dependencies,
                 native_timeouts,
@@ -703,7 +712,7 @@ impl SystemdManager for RealSystemd {
     fn control(
         &mut self,
         unit: &str,
-        state: zup_transaction::ServiceTerminalState,
+        state: zup_plan::ServiceTerminalState,
         timeout: Duration,
         controlled_units: &[String],
     ) -> Result<(), IpcError> {
@@ -729,12 +738,12 @@ impl SystemdManager for RealSystemd {
                 let mut jobs = manager.receive_job_removed().await.map_err(failed)?;
                 // Keep inactive units loaded through ResetFailedUnit and job completion.
                 // The manager releases this client's references when the bus disconnects.
-                if state == zup_transaction::ServiceTerminalState::Running
+                if state == zup_plan::ServiceTerminalState::Running
                     || !matches!(manager.get_unit_file_state(unit.into()).await.map_err(failed)?.as_str(), "masked" | "masked-runtime")
                 {
                     manager.ref_unit(unit.into()).await.map_err(failed)?;
                 }
-                if state == zup_transaction::ServiceTerminalState::Stopped {
+                if state == zup_plan::ServiceTerminalState::Stopped {
                     let path = manager.get_unit(unit.into()).await.map_err(failed)?;
                     let proxy = zbus_systemd::systemd1::UnitProxy::new(&self.connection, path).await.map_err(failed)?;
                     for dependents in [proxy.required_by().await, proxy.bound_by().await, proxy.consists_of().await, proxy.propagates_stop_to().await] {
@@ -759,14 +768,14 @@ impl SystemdManager for RealSystemd {
                 };
                 within_deadline()?;
                 let job = match state {
-                    zup_transaction::ServiceTerminalState::Running => {
+                    zup_plan::ServiceTerminalState::Running => {
                         // A deployment start begins a new native retry budget, including
                         // compensation after a failed replacement exhausted the old one.
                         manager.reset_failed_unit(unit.into()).await.map_err(failed)?;
                         within_deadline()?;
                         manager.start_unit(unit.into(), "fail".into()).await
                     }
-                    zup_transaction::ServiceTerminalState::Stopped => {
+                    zup_plan::ServiceTerminalState::Stopped => {
                         manager.stop_unit(unit.into(), "fail".into()).await
                     }
                 }

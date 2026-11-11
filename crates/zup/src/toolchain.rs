@@ -49,6 +49,8 @@ pub struct ResolvedComponent {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
+    #[error("toolchain cache is unavailable: {0}")]
+    Cache(String),
     #[error("no zup {kind} for {wanted} was found in {searched}")]
     NotFound {
         kind: &'static str,
@@ -59,20 +61,25 @@ pub enum ResolveError {
     Unusable(#[from] ToolchainError),
 }
 
+pub enum ToolchainCache {
+    Host,
+    Directory(PathBuf),
+}
+
 pub struct ToolchainResolver {
     version: String,
     override_root: Option<PathBuf>,
     executable: PathBuf,
-    state_root: PathBuf,
+    cache: ToolchainCache,
 }
 
 impl ToolchainResolver {
-    pub fn new(version: String, executable: PathBuf, state_root: PathBuf) -> Self {
+    pub fn new(version: String, executable: PathBuf, cache: ToolchainCache) -> Self {
         Self {
             version,
             override_root: std::env::var_os(TOOLCHAIN_ENV).map(PathBuf::from),
             executable,
-            state_root,
+            cache,
         }
     }
 
@@ -101,7 +108,8 @@ impl ToolchainResolver {
             });
         }
         let mut searched = Vec::new();
-        for (root, source) in self.roots() {
+        for candidate in self.roots() {
+            let (root, source) = candidate?;
             let path = root.join(file_name_for(component));
             searched.push(path.display().to_string());
             if !path.is_file() {
@@ -125,25 +133,34 @@ impl ToolchainResolver {
         })
     }
 
-    pub fn roots(&self) -> Vec<(PathBuf, ToolchainSource)> {
-        let mut candidates = Vec::new();
-        if let Some(root) = &self.override_root {
-            candidates.push((root.clone(), ToolchainSource::Root));
-        }
-        let cache = self.state_root.join(CACHE_DIRECTORY).join(&self.version);
-        candidates.push((cache, ToolchainSource::Cache));
-
+    fn roots(&self) -> impl Iterator<Item = Result<(PathBuf, ToolchainSource), ResolveError>> + '_ {
+        let override_root = self
+            .override_root
+            .iter()
+            .map(|root| Ok((root.clone(), ToolchainSource::Root)));
+        let cache = std::iter::once_with(|| {
+            let root = match &self.cache {
+                ToolchainCache::Host => crate::host_state_root().map_err(ResolveError::Cache)?,
+                ToolchainCache::Directory(root) => root.clone(),
+            };
+            Ok((
+                root.join(CACHE_DIRECTORY).join(&self.version),
+                ToolchainSource::Cache,
+            ))
+        });
         let mut beside = self.executable.clone();
         beside.pop();
         if beside.ends_with("deps") {
             beside.pop();
         }
-        candidates.push((
-            beside.join(STAGED_DIRECTORY).join(&self.version),
-            ToolchainSource::Staged,
-        ));
-        candidates.push((beside.join(STAGED_DIRECTORY), ToolchainSource::Staged));
-        candidates
+        let staged = [
+            (
+                beside.join(STAGED_DIRECTORY).join(&self.version),
+                ToolchainSource::Staged,
+            ),
+            (beside.join(STAGED_DIRECTORY), ToolchainSource::Staged),
+        ];
+        override_root.chain(cache).chain(staged.into_iter().map(Ok))
     }
 }
 
@@ -368,10 +385,11 @@ mod tests {
         let resolver = ToolchainResolver::new(
             "0.1.0".into(),
             outside.join("bin").join("zup.exe"),
-            outside.join("state"),
+            ToolchainCache::Directory(outside.join("state")),
         );
+        let candidates = resolver.roots().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(
-            resolver.roots(),
+            candidates,
             vec![
                 (
                     outside.join("state").join(CACHE_DIRECTORY).join("0.1.0"),
@@ -388,7 +406,7 @@ mod tests {
             ],
             "a pinned cache, then a staged directory beside the executable"
         );
-        for (root, _) in resolver.roots() {
+        for (root, _) in &candidates {
             assert!(
                 !root.starts_with(&repository),
                 "{} is inside the checkout at {}",
@@ -398,8 +416,7 @@ mod tests {
         }
         let current = std::env::current_dir().expect("a working directory");
         assert!(
-            !resolver
-                .roots()
+            !candidates
                 .iter()
                 .any(|(root, _)| root.starts_with(&current)),
             "resolution must not depend on where the process is standing"
@@ -408,10 +425,10 @@ mod tests {
         let deps = ToolchainResolver::new(
             "0.1.0".into(),
             PathBuf::from("C:/target/debug/deps/zup.exe"),
-            PathBuf::from("C:/state"),
+            ToolchainCache::Directory(PathBuf::from("C:/state")),
         );
         assert_eq!(
-            deps.roots().last().expect("a staged candidate").0,
+            deps.roots().last().expect("a staged candidate").unwrap().0,
             PathBuf::from("C:/target/debug/toolchain")
         );
     }
@@ -753,7 +770,7 @@ pub fn install(
     let verifier = ToolchainResolver::new(
         crate::ZUP_VERSION.to_owned(),
         cache.join("zup.exe"),
-        state_root.to_path_buf(),
+        ToolchainCache::Directory(state_root.to_path_buf()),
     )
     .with_root(toolchain_root);
     let wanted = host_components();
@@ -884,7 +901,7 @@ fn report(
     let resolver = ToolchainResolver::new(
         crate::ZUP_VERSION.to_owned(),
         executable,
-        state_root.to_path_buf(),
+        ToolchainCache::Directory(state_root.to_path_buf()),
     )
     .with_root(toolchain_root);
     let cache = crate::toolchain::cache_directory(state_root, crate::ZUP_VERSION);
@@ -991,7 +1008,7 @@ pub fn clean(
         let note = if dry_run {
             format!(
                 "{version} ({})",
-                zup_presentation::format_bytes(directory_size(&directory))
+                zup_core::format_bytes(directory_size(&directory))
             )
         } else {
             std::fs::remove_dir_all(&directory).map_err(|error| ToolchainCommandError::Io {

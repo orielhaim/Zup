@@ -4,7 +4,7 @@ members = ["crates/*"]
 # `fixtures/aurora` is deliberately not a member: it is a preset, and a preset
 # outside this workspace is the only shape a third-party author has, so packing
 # one from here has to go through a path dependency rather than a workspace edge.
-exclude = ["fixtures/aurora"]
+exclude = ["fixtures/aurora", "third-party/tough"]
 default-members = ["crates/zup"]
 
 [profile.installer]
@@ -84,6 +84,7 @@ zup-acquire-http = { path = "crates/zup-acquire-http" }
 zup-artifact = { path = "crates/zup-artifact" }
 zup-plan = { path = "crates/zup-plan" }
 zup-transaction = { path = "crates/zup-transaction" }
+zup-storage = { path = "crates/zup-storage" }
 zup-bundle = { path = "crates/zup-bundle" }
 zup-publish = { path = "crates/zup-publish" }
 zup-publish-github = { path = "crates/zup-publish-github" }
@@ -198,3 +199,6 @@ zbus_systemd = { version = "0.26201.0", default-features = false, features = [
   "systemd1",
   "zbus-async-tokio",
 ] }
+
+[patch.crates-io]
+tough = { path = "third-party/tough" }

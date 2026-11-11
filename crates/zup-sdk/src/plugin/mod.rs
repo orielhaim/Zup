@@ -13,11 +13,12 @@ pub mod prelude;
 
 pub use api::{Context, Plugin, Scope};
 pub use plan::{
-    ChangedServiceState, Error, FileAssociation, InitialServiceState, Launcher,
-    OpenrcFailurePolicy, OpenrcTimeouts, Path, Plan, Protocol, Service, ServiceExecution,
-    ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart, ServiceTimeouts,
-    SystemdFailurePolicy, SystemdRestartCondition, SystemdTimeouts, SystemdUser,
-    WindowsFailurePolicy, WindowsServiceAccount, WindowsTimeouts,
+    ChangedServiceState, DataAccess, DataCompatibility, DataDirectory, DataLocation, DataPath,
+    DataSchema, Error, FileAssociation, InitialServiceState, Launcher, OpenrcFailurePolicy,
+    OpenrcTimeouts, PathEntry, Plan, Protocol, Service, ServiceExecution, ServiceFailurePolicy,
+    ServiceLifecycle, ServiceReadiness, ServiceStart, ServiceTimeouts, SystemdFailurePolicy,
+    SystemdRestartCondition, SystemdTimeouts, SystemdUser, WindowsFailurePolicy,
+    WindowsServiceAccount, WindowsTimeouts,
 };
 
 pub use api::__answer;

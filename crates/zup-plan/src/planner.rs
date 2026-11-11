@@ -217,6 +217,106 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
         .map(PlannedPrerequisite::from_prerequisite)
         .collect::<Vec<_>>();
 
+    let generation_files: Vec<_> = build
+        .files
+        .iter()
+        .filter(|file| {
+            is_active(
+                file.component.as_ref(),
+                file.condition.as_ref(),
+                &selected_set,
+            )
+        })
+        .filter_map(|file| match &file.placement {
+            zup_core::PayloadPlacement::Generation { path } => Some(zup_core::GenerationFile {
+                path: path.clone(),
+                size: file.size,
+                sha256: file.sha256,
+                executable: file.executable,
+            }),
+            zup_core::PayloadPlacement::Fixed { .. } => None,
+        })
+        .collect();
+    let generation = if generation_files.is_empty() {
+        None
+    } else {
+        let descriptor = zup_core::GenerationDescriptor::new(installer.target, generation_files)?;
+        let reused = request
+            .previous
+            .and_then(|previous| previous.materialization)
+            .filter(|previous| {
+                request.generation_policy == crate::GenerationPolicy::ReuseVerified
+                    && previous.tree == descriptor.tree_id()
+            });
+        let materialization = reused.map_or(request.materialization, |previous| previous.id);
+        let suffix = zup_core::RelativePath::new(format!(
+            "{}/{}",
+            zup_core::DEPLOYMENTS_DIRECTORY,
+            materialization
+        ))
+        .expect("UUID and static deployment directory form a relative path");
+        let sources = build
+            .files
+            .iter()
+            .filter(|file| {
+                is_active(
+                    file.component.as_ref(),
+                    file.condition.as_ref(),
+                    &selected_set,
+                )
+            })
+            .filter_map(|file| match &file.placement {
+                zup_core::PayloadPlacement::Generation { path } => Some((
+                    path.clone(),
+                    crate::GenerationSource {
+                        key: zup_core::ResourceKey::File {
+                            id: zup_core::FileResourceId::Payload {
+                                id: file.id.clone(),
+                            },
+                        },
+                        source_relative: file.source_relative.clone(),
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
+        Some(crate::PlannedGeneration {
+            installation: request.installation,
+            id: materialization,
+            descriptor,
+            directory: install_directory.join_relative(&suffix),
+            publication: crate::GenerationPublication::Application {
+                previous: request.previous,
+                revision: match request.previous {
+                    Some(previous) => previous.revision.next()?,
+                    None => zup_core::ActivationRevision::FIRST,
+                },
+            },
+            preparation: if reused.is_some() {
+                crate::GenerationPreparation::ReuseVerified
+            } else {
+                crate::GenerationPreparation::Materialize
+            },
+            sources,
+        })
+    };
+    let payload_directory = generation.as_ref().map(|generation| &generation.descriptor);
+    let payload_root = zup_core::Template::parse("${payload}").expect("static template");
+    let resolve = |template: &zup_core::Template| {
+        resolve_template(
+            template,
+            &installer.app,
+            &install_directory,
+            payload_directory,
+        )
+    };
+    let resolve_payload = |file: &zup_core::ResolvedFile| {
+        let template = match &file.placement {
+            zup_core::PayloadPlacement::Fixed { path, .. } => path.clone(),
+            zup_core::PayloadPlacement::Generation { path } => payload_root.join_relative(path),
+        };
+        resolve(&template)
+    };
     let mut files = Vec::new();
     for file in &build.files {
         if !is_active(
@@ -226,13 +326,25 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
         ) {
             continue;
         }
-        let destination = resolve_template(&file.destination, &installer.app, &install_directory)?;
+        let destination = resolve_payload(file)?;
         files.push(DesiredFile {
             key: ResourceKey::File {
-                destination: destination.to_string(),
+                id: zup_core::FileResourceId::Payload {
+                    id: file.id.clone(),
+                },
             },
             source_relative: file.source_relative.clone(),
-            destination,
+            placement: match file.placement {
+                zup_core::PayloadPlacement::Generation { .. } => {
+                    zup_core::PayloadPlacement::Generation { path: destination }
+                }
+                zup_core::PayloadPlacement::Fixed { replacement, .. } => {
+                    zup_core::PayloadPlacement::Fixed {
+                        path: destination,
+                        replacement,
+                    }
+                }
+            },
             size: file.size,
             sha256: file.sha256,
             privilege: default_privilege,
@@ -252,17 +364,18 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
         let name = launcher.name.clone();
         launchers.push(DesiredLauncher {
             key: ResourceKey::Launcher {
-                location: launcher.location,
-                name: name.to_string(),
+                id: zup_core::DeclaredResourceId::Application {
+                    id: launcher.id.clone(),
+                },
             },
             location: launcher.location,
             name,
-            target: resolve_template(&launcher.target, &installer.app, &install_directory)?,
+            target: resolve(&launcher.target)?,
             arguments: launcher.arguments.clone(),
             working_directory: launcher
                 .working_directory
                 .as_ref()
-                .map(|dir| resolve_template(dir, &installer.app, &install_directory))
+                .map(resolve)
                 .transpose()?,
             privilege: default_privilege,
 
@@ -275,10 +388,12 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
         if !is_active(entry.component.as_ref(), entry.when.as_ref(), &selected_set) {
             continue;
         }
-        let value = resolve_template(&entry.value, &installer.app, &install_directory)?;
+        let value = resolve(&entry.value)?;
         path_entries.push(DesiredPathEntry {
             key: ResourceKey::PathEntry {
-                value: value.to_string(),
+                id: zup_core::DeclaredResourceId::Application {
+                    id: entry.id.clone(),
+                },
             },
             value,
             scope,
@@ -298,7 +413,7 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
         let mut requires_files = service
             .requires_files
             .iter()
-            .map(|path| resolve_template(path, &installer.app, &install_directory))
+            .map(resolve)
             .collect::<Result<Vec<_>, _>>()?;
         for component in &service.requires_components {
             if !selected_set.contains(component) {
@@ -316,29 +431,34 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
                         &selected_set,
                     )
             }) {
-                requires_files.push(resolve_template(
-                    &file.destination,
-                    &installer.app,
-                    &install_directory,
-                )?);
+                requires_files.push(resolve_payload(file)?);
             }
         }
         requires_files.sort_by_key(ToString::to_string);
         requires_files.dedup();
         services.push(DesiredService {
-            requires_services: service.requires_services.clone(),
-            dependency_names: service
-                .requires_services
+            state_directories: installer
+                .install
+                .data
                 .iter()
-                .map(|id| {
-                    installer
-                        .services
-                        .iter()
-                        .find(|dependency| dependency.id == *id)
-                        .map(|dependency| dependency.name.to_string())
-                        .unwrap_or_default()
+                .filter_map(|data| match &data.location {
+                    zup_core::PersistentLocation::Service { service: id }
+                        if id == &service.id
+                            && matches!(
+                                service.execution,
+                                zup_core::ServiceExecution::SystemdUser { .. }
+                                    | zup_core::ServiceExecution::SystemdDynamicUser
+                            ) =>
+                    {
+                        Some(crate::service_state_name(&installer.app.id, id, &data.id))
+                    }
+                    _ => None,
                 })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect(),
+            requires_services: service.requires_services.clone(),
+            dependency_names: Vec::new(),
             failure: service.failure,
             execution: service.execution.clone(),
             lifecycle: service.lifecycle.resolved(&service.execution),
@@ -348,12 +468,20 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
                 id: service.id.clone(),
             },
             id: service.id.clone(),
-            name: service.name.clone(),
-            display_name: service.display_name.clone(),
+            name: service
+                .execution
+                .native_name(&installer.app.id, &service.id, service.native_name.as_ref())
+                .map_err(|reason| {
+                    crate::ContractError::Capability(format!("service {}: {reason}", service.id))
+                })?,
+            display_name: Some(service.display_name.clone().unwrap_or_else(|| {
+                zup_core::NonEmptyString::new(service.id.as_str())
+                    .expect("service identity is nonempty")
+            })),
             start: service.start,
             privilege: Privilege::System,
-            command: crate::CommandSpec::new(
-                resolve_template(&service.binary, &installer.app, &install_directory)?,
+            command: zup_core::CommandSpec::new(
+                resolve(&service.binary)?,
                 service.arguments.clone(),
             ),
         });
@@ -371,8 +499,8 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
             scheme: protocol.scheme.clone(),
             scope,
             privilege: default_privilege,
-            command: crate::CommandSpec::new(
-                resolve_template(&protocol.executable, &installer.app, &install_directory)?,
+            command: zup_core::CommandSpec::new(
+                resolve(&protocol.executable)?,
                 protocol.args.clone(),
             ),
         });
@@ -392,23 +520,39 @@ fn prepare_plan(build: &TargetBuildPlan, request: &PlanRequest) -> Result<Prepar
             description: file_association.description.clone(),
             scope,
             privilege: default_privilege,
-            command: crate::CommandSpec::new(
-                resolve_template(
-                    &file_association.executable,
-                    &installer.app,
-                    &install_directory,
-                )?,
-                Vec::new(),
-            ),
+            command: zup_core::CommandSpec::new(resolve(&file_association.executable)?, Vec::new()),
         });
     }
 
+    for directory in &installer.install.data {
+        if directory.location.path().is_some_and(|path| {
+            path.contains_variable(zup_core::Variable::Payload)
+                || path.contains_variable(zup_core::Variable::AppVersion)
+        }) {
+            return Err(crate::ContractError::Capability(
+                "persistent data paths must remain stable across deployments".into(),
+            )
+            .into());
+        }
+    }
+    let data = installer
+        .install
+        .data
+        .iter()
+        .map(|directory| directory.map_path(resolve))
+        .collect::<Result<_, _>>()?;
     let plan = DesiredState {
+        generation_readers: installer.install.generation_readers,
+        requirements: (),
+        maintenance: None,
+        installation: request.installation,
+        generation,
         app: installer.app.clone(),
         target: installer.target,
         scope,
         install_directory,
         selected_components: selected,
+        data,
         prerequisites,
         files,
         launchers,

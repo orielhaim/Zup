@@ -1,16 +1,19 @@
-//! Full v1 delta planning tests with a fake machine.
+//! Delta planning against a synthetic host snapshot.
 
+mod support;
+
+use zup_core::CommandSpec;
+use zup_core::TargetPath;
 use zup_core::{
     LauncherLocation, Privilege, ProtocolScheme, RelativePath, ResourceKey, SelectedScope,
     ServiceId, ServiceStart, Sha256Digest, Target, hash_reader,
 };
 use zup_plan::{
-    CommandSpec, Conflict, FileOperationKind, HostSnapshot, InstallLedger, IntegrationChangeKind,
-    LauncherState, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
-    ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedLauncherState,
-    ObservedPathEntry, ObservedProtocol, ObservedProtocolState, ObservedService,
-    ObservedServiceState, OwnedResource, PathOperationKind, ProtocolState, SearchPath,
-    ServiceState, TargetPath, plan_execution,
+    Conflict, FileOperationKind, HostSnapshot, IntegrationChangeKind, LauncherState,
+    ObservedExtensionState, ObservedFile, ObservedFileAssociation, ObservedFileAssociationState,
+    ObservedFileState, ObservedLauncher, ObservedLauncherState, ObservedPathEntry,
+    ObservedProtocol, ObservedProtocolState, ObservedService, ObservedServiceState, OwnedResource,
+    PathOperationKind, ProtocolState, SearchPath, ServiceState, plan_execution,
 };
 
 fn digest(bytes: &[u8]) -> Sha256Digest {
@@ -25,8 +28,14 @@ fn cmd(path: &str, args: &[&str]) -> CommandSpec {
     CommandSpec::new(tpath(path), args.iter().map(|s| (*s).to_owned()).collect())
 }
 
-fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
+fn sample_target() -> zup_plan::BoundDeployment {
     zup_plan::DesiredState {
+        generation_readers: Default::default(),
+        data: Vec::new(),
+        requirements: (),
+        maintenance: None,
+        installation: "00000000-0000-4000-8000-000000000001".parse().unwrap(),
+        generation: None,
         app: zup_core::App {
             id: zup_core::AppId::new("com.acme.acme").unwrap(),
             name: zup_core::NonEmptyString::new("Acme").unwrap(),
@@ -42,10 +51,17 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
         prerequisites: vec![],
         files: vec![zup_plan::DesiredFile {
             key: ResourceKey::File {
-                destination: r"C:\PF\Acme\Acme.exe".into(),
+                id: zup_core::FileResourceId::Payload {
+                    id: zup_core::PayloadId::File {
+                        declaration: zup_core::ResourceId::new("fixture-0").unwrap(),
+                    },
+                },
             },
             source_relative: RelativePath::new("Acme.exe").unwrap(),
-            destination: tpath(r"C:\PF\Acme\Acme.exe"),
+            placement: zup_core::PayloadPlacement::Fixed {
+                replacement: zup_core::FixedReplacement::Atomic,
+                path: tpath(r"C:\PF\Acme\Acme.exe"),
+            },
             size: 4,
             sha256: digest(b"data"),
             privilege: Privilege::System,
@@ -53,8 +69,9 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
         }],
         launchers: vec![zup_plan::DesiredLauncher {
             key: ResourceKey::Launcher {
-                location: LauncherLocation::Menu,
-                name: "Acme".into(),
+                id: zup_core::DeclaredResourceId::Application {
+                    id: zup_core::ResourceId::new("main").unwrap(),
+                },
             },
             location: LauncherLocation::Menu,
             name: zup_core::NonEmptyString::new("Acme").unwrap(),
@@ -68,21 +85,26 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
         }],
         path_entries: vec![zup_plan::DesiredPathEntry {
             key: ResourceKey::PathEntry {
-                value: r"C:\PF\Acme\bin".into(),
+                id: zup_core::DeclaredResourceId::Application {
+                    id: zup_core::ResourceId::new("cli").unwrap(),
+                },
             },
             value: tpath(r"C:\PF\Acme\bin"),
             scope: SelectedScope::Machine,
             privilege: Privilege::System,
         }],
         services: vec![zup_plan::DesiredService {
+            state_directories: Vec::new(),
             failure: Default::default(),
-            execution: zup_core::ServiceExecution::Windows {
+            execution: zup_core::ServiceExecution::WindowsJob {
                 account: zup_core::WindowsServiceAccount::LocalService,
             },
             requires_files: Vec::new(),
             requires_services: Vec::new(),
             dependency_names: Vec::new(),
-            lifecycle: Default::default(),
+            lifecycle: zup_core::ServiceLifecycle {
+                ..Default::default()
+            },
             readiness: Default::default(),
             key: ResourceKey::Service {
                 id: ServiceId::new("acme-agent").unwrap(),
@@ -117,14 +139,17 @@ fn sample_target() -> zup_plan::DesiredState<TargetPath, TargetPath> {
 
         preset: None,
     }
+    .bind_fixed()
+    .expect("fixed deployment requirements")
 }
 
 fn exact_service() -> ObservedServiceState {
     ObservedServiceState::Service {
+        state_directories: Vec::new(),
         native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
-        execution: zup_core::ServiceExecution::Windows {
+        execution: zup_core::ServiceExecution::WindowsJob {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
         readiness: Default::default(),
@@ -143,7 +168,7 @@ fn service_file_dependencies_must_be_unique_managed_resources_with_matching_auth
     #[case] problem: u8,
 ) {
     let mut desired = sample_target();
-    let path = desired.files[0].destination.clone();
+    let path = desired.files[0].destination().clone();
     desired.services[0].requires_files = vec![path.clone()];
     desired.validate_resolved().unwrap();
     match problem {
@@ -196,8 +221,12 @@ fn snapshot_happy() -> HostSnapshot {
     HostSnapshot {
         files: vec![ObservedFile {
             key: target.files[0].key.clone(),
-            path: target.files[0].destination.clone(),
+            path: target.files[0].destination().clone(),
             state: ObservedFileState::File {
+                object: zup_core::NativeObjectIdentity::Windows {
+                    volume: 1,
+                    file: [1; 16],
+                },
                 executable: None,
                 size: 4,
                 sha256: digest(b"data"),
@@ -215,6 +244,12 @@ fn snapshot_happy() -> HostSnapshot {
             search_path: SearchPath::default(),
         }],
         services: vec![ObservedService {
+            registration: zup_core::ObservedServiceRegistration::Scm {
+                claim: zup_core::ServiceOwnershipClaim {
+                    installation: target.installation,
+                    service: target.services[0].id.clone(),
+                },
+            },
             key: target.services[0].key.clone(),
             id: target.services[0].id.clone(),
             state: exact_service(),
@@ -239,10 +274,11 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     let original_service = ServiceState::Registration {
+        state_directories: Vec::new(),
         native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
-        execution: zup_core::ServiceExecution::Windows {
+        execution: zup_core::ServiceExecution::WindowsJob {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
         readiness: Default::default(),
@@ -256,10 +292,11 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        state_directories: Vec::new(),
         native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
-        execution: zup_core::ServiceExecution::Windows {
+        execution: zup_core::ServiceExecution::WindowsJob {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
         readiness: Default::default(),
@@ -272,13 +309,8 @@ fn launcher_and_service_ownership_decisions() {
     assert_eq!(foreign.launchers[0].kind, IntegrationChangeKind::Conflict);
     assert_eq!(foreign.services[0].kind, IntegrationChangeKind::Conflict);
 
-    let mut ledger = InstallLedger::new(
-        target.app.id.clone(),
-        target.target,
-        SelectedScope::Machine,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.resources.insert(
+    let mut ledger = support::installed(&target);
+    ledger.current.resources.insert(
         target.launchers[0].key.clone(),
         OwnedResource::Launcher {
             launcher_path: target.launchers[0].launcher_path.clone(),
@@ -287,9 +319,12 @@ fn launcher_and_service_ownership_decisions() {
             installed: original_launcher,
         },
     );
-    ledger.resources.insert(
+    ledger.current.resources.insert(
         target.services[0].key.clone(),
-        OwnedResource::Service {
+        OwnedResource::Service(zup_plan::OwnedService {
+            registration: zup_core::NativeServiceRegistration::Scm {
+                installation: target.installation,
+            },
             timeouts: zup_core::ServiceTimeouts::Windows {
                 start_observation_seconds: 90,
                 stop_observation_seconds: 90,
@@ -298,9 +333,8 @@ fn launcher_and_service_ownership_decisions() {
             requires_services: Vec::new(),
             name: target.services[0].name.to_string(),
             privilege: Privilege::System,
-            previous: ServiceState::Absent,
             installed: Box::new(original_service),
-        },
+        }),
     );
     let owned = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
     assert_eq!(owned.launchers[0].kind, IntegrationChangeKind::UpdateOwned);
@@ -320,10 +354,11 @@ fn launcher_and_service_ownership_decisions() {
         working_directory: target.launchers[0].working_directory.clone(),
     };
     snapshot.services[0].state = ObservedServiceState::Service {
+        state_directories: Vec::new(),
         native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
-        execution: zup_core::ServiceExecution::Windows {
+        execution: zup_core::ServiceExecution::WindowsJob {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
         readiness: Default::default(),
@@ -343,14 +378,7 @@ fn e2e_fake_machine_mixed_deltas() {
     let snapshot = snapshot_happy();
     let plan = plan_execution(&target, &snapshot, None).expect("plan");
 
-    assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
-    assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
-    assert_eq!(plan.launchers[0].kind, IntegrationChangeKind::Create);
-    assert_eq!(plan.services[0].kind, IntegrationChangeKind::Conflict);
-    assert_eq!(plan.protocols[0].kind, IntegrationChangeKind::Create);
-    assert_eq!(plan.file_associations[0].kind, IntegrationChangeKind::NoOp);
-
-    assert_eq!(plan.files[0].kind, FileOperationKind::NoOp);
+    assert_eq!(plan.files[0].kind, FileOperationKind::Conflict);
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
     assert_eq!(plan.launchers[0].kind, IntegrationChangeKind::Create);
     assert_eq!(plan.services[0].kind, IntegrationChangeKind::Conflict);
@@ -364,6 +392,10 @@ fn files_replace_non_file_conflict() {
     let mut snapshot = snapshot_happy();
 
     snapshot.files[0].state = ObservedFileState::File {
+        object: zup_core::NativeObjectIdentity::Windows {
+            volume: 1,
+            file: [1; 16],
+        },
         executable: None,
         size: 4,
         sha256: digest(b"old!"),
@@ -371,16 +403,19 @@ fn files_replace_non_file_conflict() {
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.files[0].kind, FileOperationKind::Conflict);
 
-    let mut ledger = InstallLedger::new(
-        target.app.id.clone(),
-        target.target,
-        SelectedScope::Machine,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.resources.insert(
+    let mut ledger = support::installed(&target);
+    ledger.current.resources.insert(
         target.files[0].key.clone(),
         OwnedResource::File {
-            destination: target.files[0].destination.clone(),
+            replacement: zup_core::FixedReplacement::Atomic,
+            instance: zup_core::FixedFileInstance {
+                origin: ledger.current.transaction,
+                object: zup_core::NativeObjectIdentity::Windows {
+                    volume: 1,
+                    file: [1; 16],
+                },
+            },
+            destination: target.files[0].destination().clone(),
             source_relative: target.files[0].source_relative.clone(),
             sha256: digest(b"old!"),
             size: 4,
@@ -392,7 +427,20 @@ fn files_replace_non_file_conflict() {
     let plan = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
     assert_eq!(plan.files[0].kind, FileOperationKind::Replace);
 
+    if let ObservedFileState::File { object, .. } = &mut snapshot.files[0].state {
+        *object = zup_core::NativeObjectIdentity::Windows {
+            volume: 1,
+            file: [2; 16],
+        };
+    }
+    let plan = plan_execution(&target, &snapshot, Some(&ledger)).unwrap();
+    assert_eq!(plan.files[0].kind, FileOperationKind::Drift);
+
     snapshot.files[0].state = ObservedFileState::File {
+        object: zup_core::NativeObjectIdentity::Windows {
+            volume: 1,
+            file: [1; 16],
+        },
         executable: None,
         size: 4,
         sha256: digest(b"edit"),
@@ -472,13 +520,8 @@ fn protocol_upgrade_requires_previous_owned_state() {
     let foreign = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(foreign.protocols[0].kind, IntegrationChangeKind::Conflict);
 
-    let mut ledger = InstallLedger::new(
-        target.app.id.clone(),
-        target.target,
-        target.scope,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.resources.insert(
+    let mut ledger = support::installed(&target);
+    ledger.current.resources.insert(
         target.protocols[0].key.clone(),
         OwnedResource::Protocol {
             privilege: Privilege::System,
@@ -504,12 +547,8 @@ fn protocol_upgrade_requires_previous_owned_state() {
 fn ledger_target_mismatch_is_rejected() {
     let target = sample_target();
     let snapshot = snapshot_happy();
-    let ledger = InstallLedger::new(
-        target.app.id.clone(),
-        Target::parse("arm64-pc-windows-msvc").unwrap(),
-        target.scope,
-        zup_core::TransactionId::new_v7(),
-    );
+    let mut ledger = support::installed(&target);
+    ledger.target = Target::WINDOWS_ARM64;
     let error = plan_execution(&target, &snapshot, Some(&ledger)).unwrap_err();
     assert!(matches!(
         error,
@@ -570,15 +609,24 @@ fn search_path_membership_is_a_set_decision() {
     ]);
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
-    assert!(plan.path_entries[0].present);
-    assert!(!plan.path_entries[0].previously_owned);
+    assert!(matches!(
+        plan.path_entries[0].precondition,
+        zup_plan::PathPrecondition::Unclaimed {
+            presence: zup_plan::PathPresence::Single
+        }
+    ));
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Present);
 
     // An empty search path is the same decision as one that lacks the entry.
     snapshot.path_entries[0].search_path = SearchPath::new(vec![tpath(r"C:\Windows")]);
     let plan = plan_execution(&target, &snapshot, None).unwrap();
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
-    assert!(!plan.path_entries[0].present);
+    assert!(matches!(
+        plan.path_entries[0].precondition,
+        zup_plan::PathPrecondition::Unclaimed {
+            presence: zup_plan::PathPresence::Missing
+        }
+    ));
     assert_eq!(plan.path_entries[0].kind, PathOperationKind::Add);
 }
 

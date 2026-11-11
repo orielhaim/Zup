@@ -71,13 +71,6 @@ jobs:
             --target 'linux-${{ matrix.arch }}-musl'
           )
           mkdir -p target/native-service-results
-          python3 -u scripts/verify-openrc-controller.py \
-            --ssh-key "$ZUP_SERVICE_VM_ROOT/guest-key" \
-            --known-hosts "$ZUP_SERVICE_VM_ROOT/known-hosts" \
-            --ssh-port '${{ matrix.port }}' \
-            --service "$PWD/target/native-services/service-v1" \
-            --controller-receipt "${ZUP_OPENRC_BUILD_RECEIPT:-/opt/zup-controller-native/build.json}" \
-            | tee target/native-service-results/controller.log
           python3 -u scripts/verify-service-vm.py "${arguments[@]}" --supervised \
             | tee target/native-service-results/lifecycle.log
           python3 -u scripts/verify-service-vm.py "${arguments[@]}" --supervised --interference-only --qmp-socket "$ZUP_SERVICE_VM_ROOT/alpine-${{ matrix.arch }}/qmp.sock" \

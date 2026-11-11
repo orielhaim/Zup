@@ -34,6 +34,7 @@ path = "src/bin/test_gui_close_preset.rs"
 required-features = ["test-support"]
 
 [dependencies]
+zup-storage.workspace = true
 zup-presentation = { workspace = true, optional = true }
 zup-update = { workspace = true, features = ["bundle"], optional = true }
 zup-acquire = { workspace = true, optional = true }

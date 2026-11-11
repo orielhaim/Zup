@@ -1,6 +1,8 @@
+use zup_core::TransactionId;
+use zup_plan::{DeploymentNode, NodeKind};
 use zup_transaction::{
-    NodeKind, OperationExecutor, OperationReceipt, ReconcileResult, StoreError, TransactionId,
-    TransactionNode, TransactionPhase, TransactionRecord, TransactionStore,
+    OperationExecutor, OperationReceipt, ReconcileResult, StoreError, TransactionPhase,
+    TransactionRecord, TransactionStore,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,6 +32,12 @@ pub struct InterruptedStore<S> {
 }
 
 impl<S: TransactionStore> TransactionStore for InterruptedStore<S> {
+    fn reserve_installation(
+        &self,
+        record: &TransactionRecord,
+    ) -> Result<zup_transaction::InstallationReservation, zup_transaction::StoreError> {
+        self.inner.reserve_installation(record)
+    }
     fn create(&self, record: &TransactionRecord) -> Result<(), StoreError> {
         self.inner.create(record)
     }
@@ -71,11 +79,15 @@ where
 {
     type Error = String;
 
-    fn prepare(&mut self, node: &TransactionNode) -> Result<(), String> {
+    fn prepare(&mut self, node: &DeploymentNode) -> Result<(), String> {
         self.inner.prepare(node).map_err(|error| error.to_string())
     }
 
-    fn apply(&mut self, node: &TransactionNode) -> Result<OperationReceipt, String> {
+    fn apply(
+        &mut self,
+        node: &DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, String> {
         let mutating = matches!(
             node.kind,
             NodeKind::FileMutation { .. } | NodeKind::FileRemoval { .. }
@@ -83,14 +95,17 @@ where
         if mutating {
             self.boundary.reach(Boundary::BeforeMutation);
         }
-        let receipt = self.inner.apply(node).map_err(|error| error.to_string())?;
+        let receipt = self
+            .inner
+            .apply(node, transaction)
+            .map_err(|error| error.to_string())?;
         if mutating {
             self.boundary.reach(Boundary::AfterMutation);
         }
         Ok(receipt)
     }
 
-    fn verify(&mut self, node: &TransactionNode, receipt: &OperationReceipt) -> Result<(), String> {
+    fn verify(&mut self, node: &DeploymentNode, receipt: &OperationReceipt) -> Result<(), String> {
         if self.boundary == Boundary::DuringRollback
             && matches!(node.kind, NodeKind::FileMutation { .. })
         {
@@ -103,7 +118,7 @@ where
 
     fn rollback(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), String> {
         self.inner
@@ -115,11 +130,12 @@ where
 
     fn reconcile(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
         receipt: Option<&OperationReceipt>,
+        transaction: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, String> {
         self.inner
-            .reconcile(node, receipt)
+            .reconcile(node, receipt, transaction)
             .map_err(|error| error.to_string())
     }
 }

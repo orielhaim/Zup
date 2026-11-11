@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::IpcError;
-use zup_protocol::{MAX_FRAME_BYTES, SessionId, WireEnvelope, decode_payload, encode_payload};
+use zup_core::SessionId;
+use zup_protocol::{MAX_FRAME_BYTES, WireEnvelope, decode_payload, encode_payload};
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PREPARE_TIMEOUT: Duration = Duration::from_secs(300);

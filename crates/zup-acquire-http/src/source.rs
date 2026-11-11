@@ -137,7 +137,7 @@ impl HttpSource {
         cache: &zup_acquire::ContentCache,
         cancellation: &dyn Cancellation,
     ) -> Result<VerifiedBlob, HttpError> {
-        let path = zup_acquire::WebLayout::blob(&descriptor.digest);
+        let path = zup_acquire::blob_path(&descriptor.digest);
         let mut last: Option<HttpError> = None;
 
         for (index, origin) in self.origins.indices() {

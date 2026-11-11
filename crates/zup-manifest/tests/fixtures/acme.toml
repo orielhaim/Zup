@@ -39,25 +39,27 @@ default = false
 requires = ["core"]
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 component = "core"
 targets = ["windows-x64"]
 
 [[launchers]]
+id = "main"
 location = "menu"
 name = "Acme"
 target = "${install}/Acme.exe"
 component = "core"
 
 [[path]]
+id = "cli-1"
 value = "${install}/bin"
 component = "cli"
 
 [[services]]
-execution = { type = "windows", account = "local_service" }
+execution = { type = "windows_job", account = "local_service" }
 id = "acme-agent"
-name = "acme-agent"
 display_name = "Acme Agent"
 binary = "${install}/acme-agent.exe"
 start = "automatic"

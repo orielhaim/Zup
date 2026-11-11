@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, fs};
 
 use zup_core::{AppId, SelectedScope};
 use zup_transaction::{FilesystemTransactionStore, ReconciliationState, TransactionStore};
-use zup_windows::{AppsFeaturesValue, InstallLedgerStore};
+use zup_windows::{AppsFeaturesValue, InstallationRecordStore};
 
 #[path = "support/project.rs"]
 mod project;
@@ -56,13 +56,14 @@ fn registered_string(values: &BTreeMap<String, AppsFeaturesValue>, name: &str) -
 /// The version the ledger records for one application, or `None` when the
 /// application is not installed.
 fn ledger_version(state: &State, app: &AppSpec) -> Option<String> {
-    InstallLedgerStore::new(state.path())
+    InstallationRecordStore::new(state.path())
         .load(
             &AppId::new(&app.id).expect("an app id"),
             SelectedScope::User,
         )
         .expect("the ledger is readable")
-        .map(|ledger| ledger.version.to_string())
+        .filter(|ledger| ledger.is_installed())
+        .map(|ledger| ledger.current.version.to_string())
 }
 
 /// Remove an application and everything it left behind, so a test that fails
@@ -148,35 +149,48 @@ fn an_installation_outlives_its_own_source_tree_and_stays_operable() {
         b"optional payload"
     );
 
-    succeed(&maintenance, &state, "uninstall", &[]);
+    let removed = succeed(&maintenance, &state, "uninstall", &["--output", "json"]);
+    let result: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert!(
+        result["drift"].as_array().unwrap().is_empty(),
+        "{}",
+        result["drift"]
+    );
     assert!(!install.join("app.exe").exists());
-    assert!(!install.exists(), "the install directory is gone");
+    assert!(
+        install.exists(),
+        "retained generations keep their installation namespace"
+    );
     assert!(
         zup_windows::inspect_uninstall_registration(SelectedScope::User, &app.id)
             .expect("the registration is readable")
             .is_none(),
         "Apps & Features no longer lists the application"
     );
-    assert!(!maintenance.exists());
-    assert!(!state.path().join("maintenance").join(&app.id).exists());
+    assert!(
+        maintenance.exists(),
+        "executing maintenance content remains retained"
+    );
     assert_eq!(ledger_version(&state, &app), None);
 
     let journals = FilesystemTransactionStore::private_at(state.path());
     let remaining = journals.list_ids().expect("the journals are readable");
-    assert_eq!(remaining.len(), 1);
+    let installation = InstallationRecordStore::new(state.path())
+        .load(&AppId::new(&app.id).unwrap(), SelectedScope::User)
+        .unwrap()
+        .unwrap();
+    assert!(!installation.is_installed());
+    assert!(installation.current.resources.is_empty());
+    for snapshot in &installation.retained {
+        assert!(remaining.contains(&snapshot.transaction));
+    }
     let uninstall = journals
-        .load(&remaining[0])
+        .load(&installation.current.transaction)
         .expect("the uninstall journal is readable");
     assert_eq!(uninstall.app_id, AppId::new(&app.id).unwrap());
     assert_eq!(uninstall.scope, SelectedScope::User);
-    assert!(uninstall.plan.uninstall);
+    assert!(uninstall.plan.transition.is_remove());
     assert_eq!(uninstall.reconciliation, ReconciliationState::Complete);
-    for residue in ["work", "installations"] {
-        assert!(
-            !state.path().join(residue).exists(),
-            "{residue} survived the uninstall"
-        );
-    }
 }
 
 #[test]
@@ -205,7 +219,9 @@ fn an_uninstall_leaves_an_apps_and_features_entry_it_did_not_write() {
         .set_string("DisplayName", "Changed outside zup")
         .expect("the entry is writable");
 
-    succeed(&maintenance, &state, "uninstall", &[]);
+    let removed = succeed(&maintenance, &state, "uninstall", &["--output", "json"]);
+    let result: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(result["drift"].as_array().unwrap().len(), 1);
 
     let remaining = zup_windows::inspect_uninstall_registration(SelectedScope::User, &app.id)
         .expect("the registration is readable")
@@ -214,8 +230,10 @@ fn an_uninstall_leaves_an_apps_and_features_entry_it_did_not_write() {
         remaining.values["DisplayName"],
         AppsFeaturesValue::String("Changed outside zup".into())
     );
-    // Everything zup did own is gone even so.
-    assert!(!maintenance.exists());
+    assert!(
+        maintenance.exists(),
+        "retirement preserves recoverable maintenance content"
+    );
     assert_eq!(ledger_version(&state, &app), None);
 }
 
@@ -268,10 +286,27 @@ fn a_failed_upgrade_leaves_the_previous_installation_committed_and_usable() {
     // Clear the obstruction and the upgrade completes, moving the persisted copy
     // forward and retiring the old one.
     fs::remove_dir(install.join("block.dat")).expect("the obstruction is removable");
-    v2.succeed(&state, "install", &[]);
+    let retried = v2.run(&state, "install", &[]);
+    let journals = FilesystemTransactionStore::private_at(state.path());
+    let failures: Vec<_> = journals
+        .list_ids()
+        .unwrap()
+        .into_iter()
+        .filter_map(|id| {
+            journals
+                .load(&id)
+                .unwrap()
+                .failure
+                .map(|failure| failure.message)
+        })
+        .collect();
+    assert!(
+        retried.status.success(),
+        "upgrade retry failed: {failures:?}"
+    );
     let maintenance_v2 = state.maintenance(&next);
     assert!(maintenance_v2.is_file());
-    assert!(!maintenance_v1.exists());
+    assert!(maintenance_v1.exists());
     assert_eq!(ledger_version(&state, &app).as_deref(), Some("2.0.0"));
     assert_eq!(
         registered(&app)["DisplayVersion"],

@@ -169,7 +169,12 @@ impl Command {
             })),
             "available" => Ok(Self::Update(UpdateState::Available {
                 current: "1.4.0".into(),
-                available: rest.to_owned(),
+                candidate: zup_core::ReleaseCandidate {
+                    version: rest
+                        .parse()
+                        .map_err(|error: semver::Error| error.to_string())?,
+                    release: zup_core::Sha256Digest::from_bytes([0; 32]),
+                },
             })),
             "update-failed" => Ok(Self::Update(UpdateState::Failed {
                 message: rest.to_owned(),
@@ -275,7 +280,7 @@ pub fn apply(simulator: &mut Simulator, scenario: &mut Scenario, command: Comman
             publish(simulator)
         }
         Command::RecoveryRequired => {
-            simulator.finish_with(&InstallOutcome::RecoveryRequired);
+            simulator.finish_with(&InstallOutcome::RecoveryRequired { transaction: None, detail: "An interrupted transaction must be recovered before this application can be changed".into() });
             publish(simulator)
         }
         Command::RebootRequired => {

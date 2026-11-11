@@ -8,7 +8,6 @@ use crate::{
 use zup_acquire::{
     AcquisitionOutcome, AcquisitionPlan, AcquisitionSession, CachePolicy, ContentKind,
     ContentReason, HostProfile, NeverCancelled, ProgressSink, RetentionState, SessionSummary,
-    write_retention,
 };
 use zup_artifact::VariantManifest;
 use zup_core::Sha256Digest;
@@ -25,19 +24,11 @@ pub enum GraphError {
     Io(#[from] std::io::Error),
 }
 
-impl GraphError {
-    pub const fn left_machine_unchanged(&self) -> bool {
-        true
-    }
-}
-
 pub struct Acquired {
     pub resolved: ResolvedRelease,
     pub manifest: VariantManifest,
     pub plan: AcquisitionPlan,
     pub cache: Arc<zup_acquire::ContentCache>,
-    pub channel: String,
-    pub trust_anchor: Sha256Digest,
     pub outcome: AcquisitionOutcome,
 }
 
@@ -53,6 +44,8 @@ impl Acquired {
             .runtime
             .ok_or_else(|| GraphError::Manifest("the variant has no native runtime".into()))?;
         Ok(zup_acquire::RuntimeHandoff {
+            repository: self.resolved.repository.clone(),
+            pin: self.resolved.pin.clone(),
             schema: zup_acquire::HANDOFF_SCHEMA,
             app_id: self.resolved.descriptor.app_id.clone(),
             release: self.resolved.descriptor.release_digest,
@@ -92,31 +85,14 @@ impl Acquired {
     }
 
     pub fn identity(&self) -> zup_core::ReleaseIdentity {
-        zup_core::ReleaseIdentity {
-            app_id: self.resolved.descriptor.app_id.clone(),
-            release: self.resolved.descriptor.release_digest,
-            catalog: self.resolved.descriptor.catalog.digest,
-            variant: self.resolved.variant.id.clone(),
-            manifest: self.resolved.variant.manifest.digest,
-            runtime: self.resolved.variant.runtime.map(|runtime| runtime.digest),
-            version: self.resolved.descriptor.version.clone(),
-            target: self.resolved.variant.target,
-            channel: self.channel.clone(),
-            pinned: self.resolved.pinned,
-            trust_anchor: self.trust_anchor,
-            frontend: self.resolved.variant.frontend.clone(),
-            components: self
-                .manifest
-                .plan
-                .installer
-                .components
-                .iter()
-                .map(|component| component.id.to_string())
-                .collect(),
-        }
+        self.resolved
+            .identity(&self.manifest.plan.installer.components)
     }
 
-    pub fn record_retention(&self, policy: CachePolicy) -> Result<(), std::io::Error> {
+    pub fn maintain_cache(
+        &self,
+        policy: CachePolicy,
+    ) -> Result<zup_acquire::RetentionReport, std::io::Error> {
         let pinned = if policy.retains_payload() {
             self.plan
                 .items()
@@ -129,7 +105,7 @@ impl Acquired {
         };
 
         let state = RetentionState::record(policy, self.resolved.descriptor.release_digest, pinned);
-        write_retention(self.cache.root(), &state)
+        zup_acquire::maintain_cache(&self.cache, &state, zup_acquire::DEFAULT_GRACE)
             .map_err(|error| std::io::Error::other(error.to_string()))
     }
 }
@@ -339,9 +315,13 @@ pub async fn barrier_with_cancellation(
     resolver: &ReleaseResolver,
     resolved: ResolvedRelease,
     manifest: VariantManifest,
-    plan: AcquisitionPlan,
+    mut plan: AcquisitionPlan,
     cancellation: Arc<dyn zup_acquire::Cancellation>,
 ) -> Result<Acquired, GraphError> {
+    plan.extend(vec![zup_acquire::AcquisitionItem::new(
+        resolved.require_runtime()?,
+        ContentReason::Runtime,
+    )])?;
     let session = AcquisitionSession::new(
         plan.clone(),
         Arc::clone(resolver.cache()),
@@ -350,15 +330,11 @@ pub async fn barrier_with_cancellation(
     let gate = session
         .run(resolver.chain()?, cancellation, resolver.progress())
         .await?;
-    let channel = resolver.context().channel().to_owned();
-    let trust_anchor = resolver.context().trust_anchor()?;
     Ok(Acquired {
         resolved,
         manifest,
         plan,
         cache: Arc::clone(resolver.cache()),
-        channel,
-        trust_anchor,
         outcome: gate.enter(),
     })
 }
@@ -394,16 +370,6 @@ pub fn payload_source(
         acquired.resolved.catalog.clone(),
         &package,
     ))
-}
-
-pub fn is_newer(identity: &zup_core::ReleaseIdentity, version: &str) -> bool {
-    match (
-        semver::Version::parse(&identity.version),
-        semver::Version::parse(version),
-    ) {
-        (Ok(installed), Ok(candidate)) => candidate > installed,
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -476,12 +442,12 @@ mod tests {
                 zup_artifact::Descriptor::of(zup_artifact::MediaType::PRESET, preset_bytes)
             }),
             requirements: zup_artifact::VariantRequirements::default(),
-            plan: zup_bundle::PortableBuildPlan {
+            plan: zup_core::PackagePlan {
                 installer: zup_core::Installer {
                     app: zup_core::App {
                         id: zup_core::AppId::new("com.acme.preset").expect("a valid id"),
                         name: zup_core::NonEmptyString::new("Acme").expect("a name"),
-                        version: semver::Version::parse("1.0.0").expect("a version"),
+                        version: "1.0.0".parse().expect("a version"),
                         publisher: None,
                         main: None,
                         description: None,
@@ -490,7 +456,7 @@ mod tests {
                     frontend: zup_core::Frontend::Gui,
                     preset: window.then(|| zup_core::PresetRuntime {
                         name: zup_core::NonEmptyString::new("aurora").expect("a name"),
-                        version: semver::Version::parse("1.4.2").expect("a version"),
+                        version: "1.4.2".parse().expect("a version"),
                         protocol: zup_preset_protocol::PRESET_PROTOCOL_VERSION,
                         required_capabilities: vec!["components".to_owned()],
                         settings: serde_json::Value::Object(settings),
@@ -498,6 +464,8 @@ mod tests {
                     }),
                     updates: None,
                     install: zup_core::Install {
+                        generation_readers: Default::default(),
+                        data: Vec::new(),
                         scope: zup_core::InstallScope::User,
                         directory: zup_core::InstallDirectory {
                             user: Some(zup_core::Template::parse("${install}").expect("a dir")),
@@ -654,40 +622,5 @@ mod tests {
                 .is_empty(),
             "so there is nothing a machine would fetch for a window that is not there"
         );
-    }
-
-    fn identity(version: &str) -> zup_core::ReleaseIdentity {
-        zup_core::ReleaseIdentity {
-            app_id: zup_core::AppId::new("com.example.app").expect("valid"),
-            release: Sha256Digest::from_bytes([1; 32]),
-            catalog: Sha256Digest::from_bytes([2; 32]),
-            variant: "x64".to_owned(),
-            manifest: Sha256Digest::from_bytes([3; 32]),
-            runtime: None,
-            version: version.to_owned(),
-            target: zup_core::Target::parse("windows-x64").expect("valid"),
-            channel: "stable".to_owned(),
-            pinned: false,
-            trust_anchor: Sha256Digest::from_bytes([4; 32]),
-            frontend: "gui".to_owned(),
-            components: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn only_a_higher_version_is_an_update() {
-        assert!(is_newer(&identity("1.4.0"), "1.5.0"));
-        assert!(!is_newer(&identity("1.4.0"), "1.4.0"));
-        assert!(!is_newer(&identity("1.4.0"), "1.3.0"), "no downgrades");
-        assert!(
-            !is_newer(&identity("1.4.0"), "not-a-version"),
-            "an unparseable version is not an update"
-        );
-
-        let installed = identity("1.4.0");
-        let mut rebuild = installed.clone();
-        rebuild.release = Sha256Digest::from_bytes([9; 32]);
-        assert!(!installed.same_release(&rebuild));
-        assert!(!is_newer(&rebuild, "1.4.0"));
     }
 }

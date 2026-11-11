@@ -195,9 +195,6 @@ pub enum AcquisitionEvent {
         /// "the CDN reset the connection twice, then the mirror does not carry
         /// it" is.
         reasons: Vec<String>,
-        /// Always true. Present so a consumer can assert the guarantee rather
-        /// than infer it.
-        machine_unchanged: bool,
     },
 }
 

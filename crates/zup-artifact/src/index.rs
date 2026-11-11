@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
+use zup_core::ReleasePin;
 
 use serde::{Deserialize, Serialize};
-use zup_acquire::{OnlineTrust, ReleasePin};
+use zup_acquire::OnlineTrust;
 use zup_core::{App, Sha256Digest, Target};
 
 use crate::compat::LauncherSubsystem;
@@ -161,6 +162,11 @@ impl ArtifactDescriptor {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
+        if let ArtifactPin::Pinned { version } = &self.pin
+            && *version != self.application.version
+        {
+            return Err("artifact label differs from its application version");
+        }
         match (&self.mode, &self.trust) {
             (ArtifactMode::Offline, Some(_)) => {
                 Err("an offline artifact carries no online trust block")
@@ -174,11 +180,16 @@ impl ArtifactDescriptor {
                     (ArtifactPin::Pinned { .. }, ReleasePin::Channel { .. }) => {
                         Err("a version-labelled artifact needs a pinned trust block")
                     }
-                    (ArtifactPin::Channel { .. }, ReleasePin::Version { .. }) => {
+                    (ArtifactPin::Channel { .. }, ReleasePin::Release { .. }) => {
                         Err("a channel artifact needs an unpinned trust block")
                     }
-                    (ArtifactPin::Pinned { version }, ReleasePin::Version { version: pinned }) => {
-                        if version.to_string() != *pinned {
+                    (
+                        ArtifactPin::Pinned { version },
+                        ReleasePin::Release {
+                            version: pinned, ..
+                        },
+                    ) => {
+                        if version != pinned {
                             return Err(
                                 "a version-labelled artifact and its trust block disagree on the version",
                             );

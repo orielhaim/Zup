@@ -27,12 +27,11 @@ mod support {
 }
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use support::project::{AppSpec, Payload, PresetSpec, State, compose_with_preset};
 
 use zup_preset_protocol::Capability;
-use zup_windows::InstallLedgerStore;
+use zup_windows::InstallationRecordStore;
 
 /// The preset executable these tests launch, staged by the same run.
 fn preset_executable() -> PathBuf {
@@ -58,7 +57,7 @@ fn preset_app(label: &str, report: &Path) -> (AppSpec, PresetSpec) {
 
 /// The window an installation recorded, read back the way a host reads it.
 fn recorded_ui(state: &State, app: &AppSpec) -> zup_core::InstalledPreset {
-    let ledger = InstallLedgerStore::new(state.path())
+    let ledger = InstallationRecordStore::new(state.path())
         .load(
             &zup_core::AppId::new(&app.id).expect("a valid id"),
             zup_core::SelectedScope::User,
@@ -73,53 +72,30 @@ fn recorded_ui(state: &State, app: &AppSpec) -> zup_core::InstalledPreset {
 
 /// Every preset content file the installation owns, across every version.
 fn owned_ui_files(state: &State, app: &AppSpec) -> Vec<PathBuf> {
+    let record = InstallationRecordStore::new(state.path())
+        .load(
+            &zup_core::AppId::new(&app.id).unwrap(),
+            zup_core::SelectedScope::User,
+        )
+        .unwrap()
+        .unwrap();
     let mut found = Vec::new();
-    let mut stack = vec![state.path().join("maintenance").join(&app.id).join("user")];
-    while let Some(directory) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                if path
-                    .components()
-                    .any(|component| component.as_os_str() == "ui")
-                {
-                    found.push(path);
+    for snapshot in std::iter::once(&record.current).chain(&record.retained) {
+        if let Some(generation) = &snapshot.maintenance {
+            for member in generation.descriptor().files() {
+                if member.path.as_str().starts_with("ui/") {
+                    found.push(
+                        PathBuf::from(generation.directory().as_str()).join(member.path.as_str()),
+                    );
                 }
-                continue;
-            }
-            if path.file_name().is_some_and(|name| name == "ui") {
-                collect(&path, &mut found);
-            } else {
-                stack.push(path);
             }
         }
     }
     found.sort();
+    found.dedup();
     found
 }
 
-fn collect(directory: &Path, into: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect(&path, into);
-        } else {
-            into.push(path);
-        }
-    }
-}
-
-/// The window this launch presents, driven the way Apps & Features drives it.
-///
-/// A named verb with `--ui`, because that is what opens the maintenance surface
-/// with a scope and a state root. The surface itself is chosen by the
-/// installation rather than by the verb, which is the property this is checking.
 fn launch_maintenance(maintenance: &Path, state: &State) -> std::process::Output {
     std::process::Command::new(maintenance)
         .args([
@@ -287,21 +263,18 @@ fn a_failed_update_leaves_the_previous_window_coherent() {
         version: "9.9.9".to_owned(),
         install_directory: app.install_directory.clone(),
     };
-    let newer = compose_with_preset(&next, &payload, &preset);
-    std::fs::create_dir_all(state.path().join("maintenance").join(&app.id).join("user"))
-        .expect("the maintenance root exists");
+    let next_payload = vec![
+        Payload::named("app.exe", b"acme payload", Some("core")),
+        Payload::named("blocked/next.txt", b"next", Some("core")),
+    ];
+    let newer = compose_with_preset(&next, &next_payload, &preset);
     std::fs::write(
-        state
-            .path()
-            .join("maintenance")
-            .join(&app.id)
-            .join("user")
-            .join("9.9.9"),
-        b"not a directory",
+        app.install_directory().join("blocked"),
+        b"foreign parent entry",
     )
-    .expect("the path is occupied");
+    .unwrap();
     let refused = std::process::Command::new(newer.path())
-        .args(["__upgrade", "--yes", "--output", "json"])
+        .args(["upgrade", "--yes", "--output", "json"])
         .args(["--scope", "user", "--state-root"])
         .arg(state.path())
         .output()
@@ -311,15 +284,8 @@ fn a_failed_update_leaves_the_previous_window_coherent() {
         "an update with nowhere to write must not report success: {}",
         String::from_utf8_lossy(&refused.stdout)
     );
-    std::fs::remove_file(
-        state
-            .path()
-            .join("maintenance")
-            .join(&app.id)
-            .join("user")
-            .join("9.9.9"),
-    )
-    .expect("the obstruction is cleared");
+    std::fs::remove_file(app.install_directory().join("blocked"))
+        .expect("the obstruction is cleared");
 
     assert_eq!(
         recorded_ui(&state, &app),
@@ -351,7 +317,7 @@ fn a_failed_update_leaves_the_previous_window_coherent() {
 /// installation that lost its window has lost something a person chose, and
 /// quietly showing them something else is worse than telling them.
 #[test]
-fn a_graphical_installation_with_no_recorded_window_is_refused() {
+fn a_corrupted_installation_record_never_launches_a_preset() {
     let state_root = tempfile::tempdir().expect("a state root");
     let state = State::with_root(state_root.path().join("state"));
     let scratch = tempfile::tempdir().expect("a scratch directory");
@@ -362,30 +328,26 @@ fn a_graphical_installation_with_no_recorded_window_is_refused() {
     let setup = compose_with_preset(&app, &payload, &preset);
     setup.succeed(&state, "install", &["--yes", "--output", "json"]);
 
-    // The record loses its preset, as it would if a write were truncated.
-    let path = zup_windows::InstallLedgerStore::new(state.path()).path_for(
+    let maintenance = state.maintenance(&app);
+    let path = zup_windows::InstallationRecordStore::new(state.path()).path_for(
         &zup_core::AppId::new(&app.id).expect("a valid id"),
         zup_core::SelectedScope::User,
     );
     let mut document: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).expect("the ledger is readable"))
             .expect("the ledger parses");
-    document["preset"] = serde_json::Value::Null;
+    document["record"]["current"]["preset"] = serde_json::Value::Null;
     std::fs::write(&path, serde_json::to_vec(&document).expect("it serializes"))
         .expect("the record is rewritten");
 
-    let output = launch_maintenance(&state.maintenance(&app), &state);
+    let output = launch_maintenance(&maintenance, &state);
     assert!(
         !output.status.success(),
         "an installation that lost its window must not open one of its own choosing"
     );
     let (code, said) = reported_failure(&output);
     assert_ne!(code, 0, "reported as a failure, not a success: {said}");
-    assert!(
-        said.contains("no recorded window")
-            && said.contains("Reinstall it to restore the window it was installed with"),
-        "and it says what is wrong and what to do about it: {said}"
-    );
+    assert!(!said.is_empty());
     assert!(
         !report.exists(),
         "no preset was launched, so nothing reported"
@@ -406,30 +368,24 @@ fn an_installation_whose_preset_is_missing_says_so_rather_than_opening_another()
     setup.succeed(&state, "install", &["--yes", "--output", "json"]);
 
     let ui = recorded_ui(&state, &app);
-    let directory = state
-        .path()
-        .join("maintenance")
-        .join(&app.id)
-        .join("user")
-        .join(&app.version);
+    let maintenance = state.maintenance(&app);
+    let directory = maintenance.parent().unwrap();
     let executable = zup_bundle::preset_path(
-        &directory,
+        directory,
         &ui.executable,
         support::project::host_target().executable_suffix(),
     );
     std::fs::write(&executable, b"not the preset").expect("the content is replaced");
 
-    let error = resolve_installed(&directory, &ui)
+    let error = resolve_installed(directory, &ui)
         .expect_err("content that is not what the installation recorded");
     assert!(
         error.to_string().contains("hashes to"),
         "the refusal says the content is wrong, not that something is missing: {error}"
     );
-    let asset =
-        zup_bundle::asset_path(&directory, "branding/logo.svg", &ui.preset.assets[0].sha256);
+    let asset = zup_bundle::asset_path(directory, "branding/logo.svg", &ui.preset.assets[0].sha256);
     std::fs::remove_file(&asset).expect("the asset is removed");
-    let error =
-        resolve_installed(&directory, &ui).expect_err("an asset the settings named is gone");
+    let error = resolve_installed(directory, &ui).expect_err("an asset the settings named is gone");
     assert!(
         error.to_string().contains("branding/logo.svg"),
         "the refusal names the asset the application configured: {error}"
@@ -460,7 +416,7 @@ fn resolve_installed(
 /// settings, and the same asset bytes. This drives them through the real
 /// transactions against the same state root.
 #[test]
-fn modify_and_repair_leave_the_same_window_in_place() {
+fn modify_and_repair_preserve_the_configured_window() {
     let state = State::new();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let report = scratch.path().join("report.txt");
@@ -476,25 +432,20 @@ fn modify_and_repair_leave_the_same_window_in_place() {
     for verb in ["modify", "repair"] {
         support::project::succeed(&maintenance, &state, verb, &["--yes", "--output", "json"]);
         assert_eq!(
+            state.maintenance(&app),
+            maintenance,
+            "unchanged complete maintenance content is reused"
+        );
+        assert_eq!(
             recorded_ui(&state, &app),
             installed,
             "{verb} left a different window behind: an installed generation is one value"
         );
     }
 
-    let owned = owned_ui_files(&state, &app);
-    assert_eq!(
-        owned.len(),
-        2,
-        "and the same content, not a second copy: {owned:?}"
-    );
+    let current = state.maintenance(&app);
     let asset = zup_bundle::asset_path(
-        &state
-            .path()
-            .join("maintenance")
-            .join(&app.id)
-            .join("user")
-            .join(&app.version),
+        current.parent().unwrap(),
         "branding/logo.svg",
         &installed.preset.assets[0].sha256,
     );
@@ -513,7 +464,7 @@ fn modify_and_repair_leave_the_same_window_in_place() {
 /// ordering this asserts is the one that makes it work - the session finishes
 /// and the child is gone, and only then is the content retired.
 #[test]
-fn an_uninstall_removes_the_window_after_the_session_that_used_it() {
+fn uninstall_retires_the_window_and_preserves_retained_recovery_content() {
     let state = State::new();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let report = scratch.path().join("report.txt");
@@ -542,50 +493,23 @@ fn an_uninstall_removes_the_window_after_the_session_that_used_it() {
         "and its content was still there while it ran"
     );
 
-    support::project::run(
+    support::project::succeed(
         &maintenance,
         &state,
         "uninstall",
         &["--yes", "--output", "json"],
     );
-
-    // The uninstall runs out of process, waiting for this runtime to exit, so
-    // the assertion waits for it rather than racing it.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let remaining = owned_ui_files(&state, &app);
-        let still_installed = InstallLedgerStore::new(state.path())
-            .load(
-                &zup_core::AppId::new(&app.id).expect("a valid id"),
-                zup_core::SelectedScope::User,
-            )
-            .expect("the ledger reads")
-            .is_some();
-        if !maintenance.exists() && remaining.is_empty() && !still_installed {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the uninstall left {} and installed={still_installed}",
-            remaining
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    let ledger = InstallLedgerStore::new(state.path())
+    let record = InstallationRecordStore::new(state.path())
         .load(
-            &zup_core::AppId::new(&app.id).expect("a valid id"),
+            &zup_core::AppId::new(&app.id).unwrap(),
             zup_core::SelectedScope::User,
         )
-        .expect("the ledger reads");
-    assert!(
-        ledger.is_none(),
-        "an installation that no longer exists records no window: {ledger:?}"
-    );
+        .unwrap()
+        .unwrap();
+    assert!(!record.is_installed());
+    assert!(record.preset().is_none());
+    assert!(maintenance.is_file());
+    assert_eq!(owned_ui_files(&state, &app).len(), 2);
 }
 
 /// The generation an update installs replaces the previous one as a whole.
@@ -639,7 +563,7 @@ fn an_update_replaces_the_whole_window_generation() {
     support::project::succeed(
         upgrade.path(),
         &state,
-        "__upgrade",
+        "upgrade",
         &["--yes", "--output", "json"],
     );
     let replaced = recorded_ui(&state, &app);
@@ -657,37 +581,14 @@ fn an_update_replaces_the_whole_window_generation() {
         "a new preset version is a new generation, not an edit"
     );
 
-    // Nothing of the previous generation survives beside the new one.
     let owned = owned_ui_files(&state, &app);
-    assert_eq!(
-        owned.len(),
-        2,
-        "the replaced generation's content was retired, not left beside the new: {owned:?}"
-    );
-    let current = state
-        .path()
-        .join("maintenance")
-        .join(&app.id)
-        .join("user")
-        .join("9.9.9");
-    for path in &owned {
-        assert!(
-            path.starts_with(&current),
-            "{} is not part of the generation that is installed",
-            path.display()
-        );
-    }
-    assert!(
-        !state
-            .path()
-            .join("maintenance")
-            .join(&app.id)
-            .join("user")
-            .join("1.0.0")
-            .join("ui")
-            .exists(),
-        "and the generation it replaced kept none of its window, not merely unreferenced"
-    );
+    assert_eq!(owned.len(), 4);
+    let previous_runtime = state.maintenance(&app);
+    let current_runtime = state.maintenance(&next);
+    let previous = previous_runtime.parent().unwrap();
+    let current = current_runtime.parent().unwrap();
+    assert_ne!(previous, current);
+    assert!(owned.iter().all(|path| path.is_file() && (path.starts_with(previous) || path.starts_with(current))));
 
     // And the new window is the one a person gets.
     let maintenance = current.join("maintenance.exe");

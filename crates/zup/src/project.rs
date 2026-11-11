@@ -39,8 +39,9 @@ pub struct LoadedProject {
     pub manifest_path: PathBuf,
     pub manifest: zup_manifest::Manifest,
     pub selected_targets: Vec<ResolvedTargetConfig>,
-    pub build: zup_build::BuildPlan,
+    pub build: zup_core::BuildPlan,
     pub presets: Vec<Option<Vec<u8>>>,
+    pub diagnostics: Vec<zup_automation::Diagnostic>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -274,6 +275,7 @@ pub fn materialize_project(
         manifest_path,
         manifest,
         selected_targets,
+        diagnostics: payload_diagnostics(&build),
         build,
         presets: executables,
     })
@@ -462,6 +464,36 @@ pub fn install_directory_text(install: &zup_core::Install) -> String {
         (None, None) => "no directory template".to_owned(),
         (Some(user), Some(machine)) => format!("user={user} machine={machine}"),
     }
+}
+
+fn payload_diagnostics(build: &zup_core::BuildPlan) -> Vec<zup_automation::Diagnostic> {
+    use zup_automation::{Diagnostic, Severity};
+    let mut diagnostics = Vec::new();
+    for plan in &build.targets {
+        let analysis = zup_build::analyze_payload(plan);
+        for binary in analysis.binaries {
+            let source = binary.source.to_string();
+            if let Some(conflict) = binary.target_conflict {
+                diagnostics.push(Diagnostic::warning("zup.payload.target_conflict", format!("{}: {conflict}", plan.installer.target))
+                    .in_file(source.clone()).with_help("Confirm this is an intentional helper for another architecture or target, or correct the selected payload."));
+            }
+            if !binary.executable.libraries().is_empty() {
+                diagnostics.push(Diagnostic::new(Severity::Notice, "zup.payload.dependencies", format!("{} declares native libraries: {}", source, binary.executable.libraries().join(", ")))
+                    .in_file(source).with_help("Static imports do not include every dynamically loaded library. Keep application-relative dependencies together; provide native system prerequisites separately."));
+            }
+        }
+        for (source, reason) in analysis.incomplete {
+            diagnostics.push(
+                Diagnostic::warning("zup.payload.inspection_incomplete", reason)
+                    .in_file(source.to_string()),
+            );
+        }
+        if analysis.requires_relocation_contract {
+            diagnostics.push(Diagnostic::new(Severity::Notice, "zup.payload.relocation_contract", format!("{} uses immutable generation placement", plan.installer.target))
+                .with_help("Static analysis cannot prove relocation safety or absence of writes beside executables. Declare fixed placement for physical-path requirements and persistent data for mutable state."));
+        }
+    }
+    diagnostics
 }
 
 #[cfg(test)]

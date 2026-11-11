@@ -379,7 +379,6 @@ impl AcquisitionSession {
                         digest: Some(item.descriptor.digest.to_hex()),
                         message: error.to_string(),
                         reasons: Vec::new(),
-                        machine_unchanged: true,
                     })
                     .await;
                 return Err(error);
@@ -584,7 +583,6 @@ impl AcquisitionSession {
                     digest: Some(item.descriptor.digest.to_hex()),
                     message: error.to_string(),
                     reasons: failure_reasons(&error),
-                    machine_unchanged: true,
                 })
                 .await;
             return Err(error);

@@ -11,9 +11,10 @@ use rstest::rstest;
 use zup_acquire::{
     CatalogEntry, ContentCatalog, ContentDescriptor, ContentKind, DocumentRef, OnlineTrust,
     RELEASE_SCHEMA, RelativeContentPath, ReleaseDescriptor, ReleaseDownload, ReleaseDownloadKind,
-    ReleaseIdentity, ReleasePin, ReleaseVariant, WebLayout, blob_path, check_channel,
-    check_segment,
+    ReleaseVariant, blob_path, check_channel, check_segment,
 };
+use zup_core::ReleaseIdentity;
+use zup_core::ReleasePin;
 use zup_core::{AppId, Target};
 
 /// Recompute the fingerprint after a fixture edited the body it covers.
@@ -57,6 +58,7 @@ fn identity() -> ReleaseIdentity {
     ReleaseIdentity {
         app_id: AppId::new("com.acme.desktop").expect("valid"),
         release: digest_of(b"release"),
+        document: digest_of(b"release document"),
         catalog: digest_of(b"catalog"),
         variant: "windows-x64".to_owned(),
         manifest: digest_of(b"manifest"),
@@ -64,7 +66,10 @@ fn identity() -> ReleaseIdentity {
         version: "1.4.0".to_owned(),
         target: target("windows-x64"),
         channel: "stable".to_owned(),
-        pinned: false,
+        pin: ReleasePin::Channel {
+            channel: "stable".into(),
+        },
+        repository: "https://example.invalid".into(),
         trust_anchor: digest_of(b"root"),
         frontend: "gui".to_owned(),
         components: vec!["core".to_owned(), "tooling".to_owned()],
@@ -265,33 +270,12 @@ fn an_untrusted_path_segment_is_refused_whenever_it_could_leave_a_root() {
 /// cache both address. A change here silently 404s every client, so the strings
 /// are stated rather than derived.
 #[test]
-fn the_web_layout_places_each_document_where_a_reader_expects_it() {
+fn metadata_documents_do_not_alias_compressed_payload_objects() {
     let digest = digest_of(b"one");
-    let hex = digest.to_hex();
-    let blob = WebLayout::blob(&digest).to_string();
-    assert_eq!(blob, blob_path(&digest).to_string());
-    assert_eq!(blob, format!("blobs/sha256/{}/{}", &hex[..2], &hex[2..]));
-    // Two-level fan-out keeps any single directory small for a static host.
-    assert_eq!(blob.matches('/').count(), 3);
+    assert_ne!(zup_acquire::document_path(&digest), blob_path(&digest));
     assert_ne!(
-        blob,
-        WebLayout::blob(&digest_of(b"two")).to_string(),
-        "a different digest is a different object"
-    );
-
-    assert_eq!(
-        WebLayout::release("stable").expect("a path").to_string(),
-        "releases/stable.json"
-    );
-    assert_eq!(
-        WebLayout::catalog("stable").expect("a path").to_string(),
-        "releases/stable/catalog.json"
-    );
-    assert_eq!(
-        WebLayout::variant_manifest("stable", "windows-x64")
-            .expect("a path")
-            .to_string(),
-        "releases/stable/variants/windows-x64.json"
+        zup_acquire::document_path(&digest),
+        zup_acquire::document_path(&digest_of(b"two"))
     );
 }
 
@@ -354,7 +338,7 @@ fn a_catalog_that_could_make_a_reader_allocate_is_refused() {
 /// launcher has to download before it can resolve anything at all stays small.
 #[rstest]
 #[case::a_channel_pin(ReleasePin::Channel { channel: "stable".to_owned() }, false)]
-#[case::a_version_pin(ReleasePin::Version { version: "1.4.0".to_owned() }, true)]
+#[case::a_version_pin(ReleasePin::Release { version: "1.4.0".parse().unwrap(), document: digest_of(b"release document") }, true)]
 fn a_thin_bootstrapper_carries_only_what_it_needs_to_resolve_a_release(
     #[case] pin: ReleasePin,
     #[case] pinned: bool,
@@ -395,12 +379,11 @@ fn a_thin_bootstrapper_carries_only_what_it_needs_to_resolve_a_release(
     assert_eq!(
         document,
         if pinned {
-            "releases/stable/versions/1.4.0.json".to_owned()
+            zup_acquire::document_path(&digest_of(b"release document")).to_string()
         } else {
             "releases/stable.json".to_owned()
         }
     );
-    assert_eq!(trust.pinned_version(), pinned.then_some("1.4.0"));
 }
 
 #[test]
@@ -447,8 +430,8 @@ fn a_trust_configuration_that_points_somewhere_unexpected_is_refused() {
             ..base.clone()
         },
         OnlineTrust {
-            pin: ReleasePin::Version {
-                version: String::new(),
+            pin: ReleasePin::Channel {
+                channel: "another-channel".into(),
             },
             ..base.clone()
         },
@@ -473,13 +456,13 @@ fn an_installed_machine_records_the_graph_not_just_the_version() {
     };
     assert_ne!(other.release, identity.release);
     assert_eq!(other.version, identity.version);
-    assert!(!other.same_release(&identity));
-    assert!(identity.same_release(&identity));
     assert!(serde_json::to_vec(&other).expect("serializes") != bytes);
 }
 
 #[rstest]
 #[case::a_blank_version(&|id: &mut ReleaseIdentity| id.version = String::new())]
+#[case::a_missing_repository(&|id: &mut ReleaseIdentity| id.repository.clear())]
+#[case::a_conflicting_pin(&|id: &mut ReleaseIdentity| id.pin = ReleasePin::Channel { channel: "other".into() })]
 #[case::a_variant_that_climbs(&|id: &mut ReleaseIdentity| id.variant = "../x".to_owned())]
 #[case::a_component_that_climbs(&|id: &mut ReleaseIdentity| {
     id.components = vec!["../../etc/passwd".to_owned()];

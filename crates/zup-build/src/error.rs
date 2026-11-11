@@ -95,6 +95,30 @@ pub enum BuildError {
         second: String,
     },
 
+    #[error("payload `{id}` appears more than once")]
+    #[diagnostic(code(zup_build::resource_collision))]
+    ResourceCollision { id: zup_core::PayloadId },
+
+    #[error(
+        "application main `{id}` matches no shipped payload; reference a declared file or a member of a payload tree"
+    )]
+    #[diagnostic(code(zup_build::missing_main_payload))]
+    MainPayloadMissing { id: zup_core::PayloadId },
+
+    #[error("duplicate payload declaration `{id}`")]
+    #[diagnostic(code(zup_build::duplicate_resource_declaration))]
+    DuplicateResourceDeclaration { id: zup_core::ResourceId },
+
+    #[error(
+        "payload `{id}` declares one destination but matches multiple files; select one source file or use a directory placement"
+    )]
+    #[diagnostic(code(zup_build::single_file_mapping))]
+    MultipleFilesForSingleMapping { id: zup_core::ResourceId },
+
+    #[error(transparent)]
+    #[diagnostic(code(zup_build::invalid_generation))]
+    Generation(#[from] zup_core::GenerationError),
+
     #[error("failed to read source file `{path}`")]
     #[diagnostic(code(zup_build::source_read_failure))]
     SourceReadFailure {

@@ -21,7 +21,7 @@ if context.scope == Scope::Machine {
 }
 ```
 
-`install_directory` is a template. Linux installers resolve its location variables to a literal root before invoking a plugin, consistently for installation and maintenance. Build-host previews can still contain location variables. `${install}` and the other location variables
+`install_directory` is a template. Windows and Linux installers resolve its location variables to a literal root before invoking a plugin, consistently for installation and maintenance. Build-host previews can still contain location variables. `${install}` and the other location variables
 are resolved by Zup as it writes each resource, which is why a generated file
 declares `"${install}/notes.txt"` rather than a path.
 

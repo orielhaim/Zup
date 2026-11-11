@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use zup_bundle::BundleWriter;
+use zup_core::SessionId;
 use zup_core::{
     App, AppId, Frontend, Install, InstallDirectory, InstallScope, Installer, NonEmptyString,
     RelativePath, ResolvedFile, SelectedScope, Target, TargetBuildPlan, Template, hash_reader,
@@ -19,10 +20,7 @@ use zup_linux::test_support::{
     machine_v1_files, machine_v2_files, plan_for_test, recv_envelope_on, run_machine_isolated,
     run_tool, send_envelope_on, serve_worker_isolated, validate_rendezvous_for_test,
 };
-use zup_protocol::{
-    ExecuteOperation, Message, PROTOCOL_VERSION, PrepareOperation, SessionId, WireEnvelope,
-    privileged_operation,
-};
+use zup_protocol::{ExecuteOperation, Message, PROTOCOL_VERSION, PrepareOperation, WireEnvelope};
 use zup_runtime::Operation;
 
 const HANDSHAKE: Duration = Duration::from_secs(30);
@@ -48,6 +46,17 @@ fn commit(
     what: &str,
 ) {
     let outcome = run_machine_isolated(installer, roots, action, install_dir_override);
+    if !matches!(outcome, Ok(LinuxOutcome::Committed { .. })) {
+        let store = zup_transaction::FilesystemTransactionStore::private_at(&roots.state);
+        for id in store.list_ids().unwrap_or_default() {
+            if let Ok(record) = zup_transaction::TransactionStore::load(&store, &id) {
+                eprintln!(
+                    "transaction {id}: {:?}; failure {:?}; rollback {:?}; recovery {:?}",
+                    record.phase, record.failure, record.rollback_failure, record.recovery_failure
+                );
+            }
+        }
+    }
     assert!(
         matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
         "{what}: {outcome:?}"
@@ -95,11 +104,11 @@ fn machine_full_lifecycle() {
     assert_eq!(mode & 0o022, 0, "never group- or world-writable: {mode:o}");
     assert_ne!(mode & 0o111, 0, "still runnable: {mode:o}");
 
-    let ledger = zup_linux::LinuxLedgerStore::new(&roots.state)
+    let ledger = zup_linux::LinuxInstallationStore::new(&roots.state)
         .load(&app_id(), SelectedScope::Machine)
         .expect("the ledger reads")
         .expect("an installation is recorded");
-    assert_eq!(ledger.version.to_string(), "1.0.0");
+    assert_eq!(ledger.current.version.to_string(), "1.0.0");
 
     let neighbor = roots.roots.programs.join("neighbor").join("notes.txt");
     std::fs::create_dir_all(neighbor.parent().expect("a parent")).expect("a neighbor dir");
@@ -130,14 +139,14 @@ fn machine_full_lifecycle() {
         b"someone else"
     );
     assert_eq!(std::fs::read(&nearby).expect("a user file"), b"the user's");
-    let ledger = zup_linux::LinuxLedgerStore::new(&roots.state)
+    let ledger = zup_linux::LinuxInstallationStore::new(&roots.state)
         .load(&app_id(), SelectedScope::Machine)
         .expect("the ledger reads")
         .expect("an installation is recorded");
-    assert_eq!(ledger.version.to_string(), "2.0.0");
+    assert_eq!(ledger.current.version.to_string(), "2.0.0");
     assert!(
-        !machine_maintenance_path(&roots.state, "1.0.0").exists(),
-        "the old generation retires"
+        machine_maintenance_path(&roots.state, "1.0.0").exists(),
+        "the retired generation remains available for recovery"
     );
     assert!(
         machine_maintenance_path(&roots.state, "2.0.0").is_file(),
@@ -198,7 +207,10 @@ fn machine_full_lifecycle() {
         "uninstall commits: {outcome:?}",
     );
     assert!(!tool.exists(), "the payload is gone");
-    assert!(!maintenance.exists(), "its generation is gone");
+    assert!(
+        maintenance.exists(),
+        "maintenance remains retained until safe cleanup can prove it is unused"
+    );
     assert_eq!(
         std::fs::read(&neighbor).expect("a neighbor"),
         b"someone else"
@@ -209,11 +221,11 @@ fn machine_full_lifecycle() {
         "shared machine infrastructure is not removed with one application"
     );
     assert!(
-        zup_linux::LinuxLedgerStore::new(&roots.state)
+        zup_linux::LinuxInstallationStore::new(&roots.state)
             .load(&app_id(), SelectedScope::Machine)
             .expect("the ledger reads")
-            .is_none(),
-        "no ownership remains"
+            .is_some_and(|record| !record.is_installed() && record.current.resources.is_empty()),
+        "the tombstone holds no active ownership"
     );
 }
 
@@ -346,7 +358,7 @@ fn machine_lock_serializes_one_application() {
         .expect("the worker exits")
         .expect_err("no execute means no outcome");
     assert!(
-        zup_linux::LinuxLedgerStore::new(&roots.state)
+        zup_linux::LinuxInstallationStore::new(&roots.state)
             .load(&app_id(), SelectedScope::Machine)
             .expect("the ledger reads")
             .is_none(),
@@ -428,13 +440,8 @@ fn machine_execute_replay_reaches_no_worker() {
             &installer_clone,
         )
     });
-    let outcome = drive_client_isolated(
-        &mut client,
-        session,
-        &install_intent(&roots.state, None),
-        &expected_digest(&installer, &roots, Operation::Install),
-        &linux_target(),
-    );
+    let (intent, _) = plan_for_test(&installer, &roots, Operation::Install, None);
+    let outcome = drive_client_isolated(&mut client, session, &intent, &linux_target());
     assert!(
         matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
         "the first execute commits: {outcome:?}"
@@ -522,8 +529,19 @@ fn machine_cross_session_execute_is_refused() {
         session_b,
         1,
         PrepareOperation {
-            recovery_id: None,
-            operation: privileged_operation::UPGRADE.to_owned(),
+            operation: match install_intent(&roots_b.state, None).operation {
+                zup_protocol::PrivilegedRequest::Deployment {
+                    mut intent,
+                    expected_requirements,
+                } => {
+                    intent.action = zup_plan::LifecycleAction::Upgrade;
+                    zup_protocol::PrivilegedRequest::Deployment {
+                        intent,
+                        expected_requirements,
+                    }
+                }
+                _ => unreachable!(),
+            },
             app_version: "2.0.0".to_owned(),
             ..install_intent(&roots_b.state, None)
         },
@@ -687,9 +705,7 @@ fn machine_malformed_frames_are_refused_without_mutation() {
             )
         });
         let _ = next_hello(&mut client);
-        let mut intent = install_intent(&roots.state, None);
-        intent.expected_plan_digest =
-            Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_owned());
+        let intent = install_intent(&roots.state, None);
         send_envelope_on(
             &mut client,
             &WireEnvelope {
@@ -1042,7 +1058,7 @@ fn machine_interrupted_transaction_requires_explicit_recovery() {
         .expect("a journal begins")
         .preserve();
     assert!(
-        zup_linux::LinuxLedgerStore::new(&roots.state)
+        zup_linux::LinuxInstallationStore::new(&roots.state)
             .load(&app, SelectedScope::Machine)
             .expect("the ledger reads")
             .is_none(),
@@ -1051,7 +1067,7 @@ fn machine_interrupted_transaction_requires_explicit_recovery() {
 
     let refused = run_machine_isolated(&installer, &roots, Operation::Apply, None);
     assert!(
-        matches!(refused, Err(zup_linux::ExecError::RecoveryRequired(_))),
+        matches!(refused, Err(zup_linux::ExecError::RecoveryRequired { .. })),
         "an unsettled installation accepted a new operation: {refused:?}"
     );
     assert!(!machine_install_dir(&roots.roots).join("tool").exists());
@@ -1063,9 +1079,9 @@ fn machine_interrupted_transaction_requires_explicit_recovery() {
         zup_transaction::TransactionPhase::Prepared
     );
 
-    intent.operation = privileged_operation::RECOVER.into();
-    intent.recovery_id = Some(interrupted.transaction_id.as_uuid());
-    intent.expected_plan_digest = None;
+    intent.operation = zup_protocol::PrivilegedRequest::Recovery {
+        transaction: interrupted.transaction_id,
+    };
     let uid = rustix::process::getuid().as_raw();
     let session = SessionId::new_v7();
     let (mut client, mut worker) = UnixStream::pair().unwrap();
@@ -1081,8 +1097,7 @@ fn machine_interrupted_transaction_requires_explicit_recovery() {
             &worker_installer,
         )
     });
-    let recovered =
-        drive_client_isolated(&mut client, session, &intent, "", &linux_target()).unwrap();
+    let recovered = drive_client_isolated(&mut client, session, &intent, &linux_target()).unwrap();
     handle.join().unwrap().unwrap();
     assert!(matches!(recovered, LinuxOutcome::RolledBack));
     assert!(!machine_install_dir(&roots.roots).join("tool").exists());
@@ -1102,11 +1117,11 @@ fn machine_interrupted_transaction_requires_explicit_recovery() {
         .trim(),
         "tool 1.0.0"
     );
-    let ledger = zup_linux::LinuxLedgerStore::new(&roots.state)
+    let ledger = zup_linux::LinuxInstallationStore::new(&roots.state)
         .load(&app, SelectedScope::Machine)
         .expect("the ledger reads")
         .expect("an installation is recorded");
-    assert_eq!(ledger.version.to_string(), "1.0.0");
+    assert_eq!(ledger.current.version.to_string(), "1.0.0");
 
     let store = zup_transaction::FilesystemTransactionStore::private_at(&roots.state);
     let mut terminal = 0;
@@ -1121,7 +1136,7 @@ fn machine_interrupted_transaction_requires_explicit_recovery() {
         };
         let record = zup_transaction::TransactionStore::load(
             &store,
-            &zup_transaction::TransactionId::from_uuid(id),
+            &zup_core::TransactionId::from_uuid(id),
         )
         .expect("a journal loads");
         assert!(
@@ -1165,6 +1180,8 @@ fn machine_forbidden_destination_is_refused_by_policy() {
             frontend: Frontend::Console,
             updates: None,
             install: Install {
+                generation_readers: Default::default(),
+                data: Vec::new(),
                 scope: InstallScope::Machine,
                 directory: InstallDirectory {
                     user: None,
@@ -1178,7 +1195,18 @@ fn machine_forbidden_destination_is_refused_by_policy() {
             components: Vec::new(),
             component_groups: Vec::new(),
             plugins: Vec::new(),
-            files: Vec::new(),
+            files: vec![zup_core::FileMapping {
+                id: zup_core::ResourceId::new("hostile").unwrap(),
+                source: "evil".into(),
+                placement: zup_core::PayloadMapping::FixedFile {
+                    path: Template::parse(&sentinel.to_string_lossy()).unwrap(),
+                    replacement: zup_core::FixedReplacement::Atomic,
+                },
+                component: None,
+                when: None,
+                allow_empty: false,
+                executable: false,
+            }],
             launchers: Vec::new(),
             path: Vec::new(),
             services: Vec::new(),
@@ -1191,9 +1219,15 @@ fn machine_forbidden_destination_is_refused_by_policy() {
         prerequisite_size: 0,
         icons: zup_core::TargetIcons::default(),
         files: vec![ResolvedFile {
+            id: zup_core::PayloadId::File {
+                declaration: zup_core::ResourceId::new("hostile").unwrap(),
+            },
             source: evil,
             source_relative: RelativePath::new("evil").expect("a relative path"),
-            destination: Template::parse(&sentinel.to_string_lossy()).expect("a destination"),
+            placement: zup_core::PayloadPlacement::Fixed {
+                path: Template::parse(&sentinel.to_string_lossy()).unwrap(),
+                replacement: zup_core::FixedReplacement::Atomic,
+            },
             size,
             sha256,
             component: None,
@@ -1217,26 +1251,38 @@ fn machine_forbidden_destination_is_refused_by_policy() {
     );
 }
 
-fn install_intent(state: &Path, expected: Option<String>) -> PrepareOperation {
+fn install_intent(
+    state: &Path,
+    expected: Option<zup_plan::DeploymentRequirements>,
+) -> PrepareOperation {
+    let installed = zup_linux::LinuxInstallationStore::new(state)
+        .load(&app_id(), SelectedScope::Machine)
+        .ok()
+        .flatten();
     PrepareOperation {
-        recovery_id: None,
-        operation: privileged_operation::INSTALL.to_owned(),
-        force: false,
-        install_dir_override: None,
-        selected_components: Vec::new(),
-        disabled_components: Vec::new(),
-        expected_plan_digest: expected,
+        operation: zup_protocol::PrivilegedRequest::Deployment {
+            intent: Box::new(zup_plan::DeploymentIntent {
+                deployment: zup_plan::DeploymentSelection {
+                    installation: installed
+                        .as_ref()
+                        .map_or_else(zup_core::InstallationId::new_v7, |record| record.id),
+                    previous: installed.as_ref().map(|record| record.current.selection()),
+                    generation: None,
+                    maintenance: None,
+                },
+                action: zup_plan::LifecycleAction::Install,
+                enable: Vec::new(),
+                disable: Vec::new(),
+                install_directory: None,
+            }),
+            expected_requirements: expected.map(Box::new),
+        },
         app_id: app_id().to_string(),
         app_version: "1.0.0".to_owned(),
         scope: "machine".to_owned(),
         target: linux_target(),
         state_root: state.display().to_string(),
     }
-}
-
-fn expected_digest(installer: &Path, roots: &MachineTestRoots, action: Operation) -> String {
-    let (intent, _) = plan_for_test(installer, roots, action, None);
-    intent.expected_plan_digest.expect("the planner binds")
 }
 
 fn next_envelope(client: &mut UnixStream) -> WireEnvelope {
@@ -1301,7 +1347,7 @@ fn machine_destination_symlink_is_refused() {
         b"elsewhere"
     );
     assert!(
-        zup_linux::LinuxLedgerStore::new(&roots.state)
+        zup_linux::LinuxInstallationStore::new(&roots.state)
             .load(&app_id(), SelectedScope::Machine)
             .expect("the ledger reads")
             .is_none(),
@@ -1366,7 +1412,13 @@ fn machine_override_swap_is_refused() {
     let (intent_a, plan_a) =
         plan_for_test(&installer, &roots, Operation::Install, Some(dir_a.clone()));
     let _ = plan_a;
-    let digest_a = intent_a.expected_plan_digest.clone().expect("bound");
+    let zup_protocol::PrivilegedRequest::Deployment {
+        expected_requirements: Some(digest_a),
+        ..
+    } = &intent_a.operation
+    else {
+        panic!("bound requirements");
+    };
 
     let dir_b = roots.roots.programs.join("AppB");
     let session = SessionId::new_v7();
@@ -1384,8 +1436,11 @@ fn machine_override_swap_is_refused() {
         )
     });
     let _ = next_hello(&mut client);
-    let mut intent_b = install_intent(&roots.state, Some(digest_a));
-    intent_b.install_dir_override = Some(dir_b.display().to_string());
+    let mut intent_b = install_intent(&roots.state, Some(digest_a.as_ref().clone()));
+    let zup_protocol::PrivilegedRequest::Deployment { intent, .. } = &mut intent_b.operation else {
+        unreachable!()
+    };
+    intent.install_directory = Some(dir_b.clone());
     send_prepare(&mut client, session, 1, intent_b);
     let failed = next_failed(&mut client);
     assert_eq!(failed.kind, zup_protocol::WorkerFailure::Authentication);
@@ -1522,6 +1577,7 @@ fn machine_path_configuration_is_owned_through_the_worker_lifecycle() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().unwrap();
     let entries = [zup_core::PathEntry {
+        id: zup_core::ResourceId::new("cli").unwrap(),
         value: Template::parse("${install}").unwrap(),
         component: None,
         when: None,

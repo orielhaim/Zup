@@ -1,0 +1,85 @@
+PUBLISH: user now explicitly authorizes commit + push + new PR including previous branch history; supersedes earlier no-commit/no-push restrictions.
+ACTIVE: frontend recovery/update unit implemented; maintenance reuse + broad Windows/Linux verification underway. Rewrite incomplete; continue autonomously to PR-ready.
+Read AGENTS.md on restoration. Luna read-only exploration, no coding delegation. User wants major units first then review.
+ONLY checkpoint 241f9ec4a196b862ce68512e1586948e1e0383ff; feature/linux-service-lifecycle. No further commits/staging/push/PR/merge. Index empty last checked.
+Zero required Zup runtime/launcher/daemon/supervisor. One canonical requirements/DAG/record/recovery; no legacy adapters or placement fallback.
+Never weaken ACL/native identity/provenance. Binary rollback != data rollback; process crash/reboot != power-loss proof.
+Design deployment-architecture.md; audit deployment-rebuild-audit.md; decisions.tsv. Final docs/product sweep outstanding.
+Windows unelevated PS. WSL Ubuntu GNU target /home/oriel/.cache/zup-target-gnu.
+Current Windows VM Server2025build26100 win-urqzxrrp SSH43011 zup-admin/zup-user. VM root /home/oriel/.cache/zup-verification/vms/. Never print keys/seed/credentials.
+VM warm Restart can stall firmware/KVM; actual reboot requested then cold QEMU quit/start restores native boot. Not clean-reboot/power-loss proof.
+VM start root setpriv reuid1000/regid1000/groups1000,991/no-new-privs; no global host group/ACL changes.
+Old VM win-1p1lb124 SSH52113 and wrong-policy prototype app roots retained. Never retrofit ACLs/delete to pass tests.
+Canceled host UAC probe do not retry; equivalent elevated VM probe passed. Rejected old corruption probe never executed/do not retry.
+Rejected host cleanup C:/Users/oriel/AppData/Local/zup-cleanup-e2e-e7ztvckc never retried; leave fixture.
+Explicit UTF8; encode full text before write_bytes. Bound output. Never rerun one-shot target migration/recovery scripts blindly.
+Generic patch context has matched wrong places; include enclosing function context. Compiler byte spans require freshly checked unchanged source.
+Generation layout .zup/deployments, .zup/maintenance. Content/contract/materialization/version/revision/tx/resource identities distinct.
+Canonical DeploymentRequirements persist across graph/journal/snapshots. Logical resource IDs independent paths; protected installation UUID reservation.
+InstallationRecord publication+readback is COMMIT before journalCommitted. Uncertain publication cannot compensate. Latest commit separate active snapshot origin.
+Shared GenerationStorage bounded hashing/exact tree census/native IDs/no-replace/protected origins. Repair new instance; no unmarked orphan adoption.
+Preparing{dir}->Prepared{dir,tree}->Publishing{dir,tree}->Sealed{tree}. Materialize stays private; Seal persists intent before ACL/mode exposure/root last/rename.
+GenerationAccess Private|Publishing|Public exact finite profiles. Linux private0700/final0755; Windows exact private/public protected DACL; files inherit flags0 dirs3.
+Seals bind every root/file/dir native ID. Same-byte substitution refuses. Independent native operation capabilities, traversal handles read-only.
+Windows machine namespace volume flush; user namespace power-loss durability unproven. Actual native partial ACL publication crash recovery passed.
+Fixed FileInstance{origin,nativeID}; RetainFile no mutation/restart. Linux exchange; Windows Atomic refused, explicit Quiescent share0 fences/old slot/two no-replace moves.
+Foreign corruption quarantines/recovery-required; no hash/path adoption. Partial mutation reconciliation observes both names and native IDs.
+Workers independently derive authenticated graph under lock; Prepared then matching Execute before journal creation. Recovery loads protected journal, no dummy plans.
+Locks CLOEXEC/noninheritable; peer token restored before await. User/machine scope separate; namespace ancestry uses native IDs.
+Rollback retained requirements/generations/fixed slots/maintenance, no original source/plugin replay. Persistent data separately owned/preserved even Removed.
+Persistent Stable|Schema{writes,reads}; incompatible possible data exposure blocks binary compensation. Windows serviceSID DACL/Linux POSIX ACL/systemdStateDirectory.
+Stock OpenRC0.63.2; custom patch/controller/supervisor removed, no required s6. Native admission/runlevels/flock/pidfd/cgroup.kill/exact empty-scope/boot evidence.
+SCM WindowsJob contract immutable exact DACL/KILL_ON_CLOSE/PID+create+image membership, query pins. No name-only ownership; unknown scope closes admission/requires later native boot.
+Native ProcessTelemetry class64 header96 BootId60 verified; boot-env GUID unchanged across reboot and rejected. SCM main PID alone never proves no descendants.
+ServiceControlAuthority Planned|ReobservedQuiescent; exact disabled/stopped/empty scope required. Old+new requires_files DAG; unchanged services no restart.
+Native service naming done: optional native_name, canonical AppId+logicalServiceId SHA256 defaults; explicit valid override; ${service.id}/${job.id}/${data.id} whole args.
+ServiceExecution WindowsJob replaces Windows/process_scope pair. Runtime process-scope evidence retained. WIT/SDK/examples/schema migrated; final refresh needed.
+TUF protected trust leases/readback poison; namespace app+initialroot independent mirror/channel. Release content != privileged worker code authority.
+TrustContext::from_update_config/from_release now REQUIRE InstallScope; removed silent User default across all callers.
+zup-storage extracted, no compatibility reexports. CI matrix now includes zup-storage/zup-session; staged windows_updates test correctly in integration profile.
+NativePluginExecutor shared Windows/Linux physical install-root resolution; no Windows template/physical inconsistency. Genuine SDK/AOT fixture replaces handwritten WAT.
+Removed installer dev wat/wit-component/wit-parser. Remaining SDK/plugin/build/sign/publish/automation/docs workflow audit still required.
+Cleanup only postCOMMIT; failure committed-pending, no active rollback. NativeExecutables explicit reader contract; Untracked default defers.
+Generation collection exact Prepared/Deleting/Complete tree IDs; native fences, subset-only partial deletion, missing receipt never absence proof.
+Retirement Snapshot|Compensated exact protected proof; journal roots preserve pending/recovery/current/retained/data/reservation/collection evidence.
+History exact native census/no-replace archive under history/<tx>, same DAG/recovery, no recursive product journal deletion. Proof journals root creators.
+Cache shared writer lease/exclusive maintenance stable lock inode; live/foreign/unknown-age preserved. Storage estimates logical new/stage/reuse/retained/conditionalGC, not free-space guarantee.
+Advisory binary object0.40 bounded64MiB, no unsafe compatibility inference. Actual delayed DLL/ELF A staysA after B activation/noZup passed.
+Maintenance no-op Modify now reuses only same install/scope/target/root + COMPLETE descriptor and InstalledPreset equality. Explicit materialize not optimized; Repair keeps installed runtime.
+GUI: Action::Recover{tx}, snapshot typed recovery hint, OperationKind Recover; only exact known tx accepted, Retry cannot bypass recovery. Preview + docs migrated.
+Session Engine events fenced by operation UUID. Common successful lifecycle/recovery/update refresh reobserves record, updates build/surface, preserves operation/log; Windows host recover+refresh implemented.
+SessionOutcome UpdateChecked|Deployment replaces fake committed query/cancel results. Both OS update paths retain actual outcomes/cancellation.
+Windows GUI update uses native session run/reconcile; acquisition cancellation covers resolve+download and progress callback (no stdout JSONL). Validates candidate/app/target/frontend/scope/variant.
+WorkerFailure RecoveryRequired{transaction:Option<TransactionId>} retains known preparation hints; Windows LedgerError/WorkerError + Linux IpcError typed. Never parse IDs from strings.
+PASS native40 two actual boots/recoverB/rollbackA/metadata-offline native restart/uninstall+cleanup: windows-native-names40-{prepare,recover,verify}.log. Native39 also settled/cleaned.
+PASS native40 standalone partial-member ACL publication crash/recover exacttree/repair/uninstall+cleanup: windows-native-names40-publication.log. Frozen tools C:/ZupNativeNames40.
+PASS earlier actual ARM64 full-system GNU/systemd + musl/OpenRC hybrid/crash/reboot/recover/rollback/uninstall: {systemd,openrc}-arm64-hybrid-reboot16.json; refresh latest affected changes outstanding.
+PASS latest frontend units: gui-recovery-peer-tests.log61; gui-update-shared-tests.log210; gui-recovery-linux-tests.log534+7skip; frontend-maintenance-linux-tests.log75.
+PASS native-session-update-tests4.log real Windows signed repository/check/stale/cancel/install/selection/source-free uninstall. Prior failures fixed test socket blocking+plan-only runtime and explicit-update source check.
+PASS gui-update-final2-{windows,linux}-clippy before final maintenance/test extraction edits; rerun final. Automation generation gui-product-automation.log PASS.
+RUNNING frontend-maintenance-toolchain-build.log; deployment-rewrite-{windows,linux}-fast-tests.log. Check sessions/logs, do not duplicate builds needlessly.
+Installer prior fixtures74/76 had two stale assertions fixed; final rerun pending fresh toolchain. New preset assertion checks identical maintenance instance after Modify/Repair.
+OPEN: full product/docs/SDK/plugin/AOT/sign/publish/CI audit, actual default GUI and external DX projects, final fmt/Clippy/doc/native/fault/perf verification.
+OPEN: fixed unmanaged activation boundaries; abandoned/private preparation diagnostics/reclamation; storage/COW primary-source/measurements; final Linux GNU/musl/ARM refresh; Windows ARM runtime unverified.
+Old first Windows update test aborted on double panic in fixture HTTP server; server corrected (accepted sockets blocking, no destructor double panic). Isolated aborted fixture may remain, identify via protected source before cleanup.
+Memory used MEMORY.md1277-1344; final memory citation required, rollout01a13f4d-1fd6-7f40-94bf-f910d7927e6e. No memory writes authorized.
+CURRENT: deployment-rewrite-installer-tests.log20PASS incl real Windows update + no-op Modify/Repair maintenance instance reuse.
+CURRENT: deployment-rewrite-windows-dx-storage.json PASS actual init/check/plan/build/upgrade/runtime-offline/uninstall/cleanup; journal counts6,6,6,6. Logical native timings recorded.
+CURRENT: broad initial Linux1952/1956 pass; Windows1811/1818 pass. Stale doctor main/digest, blob-path wording, configure Quiescent expectations fixed; doctor Windows10PASS.
+FIXED real Linux GUI release provenance: SessionHost caches carrier release identity, update transfers whole host; Windows falls back to handoff/bundle identity. Latest broad reruns windows-fast-tests4/linux-fast-tests2 RUNNING.
+FIXED Linux GUI test old default state namespace: explicit isolated --state-root for both install/update; foreign sentinel moved outside sealed maintenance tree.
+GUI visual blocked: node_repl Computer Use initialization failed twice (reset included): failed to write kernel assets, path not found os3. No window input occurred. Do not claim visual validation.
+NEXT native worker hint proof: updated verify-windows-private-publication.ps1 checks repair refusal code7 + exact protected tx before recovery. Build latest fault runtime, fresh VM Tools41, run full probe; not yet run.
+CI matrix includes storage/session; native tests correctly split fast/integration. Docs plugin constructors and architecture old Materialized/gap claims corrected.
+RESTORE PRIORITY: source-free cross-version Windows recovery still under Luna exploration. Same-session host continuity implemented but native worker uses current_exe authority; do NOT claim cross-version recovery fixed.
+LATEST: removed duplicate core type reexports from build/manifest, digest passthrough module deleted; 48 Rust callers migrated via target/migrate-domain-imports.py (one-shot applied). Windows alltargets check/domain-cleanup Clippy passed before continuity changes.
+LATEST: SessionHost.update is now mutable; controller ActiveOperation<H> receives settled updated host through oneshot, retains candidate source on failure. Linux run updates host in place; Windows updates self.acquired. Shared focused48PASS (session-source-focused-tests.log).
+LATEST: recovery blocks new Update/Install/etc until recovered; Retry remains separately refused. Refresh failure preserves snapshot recovery tx instead of clearing it.
+LATEST: Linux GUI now accepts --state-root; discovery applies custom root only to explicitly selected scope, rejects ambiguous Either overrides. Isolated GUI test5 RUNNING, session6736. Earlier isolated4 compile never completed after interrupted turn.
+LOCAL BUILD: workspace-wide parallel linking exceeded host memory (Rust allocation failure); run -j1/2. Avoid concurrent xtask invocation/full workspace Cargo because running xtask.exe locks native image.
+NEXT: inspect test5 result; regression for mutable update-host handoff; native41 worker hint proof; final allfeatures checks/doc/build fixtures/toolchain; VM/ARM refresh and remaining DX.
+ABORTED fixture com.zup.test-session-update-01a1ca86336772639b633ab92b94031a inspected then native-uninstalled successfully; target/aborted-update-fixture-{inspect,uninstall}.json. Retained recovery content intentionally left, no manual deletion.
+VERIFIED latest session-continuity-final-clippy.log workspace Win/allfeatures/alltargets PASS after mutable-source/discovery changes; session-continuity-doctests + format PASS. Focused session48PASS before final one-assertion guard extension.
+PASS linux-gui-update-isolated5.log actual Linux GUI authenticated check/update/offline maintenance after state-root/discovery/provenance fixes. PASS session-source-focused-final-tests.log48 tests after final guard assertion.
+ACTIVE native41 build: cargo xtask fixtures runtime --target windows-x64, session78616, target/recovery-worker-hint-runtime41.log. Once complete package fresh target/native-names41.zip (base package-native-names40.py, rename output) then SCP to VM43011/new C:/ZupNativeNames41 and execute updated publication.ps1; no reboot needed for this probe.
+Luna /root/recovery_frontend_audit running source-free cross-version recovery map. Native research followups used native Luna as explicitly requested; read-only only. Await findings, no blind relaxation of worker app/version checks.

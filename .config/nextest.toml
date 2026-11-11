@@ -19,7 +19,7 @@ not (
   or package(zup-preview)
   or (package(zup-installer) and (
     binary(lifecycle) or binary(frontends) or binary(generated_files)
-    or binary(preset_session) or binary(preset_persistence)
+    or binary(preset_session) or binary(preset_persistence) or binary(windows_updates)
   ))
   or (package(zup-linux) and (binary(process) or binary(gui)))
   or (package(zup-windows) and binary(universal))
@@ -47,7 +47,7 @@ default-filter = '''
   or package(zup-preview)
   or (package(zup-installer) and (
     binary(lifecycle) or binary(frontends) or binary(generated_files)
-    or binary(preset_session) or binary(preset_persistence)
+    or binary(preset_session) or binary(preset_persistence) or binary(windows_updates)
   ))
   or (package(zup-linux) and (binary(process) or binary(gui)))
   or (package(zup-windows) and binary(universal))

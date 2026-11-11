@@ -9,7 +9,7 @@ use zup_linux::test_support::{
     fixture_protocol, menu_launcher, run_installer, run_tool, v1_files, v1_icons, v1_integration,
     v2_files, v2_icons,
 };
-use zup_linux::{LinuxLedgerStore, LinuxOutcome, run};
+use zup_linux::{LinuxInstallationStore, LinuxOutcome, run};
 use zup_runtime::Operation;
 
 fn applications() -> PathBuf {
@@ -52,9 +52,6 @@ fn install_v1(user: &IsolatedUser, scratch: &Path) -> PathBuf {
 fn install_creates_desktop_integration() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let tools = FakeTools::install();
-    let desktop_log = scratch.path().join("desktop.log");
-    tools.recording("update-desktop-database", &desktop_log);
     install_v1(&user, scratch.path());
 
     let install = user.programs().join("tool");
@@ -106,11 +103,7 @@ fn install_creates_desktop_integration() {
         "{globs}"
     );
 
-    let logged = read(&desktop_log);
-    assert!(
-        logged.contains(&applications().display().to_string()),
-        "{logged}"
-    );
+    assert!(read(&applications().join("mimeinfo.cache")).contains("x-scheme-handler/acme="));
 
     if which("desktop-file-validate").is_some() {
         for entry in [
@@ -130,25 +123,20 @@ fn install_creates_desktop_integration() {
         }
     }
 
-    let ledger = LinuxLedgerStore::new(&user.state)
+    let ledger = LinuxInstallationStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
         )
         .expect("the ledger reads")
         .expect("an installation is recorded");
-    assert!(ledger.resources.len() >= 8, "integration is owned");
+    assert!(ledger.current.resources.len() >= 8, "integration is owned");
 }
 
 #[test]
 fn handler_invocation_uses_lowered_arguments() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let tools = FakeTools::install();
-    tools.recording(
-        "update-desktop-database",
-        &scratch.path().join("desktop.log"),
-    );
     install_v1(&user, scratch.path());
 
     let tool = user.programs().join("tool").join("tool");
@@ -168,9 +156,6 @@ fn handler_invocation_uses_lowered_arguments() {
 fn upgrade_updates_and_retires_integration() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let tools = FakeTools::install();
-    let desktop_log = scratch.path().join("desktop.log");
-    tools.recording("update-desktop-database", &desktop_log);
     install_v1(&user, scratch.path());
 
     let unrelated = applications().join("unrelated.desktop");
@@ -235,18 +220,13 @@ fn upgrade_updates_and_retires_integration() {
         std::fs::read(&unrelated).expect("neighbor"),
         b"[Desktop Entry]\nType=Application\nName=Other\n"
     );
-    assert!(read(&desktop_log).contains(&applications().display().to_string()));
+    assert!(read(&applications().join("mimeinfo.cache")).contains("x-scheme-handler/acme="));
 }
 
 #[test]
 fn repair_restores_owned_integration() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let tools = FakeTools::install();
-    tools.recording(
-        "update-desktop-database",
-        &scratch.path().join("desktop.log"),
-    );
     let installer = install_v1(&user, scratch.path());
 
     let desktop = applications().join("com.example.tool.desktop");
@@ -305,11 +285,6 @@ fn repair_restores_owned_integration() {
 fn uninstall_removes_only_owned_integration() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
-    let tools = FakeTools::install();
-    tools.recording(
-        "update-desktop-database",
-        &scratch.path().join("desktop.log"),
-    );
     let installer = install_v1(&user, scratch.path());
 
     let neighbors = [
@@ -383,154 +358,21 @@ fn uninstall_removes_only_owned_integration() {
 }
 
 #[test]
-fn failed_refresh_rolls_back_and_recovers() {
+fn untrusted_path_generators_are_never_executed() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let tools = FakeTools::install();
-    let flag = scratch.path().join("mime-ok");
-    let mime_log = scratch.path().join("mime.log");
-    let desktop_log = scratch.path().join("desktop.log");
-    tools.flaky("update-mime-database", &flag, &mime_log);
-    tools.recording("update-desktop-database", &desktop_log);
-
-    let (launchers, protocols, associations) = v1_integration();
-    let installer = compose_integration_fixture(
-        scratch.path(),
-        "v1",
-        "1.0.0",
-        &v1_files(),
-        &launchers,
-        &protocols,
-        &associations,
-        &v1_icons(),
-    );
-    let outcome = run(&zup_linux::LinuxRunRequest {
-        installer: installer.clone(),
-        scope: SelectedScope::User,
-        state_root: Some(user.state.clone()),
-        action: Operation::Apply,
-        selection: Default::default(),
-    })
-    .expect("a failed refresh still reaches a stable outcome");
-    assert!(
-        matches!(outcome, LinuxOutcome::RolledBack),
-        "a failing refresh rolls back: {outcome:?}"
-    );
-    assert!(
-        !user.programs().join("tool").exists(),
-        "the payload rolls back with the refresh"
-    );
-    assert!(
-        !applications().join("com.example.tool.desktop").exists(),
-        "integration rolls back with the refresh"
-    );
-    assert!(
-        LinuxLedgerStore::new(&user.state)
-            .load(
-                &AppId::new("com.example.tool").expect("an id"),
-                SelectedScope::User,
-            )
-            .expect("the ledger reads")
-            .is_none(),
-        "nothing is owned after rollback"
-    );
-
-    std::fs::write(&flag, b"ok").expect("repair the tool");
-    let outcome = run_installer(&installer, &user.state, Operation::Apply);
-    assert!(
-        matches!(outcome, LinuxOutcome::Committed { .. }),
-        "the retry commits: {outcome:?}"
-    );
-    assert!(applications().join("com.example.tool.desktop").exists());
-    assert!(read(&desktop_log).contains(&applications().display().to_string()));
-}
-
-#[test]
-fn rollback_after_a_partial_refresh_regenerates_the_empty_world() {
-    let user = IsolatedUser::isolate();
-    let scratch = tempfile::tempdir().expect("a scratch directory");
-    let tools = FakeTools::install();
-
-    tools.tool("update-desktop-database", "#!/bin/sh\nexit 1\n");
-
-    let (launchers, protocols, associations) = v1_integration();
-    let installer = compose_integration_fixture(
-        scratch.path(),
-        "v1",
-        "1.0.0",
-        &v1_files(),
-        &launchers,
-        &protocols,
-        &associations,
-        &v1_icons(),
-    );
-    let outcome = run(&zup_linux::LinuxRunRequest {
-        installer,
-        scope: SelectedScope::User,
-        state_root: Some(user.state.clone()),
-        action: Operation::Apply,
-        selection: Default::default(),
-    })
-    .expect("a failed refresh still reaches a stable outcome");
-    assert!(
-        matches!(outcome, LinuxOutcome::RolledBack),
-        "a failing desktop refresh rolls back: {outcome:?}"
-    );
-    assert!(
-        !mime_packages().join("com.example.tool.xml").exists(),
-        "the rolled-back source is gone"
-    );
-
-    let globs = data_home().join("mime/globs2");
-    assert!(
-        globs.is_file(),
-        "the sweep regenerates the cache from the empty world instead of skipping it"
-    );
-    assert!(
-        !read(&globs).contains("application/x-com.example.tool-foo"),
-        "no stale entry survives the rollback"
-    );
-}
-
-#[test]
-fn missing_tools_fail_before_mutation() {
-    let user = IsolatedUser::isolate();
-    let scratch = tempfile::tempdir().expect("a scratch directory");
-    let tools = FakeTools::install();
-    tools.seal();
-
-    let (launchers, protocols, associations) = v1_integration();
-    let installer = compose_integration_fixture(
-        scratch.path(),
-        "v1",
-        "1.0.0",
-        &v1_files(),
-        &launchers,
-        &protocols,
-        &associations,
-        &v1_icons(),
-    );
-    let outcome = run(&zup_linux::LinuxRunRequest {
-        installer,
-        scope: SelectedScope::User,
-        state_root: Some(user.state.clone()),
-        action: Operation::Apply,
-        selection: Default::default(),
-    });
-    let error = outcome.expect_err("a missing tool refuses the run");
-    assert!(
-        error.to_string().contains("update-mime-database")
-            || error.to_string().contains("update-desktop-database"),
-        "the diagnostic names the capability: {error}"
-    );
-    assert!(
-        !user.programs().join("tool").exists(),
-        "nothing installs before preflight passes"
-    );
-    assert!(
-        !applications().join("com.example.tool.desktop").exists(),
-        "no integration lands before preflight passes"
-    );
+    let marker = scratch.path().join("untrusted-generator-ran");
+    for name in ["update-mime-database", "update-desktop-database"] {
+        tools.tool(
+            name,
+            &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+        );
+    }
+    install_v1(&user, scratch.path());
+    assert!(!marker.exists());
+    assert!(read(&data_home().join("mime/globs2")).contains("application/x-com.example.tool-foo"));
+    assert!(read(&applications().join("mimeinfo.cache")).contains("x-scheme-handler/acme="));
 }
 
 #[test]
@@ -693,6 +535,7 @@ fn path_directories_are_owned_and_reach_the_systemd_environment() {
     let user = IsolatedUser::isolate();
     let scratch = tempfile::tempdir().unwrap();
     let entries = [zup_core::PathEntry {
+        id: zup_core::ResourceId::new("cli").unwrap(),
         value: zup_core::Template::parse("${location.programs}/tool/bin with $literal").unwrap(),
         component: None,
         when: None,

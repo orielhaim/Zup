@@ -7,7 +7,8 @@ mod runtime;
 mod validation;
 
 pub use bindings::exports::zup::plugin::planner::{
-    ChangedServiceState, Context, FileAssociation, GeneratedFile, InitialServiceState,
+    ChangedServiceState, Context, DataAccess, DataCompatibility, DataDirectory, DataLocation,
+    DataPath, DataSchema, FileAssociation, FixedReplacement, GeneratedFile, InitialServiceState,
     InstallScope, InstallationPlan, Launcher, LauncherLocation, OpenrcFailurePolicy,
     OpenrcTimeouts, PathEntry, PluginError, Protocol, ResourceItem, Service, ServiceExecution,
     ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart, ServiceTimeouts,

@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use zup_core::{ResourceKey, SelectedScope, Template};
-use zup_plan::{DesiredState, HostSnapshot, InstallLedger};
+use zup_plan::{DesiredState, HostSnapshot, InstallationRecord};
 
+use zup_plan::DeploymentEffects;
 use zup_runtime::{ContentAccess, OperationHost, OperationInput, attach_maintenance_copy};
-use zup_transaction::TransactionInput;
 
 pub struct MachineHost {
     pub roots: crate::locations::MachineRoots,
@@ -17,6 +17,69 @@ pub struct LinuxOperationHost {
 }
 
 impl OperationHost for LinuxOperationHost {
+    fn collected_deployments(
+        &self,
+        input: &zup_runtime::OperationInput,
+        record: &InstallationRecord,
+    ) -> Result<Vec<zup_plan::RetiredDeploymentSelection>, String> {
+        let remaining = self.cleanup_candidates(input, record, None)?;
+        if input.scope == SelectedScope::Machine && rustix::process::geteuid().as_raw() != 0 {
+            return Ok(Vec::new());
+        }
+        Ok(zup_transaction::collected_deployments(record, &remaining))
+    }
+
+    fn cleanup_candidates(
+        &self,
+        input: &OperationInput,
+        record: &InstallationRecord,
+        retiring: Option<&zup_plan::RetentionChange>,
+    ) -> Result<Vec<zup_plan::CleanupOperation>, String> {
+        if input.scope == SelectedScope::Machine && rustix::process::geteuid().as_raw() != 0 {
+            return Ok(Vec::new());
+        }
+        let store = zup_transaction::FilesystemTransactionStore::private_at(input.state_root);
+        let mut operations = zup_transaction::cleanup_candidates(&store, record, retiring)?;
+        let state = crate::state::StateAuthority {
+            root: input.state_root.to_owned(),
+            app: record.app_id.clone(),
+            scope: record.scope,
+        };
+        operations.extend(
+            zup_transaction::HistoryStorage(crate::history::LinuxHistoryFilesystem(state))
+                .candidates(&store, record, retiring)?
+                .into_iter()
+                .map(|history| zup_plan::CleanupOperation {
+                    candidate: zup_plan::CleanupCandidate::History(history),
+                    privilege: record.scope.authorization(),
+                }),
+        );
+        Ok(operations)
+    }
+
+    fn data_bindings(
+        &self,
+        target: &zup_plan::BoundDeployment,
+    ) -> Result<BTreeMap<zup_core::ResourceId, zup_plan::PersistentBinding>, String> {
+        crate::persistent::resolve_persistent_bindings(target)
+    }
+
+    fn persistent_claims(
+        &self,
+        input: &OperationInput,
+    ) -> Result<Option<zup_plan::PersistentClaimSelection>, zup_runtime::OperationError> {
+        if input.scope == SelectedScope::Machine && rustix::process::geteuid().as_raw() != 0 {
+            return Ok(None);
+        }
+        crate::ledger::LinuxInstallationStore::new(input.state_root)
+            .persistent_claims(
+                &input.build.installer.app.id,
+                input.scope,
+                input.build.installer.target,
+            )
+            .map_err(|error| zup_runtime::OperationError::refused("persistent data", error))
+    }
+
     fn prepare_bootstrap(
         &self,
         install: &DesiredState,
@@ -43,8 +106,8 @@ impl OperationHost for LinuxOperationHost {
             &build.installer.target,
         )
         .map_err(|error| zup_runtime::OperationError::refused("plugin", error))?;
-        let mut executor = LinuxPluginExecutor {
-            inner: executor,
+        let mut executor = zup_plugin_runtime::NativePluginExecutor {
+            executor,
             locations: self
                 .machine
                 .as_ref()
@@ -90,10 +153,7 @@ impl OperationHost for LinuxOperationHost {
         Ok(())
     }
 
-    fn resolve_target(
-        &self,
-        install: &DesiredState,
-    ) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String> {
+    fn resolve_target(&self, install: &DesiredState) -> Result<zup_plan::BoundDeployment, String> {
         match &self.machine {
             Some(machine) => crate::resolve::resolve_target(
                 install,
@@ -112,7 +172,7 @@ impl OperationHost for LinuxOperationHost {
     fn install_directory(
         &self,
         explicit: Option<&std::path::Path>,
-        prior: Option<&InstallLedger>,
+        prior: Option<&InstallationRecord>,
         allowed: bool,
         repair: bool,
     ) -> Result<Option<Template>, String> {
@@ -133,8 +193,8 @@ impl OperationHost for LinuxOperationHost {
 
     fn observe(
         &self,
-        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-        ledger: Option<&InstallLedger>,
+        target: Option<&zup_plan::BoundDeployment>,
+        ledger: Option<&InstallationRecord>,
     ) -> Result<(Option<HostSnapshot>, BTreeMap<ResourceKey, bool>), String> {
         let mut snapshot = target.map(crate::executor::snapshot_target);
         let mut owned_matches = crate::run::inspect_owned_matches_for(ledger);
@@ -151,10 +211,12 @@ impl OperationHost for LinuxOperationHost {
                     snapshot.services = manager.snapshot(target)?;
                 }
                 if let Some(ledger) = ledger {
-                    for (key, owned) in &ledger.resources {
-                        if let zup_plan::OwnedResource::Service {
-                            name, installed, ..
-                        } = owned
+                    for (key, owned) in &ledger.current.resources {
+                        if let zup_plan::OwnedResource::Service(zup_plan::OwnedService {
+                            name,
+                            installed,
+                            ..
+                        }) = owned
                         {
                             owned_matches.insert(
                                 key.clone(),
@@ -173,10 +235,12 @@ impl OperationHost for LinuxOperationHost {
                     .map_err(|error| format!("service snapshot: {error}"))?;
             }
             if let Some(ledger) = ledger {
-                for (key, owned) in &ledger.resources {
-                    if let zup_plan::OwnedResource::Service {
-                        name, installed, ..
-                    } = owned
+                for (key, owned) in &ledger.current.resources {
+                    if let zup_plan::OwnedResource::Service(zup_plan::OwnedService {
+                        name,
+                        installed,
+                        ..
+                    }) = owned
                     {
                         let path = crate::machine::authorize_systemd_unit(name, systemd)
                             .map_err(|error| error.to_string())?;
@@ -201,17 +265,18 @@ impl OperationHost for LinuxOperationHost {
     fn compile(
         &self,
         execution: &zup_plan::ExecutionPlan,
-        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-        _ledger: Option<&InstallLedger>,
-    ) -> Result<TransactionInput, String> {
+        target: Option<&zup_plan::BoundDeployment>,
+        _ledger: Option<&InstallationRecord>,
+    ) -> Result<DeploymentEffects, String> {
         execution
             .validate_generation(_ledger)
             .map_err(|error| error.to_string())?;
         if crate::openrc_native::active()
             && (!execution.services.is_empty()
-                || execution.removals.iter().any(|removal| {
-                    matches!(removal.owned, zup_plan::OwnedResource::Service { .. })
-                }))
+                || execution
+                    .removals
+                    .iter()
+                    .any(|removal| matches!(removal.owned, zup_plan::OwnedResource::Service(_))))
         {
             let machine = self.machine.as_ref().ok_or("services need machine scope")?;
             let mut manager = crate::openrc_native::Openrc::connect(machine.roots.clone())?;
@@ -221,7 +286,7 @@ impl OperationHost for LinuxOperationHost {
             Some(machine)
                 if !execution.services.is_empty()
                     || execution.removals.iter().any(|removal| {
-                        matches!(removal.owned, zup_plan::OwnedResource::Service { .. })
+                        matches!(removal.owned, zup_plan::OwnedResource::Service(_))
                     }) =>
             {
                 let mut manager = crate::systemd::RealSystemd::connect()
@@ -244,18 +309,18 @@ impl OperationHost for LinuxOperationHost {
 
     fn attach_content(
         &self,
-        target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        target: &mut zup_plan::BoundDeployment,
         content: &ContentAccess,
         preset: Option<&zup_core::PresetRuntime>,
     ) -> Result<(), String> {
-        attach_maintenance_copy(
-            target,
-            content.installer,
-            content.state_root,
-            content.scope,
-            crate::run::MAINTENANCE_SOURCE,
-        )
-        .map_err(|error| error.to_string())?;
+        let preparation = attach_maintenance_copy(target, content, crate::run::MAINTENANCE_SOURCE)
+            .map_err(|error| error.to_string())?;
+        if preparation == zup_plan::GenerationPreparation::ReuseVerified {
+            if target.preset.as_ref().map(|installed| &installed.preset) != preset {
+                return Err("repair requires the installed preset declaration".into());
+            }
+            return Ok(());
+        }
         if let Ok(host) = crate::lowering::to_host_path(&target.install_directory) {
             crate::fs::anchor_reachable(&host).map_err(|error| match error {
                 crate::error::PathError::UnexpectedKind { path, expected } => {
@@ -269,125 +334,27 @@ impl OperationHost for LinuxOperationHost {
         if let Some(preset) = preset {
             let carrier = crate::carrier::Carrier::open(content.installer)
                 .map_err(|error| error.to_string())?;
-            let executable = carrier
-                .preset()
-                .ok_or_else(|| "this installer was composed without a preset".to_owned())?
-                .to_vec();
-            let assets = preset
-                .assets
-                .iter()
-                .map(|asset| {
-                    let (_, bytes) = carrier
+            zup_runtime::attach_preset_content(target, preset, &|name| {
+                if name == zup_bundle::PRESET_SOURCE {
+                    carrier
+                        .preset()
+                        .map(<[u8]>::to_vec)
+                        .ok_or_else(|| "this installer was composed without a preset".to_owned())
+                } else {
+                    let asset = name
+                        .strip_prefix("__zup_preset_asset__/")
+                        .ok_or_else(|| "invalid preset source".to_owned())?;
+                    carrier
                         .package()
-                        .ui_asset(asset.name.as_str())
-                        .map_err(|error| format!("the asset `{}`: {error}", asset.name))?;
-                    if bytes.len() as u64 != asset.size
-                        || zup_core::hash_bytes(&bytes) != asset.sha256
-                    {
-                        return Err(format!(
-                            "the asset `{}` is not the content this application configured",
-                            asset.name
-                        ));
-                    }
-                    Ok(bytes)
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            let runtime_directory = zup_transaction::maintenance_directory(
-                content.state_root,
-                &target.app.id,
-                content.scope,
-                &target.app.version,
-            );
-            let executable_digest = zup_core::hash_bytes(&executable);
-            let mut files = vec![(
-                zup_bundle::preset_path(
-                    &runtime_directory,
-                    &executable_digest,
-                    target.target.executable_suffix(),
-                ),
-                executable_digest,
-                executable.len() as u64,
-                zup_core::RelativePath::new(zup_bundle::PRESET_SOURCE)
-                    .expect("a reserved source name is always relative"),
-                true,
-            )];
-            for (asset, _) in preset.assets.iter().zip(&assets) {
-                files.push((
-                    zup_bundle::asset_path(&runtime_directory, asset.name.as_str(), &asset.sha256),
-                    asset.sha256,
-                    asset.size,
-                    zup_bundle::asset_source_name(asset.name.as_str()),
-                    false,
-                ));
-            }
-            attach_ui_runtime(target, content.scope, preset, executable_digest, files)?;
+                        .ui_asset(asset)
+                        .map(|(_, bytes)| bytes)
+                        .map_err(|error| error.to_string())
+                }
+            })
+            .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
-}
-
-struct LinuxPluginExecutor {
-    inner: zup_plugin_runtime::WasmtimePluginExecutor,
-    locations: crate::locations::LinuxInstallLocationResolver,
-}
-
-impl zup_plan::PluginExecutor for LinuxPluginExecutor {
-    fn target(&self) -> &zup_core::Target {
-        self.inner.target()
-    }
-
-    fn plan(
-        &mut self,
-        binding: &zup_core::PluginBinding,
-        context: &zup_plan::PluginPlanningContext,
-        cancellation: &dyn zup_plan::CancellationQuery,
-    ) -> Result<zup_plan::PluginResourceProposal, zup_plan::PluginFailure> {
-        let root = zup_plan::resolve_template_path(
-            &context.install_directory,
-            &context.target,
-            &self.locations,
-            context.scope,
-        )
-        .map_err(|error| zup_plan::PluginFailure::internal(error.to_string()))?;
-        let mut context = context.clone();
-        context.install_directory = Template::parse(root.as_str())
-            .map_err(|error| zup_plan::PluginFailure::internal(error.to_string()))?;
-        self.inner.plan(binding, &context, cancellation)
-    }
-}
-
-fn attach_ui_runtime(
-    target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-    scope: SelectedScope,
-    preset: &zup_core::PresetRuntime,
-    executable_digest: zup_core::Sha256Digest,
-    files: Vec<(
-        std::path::PathBuf,
-        zup_core::Sha256Digest,
-        u64,
-        zup_core::RelativePath,
-        bool,
-    )>,
-) -> Result<(), String> {
-    for (path, digest, size, source, executable) in files {
-        let destination = zup_plan::TargetPath::new(target.target, path.to_string_lossy())
-            .map_err(|error| format!("preset runtime destination: {error}"))?;
-        let text = destination.to_string();
-        target.files.push(zup_plan::DesiredFile {
-            key: zup_core::ResourceKey::File { destination: text },
-            source_relative: source,
-            destination,
-            size,
-            sha256: digest,
-            privilege: scope.authorization(),
-            executable,
-        });
-    }
-    target.preset = Some(zup_core::InstalledPreset {
-        preset: preset.clone(),
-        executable: executable_digest,
-    });
-    Ok(())
 }
 
 pub(crate) fn generated_content(

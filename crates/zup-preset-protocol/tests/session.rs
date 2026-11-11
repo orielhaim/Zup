@@ -16,6 +16,7 @@ fn product() -> ProductIdentity {
 
 fn snapshot() -> Snapshot {
     Snapshot {
+        recovery_transaction: None,
         product: product(),
         surface: Surface::Install(InstallOptions {
             existing_version: None,
@@ -427,6 +428,7 @@ fn a_maintenance_session_is_the_same_handshake() {
 
     let mut maintenance = snapshot();
     maintenance.surface = Surface::Maintenance(MaintenanceState {
+        retained: Vec::new(),
         installed_version: "1.3.0".into(),
         components: Vec::new(),
         groups: Vec::new(),

@@ -1,34 +1,56 @@
 #![forbid(unsafe_code)]
 
+mod collection;
+pub use collection::{
+    CollectionFence, CollectionState, GenerationCollection, GenerationCollector,
+    collect_generation, verify_generation_collection,
+};
+mod cleanup;
+pub use cleanup::{
+    authenticate_cleanup, cleanup_candidates, collected_deployments, validate_retention,
+};
 mod coordinator;
 mod executor;
+mod generation;
+mod history;
+pub use history::{HistoryFilesystem, HistoryStorage, StateNamespace};
+mod materialization;
+pub use generation::{
+    GenerationAccess, GenerationReceipt, MaterializationObservation, MaterializationRecord,
+    MaterializationState, RetiredPreparation,
+};
+pub use materialization::{GenerationFilesystem, GenerationStorage};
 pub mod fault_injection;
-mod id;
-mod input;
 mod ledger;
 mod lock;
 pub use ledger::{
-    LedgerProjectionError, ledger_path, project_committed_files, retire_resources,
-    retired_ledger_keys, valid_file_key, validate_ledger_identity,
+    OwnershipProjectionError, ledger_path, prepare_installation_record, project_committed_files,
+    retire_resources, retired_owned_keys, valid_file_key, validate_installation_record,
 };
 mod ownership;
 pub use ownership::{OwnershipError, validate_ownership};
-mod plan;
-mod private;
-mod reconciliation;
-mod record;
-pub use reconciliation::{
-    LedgerPublication, PublicationError, ReconciliationError, ReconciliationState,
-    ledger_publication, reconcile_committed, retired_records, settled_records,
+mod publication;
+pub use publication::{
+    InstallationPublisher, PublicationState, verify_installation_evidence,
+    verify_published_installation,
 };
+mod native_service;
+mod reconciliation;
+mod retained_content;
+pub use retained_content::{RetainedFileSource, retained_file_sources};
+mod record;
+mod reservation;
+pub use native_service::NativeServiceReceipt;
+pub use reconciliation::{
+    ReconciliationError, ReconciliationState, reconcile_committed, settled_records,
+};
+pub use reservation::InstallationReservation;
 mod service;
 pub use service::{
-    NativeServiceManager, ServiceControlCompletion, ServiceControlIntent, ServiceControlOperation,
-    ServiceControlReceipt, ServiceControlStage, ServiceObservation, ServiceTerminalState,
-    apply_service_control, bind_service_dependencies, disabled_startup, plan_service_controls,
-    reconcile_service_control, reconcile_service_rollback, requires_startup_inhibition,
-    rollback_service_control, validate_owned_service_inputs, validate_runtime_preservation,
-    validate_startup_inhibition, verify_service_control,
+    NativeServiceManager, ServiceControlAuthority, ServiceControlCompletion, ServiceControlReceipt,
+    ServiceObservation, apply_service_control, prepare_service_compensation,
+    reconcile_service_control, reconcile_service_rollback, rollback_service_control,
+    verify_service_control,
 };
 mod storage;
 
@@ -37,31 +59,24 @@ pub use coordinator::{
     TransactionOutcome, recover,
 };
 pub use executor::{
-    CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult,
+    CancellationProbe, NativeCacheCompletion, OperationExecutor, OperationReceipt, ReconcileResult,
     RollbackReconcileResult,
 };
-pub use id::{OperationId, TransactionId};
-pub use input::{
-    BackendOperation, BackendOperationIntent, FileRemoval, MAX_BACKEND_DEPENDENCIES,
-    MAX_BACKEND_PAYLOAD_BYTES, TransactionInput, TransactionInputError, TransactionResource,
-};
-pub use lock::{InstallationLock, LockError, LockScope};
-pub use plan::{
-    Dependency, NodeKind, NodeMeta, Phase, TRANSACTION_PLAN_SCHEMA, TransactionAudit,
-    TransactionNode, TransactionPlan, TransactionPlanError, compile_transaction,
-};
-pub use private::{
-    absent_collision, ensure_dir as ensure_private_dir, publish_full, publish_private, read_private,
-};
+pub use lock::{LockError, LockScope, ResourceLock};
 pub use record::{
-    CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, PublishError,
-    RecoveryPhase, StoreError, TransactionFailure, TransactionPhase, TransactionRecord,
-    VisiblePublish, settle_visible,
+    CorruptReason, JOURNAL_SCHEMA, NodeState, NodeStateError, PhaseError, RecoveryPhase,
+    StoreError, TransactionFailure, TransactionPhase, TransactionRecord,
 };
 pub use storage::{CONTENT_STORE_DIRECTORY, ContentStoreIdentity};
 pub use storage::{FilesystemTransactionStore, JournalVolume, TransactionStore};
 pub use storage::{
-    MAINTENANCE_INDEX_NAME, MAINTENANCE_PACKAGE_NAME, MAINTENANCE_RUNTIME_DIRECTORY, STATE_FOLDER,
-    is_maintenance_path, maintenance_directory, maintenance_root, maintenance_runtime_path,
+    MAINTENANCE_PACKAGE_NAME, MAINTENANCE_RUNTIME_DIRECTORY, STATE_FOLDER, is_maintenance_path,
     scope_name,
 };
+mod persistent;
+pub use persistent::{
+    PersistentAccessState, PersistentCreation, PersistentCreationToken, PersistentDirectoryReceipt,
+    PersistentFilesystem, PersistentPreparation, PersistentStorage,
+};
+
+pub use executor::{CleanupCompletion, CleanupDeferral};

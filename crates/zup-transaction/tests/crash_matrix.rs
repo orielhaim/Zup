@@ -29,10 +29,12 @@ mod common;
 use common::fake::FakeExecutor;
 use common::{sample_app_id, sample_input, sample_version};
 use tempfile::TempDir;
+use zup_core::TransactionId;
+use zup_plan::{DeploymentNode, compile_deployment};
 use zup_transaction::{
     FilesystemTransactionStore, NodeState, OperationExecutor, OperationReceipt,
-    TransactionCoordinator, TransactionId, TransactionNode, TransactionOutcome, TransactionPhase,
-    TransactionRecord, TransactionStore, compile_transaction, recover,
+    TransactionCoordinator, TransactionOutcome, TransactionPhase, TransactionRecord,
+    TransactionStore, recover,
 };
 
 /// An executor that dies on its *n*-th call.
@@ -58,12 +60,16 @@ impl CrashingExecutor {
 impl OperationExecutor for CrashingExecutor {
     type Error = String;
 
-    fn prepare(&mut self, _operation: &TransactionNode) -> Result<(), Self::Error> {
+    fn prepare(&mut self, _operation: &DeploymentNode) -> Result<(), Self::Error> {
         self.reached();
         Ok(())
     }
 
-    fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error> {
+    fn apply(
+        &mut self,
+        operation: &DeploymentNode,
+        _transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, Self::Error> {
         self.reached();
         // A real receipt for the node, not a blanket `Control`: the record's own
         // validation refuses a control receipt on a file mutation, and a fake that
@@ -73,7 +79,7 @@ impl OperationExecutor for CrashingExecutor {
 
     fn verify(
         &mut self,
-        _operation: &TransactionNode,
+        _operation: &DeploymentNode,
         _receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         self.reached();
@@ -82,7 +88,7 @@ impl OperationExecutor for CrashingExecutor {
 
     fn rollback(
         &mut self,
-        _operation: &TransactionNode,
+        _operation: &DeploymentNode,
         _receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         self.reached();
@@ -91,8 +97,9 @@ impl OperationExecutor for CrashingExecutor {
 
     fn reconcile(
         &mut self,
-        _operation: &TransactionNode,
+        _operation: &DeploymentNode,
         _receipt: Option<&OperationReceipt>,
+        _transaction: &zup_transaction::TransactionRecord,
     ) -> Result<zup_transaction::ReconcileResult, Self::Error> {
         self.reached();
         Ok(zup_transaction::ReconcileResult::NotApplied)
@@ -119,7 +126,10 @@ fn assert_settled(record: &TransactionRecord, outcome: TransactionOutcome) {
                 assert!(
                     matches!(
                         state,
-                        NodeState::Pending | NodeState::Failed | NodeState::RolledBack
+                        NodeState::Pending
+                            | NodeState::Failed
+                            | NodeState::RolledBack
+                            | NodeState::Compensated { .. }
                     ),
                     "a rolled-back transaction left `{id}` as {state:?}"
                 );
@@ -151,7 +161,7 @@ fn fingerprint(record: &TransactionRecord) -> String {
 
 /// Build a fresh transaction of `input` in a fresh store.
 fn fresh(
-    input: &zup_transaction::TransactionInput,
+    input: &zup_plan::DeploymentEffects,
 ) -> (
     TempDir,
     FilesystemTransactionStore,
@@ -159,16 +169,17 @@ fn fresh(
     TransactionId,
 ) {
     let dir = TempDir::new().expect("a temp dir");
-    let store = FilesystemTransactionStore::private_at(dir.path());
-    let coordinator =
-        TransactionCoordinator::new(FilesystemTransactionStore::private_at(dir.path()));
+    let store = FilesystemTransactionStore::private_at(dir.path().join("state"));
+    let coordinator = TransactionCoordinator::new(FilesystemTransactionStore::private_at(
+        dir.path().join("state"),
+    ));
     let id = TransactionId::new_v7();
     let record = TransactionRecord::new(
         id,
         sample_app_id(),
         zup_core::SelectedScope::User,
         sample_version(),
-        compile_transaction(input).expect("a plan"),
+        compile_deployment(input).expect("a plan"),
     );
     store.create(&record).expect("create");
     (dir, store, coordinator, id)
@@ -176,13 +187,13 @@ fn fresh(
 
 /// Kill the transaction at every executor call in turn, and recover what each kill
 /// left behind.
-fn sweep(label: &str, input: zup_transaction::TransactionInput) {
+fn sweep(label: &str, input: zup_plan::DeploymentEffects) {
     let calls = {
         let (_dir, store, coordinator, id) = fresh(&input);
         let mut counter = CrashingExecutor::new(usize::MAX);
         let record = store.load(&id).expect("a durable record");
         coordinator
-            .execute(record, &mut counter)
+            .execute(record, &mut counter, &common::Publisher::default())
             .unwrap_or_else(|error| panic!("{label}: an uninterrupted run failed: {error}"));
         counter.calls
     };
@@ -198,7 +209,7 @@ fn sweep(label: &str, input: zup_transaction::TransactionInput) {
         let record = store.load(&id).expect("a durable record");
         let mut executor = CrashingExecutor::new(die_at);
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            coordinator.execute(record, &mut executor)
+            coordinator.execute(record, &mut executor, &common::Publisher::default())
         }));
         if crashed.is_ok() {
             // Fewer calls than expected: the run finished before reaching this
@@ -217,8 +228,13 @@ fn sweep(label: &str, input: zup_transaction::TransactionInput) {
         );
         distinct.insert(fingerprint(&persisted));
 
-        let (_, outcome) = recover(persisted, &store, &mut FakeExecutor::new())
-            .unwrap_or_else(|error| panic!("{label}: crash {die_at} did not recover: {error}"));
+        let (_, outcome) = recover(
+            persisted,
+            &store,
+            &mut FakeExecutor::new(),
+            &common::Publisher::default(),
+        )
+        .unwrap_or_else(|error| panic!("{label}: crash {die_at} did not recover: {error}"));
         let settled = store.load(&id).unwrap_or_else(|error| {
             panic!("{label}: the store is unreadable after {die_at}: {error}")
         });
@@ -296,18 +312,22 @@ struct InterruptedRollback {
 impl OperationExecutor for InterruptedRollback {
     type Error = String;
 
-    fn prepare(&mut self, node: &TransactionNode) -> Result<(), String> {
+    fn prepare(&mut self, node: &DeploymentNode) -> Result<(), String> {
         self.inner.prepare(node)
     }
-    fn apply(&mut self, node: &TransactionNode) -> Result<OperationReceipt, String> {
-        self.inner.apply(node)
+    fn apply(
+        &mut self,
+        node: &DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, String> {
+        self.inner.apply(node, transaction)
     }
-    fn verify(&mut self, node: &TransactionNode, receipt: &OperationReceipt) -> Result<(), String> {
+    fn verify(&mut self, node: &DeploymentNode, receipt: &OperationReceipt) -> Result<(), String> {
         self.inner.verify(node, receipt)
     }
     fn rollback(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), String> {
         if self.crash {
@@ -317,14 +337,15 @@ impl OperationExecutor for InterruptedRollback {
     }
     fn reconcile(
         &mut self,
-        node: &TransactionNode,
+        node: &DeploymentNode,
         receipt: Option<&OperationReceipt>,
+        transaction: &zup_transaction::TransactionRecord,
     ) -> Result<zup_transaction::ReconcileResult, String> {
-        self.inner.reconcile(node, receipt)
+        self.inner.reconcile(node, receipt, transaction)
     }
     fn reconcile_rollback(
         &mut self,
-        _: &TransactionNode,
+        _: &DeploymentNode,
         _: &OperationReceipt,
     ) -> Result<zup_transaction::RollbackReconcileResult, String> {
         Ok(self.evidence)
@@ -356,7 +377,11 @@ fn interrupted_compensation_retains_receipts_and_requires_explicit_evidence(
     };
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            coordinator.execute(store.load(&id).unwrap(), &mut executor)
+            coordinator.execute(
+                store.load(&id).unwrap(),
+                &mut executor,
+                &common::Publisher::default(),
+            )
         }))
         .is_err()
     );
@@ -374,7 +399,12 @@ fn interrupted_compensation_retains_receipts_and_requires_explicit_evidence(
     if evidence == zup_transaction::RollbackReconcileResult::Retry {
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                recover(interrupted.clone(), &store, &mut executor)
+                recover(
+                    interrupted.clone(),
+                    &store,
+                    &mut executor,
+                    &common::Publisher::default(),
+                )
             }))
             .is_err(),
             "a second crash must leave the same durable compensation intent"
@@ -382,7 +412,13 @@ fn interrupted_compensation_retains_receipts_and_requires_explicit_evidence(
         assert_eq!(store.load(&id).unwrap().nodes, interrupted.nodes);
     }
     executor.crash = false;
-    let (record, outcome) = recover(store.load(&id).unwrap(), &store, &mut executor).unwrap();
+    let (record, outcome) = recover(
+        store.load(&id).unwrap(),
+        &store,
+        &mut executor,
+        &common::Publisher::default(),
+    )
+    .unwrap();
     assert_eq!(outcome, expected);
     assert_eq!(record.failure, original_failure);
     assert_settled(&record, outcome);

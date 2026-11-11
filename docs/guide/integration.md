@@ -6,11 +6,13 @@ Declare system integration as resources. Add only what the application owns.
 
 ```toml
 [[launchers]]
+id = "main"
 location = "menu"
 name = "Acme"
 target = "${install}/Acme.exe"
 
 [[launchers]]
+id = "desktop"
 location = "desktop"
 name = "Acme"
 target = "${install}/Acme.exe"
@@ -23,6 +25,7 @@ Locations are `menu` and `desktop`. Optional arguments and a working directory a
 
 ```toml
 [[path]]
+id = "cli-1"
 value = "${install}/bin"
 ```
 
@@ -32,9 +35,9 @@ Use PATH entries for command-line tools. Do not add an application directory to 
 
 ```toml
 [[services]]
-execution = { type = "windows", account = "local_service" }
+execution = { type = "windows_job", account = "local_service" }
 id = "acme-agent"
-name = "Acme Agent"
+display_name = "Acme Agent"
 binary = "${install}/acme-agent.exe"
 start = "automatic"
 ```

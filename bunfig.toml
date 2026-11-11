@@ -1,2 +1,7 @@
 [fmt]
-ignorePatterns = ["action/dist/**"]
+ignorePatterns = [
+  "action/dist/**",
+  "action/src/protocol.generated.ts",
+  "schema/automation-v1.schema.json",
+  "third-party/**",
+]

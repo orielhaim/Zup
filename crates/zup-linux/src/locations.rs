@@ -1,8 +1,9 @@
 use std::path::PathBuf;
+use zup_core::TargetPath;
 
 use crate::error::PathError;
 use zup_core::{InstallLocation, SelectedScope, Target};
-use zup_plan::{InstallLocationError, InstallLocationResolver, TargetPath};
+use zup_plan::{InstallLocationError, InstallLocationResolver};
 
 pub const MACHINE_PROGRAMS_ROOT: &str = "/opt";
 
@@ -25,6 +26,10 @@ pub struct MachineRoots {
 }
 
 impl MachineRoots {
+    pub fn application_state(&self, app: &zup_core::AppId) -> PathBuf {
+        self.state.join("apps").join(app.state_key().to_hex())
+    }
+
     pub fn production() -> Self {
         Self {
             programs: PathBuf::from(MACHINE_PROGRAMS_ROOT),

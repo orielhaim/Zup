@@ -1,8 +1,4 @@
-use crate::{
-    error::ExecError,
-    fs::OwnedDirectory,
-    service_ops::{ServicePayload, ServiceReceipt},
-};
+use crate::{error::ExecError, fs::OwnedDirectory};
 use std::{
     collections::BTreeMap,
     os::unix::fs::MetadataExt,
@@ -12,9 +8,8 @@ use std::{
 };
 use zup_core::{Privilege, ServiceStart};
 use zup_plan::{ObservedServiceState, OwnedResource, ServiceRuntimeState, ServiceState};
-use zup_transaction::{
-    NativeServiceManager, ServiceControlOperation, ServiceObservation, ServiceTerminalState,
-};
+use zup_plan::{ServiceControlOperation, ServiceTerminalState};
+use zup_transaction::{NativeServiceManager, ServiceObservation};
 
 fn refused(name: &str, reason: impl Into<String>) -> ExecError {
     ExecError::refused(name, reason)
@@ -29,11 +24,6 @@ fn state_marked(name: &str, state: &str) -> Result<bool, String> {
 }
 
 fn live_runtime_records(name: &str) -> Result<bool, String> {
-    if let Some(controller) = ControllerIdentity::read(name)?
-        && process_identity(controller.pid)?.is_some()
-    {
-        return Ok(true);
-    }
     if let Some(pid) = read_pid(&Path::new("/run").join(format!("{name}.pid")))?
         && process_identity(pid)?.is_some()
     {
@@ -45,12 +35,10 @@ fn live_runtime_records(name: &str) -> Result<bool, String> {
         Err(error) => return Err(error.to_string()),
         Ok(_) => trusted_directory(&options)?,
     }
-    for record in ["child_pid", "zup_pid"] {
-        if let Some(pid) = read_pid(&options.join(record))?
-            && process_identity(pid)?.is_some()
-        {
-            return Ok(true);
-        }
+    if let Some(pid) = read_pid(&options.join("child_pid"))?
+        && process_identity(pid)?.is_some()
+    {
+        return Ok(true);
     }
     Ok(false)
 }
@@ -83,87 +71,43 @@ pub struct Openrc {
     controller_binary: (u64, u64),
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ControllerIdentity {
-    instance: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeProcess {
     pid: u32,
     ticks: u64,
 }
 
-impl ControllerIdentity {
-    fn read(name: &str) -> Result<Option<Self>, String> {
-        let path = Path::new("/run/openrc").join(format!("supervise-{name}.identity"));
-        match std::fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.to_string()),
-            Ok(_) => {}
-        }
-        let record = trusted_value(&path)?;
-        let fields = record.split_ascii_whitespace().collect::<Vec<_>>();
-        let [instance, pid, ticks] = fields.as_slice() else {
-            return Err("invalid OpenRC controller identity".into());
-        };
-        if instance.len() != 32 || !instance.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("invalid OpenRC controller instance".into());
-        }
-        let pid = pid.parse::<u32>().map_err(|error| error.to_string())?;
-        let ticks = ticks.parse::<u64>().map_err(|error| error.to_string())?;
-        if pid <= 1 || ticks == 0 {
-            return Err("invalid OpenRC controller process generation".into());
-        }
-        Ok(Some(Self {
-            instance: instance.to_string(),
-            pid,
-            ticks,
-        }))
+impl NativeProcess {
+    fn observe(pid: u32) -> Result<Option<Self>, String> {
+        process_identity(pid)?
+            .map(|ticks| {
+                ticks
+                    .parse()
+                    .map(|ticks| Self { pid, ticks })
+                    .map_err(|error: std::num::ParseIntError| error.to_string())
+            })
+            .transpose()
+    }
+
+    fn unchanged(self) -> Result<bool, String> {
+        Ok(Self::observe(self.pid)? == Some(self))
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum ChildPhase {
-    Pending,
-    Running,
-    Reaped,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopeIdentity {
+    device: u64,
+    inode: u64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct ControllerChild {
-    pid: u32,
-    ticks: u64,
-    sequence: u64,
-    phase: ChildPhase,
-}
-
-impl ControllerChild {
-    fn read(name: &str, controller: &ControllerIdentity) -> Result<Self, String> {
-        let record =
-            trusted_value(&Path::new("/run/openrc").join(format!("supervise-{name}.child")))?;
-        let fields = record.split_ascii_whitespace().collect::<Vec<_>>();
-        let [instance, pid, ticks, sequence, phase] = fields.as_slice() else {
-            return Err("invalid OpenRC child identity".into());
-        };
-        if *instance != controller.instance {
-            return Err("OpenRC child belongs to another controller instance".into());
-        }
-        let pid = pid.parse::<u32>().map_err(|error| error.to_string())?;
-        let ticks = ticks.parse::<u64>().map_err(|error| error.to_string())?;
-        let sequence = sequence.parse::<u64>().map_err(|error| error.to_string())?;
-        if pid <= 1 || ticks == 0 || sequence == 0 {
-            return Err("invalid OpenRC child process generation".into());
-        }
-        let phase = match *phase {
-            "pending" => ChildPhase::Pending,
-            "running" => ChildPhase::Running,
-            "reaped" => ChildPhase::Reaped,
-            _ => return Err("invalid OpenRC child execution phase".into()),
-        };
-        Ok(Self {
-            pid,
-            ticks,
-            sequence,
-            phase,
-        })
-    }
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeExecution {
+    scope: ScopeIdentity,
+    supervisor: Option<NativeProcess>,
+    process: NativeProcess,
 }
 
 enum RuntimeSnapshotError {
@@ -196,22 +140,252 @@ fn process_snapshot<T>(
 }
 
 impl Openrc {
+    fn check_inhibited(&self, operation: &ServiceControlOperation) -> Result<(), String> {
+        let source = self
+            .definition(&operation.native_name)?
+            .ok_or("OpenRC definition disappeared")?;
+        if self.generation()? != operation.manager_generation
+            || self.configuration(&operation.native_name, &source)? != operation.configuration
+            || !matches!(
+                operation.configuration,
+                ServiceState::Registration {
+                    start: ServiceStart::Disabled,
+                    ..
+                }
+            )
+            || self.policy(&operation.native_name)? != "disabled"
+            || !self.inhibited(&operation.native_name)?
+        {
+            return Err("OpenRC stop requires the authenticated disabled registration".into());
+        }
+        Ok(())
+    }
+
+    fn drain_admission(
+        &self,
+        operation: &ServiceControlOperation,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        self.check_inhibited(operation)?;
+        let path = Path::new("/run/openrc/exclusive").join(&operation.native_name);
+        let parent =
+            OwnedDirectory::open(path.parent().unwrap()).map_err(|error| error.to_string())?;
+        let lease = match rustix::fs::openat(
+            parent.as_fd(),
+            operation.native_name.as_str(),
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(lease) => lease,
+            Err(rustix::io::Errno::NOENT) => return self.check_inhibited(operation),
+            Err(error) => return Err(error.to_string()),
+        };
+        let stat = rustix::fs::fstat(&lease).map_err(|error| error.to_string())?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
+            || stat.st_uid != 0
+            || stat.st_mode & 0o022 != 0
+        {
+            return Err("OpenRC native admission lease is untrusted".into());
+        }
+        loop {
+            match rustix::fs::flock(&lease, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => break,
+                Err(rustix::io::Errno::WOULDBLOCK) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(
+                            "OpenRC start admission did not drain before the stop deadline".into(),
+                        );
+                    }
+                    std::thread::park_timeout(Duration::from_millis(20));
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        // Native OpenRC unlinks this lease; the disabled native configuration is the persistent gate.
+        drop(lease);
+        self.check_inhibited(operation)
+    }
+
+    fn stop_native(
+        &self,
+        operation: &ServiceControlOperation,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        self.drain_admission(operation, deadline)?;
+        let name = &operation.native_name;
+        let scope = ProcessScope::observe(name)?;
+        let evidence =
+            serde_json::from_str::<NativeExecution>(&operation.before_execution_generation);
+        if !scope.populated && !live_runtime_records(name)? && evidence.is_err() {
+            return self.check_inhibited(operation);
+        }
+        let evidence =
+            evidence.map_err(|_| "OpenRC stop lacks authenticated native execution evidence")?;
+        if scope.identity() != Some(evidence.scope) {
+            return Err("OpenRC process scope differs from the journaled execution".into());
+        }
+        let directory =
+            OwnedDirectory::open(&Path::new("/sys/fs/cgroup").join(format!("openrc.{name}")))
+                .map_err(|error| error.to_string())?;
+        let held = directory.stat_self().map_err(|error| error.to_string())?;
+        if (ScopeIdentity {
+            device: held.dev,
+            inode: held.ino,
+        }) != evidence.scope
+        {
+            return Err("OpenRC process scope changed while being retained".into());
+        }
+        let native = evidence.supervisor.unwrap_or(evidence.process);
+        if let Some(current) = NativeProcess::observe(native.pid)? {
+            if current != native {
+                return Err("OpenRC native process identity was reused".into());
+            }
+            let pid =
+                rustix::process::Pid::from_raw(native.pid as i32).ok_or("invalid native PID")?;
+            let process = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::NONBLOCK)
+                .map_err(|error| error.to_string())?;
+            if !native.unchanged()? {
+                return Err("OpenRC native process changed while opening its pidfd".into());
+            }
+            scope
+                .verify_member(native.pid)
+                .map_err(|_| "OpenRC native process left its authenticated scope")?;
+            self.check_inhibited(operation)?;
+            rustix::process::pidfd_send_signal(&process, rustix::process::Signal::TERM)
+                .or_else(|error| {
+                    if error == rustix::io::Errno::SRCH {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            let ServiceState::Registration {
+                native_timeouts:
+                    zup_core::NativeServiceTimeouts::Openrc {
+                        stop_grace_seconds, ..
+                    },
+                ..
+            } = operation.configuration
+            else {
+                return Err("OpenRC stop requires native retry settings".into());
+            };
+            let grace = (std::time::Instant::now()
+                + Duration::from_secs(stop_grace_seconds.into()))
+            .min(deadline);
+            loop {
+                let mut waiting = [rustix::event::PollFd::new(
+                    &process,
+                    rustix::event::PollFlags::IN,
+                )];
+                if rustix::event::poll(
+                    &mut waiting,
+                    Some(&rustix::event::Timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    }),
+                )
+                .map_err(|error| error.to_string())?
+                    != 0
+                    || std::time::Instant::now() >= grace
+                {
+                    break;
+                }
+                std::thread::park_timeout(Duration::from_millis(20));
+            }
+        }
+        self.check_inhibited(operation)?;
+        if ProcessScope::observe(name)?.identity() != Some(evidence.scope) {
+            return Err("OpenRC scope changed before descendant termination".into());
+        }
+        let control = rustix::fs::openat(
+            directory.as_fd(),
+            "cgroup.kill",
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| error.to_string())?;
+        let stat = rustix::fs::fstat(&control).map_err(|error| error.to_string())?;
+        if stat.st_uid != 0 || stat.st_mode & 0o022 != 0 {
+            return Err("OpenRC cgroup termination control is delegated".into());
+        }
+        rustix::io::write(&control, b"1").map_err(|error| error.to_string())?;
+        loop {
+            let current = ProcessScope::observe(name)?;
+            if current.identity() != Some(evidence.scope) {
+                return Err("OpenRC scope changed during descendant termination".into());
+            }
+            if !current.populated && !live_runtime_records(name)? {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(
+                    "OpenRC native scope did not become empty before the stop deadline".into(),
+                );
+            }
+            std::thread::park_timeout(Duration::from_millis(20));
+        }
+        self.check_inhibited(operation)?;
+        let run = OwnedDirectory::open(Path::new("/run")).map_err(|error| error.to_string())?;
+        let pid_name = format!("{name}.pid");
+        if run
+            .kind_or_absent(&pid_name)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            let held = run
+                .stream_regular(&pid_name)
+                .map_err(|error| error.to_string())?;
+            if held.uid != 0
+                || held.mode & 0o022 != 0
+                || held.size > 256
+                || read_pid(&Path::new("/run").join(&pid_name))? != Some(native.pid)
+                || NativeProcess::observe(native.pid)?.is_some()
+                || run
+                    .stat_child(&pid_name)
+                    .map_err(|error| error.to_string())?
+                    .object()
+                    != held.object()
+            {
+                return Err(
+                    "OpenRC stopped pidfile no longer identifies its terminated native process"
+                        .into(),
+                );
+            }
+            run.remove_file(&pid_name)
+                .map_err(|error| error.to_string())?;
+            run.sync().map_err(|error| error.to_string())?;
+        }
+        self.check_inhibited(operation)?;
+        self.command(
+            "/sbin/rc-service",
+            &["--nodeps", name, "zap"],
+            deadline
+                .checked_duration_since(std::time::Instant::now())
+                .ok_or("OpenRC stop deadline expired")?,
+        )?;
+        self.check_inhibited(operation)
+    }
+
     pub fn snapshot(
         &self,
-        target: &zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        target: &zup_plan::BoundDeployment,
     ) -> Result<Vec<zup_plan::ObservedService>, String> {
         target
             .services
             .iter()
             .map(|service| {
-                let name = crate::openrc::service_name(&service.id);
-                if service.name.as_str() != name {
-                    return Err("resolved service manager differs from active OpenRC".into());
-                }
+                let name = service.name.to_string();
+                let state = self.observe_registration(&name)?;
                 Ok(zup_plan::ObservedService {
+                    registration: if state == ObservedServiceState::Absent {
+                        zup_core::ObservedServiceRegistration::Unclaimed
+                    } else {
+                        zup_core::ObservedServiceRegistration::SourceFile
+                    },
                     key: service.key.clone(),
                     id: service.id.clone(),
-                    state: self.observe_registration(&name)?,
+                    state,
                 })
             })
             .collect()
@@ -220,9 +394,9 @@ impl Openrc {
     pub fn compile(
         &mut self,
         execution: &zup_plan::ExecutionPlan,
-        target: Option<&zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-        ledger: Option<&zup_plan::InstallLedger>,
-    ) -> Result<zup_transaction::TransactionInput, String> {
+        target: Option<&zup_plan::BoundDeployment>,
+        ledger: Option<&zup_plan::InstallationRecord>,
+    ) -> Result<zup_plan::DeploymentEffects, String> {
         if execution
             .validate_desired(target)
             .map_err(|error| error.to_string())?
@@ -235,17 +409,17 @@ impl Openrc {
         files.services.clear();
         files
             .removals
-            .retain(|removal| !matches!(removal.owned, OwnedResource::Service { .. }));
+            .retain(|removal| !matches!(removal.owned, OwnedResource::Service(_)));
         let mut input =
             crate::input::compile_files_only(&files, target).map_err(|error| error.to_string())?;
         let target_files: BTreeMap<_, _> = target
             .into_iter()
             .flat_map(|target| &target.files)
-            .map(|file| (file.destination.to_string(), file.executable))
+            .map(|file| (file.destination().to_string(), file.executable))
             .collect();
         let affected = execution.affected_services(ledger);
         for service in &execution.services {
-            let name = crate::openrc::resource_name(&service.key)?;
+            let name = service.name.clone();
             if service.previous == ObservedServiceState::Absent {
                 ensure_absent_runtime(&name)?;
             } else {
@@ -262,7 +436,7 @@ impl Openrc {
                 false,
             )
             .map_err(|error| error.to_string())?;
-            let owned = ledger.and_then(|ledger| ledger.resources.get(&service.key));
+            let owned = ledger.and_then(|ledger| ledger.current.resources.get(&service.key));
             if (affected.contains(&service.key) || service.preserves_runtime())
                 && (owned.is_some() || service.previous == ObservedServiceState::Absent)
             {
@@ -275,19 +449,15 @@ impl Openrc {
                 };
                 input
                     .service_controls
-                    .extend(zup_transaction::plan_service_controls(
+                    .extend(zup_plan::plan_service_controls(
                         service,
                         owned,
                         affected.contains(&service.key),
                         name.clone(),
                         self.generation()?,
                         generation,
+                        zup_plan::ServiceScopeObservation::NativeManager,
                     )?);
-            }
-            if service.kind == zup_plan::IntegrationChangeKind::NoOp
-                && !affected.contains(&service.key)
-            {
-                continue;
             }
             if matches!(
                 service.kind,
@@ -308,31 +478,55 @@ impl Openrc {
             {
                 return Err("OpenRC registration changed after observation".into());
             }
-            input.backend_operations.push(
-                crate::service_exec::apply_operation(
-                    service,
-                    &name,
-                    &bytes,
-                    true,
-                    self.policy(&name)?,
-                    previous_source.as_deref(),
-                )
-                .map_err(|error| error.to_string())?,
-            );
+            let source_key = zup_core::ResourceKey::File {
+                id: zup_core::FileResourceId::Native {
+                    id: zup_core::NativeFileId::ServiceSource {
+                        id: zup_core::ServiceId::new(&service.id)
+                            .map_err(|error| error.to_string())?,
+                    },
+                },
+            };
+            let source = input
+                .files
+                .iter()
+                .find(|file| file.key == source_key)
+                .ok_or("OpenRC source is missing its owned file effect")?;
+            if source.destination.as_str() != Self::source(&name)?.to_string_lossy()
+                || source.expected_sha256 != zup_core::hash_bytes(&bytes)
+                || source.expected_size != bytes.len() as u64
+                || !source.executable
+            {
+                return Err("OpenRC source file differs from its native declaration".into());
+            }
+            let mut service = service.clone();
+            service.lifecycle = service.lifecycle.resolved(&service.execution);
+            input
+                .native_services
+                .push(zup_plan::NativeServiceOperation::Configure {
+                    service: Box::new(service),
+                    previous: match owned {
+                        Some(OwnedResource::Service(service)) => Some(Box::new(service.clone())),
+                        None => None,
+                        _ => return Err("OpenRC service ownership type mismatch".into()),
+                    },
+                    activation: zup_plan::ServiceActivation::Declared,
+                });
         }
         for removal in &execution.removals {
-            let OwnedResource::Service {
-                timeouts,
-                installed,
-                name,
-                privilege,
-                ..
-            } = &removal.owned
+            let OwnedResource::Service(
+                owned_service @ zup_plan::OwnedService {
+                    timeouts,
+                    installed,
+                    name,
+                    privilege,
+                    ..
+                },
+            ) = &removal.owned
             else {
                 continue;
             };
             if *privilege != Privilege::System
-                || crate::openrc::resource_name(&removal.key)? != *name
+                || !crate::openrc::valid_name(name)
                 || self.observe_registration(name)?.configuration().as_ref() != Some(installed)
             {
                 return Err("OpenRC removal ownership changed".into());
@@ -344,14 +538,15 @@ impl Openrc {
             match runtime {
                 ServiceRuntimeState::Running | ServiceRuntimeState::Stopped => {
                     input.service_controls.push(ServiceControlOperation {
-                        intent: zup_transaction::ServiceControlIntent::Transition,
+                        requires_files: owned_service.requires_files.clone(),
+                        registration: zup_core::NativeServiceRegistration::SourceFile,
+                        intent: zup_plan::ServiceControlIntent::Transition,
                         key: removal.key.clone(),
                         native_name: name.clone(),
                         privilege: *privilege,
-                        stage: zup_transaction::ServiceControlStage::Quiesce,
+                        stage: zup_plan::ServiceControlStage::Quiesce,
                         before_configuration: installed.as_ref().clone(),
-                        configuration: zup_transaction::disabled_startup(installed)
-                            .expect("registration"),
+                        configuration: zup_plan::disabled_startup(installed).expect("registration"),
                         owned_configuration: installed.as_ref().clone(),
                         before: if runtime == ServiceRuntimeState::Running {
                             ServiceTerminalState::Running
@@ -361,6 +556,7 @@ impl Openrc {
                         after: ServiceTerminalState::Stopped,
                         manager_generation: self.generation()?,
                         before_execution_generation: generation,
+                        process_scope: zup_plan::ServiceScopeObservation::NativeManager,
                         timeouts: *timeouts,
                         dependencies: Vec::new(),
                     })
@@ -371,24 +567,30 @@ impl Openrc {
                     );
                 }
             }
-            let operation = crate::service_exec::remove_operation(
-                &removal.key,
-                name,
-                &removal.owned,
-                removal.privilege,
-            )
-            .map_err(|error| error.to_string())?;
-            input.retired_keys.push(operation.key.clone());
-            input.backend_operations.push(operation);
+            input.retired_keys.push(removal.key.clone());
+            input
+                .native_services
+                .push(zup_plan::NativeServiceOperation::Remove {
+                    key: removal.key.clone(),
+                    service: Box::new(owned_service.clone()),
+                    activation: zup_plan::ServiceActivation::Declared,
+                });
         }
-        zup_transaction::bind_service_dependencies(&mut input.service_controls, execution, ledger)?;
-        crate::service_ops::bind_startup_inhibition(&mut input)
+        zup_plan::bind_service_dependencies(&mut input.service_controls, execution, ledger)?;
+        crate::service_ops::bind_startup_inhibition(&mut input);
+        input
+            .bind_generations(target)
             .map_err(|error| error.to_string())?;
         Ok(input)
     }
 
     pub fn connect(roots: crate::locations::MachineRoots) -> Result<Self, String> {
         crate::service_host::validate_init_view()?;
+        let _process = rustix::process::pidfd_open(
+            rustix::process::getpid(),
+            rustix::process::PidfdFlags::NONBLOCK,
+        )
+        .map_err(|error| format!("OpenRC deployment requires kernel pidfds: {error}"))?;
         if !active() {
             return Err("an active OpenRC init environment is required".into());
         }
@@ -411,17 +613,6 @@ impl Openrc {
             roots,
             controller_binary: (binary.dev(), binary.ino()),
         };
-        if manager
-            .command(
-                "/sbin/supervise-daemon",
-                &["--control-features"],
-                Duration::from_secs(5),
-            )?
-            .trim()
-            != "pidfd-control-v1"
-        {
-            return Err("OpenRC requires the pinned pidfd-control-v1 native controller".into());
-        }
         manager.generation()?;
         Ok(manager)
     }
@@ -440,10 +631,10 @@ impl Openrc {
         )
         .map_err(|error| error.to_string())?;
         if (binary.dev(), binary.ino()) != self.controller_binary {
-            return Err("OpenRC native controller changed after capability negotiation".into());
+            return Err("OpenRC native supervisor changed after validation".into());
         }
         Ok(format!(
-            "openrc:{}:{init}:{}:{}:pidfd-control-v1",
+            "openrc:{}:{init}:{}:{}",
             boot.trim(),
             binary.dev(),
             binary.ino()
@@ -460,20 +651,17 @@ impl Openrc {
     fn definition(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
         trusted_directory(Path::new("/etc/init.d"))?;
         let path = Self::source(name)?;
-        for override_path in [
-            Path::new("/etc/conf.d").join(name),
-            Path::new("/etc/init.d").join(format!("{name}.options")),
-        ] {
-            match std::fs::symlink_metadata(&override_path) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => {
-                    return Err(format!(
-                        "foreign OpenRC configuration override at {}",
-                        override_path.display()
-                    ));
-                }
+        let override_path = Path::new("/etc/init.d").join(format!("{name}.options"));
+        match std::fs::symlink_metadata(&override_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(format!(
+                    "foreign OpenRC configuration override at {}",
+                    override_path.display()
+                ));
             }
         }
+        self.inhibited(name)?;
         let source =
             crate::service_ops::read_canonical_source(&path).map_err(|error| error.to_string())?;
         if source.is_some() {
@@ -486,6 +674,75 @@ impl Openrc {
             }
         }
         Ok(source)
+    }
+
+    fn inhibited(&self, name: &str) -> Result<bool, String> {
+        trusted_directory(Path::new("/etc/conf.d"))?;
+        let path = Path::new("/etc/conf.d").join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.to_string()),
+            Ok(_) => {
+                if trusted_value(&path)? != "zup_disabled=yes\n" {
+                    return Err("foreign OpenRC configuration override".into());
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    fn configuration(&self, name: &str, source: &[u8]) -> Result<ServiceState, String> {
+        let mut state = crate::openrc::parse(name, source)?;
+        if let ServiceState::Registration { start, .. } = &mut state {
+            *start = if self.inhibited(name)? {
+                if self.policy(name)? != "disabled" {
+                    return Err("inhibited OpenRC service remains enabled".into());
+                }
+                ServiceStart::Disabled
+            } else if self.policy(name)? == "enabled" {
+                ServiceStart::Automatic
+            } else {
+                ServiceStart::Manual
+            };
+        }
+        Ok(state)
+    }
+
+    fn set_activation(&self, name: &str, configuration: &ServiceState) -> Result<(), String> {
+        let start = match configuration {
+            ServiceState::Registration { start, .. } => *start,
+            ServiceState::Absent => ServiceStart::Manual,
+        };
+        let inhibited = self.inhibited(name)?;
+        let directory =
+            OwnedDirectory::open(Path::new("/etc/conf.d")).map_err(|error| error.to_string())?;
+        if start == ServiceStart::Disabled && !inhibited {
+            directory
+                .create_durable_exclusive(
+                    name,
+                    b"zup_disabled=yes\n",
+                    rustix::fs::Mode::from_bits_truncate(0o644),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        self.set_policy(
+            name,
+            if start == ServiceStart::Automatic {
+                "enabled"
+            } else {
+                "disabled"
+            },
+        )?;
+        if start != ServiceStart::Disabled && inhibited {
+            if !self.inhibited(name)? {
+                return Err("OpenRC inhibition changed before removal".into());
+            }
+            directory
+                .remove_file(name)
+                .map_err(|error| error.to_string())?;
+            directory.sync().map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn policy(&self, name: &str) -> Result<&'static str, String> {
@@ -521,17 +778,18 @@ impl Openrc {
 
     pub fn observe_registration(&self, name: &str) -> Result<ObservedServiceState, String> {
         let Some(bytes) = self.definition(name)? else {
-            if self.policy(name)? != "disabled" {
-                return Err("orphaned OpenRC runlevel entry".into());
+            if self.policy(name)? != "disabled" || self.inhibited(name)? {
+                return Err("orphaned OpenRC activation resource".into());
             }
             ensure_absent_runtime(name)?;
             return Ok(ObservedServiceState::Absent);
         };
-        let state = match crate::openrc::parse(name, &bytes) {
+        let state = match self.configuration(name, &bytes) {
             Ok(state) => state,
             Err(_) => return Ok(ObservedServiceState::InvalidService),
         };
         let ServiceState::Registration {
+            state_directories,
             native_timeouts,
             execution,
             failure,
@@ -554,6 +812,7 @@ impl Openrc {
         }
         let runtime_state = Some(self.runtime(name, &command)?.0);
         Ok(ObservedServiceState::Service {
+            state_directories,
             native_timeouts,
             execution,
             failure,
@@ -569,7 +828,7 @@ impl Openrc {
     fn runtime(
         &self,
         name: &str,
-        command: &zup_plan::CommandSpec,
+        command: &zup_core::CommandSpec,
     ) -> Result<(ServiceRuntimeState, String), String> {
         for _ in 0..3 {
             match self.runtime_snapshot(name, command) {
@@ -584,7 +843,7 @@ impl Openrc {
     fn runtime_snapshot(
         &self,
         name: &str,
-        command: &zup_plan::CommandSpec,
+        command: &zup_core::CommandSpec,
     ) -> Result<(ServiceRuntimeState, String), RuntimeSnapshotError> {
         for (directory, state) in [
             ("starting", ServiceRuntimeState::StartPending),
@@ -595,50 +854,72 @@ impl Openrc {
             }
         }
         let scope = ProcessScope::observe(name)?;
-        let Some(controller) = ControllerIdentity::read(name)? else {
+        let source = self
+            .definition(name)?
+            .ok_or("OpenRC definition disappeared")?;
+        let ServiceState::Registration {
+            execution, failure, ..
+        } = crate::openrc::parse(name, &source)?
+        else {
+            unreachable!()
+        };
+        let pidfile = Path::new("/run").join(format!("{name}.pid"));
+        let Some(native_pid) = read_pid(&pidfile)? else {
             if scope.populated || live_runtime_records(name)? {
-                return Err("OpenRC runtime lacks its private controller identity".into());
+                return Err("OpenRC process scope lacks native launch evidence".into());
             }
             return Ok((ServiceRuntimeState::Stopped, "stopped".into()));
         };
-        let supervisor_pid = controller.pid;
-        if process_identity(supervisor_pid)?.as_deref() != Some(&controller.ticks.to_string()) {
+        let Some(native) = NativeProcess::observe(native_pid)? else {
             if scope.populated || live_runtime_records(name)? {
-                return Err("OpenRC controller exited while its process scope remains live".into());
+                return Err(
+                    "OpenRC native launcher exited while its process scope remains live".into(),
+                );
             }
             return Ok((ServiceRuntimeState::Stopped, "stopped".into()));
-        }
-        let supervisor =
-            process_snapshot(|| std::fs::metadata(format!("/proc/{supervisor_pid}/exe")))?;
-        let expected = std::fs::metadata(
-            crate::prerequisites::trusted_executable("/sbin/supervise-daemon")
-                .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        if (supervisor.dev(), supervisor.ino()) != (expected.dev(), expected.ino()) {
-            return Err("OpenRC controller executable identity changed".into());
-        }
-        scope.verify_member(supervisor_pid)?;
-        let child = ControllerChild::read(name, &controller)?;
-        if child.phase != ChildPhase::Running {
-            return Ok((ServiceRuntimeState::StartPending, "pending".into()));
-        }
-        let pid = child.pid;
-        let Some(generation) = process_identity(pid)? else {
-            return Err(RuntimeSnapshotError::Changed);
         };
-        if generation != child.ticks.to_string() {
-            return Err("OpenRC child process generation was replaced".into());
-        }
-        let stat = process_snapshot(|| std::fs::read_to_string(format!("/proc/{pid}/stat")))?;
-        if stat
-            .rsplit_once(") ")
-            .and_then(|(_, fields)| fields.split_ascii_whitespace().nth(1))
-            .and_then(|parent| parent.parse::<u32>().ok())
-            != Some(supervisor_pid)
-        {
-            return Err("OpenRC child no longer belongs to its controller".into());
-        }
+        let supervisor = match failure {
+            zup_core::ServiceFailurePolicy::None => None,
+            zup_core::ServiceFailurePolicy::Openrc { .. } => Some(native),
+            _ => return Err("OpenRC native launch policy is invalid".into()),
+        };
+        let process = if let Some(supervisor) = supervisor {
+            let live =
+                process_snapshot(|| std::fs::metadata(format!("/proc/{}/exe", supervisor.pid)))?;
+            let expected = std::fs::metadata(
+                crate::prerequisites::trusted_executable("/sbin/supervise-daemon")
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            if (live.dev(), live.ino()) != (expected.dev(), expected.ino()) {
+                return Err("OpenRC supervisor executable identity changed".into());
+            }
+            scope.verify_member(supervisor.pid)?;
+            let Some(pid) = read_pid(
+                &Path::new("/run/openrc/options")
+                    .join(name)
+                    .join("child_pid"),
+            )?
+            else {
+                return Ok((ServiceRuntimeState::StartPending, "pending".into()));
+            };
+            let Some(child) = NativeProcess::observe(pid)? else {
+                return Ok((ServiceRuntimeState::StartPending, "pending".into()));
+            };
+            let stat = process_snapshot(|| std::fs::read_to_string(format!("/proc/{pid}/stat")))?;
+            if stat
+                .rsplit_once(") ")
+                .and_then(|(_, fields)| fields.split_ascii_whitespace().nth(1))
+                .and_then(|parent| parent.parse::<u32>().ok())
+                != Some(supervisor.pid)
+            {
+                return Err("OpenRC child no longer belongs to its native supervisor".into());
+            }
+            child
+        } else {
+            native
+        };
+        let pid = process.pid;
         let executable = crate::lowering::to_host_path(&command.executable)
             .map_err(|error| error.to_string())?;
         let live = process_snapshot(|| std::fs::metadata(format!("/proc/{pid}/exe")))?;
@@ -646,13 +927,6 @@ impl Openrc {
         if (live.dev(), live.ino()) != (expected.dev(), expected.ino()) {
             return Err("OpenRC process identity differs from the authorized executable".into());
         }
-        let source = self
-            .definition(name)?
-            .ok_or("OpenRC definition disappeared")?;
-        let ServiceState::Registration { execution, .. } = crate::openrc::parse(name, &source)?
-        else {
-            unreachable!()
-        };
         let (uid, gid) = execution_ids(&execution)?;
         let status = process_snapshot(|| std::fs::read_to_string(format!("/proc/{pid}/status")))?;
         for (field, expected) in [("Uid:", uid), ("Gid:", gid)] {
@@ -677,16 +951,24 @@ impl Openrc {
         }) {
             return Err("OpenRC process lacks NoNewPrivileges".into());
         }
-        scope.verify_member(supervisor_pid)?;
+        if let Some(supervisor) = supervisor {
+            scope.verify_member(supervisor.pid)?;
+        }
         scope.verify_member(pid)?;
         if ProcessScope::observe(name)? != scope {
             return Err(RuntimeSnapshotError::Changed);
         }
         let final_image = process_snapshot(|| std::fs::metadata(format!("/proc/{pid}/exe")))?;
-        if process_identity(pid)?.as_ref() != Some(&generation)
-            || ControllerIdentity::read(name)?.as_ref() != Some(&controller)
-            || ControllerChild::read(name, &controller)? != child
-            || process_identity(supervisor_pid)?.as_deref() != Some(&controller.ticks.to_string())
+        if !process.unchanged()?
+            || !native.unchanged()?
+            || read_pid(&pidfile)? != Some(native_pid)
+            || supervisor.is_some()
+                && read_pid(
+                    &Path::new("/run/openrc/options")
+                        .join(name)
+                        .join("child_pid"),
+                )? != Some(pid)
+            || self.definition(name)?.as_deref() != Some(source.as_slice())
         {
             return Err(RuntimeSnapshotError::Changed);
         }
@@ -700,15 +982,14 @@ impl Openrc {
             } else {
                 ServiceRuntimeState::Unknown
             },
-            format!(
-                "{}:{}:{supervisor_pid}:{}:{pid}:{generation}:{}",
-                scope
-                    .inode
+            serde_json::to_string(&NativeExecution {
+                scope: scope
+                    .identity()
                     .ok_or("OpenRC runtime lacks its native process scope")?,
-                controller.instance,
-                controller.ticks,
-                child.sequence
-            ),
+                supervisor,
+                process,
+            })
+            .map_err(|error| error.to_string())?,
         ))
     }
 
@@ -789,308 +1070,254 @@ impl Openrc {
         Ok(())
     }
 
-    pub fn prepare(&self, payload: &ServicePayload) -> Result<(), ExecError> {
-        let (name, state) = payload_state(payload)?;
-        if crate::openrc::render(name, &state).is_err() {
-            return Err(refused(name, "unsupported OpenRC registration"));
-        }
-        if let ServiceState::Registration { execution, .. } = &state {
-            execution_ids(execution).map_err(|reason| refused(name, reason))?;
-        }
-        if self
-            .definition(name)
-            .map_err(|reason| refused(name, reason))?
-            .is_none()
-        {
-            ensure_absent_runtime(name).map_err(|reason| refused(name, reason))?;
-        } else {
-            ProcessScope::observe(name).map_err(|reason| refused(name, reason))?;
-        }
-        self.policy(name).map_err(|reason| refused(name, reason))?;
-        self.generation().map_err(|reason| refused(name, reason))?;
-        Ok(())
-    }
-
-    pub fn apply(&mut self, payload: &ServicePayload) -> Result<ServiceReceipt, ExecError> {
-        self.prepare(payload)?;
-        let (name, state) = payload_state(payload)?;
-        let previous_source = self
-            .definition(name)
-            .map_err(|reason| refused(name, reason))?;
-        let previous_policy = self
-            .policy(name)
-            .map_err(|reason| refused(name, reason))?
-            .to_owned();
-        let installed_policy;
-        let installed_source;
-        match payload {
-            ServicePayload::Apply {
-                service,
-                unit_bytes,
-                previous_source: expected_source,
-                previous_policy: expected_policy,
-                ..
-            } => {
-                if previous_source != *expected_source || previous_policy != *expected_policy {
-                    return Err(refused(name, "OpenRC definition changed after planning"));
-                }
-                if crate::openrc::render(name, &state).map_err(|reason| refused(name, reason))?
-                    != *unit_bytes
-                {
-                    return Err(refused(
-                        name,
-                        "OpenRC payload differs from authorized configuration",
-                    ));
-                }
-                crate::service_ops::validate_executable_live(&service.command, &self.roots, 0)?;
-                let desired_policy = if service.start == ServiceStart::Automatic {
-                    "enabled"
-                } else {
-                    "disabled"
-                };
-                if previous_source.as_deref() == Some(unit_bytes)
-                    && previous_policy == desired_policy
-                {
-                    let digest = zup_core::hash_bytes(unit_bytes).to_hex();
-                    return Ok(ServiceReceipt {
-                        unit: name.into(),
-                        previous_source_sha256: Some(digest.clone()),
-                        installed_source_sha256: Some(digest),
-                        previous_policy,
-                        installed_policy: desired_policy.into(),
-                        reloaded: false,
-                        changes: Vec::new(),
-                    });
-                }
-                if !service.preserves_runtime() {
-                    self.ensure_stopped(name, &state)
-                        .map_err(|reason| refused(name, reason))?;
-                }
-                let directory = OwnedDirectory::open(Path::new("/etc/init.d"))?;
-                if previous_source.is_none() {
-                    directory.create_durable_exclusive(
-                        name,
-                        unit_bytes,
-                        rustix::fs::Mode::from_bits_truncate(0o755),
-                    )?;
-                } else {
-                    directory.write_durable(
-                        name,
-                        unit_bytes,
-                        rustix::fs::Mode::from_bits_truncate(0o755),
-                    )?;
-                }
-                installed_policy = if service.start == ServiceStart::Automatic {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
-                .to_owned();
-                self.set_policy(name, &installed_policy)
-                    .map_err(|reason| refused(name, reason))?;
-                installed_source = Some(zup_core::hash_bytes(unit_bytes).to_hex());
-            }
-            ServicePayload::Remove { owned, .. } => {
-                let OwnedResource::Service { installed, .. } = owned.as_ref() else {
-                    return Err(refused(name, "owned OpenRC registration required"));
-                };
-                if self
-                    .observe_registration(name)
-                    .map_err(|reason| refused(name, reason))?
-                    .configuration()
-                    .as_ref()
-                    != Some(installed)
-                {
-                    return Err(refused(name, "OpenRC registration differs from its owner"));
-                }
-                self.ensure_stopped(name, installed)
-                    .map_err(|reason| refused(name, reason))?;
-                self.set_policy(name, "disabled")
-                    .map_err(|reason| refused(name, reason))?;
-                let directory = OwnedDirectory::open(Path::new("/etc/init.d"))?;
-                directory.remove_file(name)?;
-                directory.sync()?;
-                installed_policy = "disabled".into();
-                installed_source = None;
-            }
-        }
-        Ok(ServiceReceipt {
-            unit: name.into(),
-            previous_source_sha256: previous_source
-                .as_ref()
-                .map(|bytes| zup_core::hash_bytes(bytes).to_hex()),
-            installed_source_sha256: installed_source,
-            previous_policy,
-            installed_policy,
-            reloaded: false,
-            changes: Vec::new(),
-        })
-    }
-
-    pub fn verify(&self, receipt: &ServiceReceipt) -> Result<(), ExecError> {
-        if self
-            .definition(&receipt.unit)
-            .map_err(|reason| refused(&receipt.unit, reason))?
-            .as_ref()
-            .map(|bytes| zup_core::hash_bytes(bytes).to_hex())
-            != receipt.installed_source_sha256
-            || self
-                .policy(&receipt.unit)
-                .map_err(|reason| refused(&receipt.unit, reason))?
-                != receipt.installed_policy
-        {
-            return Err(refused(
-                &receipt.unit,
-                "OpenRC registration changed after execution",
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn reconcile(
+    pub fn prepare_registration(
         &self,
-        payload: &ServicePayload,
-        receipt: Option<&ServiceReceipt>,
-    ) -> Result<zup_transaction::ReconcileResult, ExecError> {
-        use zup_transaction::ReconcileResult;
-        if let Some(receipt) = receipt {
-            return Ok(if self.verify(receipt).is_ok() {
-                ReconcileResult::Applied
-            } else {
-                ReconcileResult::Ambiguous
-            });
-        }
-        let (name, state) = payload_state(payload)?;
-        let current = self
-            .definition(name)
-            .map_err(|reason| refused(name, reason))?;
-        let policy = self.policy(name).map_err(|reason| refused(name, reason))?;
-        match payload {
-            ServicePayload::Apply {
-                previous_source,
-                previous_policy,
-                unit_bytes,
-                ..
-            } => {
-                if current == *previous_source && policy == previous_policy {
-                    return Ok(ReconcileResult::NotApplied);
-                }
-                if previous_source.is_some()
-                    && current.as_deref() == Some(unit_bytes)
-                    && policy
-                        == if matches!(
-                            state,
-                            ServiceState::Registration {
-                                start: ServiceStart::Automatic,
-                                ..
-                            }
-                        ) {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        }
-                {
-                    let receipt = ServiceReceipt {
-                        unit: name.into(),
-                        previous_source_sha256: previous_source
-                            .as_ref()
-                            .map(|bytes| zup_core::hash_bytes(bytes).to_hex()),
-                        installed_source_sha256: Some(zup_core::hash_bytes(unit_bytes).to_hex()),
-                        previous_policy: previous_policy.clone(),
-                        installed_policy: policy.into(),
-                        reloaded: false,
-                        changes: Vec::new(),
-                    };
-                    return Ok(ReconcileResult::AppliedWithReceipt(
-                        zup_transaction::OperationReceipt::Backend {
-                            key: crate::service_ops::backend_key_for_unit(name),
-                            payload: serde_json::to_vec(&receipt)
-                                .map_err(|error| refused(name, error.to_string()))?,
-                        },
-                    ));
-                }
-            }
-            ServicePayload::Remove { .. }
-                if current.as_ref()
-                    == Some(
-                        &crate::openrc::render(name, &state)
-                            .map_err(|reason| refused(name, reason))?,
-                    ) =>
-            {
-                return Ok(ReconcileResult::NotApplied);
-            }
-            _ => {}
-        }
-        Ok(ReconcileResult::Ambiguous)
-    }
-
-    pub fn rollback(
-        &mut self,
-        payload: &ServicePayload,
-        receipt: &ServiceReceipt,
+        operation: &zup_plan::NativeServiceOperation,
     ) -> Result<(), ExecError> {
-        self.verify(receipt)?;
-        let (name, state) = payload_state(payload)?;
-        if name != receipt.unit {
-            return Err(refused(name, "OpenRC rollback receipt identity mismatch"));
-        }
-        let preserve_runtime = matches!(payload,
-            ServicePayload::Apply { service, .. } if service.preserves_runtime());
-        if !preserve_runtime {
-            self.ensure_stopped(name, &state)
-                .map_err(|reason| refused(name, reason))?;
-        }
-        let previous = match payload {
-            ServicePayload::Apply {
-                previous_source, ..
-            } => previous_source.clone(),
-            ServicePayload::Remove { .. } => {
-                Some(crate::openrc::render(name, &state).map_err(|reason| refused(name, reason))?)
-            }
-        };
-        if previous
-            .as_ref()
-            .map(|bytes| zup_core::hash_bytes(bytes).to_hex())
-            != receipt.previous_source_sha256
-        {
+        let name = operation.native_name().to_owned();
+        if !crate::openrc::valid_name(&name) || operation.privilege() != Privilege::System {
             return Err(refused(
-                name,
-                "OpenRC rollback source does not match durable receipt",
+                &name,
+                "OpenRC native registration authority mismatch",
             ));
         }
-        let directory = OwnedDirectory::open(Path::new("/etc/init.d"))?;
-        match previous {
-            Some(bytes) => {
-                directory.write_durable(
-                    name,
-                    &bytes,
-                    rustix::fs::Mode::from_bits_truncate(0o755),
-                )?;
-                self.set_policy(name, &receipt.previous_policy)
-                    .map_err(|reason| refused(name, reason))?;
-            }
-            None => {
-                self.set_policy(name, "disabled")
-                    .map_err(|reason| refused(name, reason))?;
-                directory.remove_file(name)?;
-                directory.sync()?;
+        for state in operation
+            .configurations()
+            .0
+            .iter()
+            .chain(std::iter::once(&operation.configurations().1))
+        {
+            if let ServiceState::Registration { execution, .. } = state
+                && !matches!(execution, zup_core::ServiceExecution::OpenrcUser { .. })
+            {
+                return Err(refused(&name, "OpenRC execution identity required"));
             }
         }
-        if self
-            .definition(name)
-            .map_err(|reason| refused(name, reason))?
-            .as_ref()
-            .map(|bytes| zup_core::hash_bytes(bytes).to_hex())
-            != receipt.previous_source_sha256
-            || self.policy(name).map_err(|reason| refused(name, reason))? != receipt.previous_policy
-        {
-            return Err(refused(name, "OpenRC rollback failed verification"));
+        self.definition(&name)
+            .map_err(|reason| refused(&name, reason))?;
+        self.generation().map_err(|reason| refused(&name, reason))?;
+        Ok(())
+    }
+
+    fn registration_source(&self, name: &str, state: &ServiceState) -> Result<(), String> {
+        let expected = match state {
+            ServiceState::Absent => None,
+            _ => Some(crate::openrc::render(name, state)?),
+        };
+        if self.definition(name)? != expected {
+            return Err("OpenRC source differs from the owned file effect".into());
         }
         Ok(())
+    }
+
+    fn configure_registration(
+        &self,
+        operation: &zup_plan::NativeServiceOperation,
+        desired: &ServiceState,
+    ) -> Result<(), String> {
+        let name = operation.native_name().to_owned();
+        self.registration_source(&name, desired)?;
+        let generation = self.generation()?;
+        let preserving = operation.configurations().0.as_ref().is_some_and(|before| {
+            *desired != ServiceState::Absent && desired.update_from(before).preserves_runtime()
+        });
+        let runtime = if let ServiceState::Registration { command, .. } = desired {
+            crate::service_ops::validate_executable_live(command, &self.roots, 0)
+                .map_err(|error| error.to_string())?;
+            let path = crate::lowering::to_host_path(&command.executable)
+                .map_err(|error| error.to_string())?;
+            let (directory, child) =
+                crate::fs::open_parent(&path).map_err(|error| error.to_string())?;
+            crate::openrc::validate_executable(
+                &directory
+                    .read_regular(&child)
+                    .map_err(|error| error.to_string())?,
+                command.executable.target(),
+            )?;
+            let current = self.runtime(&name, command)?;
+            if !preserving && current.0 != ServiceRuntimeState::Stopped {
+                return Err(
+                    "OpenRC registration changes require a stopped native process scope".into(),
+                );
+            }
+            Some(current)
+        } else {
+            ensure_absent_runtime(&name)?;
+            None
+        };
+        self.set_activation(&name, desired)?;
+        if self.generation()? != generation
+            || self.observe_registration(&name)?.configuration().as_ref() != Some(desired)
+        {
+            return Err("OpenRC registration failed native readback".into());
+        }
+        if let Some(expected) = runtime
+            && let ServiceState::Registration { command, .. } = desired
+            && self.runtime(&name, command)? != expected
+        {
+            return Err("OpenRC runtime changed during native registration".into());
+        }
+        Ok(())
+    }
+
+    fn registration_receipt(
+        operation: &zup_plan::NativeServiceOperation,
+    ) -> zup_transaction::OperationReceipt {
+        let configuration = operation.configurations().1;
+        zup_transaction::OperationReceipt::NativeService(Box::new(
+            zup_transaction::NativeServiceReceipt {
+                intent: operation.fingerprint(),
+                registration: if configuration == ServiceState::Absent {
+                    zup_core::ObservedServiceRegistration::Unclaimed
+                } else {
+                    zup_core::ObservedServiceRegistration::SourceFile
+                },
+                configuration,
+            },
+        ))
+    }
+
+    pub fn apply_registration(
+        &self,
+        operation: &zup_plan::NativeServiceOperation,
+    ) -> Result<zup_transaction::OperationReceipt, ExecError> {
+        let name = operation.native_name().to_owned();
+        self.configure_registration(operation, &operation.configurations().1)
+            .map_err(|reason| refused(&name, reason))?;
+        Ok(Self::registration_receipt(operation))
+    }
+
+    pub fn verify_registration(
+        &self,
+        operation: &zup_plan::NativeServiceOperation,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), ExecError> {
+        let name = operation.native_name().to_owned();
+        if !matches!(receipt, zup_transaction::OperationReceipt::NativeService(receipt) if receipt.matches(operation))
+            || self
+                .observe_registration(&name)
+                .map_err(|reason| refused(&name, reason))?
+                .configuration()
+                .as_ref()
+                != Some(&operation.configurations().1)
+        {
+            return Err(refused(
+                &name,
+                "OpenRC native receipt differs from observed registration",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn rollback_registration(
+        &self,
+        operation: &zup_plan::NativeServiceOperation,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), ExecError> {
+        let name = operation.native_name().to_owned();
+        if !matches!(receipt, zup_transaction::OperationReceipt::NativeService(receipt) if receipt.matches(operation))
+            && !matches!(receipt, zup_transaction::OperationReceipt::NativeServiceCompensation { intent } if *intent == operation.fingerprint())
+        {
+            return Err(refused(
+                &name,
+                "OpenRC compensation receipt differs from intent",
+            ));
+        }
+        self.configure_registration(
+            operation,
+            &operation.configurations().0.unwrap_or(ServiceState::Absent),
+        )
+        .map_err(|reason| refused(&name, reason))
+    }
+
+    pub fn reconcile_registration(
+        &self,
+        operation: &zup_plan::NativeServiceOperation,
+    ) -> Result<zup_transaction::ReconcileResult, ExecError> {
+        let receipt = Self::registration_receipt(operation);
+        if self.verify_registration(operation, &receipt).is_ok() {
+            return Ok(zup_transaction::ReconcileResult::AppliedWithReceipt(
+                receipt,
+            ));
+        }
+        let name = operation.native_name().to_owned();
+        let desired = operation.configurations().1;
+        if self.registration_source(&name, &desired).is_ok()
+            && (if desired == ServiceState::Absent {
+                ensure_absent_runtime(&name)
+            } else {
+                self.ensure_stopped(&name, &desired)
+            })
+            .is_ok()
+        {
+            Ok(zup_transaction::ReconcileResult::Incomplete)
+        } else {
+            Ok(zup_transaction::ReconcileResult::Ambiguous)
+        }
     }
 }
 
 impl NativeServiceManager for Openrc {
+    fn reconcile_control_request(
+        &mut self,
+        operation: &ServiceControlOperation,
+        deadline: std::time::Instant,
+    ) -> Result<(), String> {
+        let source = self
+            .definition(&operation.native_name)?
+            .ok_or("OpenRC definition disappeared")?;
+        if self.generation()? != operation.manager_generation
+            || source != crate::openrc::render(&operation.native_name, &operation.configuration)?
+        {
+            return Err("OpenRC recovery registration or manager changed".into());
+        }
+        if operation.stage == zup_plan::ServiceControlStage::Restore {
+            let Some(inhibited) = zup_plan::disabled_startup(&operation.configuration) else {
+                return Err("OpenRC activation recovery requires a registration".into());
+            };
+            if operation.before != ServiceTerminalState::Stopped
+                || operation.before_configuration != inhibited
+            {
+                return Err(
+                    "OpenRC activation recovery lacks its closed admission boundary".into(),
+                );
+            }
+            self.set_activation(&operation.native_name, &inhibited)?;
+            let mut stop = operation.clone();
+            stop.stage = zup_plan::ServiceControlStage::Quiesce;
+            stop.before_configuration = inhibited.clone();
+            stop.configuration = inhibited;
+            stop.after = ServiceTerminalState::Stopped;
+            self.drain_admission(&stop, deadline)?;
+            let ServiceState::Registration { command, .. } = &stop.configuration else {
+                unreachable!()
+            };
+            let (runtime, generation) = self.runtime(&operation.native_name, command)?;
+            match runtime {
+                ServiceRuntimeState::Stopped => return Ok(()),
+                ServiceRuntimeState::Running => {
+                    stop.before = ServiceTerminalState::Running;
+                    stop.before_execution_generation = generation;
+                    return self.stop_native(&stop, deadline);
+                }
+                _ => {
+                    return Err(
+                        "OpenRC activation request did not settle under closed admission".into(),
+                    );
+                }
+            }
+        }
+        if !self.inhibited(&operation.native_name)? {
+            let actual = self.configuration(&operation.native_name, &source)?;
+            if actual == operation.before_configuration && actual != operation.configuration {
+                return Ok(());
+            }
+            return Err("OpenRC recovery lacks its persisted activation inhibition".into());
+        }
+        self.set_policy(&operation.native_name, "disabled")?;
+        self.stop_native(operation, deadline)
+    }
+
     fn finish_startup_inhibition(
         &mut self,
         operation: &ServiceControlOperation,
@@ -1130,7 +1357,7 @@ impl NativeServiceManager for Openrc {
     ) -> Result<ServiceObservation, String> {
         operation.validate()?;
         if operation.privilege != Privilege::System
-            || crate::openrc::resource_name(&operation.key)? != operation.native_name
+            || !crate::openrc::valid_name(&operation.native_name)
         {
             return Err("OpenRC service authority mismatch".into());
         }
@@ -1143,9 +1370,11 @@ impl NativeServiceManager for Openrc {
         };
         let (runtime, execution_generation) = self.runtime(&operation.native_name, command)?;
         Ok(ServiceObservation {
+            registration: zup_core::ObservedServiceRegistration::SourceFile,
             configuration,
             runtime,
             execution_generation,
+            process_scope: zup_plan::ServiceScopeObservation::NativeManager,
             manager_generation: self.generation()?,
         })
     }
@@ -1171,27 +1400,7 @@ impl NativeServiceManager for Openrc {
         }
         if operation.before_configuration != operation.configuration {
             remaining()?;
-            let bytes = crate::openrc::render(&operation.native_name, &operation.configuration)?;
-            let directory = OwnedDirectory::open(Path::new("/etc/init.d"))
-                .map_err(|error| error.to_string())?;
-            directory
-                .write_durable(
-                    &operation.native_name,
-                    &bytes,
-                    rustix::fs::Mode::from_bits_truncate(0o755),
-                )
-                .map_err(|error| error.to_string())?;
-            let ServiceState::Registration { start, .. } = operation.configuration else {
-                return Err("OpenRC registration required".into());
-            };
-            self.set_policy(
-                &operation.native_name,
-                if start == ServiceStart::Automatic {
-                    "enabled"
-                } else {
-                    "disabled"
-                },
-            )?;
+            self.set_activation(&operation.native_name, &operation.configuration)?;
             zup_transaction::fault_injection::boundary(
                 zup_transaction::fault_injection::Boundary::NativeConfigurationChanged,
                 &operation.native_name,
@@ -1295,7 +1504,7 @@ impl NativeServiceManager for Openrc {
         if dispatch != current {
             return Err("OpenRC authority or execution changed before native dispatch".into());
         }
-        if !state.matches(dispatch.runtime) {
+        if !state.matches(dispatch.runtime) || state == ServiceTerminalState::Stopped {
             match state {
                 ServiceTerminalState::Running => {
                     self.command(
@@ -1305,29 +1514,7 @@ impl NativeServiceManager for Openrc {
                     )?;
                 }
                 ServiceTerminalState::Stopped => {
-                    let controller = ControllerIdentity::read(&operation.native_name)?
-                        .ok_or("OpenRC shutdown lacks its controller identity")?;
-                    let child = ControllerChild::read(&operation.native_name, &controller)?;
-                    if self.observe(operation)? != dispatch {
-                        return Err("OpenRC execution changed before guarded shutdown".into());
-                    }
-                    let child_identity =
-                        format!("{}:{}:{}", child.pid, child.ticks, child.sequence);
-                    let timeout = remaining()?.as_secs_f64().ceil().to_string();
-                    self.command(
-                        "/sbin/supervise-daemon",
-                        &[
-                            &operation.native_name,
-                            "--shutdown",
-                            "--shutdown-timeout",
-                            &timeout,
-                            "--expected-instance",
-                            &controller.instance,
-                            "--expected-child",
-                            &child_identity,
-                        ],
-                        remaining()?,
-                    )?;
+                    self.stop_native(operation, deadline)?;
                 }
             }
         }
@@ -1375,10 +1562,18 @@ fn trusted_scope_control(path: &Path) -> Result<(), String> {
 struct ProcessScope {
     name: String,
     inode: Option<u64>,
+    device: u64,
     populated: bool,
 }
 
 impl ProcessScope {
+    fn identity(&self) -> Option<ScopeIdentity> {
+        self.inode.map(|inode| ScopeIdentity {
+            device: self.device,
+            inode,
+        })
+    }
+
     fn observe(name: &str) -> Result<Self, String> {
         if !crate::openrc::valid_name(name) {
             return Err("invalid OpenRC process scope name".into());
@@ -1396,12 +1591,15 @@ impl ProcessScope {
             trusted_scope_control(&root.join(control))?;
         }
         let path = root.join(format!("openrc.{name}"));
+        let mut device = 0;
         let inode = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => {
                 trusted_directory(&path)?;
                 for control in ["cgroup.procs", "cgroup.threads"] {
                     trusted_scope_control(&path.join(control))?;
                 }
+                trusted_scope_control(&path.join("cgroup.kill"))?;
+                device = metadata.dev();
                 Some(metadata.ino())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -1427,6 +1625,7 @@ impl ProcessScope {
         Ok(Self {
             name: name.to_owned(),
             inode,
+            device,
             populated,
         })
     }
@@ -1461,6 +1660,11 @@ fn trusted_directory(path: &Path) -> Result<(), String> {
 }
 
 fn read_pid(path: &Path) -> Result<Option<u32>, String> {
+    match std::fs::symlink_metadata(path.parent().ok_or("PID state lacks a parent")?) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
+    }
     let directory = OwnedDirectory::open(path.parent().ok_or("PID state lacks a parent")?)
         .map_err(|error| error.to_string())?;
     let name = path
@@ -1551,37 +1755,283 @@ fn execution_ids(execution: &zup_core::ServiceExecution) -> Result<(u32, u32), S
     Ok((account.uid(), gid))
 }
 
-fn payload_state(payload: &ServicePayload) -> Result<(&str, ServiceState), ExecError> {
-    match payload {
-        ServicePayload::Apply { service, unit, .. } => {
-            if crate::openrc::resource_name(&service.key).map_err(|reason| refused(unit, reason))?
-                != *unit
-                || service.name != *unit
-                || service.privilege != Privilege::System
-            {
-                return Err(refused(unit, "OpenRC payload authority mismatch"));
-            }
-            Ok((unit, service.desired_configuration()))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use zup_core::{
+        CommandSpec, ResourceKey, ServiceExecution, ServiceFailurePolicy, ServiceId,
+        ServiceTimeouts, Target, TargetPath,
+    };
+    use zup_plan::{
+        NativeServiceOperation, ServiceActivation, ServiceControlIntent, ServiceControlStage,
+    };
+
+    fn control(
+        manager: &Openrc,
+        key: &ResourceKey,
+        name: &str,
+        before: &ServiceState,
+        after: &ServiceState,
+        running: bool,
+        start: bool,
+    ) -> ServiceControlOperation {
+        let ServiceState::Registration { command, .. } = before else {
+            unreachable!()
+        };
+        ServiceControlOperation {
+            requires_files: Vec::new(),
+            registration: zup_core::NativeServiceRegistration::SourceFile,
+            intent: ServiceControlIntent::Transition,
+            key: key.clone(),
+            native_name: name.into(),
+            privilege: Privilege::System,
+            stage: if start {
+                ServiceControlStage::Restore
+            } else {
+                ServiceControlStage::Quiesce
+            },
+            before_configuration: before.clone(),
+            configuration: after.clone(),
+            owned_configuration: before.clone(),
+            before: if running {
+                ServiceTerminalState::Running
+            } else {
+                ServiceTerminalState::Stopped
+            },
+            after: if start {
+                ServiceTerminalState::Running
+            } else {
+                ServiceTerminalState::Stopped
+            },
+            manager_generation: manager.generation().unwrap(),
+            before_execution_generation: manager.runtime(name, command).unwrap().1,
+            process_scope: zup_plan::ServiceScopeObservation::NativeManager,
+            timeouts: ServiceTimeouts::Openrc {
+                start_timeout_seconds: 10,
+                stop_grace_seconds: 1,
+                kill_wait_seconds: 2,
+                settle_seconds: 2,
+            },
+            dependencies: vec![],
         }
-        ServicePayload::Remove {
-            key, unit, owned, ..
-        } => {
-            let OwnedResource::Service {
-                installed,
+    }
+
+    fn declaration(
+        key: &ResourceKey,
+        name: &str,
+        state: &ServiceState,
+        previous: Option<zup_plan::OwnedService>,
+    ) -> NativeServiceOperation {
+        let ResourceKey::Service { id } = key else {
+            unreachable!()
+        };
+        let ServiceState::Registration {
+            execution,
+            failure,
+            command,
+            start,
+            readiness,
+            display_name,
+            ..
+        } = state
+        else {
+            unreachable!()
+        };
+        NativeServiceOperation::Configure {
+            service: Box::new(zup_plan::ServiceOperation {
+                state_directories: Vec::new(),
+                registration: zup_core::NativeServiceRegistration::SourceFile,
+                execution: execution.clone(),
+                failure: *failure,
+                key: key.clone(),
+                kind: if previous.is_some() {
+                    zup_plan::IntegrationChangeKind::UpdateOwned
+                } else {
+                    zup_plan::IntegrationChangeKind::Create
+                },
+                id: id.to_string(),
+                name: name.into(),
+                display_name: display_name.clone(),
+                command: command.as_ref().clone(),
+                start: *start,
+                lifecycle: zup_core::ServiceLifecycle {
+                    timeouts: Some(ServiceTimeouts::Openrc {
+                        start_timeout_seconds: 10,
+                        stop_grace_seconds: 1,
+                        kill_wait_seconds: 2,
+                        settle_seconds: 2,
+                    }),
+                    ..Default::default()
+                },
+                readiness: *readiness,
+                requires_files: vec![],
+                requires_services: vec![],
+                dependency_names: vec![],
                 privilege: Privilege::System,
-                name,
-                ..
-            } = owned.as_ref()
-            else {
-                return Err(refused(
-                    unit,
-                    "OpenRC removal requires machine service ownership",
-                ));
-            };
-            if crate::openrc::resource_name(key).as_ref() != Ok(unit) || name != unit {
-                return Err(refused(unit, "OpenRC removal identity mismatch"));
-            }
-            Ok((unit, installed.as_ref().clone()))
+                previous: ObservedServiceState::Absent,
+                conflict: None,
+            }),
+            previous: previous.map(Box::new),
+            activation: ServiceActivation::Declared,
         }
+    }
+
+    #[rstest::rstest]
+    #[case::direct(false)]
+    #[case::supervised(true)]
+    #[ignore = "requires a disposable stock OpenRC cgroup-v2 VM as root"]
+    fn stock_native_activation_and_interrupted_shutdown(#[case] supervised: bool) {
+        assert!(std::env::var_os("ZUP_TEST_STOCK_OPENRC").is_some());
+        assert_eq!(rustix::process::geteuid().as_raw(), 0);
+        let tag = uuid::Uuid::now_v7().simple().to_string();
+        let id = ServiceId::new(format!("probe-{tag}")).unwrap();
+        let key = ResourceKey::Service { id: id.clone() };
+        let name = "zup-openrc-fixture".to_owned();
+        let root = Path::new("/opt").join(format!("zup-openrc-{tag}"));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for generation in ["a", "b"] {
+            let directory = root.join(generation);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::copy("/bin/busybox", directory.join("sleep")).unwrap();
+            std::fs::set_permissions(
+                directory.join("sleep"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let target = Target::host().unwrap();
+        let state = |generation: &str| ServiceState::Registration {
+            state_directories: Vec::new(),
+            native_timeouts: zup_core::NativeServiceTimeouts::Openrc {
+                stop_grace_seconds: 1,
+                kill_wait_seconds: 2,
+            },
+            execution: ServiceExecution::OpenrcUser {
+                user: "nobody".into(),
+                group: Some("nobody".into()),
+            },
+            failure: if supervised {
+                ServiceFailurePolicy::Openrc {
+                    delay_seconds: 1,
+                    max_respawns: 3,
+                    respawn_period_seconds: 60,
+                }
+            } else {
+                ServiceFailurePolicy::None
+            },
+            dependencies: vec![],
+            display_name: "Stock native activation".into(),
+            command: Box::new(CommandSpec::new(
+                TargetPath::new(
+                    target,
+                    root.join(generation).join("sleep").to_string_lossy(),
+                )
+                .unwrap(),
+                vec!["600".into()],
+            )),
+            start: ServiceStart::Manual,
+            readiness: zup_core::ServiceReadiness::Manager,
+        };
+        let mut manager = Openrc::connect(crate::locations::MachineRoots::production()).unwrap();
+        let source = OwnedDirectory::open(Path::new("/etc/init.d")).unwrap();
+        let a = state("a");
+        source
+            .create_durable_exclusive(
+                &name,
+                &crate::openrc::render(&name, &a).unwrap(),
+                rustix::fs::Mode::from_bits_truncate(0o755),
+            )
+            .unwrap();
+        let initial = declaration(&key, &name, &a, None);
+        let receipt = manager.apply_registration(&initial).unwrap();
+        manager.verify_registration(&initial, &receipt).unwrap();
+        let start = control(&manager, &key, &name, &a, &a, false, true);
+        zup_transaction::apply_service_control(&mut manager, &start).unwrap();
+        let disabled_a = zup_plan::disabled_startup(&a).unwrap();
+        let stop = control(&manager, &key, &name, &a, &disabled_a, true, false);
+        if supervised {
+            manager.set_activation(&name, &disabled_a).unwrap();
+            let evidence: NativeExecution =
+                serde_json::from_str(&stop.before_execution_generation).unwrap();
+            let native = evidence.supervisor.unwrap();
+            let pid = rustix::process::Pid::from_raw(native.pid as i32).unwrap();
+            let held =
+                rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).unwrap();
+            assert!(native.unchanged().unwrap());
+            rustix::process::pidfd_send_signal(&held, rustix::process::Signal::KILL).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while native.unchanged().unwrap() && std::time::Instant::now() < deadline {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+            assert!(ProcessScope::observe(&name).unwrap().populated);
+            assert!(matches!(
+                zup_transaction::reconcile_service_control(&mut manager, &stop, None).unwrap(),
+                zup_transaction::ReconcileResult::AppliedWithReceipt(_)
+            ));
+        } else {
+            zup_transaction::apply_service_control(&mut manager, &stop).unwrap();
+        }
+        assert!(!ProcessScope::observe(&name).unwrap().populated);
+        assert!(
+            manager
+                .command(
+                    "/sbin/rc-service",
+                    &["--nodeps", &name, "start"],
+                    Duration::from_secs(5)
+                )
+                .is_err()
+        );
+        let b = state("b");
+        source
+            .write_durable(
+                &name,
+                &crate::openrc::render(&name, &b).unwrap(),
+                rustix::fs::Mode::from_bits_truncate(0o755),
+            )
+            .unwrap();
+        let mut next = declaration(&key, &name, &b, Some(initial.contract()));
+        let NativeServiceOperation::Configure { activation, .. } = &mut next else {
+            unreachable!()
+        };
+        *activation = ServiceActivation::Inhibited;
+        manager.apply_registration(&next).unwrap();
+        let disabled_b = zup_plan::disabled_startup(&b).unwrap();
+        let restore = control(&manager, &key, &name, &disabled_b, &b, false, true);
+        zup_transaction::apply_service_control(&mut manager, &restore).unwrap();
+        assert!(matches!(
+            zup_transaction::reconcile_service_control(&mut manager, &restore, None).unwrap(),
+            zup_transaction::ReconcileResult::AppliedWithReceipt(zup_transaction::OperationReceipt::ServiceControl(receipt))
+                if receipt.completion == zup_transaction::ServiceControlCompletion::CompensationOnly
+        ));
+        assert!(!ProcessScope::observe(&name).unwrap().populated);
+        zup_transaction::apply_service_control(&mut manager, &restore).unwrap();
+        manager
+            .command(
+                "/sbin/rc-service",
+                &[&name, "stop"],
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        assert!(!ProcessScope::observe(&name).unwrap().populated);
+        let restart = control(&manager, &key, &name, &b, &b, false, true);
+        zup_transaction::apply_service_control(&mut manager, &restart).unwrap();
+        let stop = control(&manager, &key, &name, &b, &disabled_b, true, false);
+        zup_transaction::apply_service_control(&mut manager, &stop).unwrap();
+        source.remove_file(&name).unwrap();
+        source.sync().unwrap();
+        let remove = NativeServiceOperation::Remove {
+            key,
+            service: Box::new(next.contract()),
+            activation: ServiceActivation::Inhibited,
+        };
+        manager.apply_registration(&remove).unwrap();
+        assert_eq!(
+            manager.observe_registration(&name).unwrap(),
+            ObservedServiceState::Absent
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

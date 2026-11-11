@@ -1,5 +1,5 @@
 use zup_core::{ComponentId as EngineComponentId, InstallScope, Installer, SelectedScope};
-use zup_plan::{InstallLedger, LifecycleAction};
+use zup_plan::{InstallationRecord, LifecycleAction};
 use zup_preset_protocol::{
     Action, Capabilities, ComponentId, DiagnosticKind, InstallationHealth, InstallerState,
     OperationPhase, Surface,
@@ -23,6 +23,8 @@ fn installer() -> Installer {
         frontend: zup_core::Frontend::Gui,
         updates: None,
         install: zup_core::Install {
+            generation_readers: Default::default(),
+            data: Vec::new(),
             scope: InstallScope::Either,
             directory: zup_core::InstallDirectory {
                 user: Some(zup_core::Template::parse("${location.programs}/Acme").expect("t")),
@@ -72,6 +74,7 @@ fn preview(scope: SelectedScope) -> zup_presentation::PlanPreview {
         selected_components: Vec::new(),
         estimated_bytes: 0,
         download_bytes: 0,
+        storage: None,
         requires_authorization: false,
         groups: Vec::new(),
         requirements: Vec::new(),
@@ -88,6 +91,45 @@ fn install_host() -> HostState {
     )
 }
 
+fn installed(installer: &Installer, scope: SelectedScope) -> InstallationRecord {
+    {
+        let fixture_commit = zup_plan::InstallationCommit {
+            transaction: zup_core::TransactionId::new_v7(),
+            plan_hash: zup_core::hash_bytes(b"preset fixture"),
+        };
+        InstallationRecord {
+            commit: fixture_commit,
+            retired_deployments: Vec::new(),
+            data: Default::default(),
+            id: zup_core::InstallationId::new_v7(),
+            state: zup_plan::InstallationState::Installed,
+            app_id: installer.app.id.clone(),
+            scope,
+            target: installer.target,
+            directory: zup_core::TargetPath::new(installer.target, r"C:\Programs\Acme").unwrap(),
+            current: zup_plan::DeploymentSnapshot {
+                maintenance: None,
+                requirements: crate::requirements_fixture::requirements(
+                    installer.target,
+                    scope,
+                    installer.app.id.as_str(),
+                    &installer.app.version.to_string(),
+                ),
+                revision: zup_core::ActivationRevision::FIRST,
+                transaction: fixture_commit.transaction,
+                plan_hash: fixture_commit.plan_hash,
+                version: installer.app.version.clone(),
+                selected_components: Vec::new(),
+                release: None,
+                preset: None,
+                materialization: None,
+                resources: Default::default(),
+            },
+            retained: Vec::new(),
+        }
+    }
+}
+
 fn maintenance_host() -> HostState {
     let mut installer = installer();
     installer.updates = Some(zup_core::UpdateConfig {
@@ -95,14 +137,9 @@ fn maintenance_host() -> HostState {
         channel: "stable".into(),
         trusted_root: Vec::new(),
     });
-    let mut ledger = InstallLedger::new(
-        installer.app.id.clone(),
-        installer.target,
-        SelectedScope::Machine,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.version = installer.app.version.clone();
-    ledger.selected_components = vec![EngineComponentId::new("core").expect("id")];
+    let mut ledger = installed(&installer, SelectedScope::Machine);
+    ledger.current.version = installer.app.version.clone();
+    ledger.current.selected_components = vec![EngineComponentId::new("core").expect("id")];
     HostState::maintenance(
         surface::product(&installer),
         surface::maintenance_state(&installer, &ledger, SelectedScope::Machine),
@@ -283,6 +320,48 @@ fn a_recovery_failure_is_distinct_from_an_ordinary_one() {
     let diagnostic = host.snapshot().diagnostic.as_ref().expect("a diagnostic");
     assert_eq!(diagnostic.kind, DiagnosticKind::Recovery);
     assert!(host.snapshot().progress.is_none());
+    assert_eq!(
+        host.accept(Action::Retry),
+        HostDecision::Refused(ActionRefusal::NoRecovery)
+    );
+}
+
+#[test]
+fn recovery_only_accepts_the_transaction_reported_by_the_engine() {
+    let mut host = install_host();
+    let transaction = zup_core::TransactionId::new_v7();
+    host.finish_with(&InstallOutcome::RecoveryRequired {
+        transaction: Some(transaction.0),
+        detail: "activation outcome must be observed".into(),
+    });
+    assert_eq!(
+        host.accept(Action::Update),
+        HostDecision::Refused(ActionRefusal::RecoveryRequired)
+    );
+    assert_eq!(
+        host.accept(Action::Recover {
+            transaction: zup_core::TransactionId::new_v7()
+        }),
+        HostDecision::Refused(ActionRefusal::NoRecovery)
+    );
+    assert_eq!(
+        host.accept(Action::Recover { transaction }),
+        HostDecision::Recover { transaction }
+    );
+    host.refresh_installation(install_host());
+    assert_eq!(
+        host.snapshot().operation,
+        Some(zup_preset_protocol::OperationKind::Recover)
+    );
+    host.finish_with(&InstallOutcome::Recovered {
+        settlement: zup_runtime::RecoverySettlement::RolledBack,
+    });
+    assert_eq!(host.snapshot().state, InstallerState::Succeeded);
+    assert_eq!(host.snapshot().recovery_transaction, None);
+    assert_eq!(
+        host.accept(Action::Recover { transaction }),
+        HostDecision::Refused(ActionRefusal::NoRecovery)
+    );
 }
 
 #[test]
@@ -612,13 +691,19 @@ fn an_update_check_is_refused_where_there_is_no_channel() {
         None,
         zup_preset_protocol::UpdateState::Available {
             current: "1.0.0".into(),
-            available: "2.0.0".into(),
+            candidate: zup_core::ReleaseCandidate {
+                version: "2.0.0".parse().unwrap(),
+                release: zup_core::Sha256Digest::from_bytes([7; 32]),
+            },
         },
     );
     assert_eq!(
         host.accept(Action::Update),
         HostDecision::Update(zup_runtime::UpdateRequest::Install {
-            version: Some("2.0.0".into())
+            expected: Some(zup_core::ReleaseCandidate {
+                version: "2.0.0".parse().unwrap(),
+                release: zup_core::Sha256Digest::from_bytes([7; 32]),
+            })
         })
     );
 }
@@ -827,17 +912,12 @@ fn an_unsatisfied_prerequisite_keeps_the_run_going() {
 #[test]
 fn a_fresh_session_over_an_existing_installation_names_what_it_replaces() {
     let installer = installer();
-    let mut ledger = InstallLedger::new(
-        installer.app.id.clone(),
-        installer.target,
-        SelectedScope::User,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.version = semver::Version::parse("1.0.0").expect("version");
+    let mut ledger = installed(&installer, SelectedScope::User);
+    ledger.current.version = semver::Version::parse("1.0.0").expect("version");
     let options = surface::install_options(
         &installer,
         SelectedScope::User,
-        Some(ledger.version.to_string()),
+        Some(ledger.current.version.to_string()),
         None,
         Some(&ledger),
     );

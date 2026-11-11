@@ -43,14 +43,3 @@ fn is_link_metadata(path: &Path, metadata: &std::fs::Metadata) -> bool {
 fn is_link_metadata(_path: &Path, metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
-
-pub fn ensure_no_links(path: &Path) -> std::io::Result<()> {
-    ensure_ancestor_chain(path, |ancestor| match std::fs::symlink_metadata(ancestor) {
-        Ok(metadata) if is_link_metadata(ancestor, &metadata) => {
-            Err(std::io::Error::other("redirected cleanup path"))
-        }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    })
-}

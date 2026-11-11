@@ -246,8 +246,9 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/OutputLifecycle"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#,
             frontend = FRONTEND,
             host = host_target(),

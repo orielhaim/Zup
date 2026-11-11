@@ -1,20 +1,24 @@
 #![cfg(all(target_os = "linux", feature = "test-support"))]
 
+mod requirements_fixture {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/deployment.rs"
+    ));
+}
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use zup_plan::{DeploymentEffects, compile_deployment};
 
+use zup_core::TargetPath;
 use zup_core::{RelativePath, ResourceKey, SelectedScope, Sha256Digest, Target};
 use zup_linux::test_support::{compose_fixture, v1_files};
-use zup_plan::TargetPath;
 use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_runtime::{
     ExecutionPolicy, InstallOutcome, OperationControl, RuntimeControl, RuntimeRequest,
 };
-use zup_transaction::{
-    FilesystemTransactionStore, InstallationLock, TransactionInput, TransactionStore,
-    compile_transaction,
-};
+use zup_transaction::{FilesystemTransactionStore, ResourceLock, TransactionStore};
 
 fn target() -> Target {
     Target::parse("linux-x64").expect("target")
@@ -24,13 +28,27 @@ fn digest(bytes: &[u8]) -> (u64, Sha256Digest) {
     zup_core::hash_reader(bytes).expect("hash")
 }
 
-fn plan_for(bytes: &[u8], source: &str) -> zup_transaction::TransactionPlan {
+fn plan_for(bytes: &[u8], source: &str) -> zup_plan::DeploymentPlan {
     let (size, sha256) = digest(bytes);
     let destination = "/tmp/zup-generated-ownership.desktop";
-    let mut input = TransactionInput::new(target());
+    let mut input = DeploymentEffects::new(
+        zup_core::InstallationId::new_v7(),
+        requirements_fixture::requirements(
+            target(),
+            zup_core::SelectedScope::User,
+            "com.example.generated",
+            "1.0.0",
+        ),
+    );
+    input.install_directory = Some(TargetPath::new(target(), "/tmp").unwrap());
     input.files.push(FileOperation {
+        replacement: zup_core::FixedReplacement::Atomic,
         key: ResourceKey::File {
-            destination: destination.into(),
+            id: zup_core::FileResourceId::Payload {
+                id: zup_core::PayloadId::File {
+                    declaration: zup_core::ResourceId::new("fixture-0").unwrap(),
+                },
+            },
         },
         source_relative: RelativePath::new(source).expect("source"),
         destination: TargetPath::new(target(), destination).expect("destination"),
@@ -43,21 +61,21 @@ fn plan_for(bytes: &[u8], source: &str) -> zup_transaction::TransactionPlan {
 
         conflict: None,
     });
-    compile_transaction(&input).expect("plan")
+    compile_deployment(&input).expect("plan")
 }
 
 fn app() -> zup_core::AppId {
     zup_core::AppId::new("com.example.generated").expect("id")
 }
 
-fn lock_for(root: &Path, id: &zup_core::AppId) -> InstallationLock {
-    let key = InstallationLock::lock_key(id.as_str(), "user");
-    InstallationLock::try_acquire(root, &key)
+fn lock_for(root: &Path, id: &zup_core::AppId) -> ResourceLock {
+    let key = ResourceLock::lock_key(id.as_str(), "user");
+    ResourceLock::try_acquire(root, &key)
         .expect("lock")
         .expect("acquired")
 }
 
-fn stage_with(root: &Path, lock: &InstallationLock, name: &str, bytes: &[u8]) {
+fn stage_with(root: &Path, lock: &ResourceLock, name: &str, bytes: &[u8]) {
     let mut generated = BTreeMap::new();
     generated.insert(name.into(), bytes.to_vec());
     zup_linux::stage_generated(root, &app(), SelectedScope::User, lock, &generated).expect("stage");
@@ -71,7 +89,7 @@ fn stage(root: &Path, name: &str, bytes: &[u8]) {
 fn object(root: &Path, bytes: &[u8]) -> std::path::PathBuf {
     let (_, sha) = digest(bytes);
     root.join("objects")
-        .join(InstallationLock::lock_key(app().as_str(), "user"))
+        .join(ResourceLock::lock_key(app().as_str(), "user"))
         .join(sha.to_hex())
 }
 
@@ -86,7 +104,7 @@ fn a_later_operation_cannot_replace_an_unsettled_transactions_inputs(#[case] sou
     stage(root, source, original);
     let object = object(root, original);
     let mut record = zup_transaction::TransactionRecord::new(
-        zup_transaction::TransactionId::new_v7(),
+        zup_core::TransactionId::new_v7(),
         app(),
         SelectedScope::User,
         semver::Version::new(1, 0, 0),
@@ -129,7 +147,7 @@ fn a_corrupt_object_is_left_in_place() {
     let bytes = b"[Desktop Entry]\nName=Complete\n";
     let plan = plan_for(bytes, "__zup_generated__/applications/app.desktop");
     let (_, sha) = digest(bytes);
-    let key = InstallationLock::lock_key(app().as_str(), "user");
+    let key = ResourceLock::lock_key(app().as_str(), "user");
     let directory = private_fs::PrivateDir::ensure(root.join("objects"))
         .expect("objects")
         .ensure_dir(&key)
@@ -165,8 +183,8 @@ fn a_busy_operation_does_not_stage_generated_content() {
     let installer = compose_fixture(scratch.path(), "setup", "1.0.0", &v1_files());
     let state = scratch.path().join("state");
     std::fs::create_dir_all(&state).expect("state");
-    let key = InstallationLock::lock_key("com.example.fresh", "user");
-    let _held = InstallationLock::try_acquire(&state, &key)
+    let key = ResourceLock::lock_key("com.example.fresh", "user");
+    let _held = ResourceLock::try_acquire(&state, &key)
         .expect("lock")
         .expect("acquired");
     let operation = OperationControl::new(ExecutionPolicy::NonInteractive);
@@ -179,6 +197,7 @@ fn a_busy_operation_does_not_stage_generated_content() {
         installer,
         operation: zup_runtime::Operation::Install,
         selection: zup_runtime::OperationSelection {
+            deployment: None,
             enable: Vec::new(),
             disable: Vec::new(),
             install_directory: None,
@@ -188,21 +207,45 @@ fn a_busy_operation_does_not_stage_generated_content() {
             b"[Desktop Entry]\n".to_vec(),
         )]),
     };
-    let plan = compile_transaction(&TransactionInput::new(target())).expect("plan");
+    let mut effects = DeploymentEffects::new(
+        zup_core::InstallationId::new_v7(),
+        requirements_fixture::requirements(
+            target(),
+            zup_core::SelectedScope::User,
+            "example.application",
+            "1.0.0",
+        ),
+    );
+    effects.install_directory = Some(TargetPath::new(target(), "/tmp").unwrap());
+    let plan = compile_deployment(&effects).expect("plan");
+    let target = plan.target;
     let report = backend
         .execute_blocking(
             &RuntimeRequest {
-                intent: None,
-                target: plan.target,
+                operation: zup_runtime::RuntimeOperation::Deployment(Box::new(
+                    zup_runtime::RuntimeDeployment {
+                        plan: plan.clone(),
+
+                        intent: zup_plan::DeploymentIntent {
+                            deployment: zup_plan::DeploymentSelection::from_plan(&plan),
+                            action: if plan.transition.is_remove() {
+                                zup_plan::LifecycleAction::Uninstall
+                            } else {
+                                zup_plan::LifecycleAction::Install
+                            },
+                            enable: Vec::new(),
+                            disable: Vec::new(),
+                            install_directory: None,
+                        },
+                        bootstrap: None,
+                        release: None,
+                    },
+                )),
+                target,
                 app_id: zup_core::AppId::new("com.example.fresh").expect("id"),
                 app_version: semver::Version::new(1, 0, 0),
                 scope: SelectedScope::User,
-                transaction_plan: plan,
                 state_root: state.clone(),
-
-                recovery_id: None,
-                bootstrap: None,
-                release: None,
             },
             &runtime,
         )
@@ -217,7 +260,7 @@ fn concurrent_writers_publish_one_immutable_object() {
     let scratch = tempfile::tempdir().expect("scratch");
     let root = scratch.path();
     let bytes = b"[Desktop Entry]\nName=Shared\n";
-    let key = InstallationLock::lock_key(app().as_str(), "user");
+    let key = ResourceLock::lock_key(app().as_str(), "user");
     let held = lock_for(root, &app());
     stage_with(root, &held, "payload", bytes);
     let (started, started_rx) = std::sync::mpsc::channel();
@@ -225,7 +268,7 @@ fn concurrent_writers_publish_one_immutable_object() {
         let root = root.to_path_buf();
         move || {
             assert!(
-                InstallationLock::try_acquire(&root, &key)
+                ResourceLock::try_acquire(&root, &key)
                     .expect("attempt")
                     .is_none(),
                 "the holder excludes a second writer"
@@ -265,7 +308,7 @@ fn concurrent_writers_publish_distinct_objects() {
     assert_eq!(std::fs::read(object(root, first)).expect("first"), first);
     let other_object = root
         .join("objects")
-        .join(InstallationLock::lock_key(other.as_str(), "user"))
+        .join(ResourceLock::lock_key(other.as_str(), "user"))
         .join(digest(second).1.to_hex());
     assert_eq!(std::fs::read(other_object).expect("second"), second);
 }
@@ -293,7 +336,7 @@ fn a_prepared_journal_does_not_keep_objects_an_applying_journal_does() {
     stage(root, "payload", bytes);
     let plan = plan_for(bytes, "__zup_generated__/applications/app.desktop");
     let mut prepared = zup_transaction::TransactionRecord::new(
-        zup_transaction::TransactionId::new_v7(),
+        zup_core::TransactionId::new_v7(),
         app(),
         SelectedScope::User,
         semver::Version::new(1, 0, 0),
@@ -311,7 +354,7 @@ fn a_prepared_journal_does_not_keep_objects_an_applying_journal_does() {
 
     stage(root, "payload", bytes);
     prepared.phase = zup_transaction::TransactionPhase::Applying;
-    prepared.transaction_id = zup_transaction::TransactionId::new_v7();
+    prepared.transaction_id = zup_core::TransactionId::new_v7();
     FilesystemTransactionStore::private_at(root)
         .create(&prepared)
         .expect("applying");
@@ -325,8 +368,8 @@ fn garbage_collection_waits_for_the_installation_lock() {
     let scratch = tempfile::tempdir().expect("scratch");
     let root = scratch.path();
     let bytes = b"staged-under-the-lock";
-    let key = InstallationLock::lock_key(app().as_str(), "user");
-    let held = InstallationLock::try_acquire(root, &key)
+    let key = ResourceLock::lock_key(app().as_str(), "user");
+    let held = ResourceLock::try_acquire(root, &key)
         .expect("lock")
         .expect("held");
     stage_with(root, &held, "payload", bytes);
@@ -337,7 +380,7 @@ fn garbage_collection_waits_for_the_installation_lock() {
         move || {
             started.send(()).expect("started");
             assert!(
-                InstallationLock::try_acquire(&root, &key)
+                ResourceLock::try_acquire(&root, &key)
                     .expect("attempt")
                     .is_none()
             );

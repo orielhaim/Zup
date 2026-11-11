@@ -11,7 +11,7 @@
 use crate::result::{
     Application, ArtifactInspectDetails, AutomationResult, BuildDetails, CheckDetails, Composition,
     Details, DoctorCheck, DoctorDetails, DoctorTarget, InspectedContent, InspectedTrust,
-    InspectedVariant, PlanDetails, PlanResource, PublishDetails, PublishFailure,
+    InspectedVariant, PlanDetails, PlanFilePlacement, PlanResource, PublishDetails, PublishFailure,
     PublishStageDetails, SignPrepareDetails, SignSubject, SignVerifyDetails, StagedPackage, Status,
     Target, ToolchainCleanDetails, ToolchainComponentStatus, ToolchainInstallDetails,
     ToolchainStatusDetails,
@@ -52,6 +52,7 @@ const TYPES: &[Declaration] = &[
     ("BuildDetails", BuildDetails::decl),
     ("CheckDetails", CheckDetails::decl),
     ("Composition", Composition::decl),
+    ("PlanFilePlacement", PlanFilePlacement::decl),
     ("PlanResource", PlanResource::decl),
     ("PlanDetails", PlanDetails::decl),
     ("DoctorCheck", DoctorCheck::decl),

@@ -1,13 +1,13 @@
 use std::{fs, io::Read, path::Path};
 
 use tempfile::TempDir;
-use zup_build::TargetBuildPlan;
 use zup_bundle::{
     AutoPayloadSource, BundleWriter, PACKAGE_SCHEMA, Package, PackageError, PayloadError,
     PayloadSource,
 };
+use zup_core::TargetBuildPlan;
+use zup_core::TargetOverrides;
 use zup_core::{RelativePath, hash_reader};
-use zup_manifest::TargetOverrides;
 
 fn plan(root: &Path) -> TargetBuildPlan {
     fs::create_dir_all(root.join("dist")).unwrap();
@@ -29,8 +29,8 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/BundleTest"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
 "#,
         target = zup_plugin_contract::HOST_TARGET
     );
@@ -49,6 +49,30 @@ destination = "${{install}}"
     )
     .unwrap();
     build.targets.pop().unwrap()
+}
+
+#[test]
+fn opened_package_content_survives_path_replacement_with_independent_streams() {
+    let root = TempDir::new().unwrap();
+    let build = plan(root.path());
+    let path = root.path().join("package.zup");
+    BundleWriter::write_file(&build, &[], &path).unwrap();
+    let package = Package::open(&path).unwrap();
+    fs::rename(&path, root.path().join("original.zup")).unwrap();
+    fs::write(&path, b"a different object").unwrap();
+
+    let source = package.payload_source();
+    let entry = &package.plan().entries[0];
+    let mut first = source.open(&entry.path, &entry.sha256, entry.size).unwrap();
+    let mut second = source.open(&entry.path, &entry.sha256, entry.size).unwrap();
+    let mut prefix = [0; 3];
+    first.read_exact(&mut prefix).unwrap();
+    let mut second_bytes = Vec::new();
+    second.read_to_end(&mut second_bytes).unwrap();
+    let mut first_bytes = prefix.to_vec();
+    first.read_to_end(&mut first_bytes).unwrap();
+    assert_eq!(first_bytes, b"duplicate payload");
+    assert_eq!(second_bytes, b"duplicate payload");
 }
 
 #[test]

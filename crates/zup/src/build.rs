@@ -14,6 +14,7 @@ use crate::toolchain::{self, ToolchainResolver};
 /// fails halfway still says what it managed to write, and a caller never has to go
 pub struct BuildOutcome {
     pub release: zup_artifact::ReleaseManifest,
+    pub diagnostics: Vec<zup_automation::Diagnostic>,
     pub release_manifest: Option<String>,
     pub signing_plan: Option<String>,
     pub pending_signatures: usize,
@@ -41,6 +42,7 @@ pub fn run(
             })
             .collect(),
     );
+    result = result.with_diagnostics(outcome.diagnostics.clone());
     result = result.with_details(Details::Build(BuildDetails {
         signing_plan: outcome.signing_plan.clone(),
         pending_signatures: outcome.pending_signatures,
@@ -238,7 +240,7 @@ fn compose_target_installer(
     config: &ResolvedTargetConfig,
     runtime: &Path,
     output: &Path,
-    plan: &zup_build::TargetBuildPlan,
+    plan: &zup_core::TargetBuildPlan,
     plugin_artifacts: &[zup_bundle::CompiledPluginArtifact],
     preset: Option<&[u8]>,
 ) -> miette::Result<u64> {
@@ -261,7 +263,7 @@ fn compose_target_installer(
 
 fn report_single(
     reporter: &Reporter,
-    target_plan: &zup_build::TargetBuildPlan,
+    target_plan: &zup_core::TargetBuildPlan,
     config: &ResolvedTargetConfig,
     output: &Path,
     size: u64,
@@ -284,10 +286,10 @@ fn report_single(
             config.profile,
             config.frontend,
             output.display(),
-            zup_presentation::format_bytes(size),
+            zup_core::format_bytes(size),
             config.target,
             target_plan.files.len(),
-            zup_presentation::format_bytes(payload_bytes),
+            zup_core::format_bytes(payload_bytes),
             plugins,
             updates,
         ),
@@ -300,7 +302,7 @@ fn digest_of(path: &Path) -> miette::Result<zup_core::Sha256Digest> {
 
 fn single_target(
     config: &ResolvedTargetConfig,
-    plan: &zup_build::TargetBuildPlan,
+    plan: &zup_core::TargetBuildPlan,
     subsystem: zup_artifact::LauncherSubsystem,
 ) -> zup_artifact::SingleTarget {
     zup_artifact::SingleTarget {
@@ -479,7 +481,7 @@ fn compose_universal_artifact(
     dispatcher: &Path,
     output: &Path,
     graph: &zup_artifact::ArtifactGraph,
-    build: &zup_build::BuildPlan,
+    build: &zup_core::BuildPlan,
     force: bool,
     id: &str,
 ) -> miette::Result<u64> {
@@ -504,7 +506,7 @@ fn compose_universal_artifact(
 
 fn resolve_variant(
     config: &ResolvedTargetConfig,
-    plan: &zup_build::TargetBuildPlan,
+    plan: &zup_core::TargetBuildPlan,
     runtime: &Path,
     preset: Option<&[u8]>,
 ) -> miette::Result<zup_artifact::DistributionVariant> {
@@ -549,13 +551,13 @@ fn report_artifact(reporter: &Reporter, app: &zup_core::App, artifact: &Composed
             capitalize(artifact.profile.kind.as_str()),
             capitalize(artifact.profile.mode.as_str()),
             artifact.output.display(),
-            zup_presentation::format_bytes(artifact.size),
+            zup_core::format_bytes(artifact.size),
             subsystem_text(artifact.composed),
             artifact.savings.unique_blob_count,
-            zup_presentation::format_bytes(artifact.graph.table().stored_size()),
-            zup_presentation::format_bytes(artifact.savings.standalone_size),
-            zup_presentation::format_bytes(artifact.savings.shared_size),
-            zup_presentation::format_bytes(artifact.savings.standalone_size),
+            zup_core::format_bytes(artifact.graph.table().stored_size()),
+            zup_core::format_bytes(artifact.savings.standalone_size),
+            zup_core::format_bytes(artifact.savings.shared_size),
+            zup_core::format_bytes(artifact.savings.standalone_size),
             percent(
                 artifact.savings.shared_size,
                 artifact.savings.standalone_size
@@ -699,6 +701,7 @@ fn finish(
 ) -> miette::Result<BuildOutcome> {
     if args.release_manifest == "none" {
         return Ok(BuildOutcome {
+            diagnostics: loaded.diagnostics.clone(),
             release,
             release_manifest: None,
             signing_plan: None,
@@ -769,6 +772,7 @@ fn finish(
         ),
     );
     Ok(BuildOutcome {
+        diagnostics: loaded.diagnostics.clone(),
         release,
         release_manifest: Some(crate::automation::project_path(&path)),
         signing_plan: Some(crate::automation::project_path(&plan_path)),
@@ -876,7 +880,7 @@ fn report_icon_warnings(reporter: &Reporter, loaded: &crate::project::LoadedProj
 
 pub(crate) fn stamp_application_icon(
     path: &Path,
-    plan: &zup_build::BuildPlan,
+    plan: &zup_core::BuildPlan,
 ) -> miette::Result<()> {
     let Some(icon) = plan.targets.iter().find_map(|target| {
         target

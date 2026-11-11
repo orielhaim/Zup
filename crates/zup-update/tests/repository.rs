@@ -8,6 +8,7 @@
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use zup_core::ReleasePin;
 
 use jiff::{SignedDuration, Timestamp};
 use sha2::{Digest, Sha256};
@@ -19,7 +20,7 @@ use tough::schema::{KeyHolder, Root, Signed, Target};
 use url::Url;
 use zup_acquire::{
     ContentCatalog, DocumentRef, HostArchitecture, HostProfile, OnlineTrust, RELEASE_SCHEMA,
-    ReleaseDescriptor, ReleaseDownload, ReleaseDownloadKind, ReleasePin, ReleaseVariant,
+    ReleaseDescriptor, ReleaseDownload, ReleaseDownloadKind, ReleaseVariant,
 };
 use zup_core::Sha256Digest;
 use zup_update::{ReleaseResolver, TrustContext, UpdateError};
@@ -154,7 +155,6 @@ struct Fixture {
     repository: String,
     trusted_root: Vec<u8>,
     state: PathBuf,
-    documents: Vec<PathBuf>,
     /// The staged web tree a local seed reads.
     seed_dir: PathBuf,
 }
@@ -224,29 +224,52 @@ async fn publish_at(
         ));
     }
     documents.push((
-        format!("releases/{CHANNEL}/catalog.json"),
+        zup_acquire::document_path(&release.catalog.digest).to_string(),
         content.catalog_bytes.clone(),
     ));
     for entry in &release.variants {
         documents.push((
-            format!("releases/{CHANNEL}/variants/{}.json", entry.id),
+            zup_acquire::document_path(&entry.manifest.digest).to_string(),
             manifest_bytes(&release.version),
         ));
     }
     let release_bytes = release.encode().expect("the release encodes");
     documents.push((format!("releases/{CHANNEL}.json"), release_bytes.clone()));
     documents.push((
-        format!("releases/{CHANNEL}/versions/{}.json", release.version),
+        zup_acquire::document_path(&digest_of(&release_bytes)).to_string(),
         release_bytes,
     ));
 
-    let mut paths = Vec::new();
     for (relative, bytes) in &documents {
         let path = input.join(relative);
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
         std::fs::write(&path, bytes).expect("a document");
-        paths.push(path);
     }
+    let mut paths = Vec::new();
+    let mut pending = vec![input.clone()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            } else {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths.sort();
+    let documents = paths
+        .iter()
+        .map(|path| {
+            (
+                path.strip_prefix(&input)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                std::fs::read(path).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
 
     let mut editor = RepositoryEditor::new(&root_file).await.expect("an editor");
     let version = NonZeroU64::new(options.metadata_version).expect("a metadata version");
@@ -307,7 +330,6 @@ async fn publish_at(
     Fixture {
         state: directory.join("state"),
         trusted_root,
-        documents: paths,
         seed_dir: input,
         repository: repository.to_string(),
         root: None,
@@ -343,9 +365,6 @@ fn context(fixture: &Fixture) -> TrustContext {
             zup_core::InstallScope::User,
         ),
         state_root: fixture.state.clone(),
-        pin: ReleasePin::Channel {
-            channel: CHANNEL.to_owned(),
-        },
     }
 }
 
@@ -356,15 +375,6 @@ fn resolver_with(_fixture: &Fixture, context: TrustContext) -> ReleaseResolver {
 
 fn resolver(fixture: &Fixture) -> ReleaseResolver {
     resolver_with(fixture, context(fixture))
-}
-
-fn document(fixture: &Fixture, suffix: &str) -> PathBuf {
-    fixture
-        .documents
-        .iter()
-        .find(|path| path.to_string_lossy().ends_with(suffix))
-        .unwrap_or_else(|| panic!("a `{suffix}` document"))
-        .clone()
 }
 
 #[tokio::test]
@@ -379,7 +389,7 @@ async fn resolves_a_channel_release_and_reports_what_it_chose() {
 
     assert_eq!(resolved.descriptor.version, "1.1.0");
     assert_eq!(resolved.variant.id, "windows-x64");
-    assert!(!resolved.pinned, "a channel context is not pinned");
+    assert!(!resolved.pin.is_pinned(), "a channel context is not pinned");
     assert_eq!(resolved.document, "releases/stable.json");
     assert_eq!(resolved.descriptor.release_digest, release.release_digest);
     assert_eq!(resolved.catalog.blobs.len(), options.content.blobs.len());
@@ -391,7 +401,7 @@ async fn resolves_a_channel_release_and_reports_what_it_chose() {
 }
 
 #[tokio::test]
-async fn a_pinned_context_reads_the_immutable_version_document() {
+async fn an_exact_release_pin_reads_its_document_digest() {
     let options = ReleaseOptions {
         version: "2.3.4".to_owned(),
         ..ReleaseOptions::default()
@@ -399,13 +409,20 @@ async fn a_pinned_context_reads_the_immutable_version_document() {
     let release = release(&options);
     let fixture = publish(&release, &options.content, SigningOptions::default()).await;
 
-    let pinned = context(&fixture).pinned_to("2.3.4");
+    let mut pinned = context(&fixture);
+    pinned.trust.pin = ReleasePin::Release {
+        version: "2.3.4".parse().unwrap(),
+        document: digest_of(&release.encode().unwrap()),
+    };
     let resolved = resolver_with(&fixture, pinned)
         .resolve()
         .await
         .expect("a resolved release");
-    assert_eq!(resolved.document, "releases/stable/versions/2.3.4.json");
-    assert!(resolved.pinned);
+    assert_eq!(
+        resolved.document,
+        zup_acquire::document_path(&digest_of(&release.encode().unwrap())).to_string()
+    );
+    assert!(resolved.pin.is_pinned());
     // Both documents carry the same body, so the release digest is the same
     // either way. That is what lets a pinned and a channel client prove they
     // would install identical bytes.
@@ -427,7 +444,11 @@ async fn a_document_that_was_never_published_is_refused_rather_than_trusted() {
     // The version-addressed document for 1.0.0 was never published, so a
     // pinned client asking for it gets a missing target rather than the
     // current release. That is what keeps a pinned installer from moving.
-    let pinned = context(&fixture).pinned_to("1.0.0");
+    let mut pinned = context(&fixture);
+    pinned.trust.pin = ReleasePin::Release {
+        version: "1.0.0".parse().unwrap(),
+        document: digest_of(b"an unpublished release document"),
+    };
     let error = resolver_with(&fixture, pinned)
         .resolve()
         .await
@@ -477,7 +498,6 @@ async fn a_release_with_no_variant_for_this_host_is_refused() {
     let fixture = publish(&release, &options.content, SigningOptions::default()).await;
     let error = resolver(&fixture).resolve().await.expect_err("refused");
     assert!(error.to_string().contains("architecture x86_64"), "{error}");
-    assert!(error.left_machine_unchanged());
 }
 
 #[tokio::test]
@@ -489,12 +509,14 @@ async fn a_substituted_catalog_is_refused() {
     // release's digest claim. This is the substitution a hostile origin or a
     // stale mirror would try.
     std::fs::write(
-        document(&fixture, "catalog.json"),
+        fixture
+            .seed_dir
+            .join(zup_acquire::document_path(&release.catalog.digest).to_string()),
         content(&[1, 2, 3]).catalog_bytes,
     )
     .expect("a tampered catalog");
     let error = resolver(&fixture).resolve().await.expect_err("refused");
-    assert!(error.left_machine_unchanged());
+
     // Either layer refusing is a refusal; TUF's hash check comes first, so a
     // substituted target is caught before the graph is even parsed.
     let text = error.to_string();
@@ -512,7 +534,9 @@ async fn a_substituted_manifest_is_refused() {
     let release = release(&options);
     let fixture = publish(&release, &options.content, SigningOptions::default()).await;
     std::fs::write(
-        document(&fixture, "variants/windows-x64.json"),
+        fixture
+            .seed_dir
+            .join(zup_acquire::document_path(&release.variants[0].manifest.digest).to_string()),
         b"{\"schema\":1,\"version\":\"tampered\"}",
     )
     .expect("a tampered manifest");
@@ -543,11 +567,11 @@ async fn expired_metadata_is_refused() {
     assert!(matches!(error, UpdateError::Tuf(_)), "{error:?}");
 }
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
 #[tokio::test]
-async fn rollback_is_refused_across_processes() {
-    // The load-bearing test. A resolver that created a fresh datastore per call
-    // would pass every other test in this file and fail this one, because this is
-    // the only test whose two runs share a state root and a repository.
+async fn rollback_is_refused_across_resolvers_and_source_locations(#[case] relocate: bool) {
     let shared = tempfile::tempdir().expect("one repository");
     let current = ReleaseOptions {
         version: "1.2.0".to_owned(),
@@ -569,17 +593,18 @@ async fn rollback_is_refused_across_processes() {
         .await
         .expect("the current release");
 
-    // The same repository, re-signed at a lower metadata version and pointing at
-    // an older release. This is exactly what a compromised or misconfigured
-    // publisher would serve, and exactly what a durable datastore exists to
-    // refuse.
     let old = ReleaseOptions {
         version: "1.1.0".to_owned(),
         ..ReleaseOptions::default()
     };
     let old_release = release(&old);
+    let mirror = tempfile::tempdir().unwrap();
     let rolled_back = publish_at(
-        shared.path(),
+        if relocate {
+            mirror.path()
+        } else {
+            shared.path()
+        },
         &old_release,
         &old.content,
         SigningOptions {
@@ -588,7 +613,18 @@ async fn rollback_is_refused_across_processes() {
         },
     )
     .await;
-    let error = resolver(&rolled_back).resolve().await.expect_err("refused");
+    let mut selected = context(&rolled_back);
+    selected.state_root = fresh.state.clone();
+    if relocate {
+        selected
+            .trust
+            .mirrors
+            .push("https://mirror.example.test/acme".into());
+    }
+    let error = resolver_with(&rolled_back, selected)
+        .resolve()
+        .await
+        .expect_err("refused");
     assert!(matches!(error, UpdateError::Tuf(_)), "{error:?}");
 }
 
@@ -756,4 +792,51 @@ async fn the_closure_narrows_by_component_selection() {
     // Required content plus the two named components; the CLI tools cost zero.
     assert_eq!(core_only.len(), 3);
     assert!(core_only.wire_size() < every.wire_size());
+}
+
+#[rstest::rstest]
+#[case("1.1.0")]
+#[case("2.0.0")]
+#[tokio::test]
+async fn an_exact_release_remains_resolvable_after_a_different_build_is_published(
+    #[case] next_version: &str,
+) {
+    let first_options = ReleaseOptions::default();
+    let first = release(&first_options);
+    let fixture = publish(&first, &first_options.content, SigningOptions::default()).await;
+    let mut exact = context(&fixture);
+    exact.trust.pin = ReleasePin::Release {
+        version: first.version.parse().unwrap(),
+        document: digest_of(&first.encode().unwrap()),
+    };
+    let selected = resolver_with(&fixture, exact.clone())
+        .resolve()
+        .await
+        .unwrap();
+    let second_options = ReleaseOptions {
+        version: next_version.into(),
+        content: content(&[65, 129, 257]),
+        downloads: Vec::new(),
+    };
+    let second = release(&second_options);
+    publish_at(
+        fixture.root.as_ref().unwrap().path(),
+        &second,
+        &second_options.content,
+        SigningOptions {
+            metadata_version: 2,
+            ..SigningOptions::default()
+        },
+    )
+    .await;
+    let current = resolver(&fixture).resolve().await.unwrap();
+    assert_eq!(current.descriptor.release_digest, second.release_digest);
+    assert_ne!(
+        current.descriptor.release_digest,
+        selected.descriptor.release_digest
+    );
+    let retained = resolver_with(&fixture, exact).resolve().await.unwrap();
+    assert_eq!(retained.descriptor_bytes, selected.descriptor_bytes);
+    assert_eq!(retained.catalog, selected.catalog);
+    assert_eq!(retained.manifest, selected.manifest);
 }

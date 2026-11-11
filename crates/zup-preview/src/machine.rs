@@ -192,7 +192,13 @@ impl Scenario {
                 services: installer
                     .services
                     .iter()
-                    .map(|service| service.name.to_string())
+                    .map(|service| {
+                        service
+                            .display_name
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| service.id.to_string())
+                    })
                     .collect(),
                 protocols: installer
                     .protocols
@@ -335,6 +341,7 @@ impl Scenario {
             Surface::Maintenance => HostState::maintenance(
                 self.product.clone(),
                 MaintenanceState {
+                    retained: Vec::new(),
                     installed_version: self.installed_version.clone(),
                     // What a maintained machine has is what it was installed with.
                     components: self
@@ -622,6 +629,7 @@ impl Scenario {
             )
             .collect();
         Ok(zup_presentation::PlanPreview {
+            storage: None,
             basis: zup_presentation::PlanBasis::Simulation,
             application: self.product.name.clone(),
             version: self.product.version.clone(),
@@ -650,7 +658,7 @@ fn display_location(template: &zup_core::Template, name: &str, scope: SelectedSc
             Variable::AppName => name.to_owned(),
             Variable::AppId => name.to_ascii_lowercase(),
             Variable::AppVersion => "1.0.0".to_owned(),
-            Variable::Install => return None,
+            Variable::Install | Variable::Payload => return None,
             Variable::Location(location) => match (location, scope) {
                 (InstallLocation::Programs, SelectedScope::User) => {
                     r"C:\Users\you\AppData\Local\Programs".to_owned()

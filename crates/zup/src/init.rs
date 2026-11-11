@@ -286,6 +286,7 @@ impl Answers {
                 "machine = \"${{location.programs}}/{install_name}\"\n"
             ));
         }
+        document.push_str("\n[[files]]\nid = \"application\"\nsource = \"**/*\"\n");
         document
     }
 }

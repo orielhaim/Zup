@@ -44,6 +44,8 @@ impl ProgressPresentation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceCategory {
+    Data,
+    Application,
     Files,
     Launchers,
     Path,
@@ -59,6 +61,8 @@ pub enum ResourceCategory {
 impl ResourceCategory {
     pub const fn title(self) -> &'static str {
         match self {
+            Self::Data => "Application data",
+            Self::Application => "Application",
             Self::Files => "Files",
             Self::Launchers => "Launchers",
             Self::Path => "Search path",
@@ -76,6 +80,11 @@ impl ResourceCategory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
+    Preserve,
+    Prepare,
+    Seal,
+    Verify,
+    Activate,
     Create,
     Update,
     Remove,
@@ -87,6 +96,11 @@ pub enum ChangeKind {
 impl ChangeKind {
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Preserve => "Preserve",
+            Self::Prepare => "Prepare",
+            Self::Seal => "Seal",
+            Self::Verify => "Verify",
+            Self::Activate => "Activate",
             Self::Create => "Create",
             Self::Update => "Update",
             Self::Remove => "Remove",
@@ -148,6 +162,7 @@ pub struct PlanPreview {
     pub selected_components: Vec<ComponentId>,
     pub estimated_bytes: u64,
     pub download_bytes: u64,
+    pub storage: Option<zup_core::DeploymentStorageEstimate>,
     pub requires_authorization: bool,
     pub groups: Vec<ChangeGroup>,
     pub requirements: Vec<RequirementPresentation>,
@@ -217,11 +232,22 @@ pub enum InstallationHealth {
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum UpdateState {
     Idle,
-    Checking { detail: String },
-    Installing { detail: String },
-    UpToDate { current: String },
-    Available { current: String, available: String },
-    Failed { message: String },
+    Checking {
+        detail: String,
+    },
+    Installing {
+        detail: String,
+    },
+    UpToDate {
+        current: String,
+    },
+    Available {
+        current: String,
+        candidate: zup_core::ReleaseCandidate,
+    },
+    Failed {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

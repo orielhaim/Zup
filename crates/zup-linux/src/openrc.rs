@@ -1,5 +1,6 @@
+use zup_core::TargetPath;
 use zup_core::{ServiceExecution, ServiceFailurePolicy, ServiceReadiness};
-use zup_plan::{DesiredService, ServiceState, TargetPath};
+use zup_plan::{DesiredService, ServiceState};
 
 #[cfg(target_os = "linux")]
 pub fn validate_executable(bytes: &[u8], target: &zup_core::Target) -> Result<(), String> {
@@ -13,15 +14,6 @@ pub fn validate_executable(bytes: &[u8], target: &zup_core::Target) -> Result<()
         .map_err(|error| error.to_string())
 }
 
-pub fn service_name(id: &zup_core::ServiceId) -> String {
-    let encoded: String = id
-        .as_str()
-        .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("zup-openrc-{encoded}")
-}
-
 fn quote(value: &str) -> Result<String, String> {
     if value.chars().any(char::is_control) {
         return Err("OpenRC service values cannot contain control characters".into());
@@ -31,6 +23,7 @@ fn quote(value: &str) -> Result<String, String> {
 
 pub fn registration(service: &DesiredService<TargetPath>) -> ServiceState {
     ServiceState::Registration {
+        state_directories: service.state_directories.clone(),
         native_timeouts: service.lifecycle.timeouts_for(&service.execution).native(),
         execution: service.execution.clone(),
         failure: service.failure,
@@ -48,18 +41,23 @@ pub fn registration(service: &DesiredService<TargetPath>) -> ServiceState {
 
 pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
     let ServiceState::Registration {
+        state_directories,
         native_timeouts,
         execution,
         failure,
         dependencies,
         display_name,
         command,
-        start,
         readiness,
+        ..
     } = state
     else {
         return Err("OpenRC requires a service registration".into());
     };
+
+    if !state_directories.is_empty() {
+        return Err("OpenRC requires filesystem service data".into());
+    }
     let ServiceExecution::OpenrcUser { user, group } = execution else {
         return Err("OpenRC requires an explicit OpenRC user identity".into());
     };
@@ -70,7 +68,6 @@ pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
         .validate_for(execution)
         .map_err(str::to_owned)?;
     let zup_core::NativeServiceTimeouts::Openrc {
-        start_timeout_seconds,
         stop_grace_seconds,
         kill_wait_seconds,
     } = native_timeouts
@@ -111,25 +108,24 @@ pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
             .as_ref()
             .map_or_else(|| user.clone(), |group| format!("{user}:{group}")),
     )?;
-    let metadata =
-        zup_core::base64_encode(&serde_json::to_vec(state).map_err(|error| error.to_string())?);
+    let mut source_contract = state.clone();
+    if let ServiceState::Registration { start, .. } = &mut source_contract {
+        *start = zup_core::ServiceStart::Manual;
+    }
+    let metadata = zup_core::base64_encode(
+        &serde_json::to_vec(&source_contract).map_err(|error| error.to_string())?,
+    );
     let supervisor = match failure {
-        ServiceFailurePolicy::None => {
-            "supervise_daemon_args='--pidfd-control --no-respawn --respawn-delay-step 0'\n"
-                .to_owned()
-        }
+        ServiceFailurePolicy::None => "command_background=yes\n".to_owned(),
         ServiceFailurePolicy::Openrc {
             delay_seconds,
             max_respawns,
             respawn_period_seconds,
         } => format!(
-            "supervise_daemon_args='--pidfd-control --respawn-delay-step 0'\nrespawn_delay={delay_seconds}\nrespawn_max={max_respawns}\nrespawn_period={respawn_period_seconds}\n"
+            "supervisor=supervise-daemon\nsupervise_daemon_args='--respawn-delay-step 0'\nrespawn_delay={delay_seconds}\nrespawn_max={max_respawns}\nrespawn_period={respawn_period_seconds}\n"
         ),
         _ => return Err("OpenRC requires its native respawn policy".into()),
     };
-    let supervisor = format!(
-        "{supervisor}supervise_daemon_args=\"$supervise_daemon_args --start-timeout {start_timeout_seconds}\"\n"
-    );
     let dependency = if dependencies.is_empty() {
         String::new()
     } else {
@@ -142,22 +138,16 @@ pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
                 .join(" ")
         )
     };
-    let shutdown_wait = stop_grace_seconds + kill_wait_seconds + 5;
-    let shutdown = format!(
-        "stop() {{ supervise-daemon \"$RC_SVCNAME\" --shutdown --shutdown-timeout {shutdown_wait}; }}\n"
-    );
-    let activation = if *start == zup_core::ServiceStart::Disabled {
-        "start_pre() { return 1; }\n"
-    } else {
-        r#"start_pre() {
+    let activation = r#"start_pre() {
     local membership
+    [ "${zup_disabled:-no}" != yes ] || return 1
     mountinfo -q -f '^cgroup2$' /sys/fs/cgroup || return 1
+    [ -f "/sys/fs/cgroup/openrc.$RC_SVCNAME/cgroup.kill" ] || return 1
     read -r membership < /proc/self/cgroup || return 1
     [ "$membership" = "0::/openrc.$RC_SVCNAME" ]
 }
-"#
-    };
-    Ok(format!("#!/sbin/openrc-run\n# zup-registration={metadata}\ndescription={}\ncommand={executable}\ncommand_args={arguments}\ncommand_args_foreground=''\ncommand_user={user}\npidfile='/run/{name}.pid'\nretry='TERM/{stop_grace_seconds}/KILL/{kill_wait_seconds}'\nstopgroup=yes\nrc_cgroup_mode=unified\nrc_cgroup_cleanup=NO\numask=027\nno_new_privs=yes\nsupervisor=supervise-daemon\n{supervisor}{dependency}{activation}{shutdown}", quote(display_name)?).into_bytes())
+"#;
+    Ok(format!("#!/sbin/openrc-run\n# zup-registration={metadata}\ndescription={}\ncommand={executable}\ncommand_args={arguments}\ncommand_args_foreground=''\ncommand_user={user}\npidfile='/run/{name}.pid'\nretry='TERM/{stop_grace_seconds}/KILL/{kill_wait_seconds}'\nstopgroup=yes\nrc_cgroup_mode=unified\nrc_cgroup_cleanup=YES\numask=027\nno_new_privs=yes\n{supervisor}{dependency}{activation}", quote(display_name)?).into_bytes())
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -181,20 +171,13 @@ pub fn parse(name: &str, bytes: &[u8]) -> Result<ServiceState, String> {
 }
 
 pub fn valid_name(name: &str) -> bool {
-    name.strip_prefix("zup-openrc-").is_some_and(|suffix| {
-        !suffix.is_empty()
-            && suffix.len() <= 192
-            && suffix.len().is_multiple_of(2)
-            && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
-}
-
-#[cfg(target_os = "linux")]
-pub fn resource_name(key: &zup_core::ResourceKey) -> Result<String, String> {
-    match key {
-        zup_core::ResourceKey::Service { id } => Ok(service_name(id)),
-        _ => Err("managed service resource required".into()),
-    }
+    !name.is_empty()
+        && name.len() <= 200
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 #[cfg(test)]
@@ -203,8 +186,8 @@ mod tests {
 
     fn state() -> ServiceState {
         ServiceState::Registration {
+            state_directories: Vec::new(),
             native_timeouts: zup_core::NativeServiceTimeouts::Openrc {
-                start_timeout_seconds: 90,
                 stop_grace_seconds: 90,
                 kill_wait_seconds: 5,
             },
@@ -213,9 +196,9 @@ mod tests {
                 group: Some("nobody".into()),
             },
             failure: ServiceFailurePolicy::None,
-            dependencies: vec![service_name(&zup_core::ServiceId::new("database").unwrap())],
+            dependencies: vec!["database".into()],
             display_name: "Application".into(),
-            command: Box::new(zup_plan::CommandSpec::new(
+            command: Box::new(zup_core::CommandSpec::new(
                 TargetPath::new(
                     zup_core::Target::parse("linux-x64-musl").unwrap(),
                     "/opt/application/service",
@@ -230,8 +213,12 @@ mod tests {
 
     #[test]
     fn only_the_canonical_definition_authorizes_native_control() {
-        let name = service_name(&zup_core::ServiceId::new("application").unwrap());
-        let state = state();
+        let name = "application".to_owned();
+        let mut state = state();
+        let ServiceState::Registration { start, .. } = &mut state else {
+            unreachable!()
+        };
+        *start = zup_core::ServiceStart::Manual;
         let mut bytes = render(&name, &state).unwrap();
         assert_eq!(parse(&name, &bytes).unwrap(), state);
         bytes.extend_from_slice(b"\nstart() { arbitrary_command; }\n");
@@ -248,12 +235,6 @@ mod tests {
             unreachable!()
         };
         command.arguments = vec![argument.into()];
-        assert!(
-            render(
-                &service_name(&zup_core::ServiceId::new("application").unwrap()),
-                &state
-            )
-            .is_err()
-        );
+        assert!(render("application", &state).is_err());
     }
 }

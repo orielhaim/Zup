@@ -7,6 +7,7 @@ use zup_core::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlannedPrerequisite {
     pub id: PrerequisiteId,
     pub name: NonEmptyString,
@@ -30,10 +31,11 @@ impl PlannedPrerequisite {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesiredFile<P = Template> {
     pub key: ResourceKey,
     pub source_relative: RelativePath,
-    pub destination: P,
+    pub placement: zup_core::PayloadPlacement<P, P>,
     pub size: u64,
     pub sha256: Sha256Digest,
     pub privilege: Privilege,
@@ -41,7 +43,14 @@ pub struct DesiredFile<P = Template> {
     pub executable: bool,
 }
 
+impl<P> DesiredFile<P> {
+    pub fn destination(&self) -> &P {
+        self.placement.path()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesiredLauncher<P = Template, L = ()> {
     pub key: ResourceKey,
     pub location: LauncherLocation,
@@ -54,6 +63,7 @@ pub struct DesiredLauncher<P = Template, L = ()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesiredPathEntry<P = Template> {
     pub key: ResourceKey,
     pub value: P,
@@ -62,14 +72,16 @@ pub struct DesiredPathEntry<P = Template> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesiredService<P = Template> {
+    pub state_directories: Vec<zup_core::RelativePath>,
     pub failure: zup_core::ServiceFailurePolicy,
     pub execution: zup_core::ServiceExecution,
     pub key: ResourceKey,
     pub id: ServiceId,
     pub name: NonEmptyString,
     pub display_name: Option<NonEmptyString>,
-    pub command: crate::CommandSpec<P>,
+    pub command: zup_core::CommandSpec<P>,
     pub start: ServiceStart,
     pub lifecycle: zup_core::ServiceLifecycle,
     pub readiness: zup_core::ServiceReadiness,
@@ -80,21 +92,23 @@ pub struct DesiredService<P = Template> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesiredProtocol<P = Template> {
     pub key: ResourceKey,
     pub scheme: ProtocolScheme,
-    pub command: crate::CommandSpec<P>,
+    pub command: zup_core::CommandSpec<P>,
     pub scope: SelectedScope,
     pub privilege: Privilege,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DesiredFileAssociation<P = Template> {
     pub key: ResourceKey,
     pub extension: FileExtension,
     pub id: FileAssociationId,
     pub description: Option<String>,
-    pub command: crate::CommandSpec<P>,
+    pub command: zup_core::CommandSpec<P>,
     pub scope: SelectedScope,
     pub privilege: Privilege,
 }

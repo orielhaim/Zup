@@ -72,6 +72,19 @@ pub fn compile(
     validate_target_references(manifest)?;
     validate_resolved_target(manifest, target, overrides)?;
     let view = ManifestView::for_target(manifest, target);
+    let mut payload_ids = BTreeSet::new();
+    for mapping in &view.files {
+        if !payload_ids.insert(&mapping.id) {
+            return Err(ManifestError::Invalid {
+                message: format!(
+                    "payload declaration `{}` is repeated for target `{}`",
+                    mapping.id, view.target
+                ),
+                src: None,
+                span: None,
+            });
+        }
+    }
 
     validate_install(&view.install)?;
     validate_ui(&view.ui)?;
@@ -640,6 +653,14 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
     for service in &manifest.services {
         service
             .execution
+            .native_name(&manifest.app.id, &service.id, service.native_name.as_ref())
+            .map_err(|message| ManifestError::Invalid {
+                message: format!("service {}: {message}", service.id),
+                src: None,
+                span: None,
+            })?;
+        service
+            .execution
             .validate_policies(service.failure, service.readiness, manifest.target)
             .map_err(|reason| ManifestError::Invalid {
                 message: format!("service `{}`: {reason}", service.id),
@@ -665,6 +686,17 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
         if !services.insert(service.id.clone()) {
             return Err(ManifestError::DuplicateService {
                 id: service.id.to_string(),
+                src: None,
+                span: None,
+            });
+        }
+    }
+
+    let mut path_entries = BTreeSet::new();
+    for entry in &manifest.path {
+        if !path_entries.insert(&entry.id) {
+            return Err(ManifestError::Invalid {
+                message: format!("duplicate PATH declaration `{}`", entry.id),
                 src: None,
                 span: None,
             });

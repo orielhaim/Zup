@@ -26,6 +26,7 @@ def verify(options):
         raise ValueError("--interference-only requires an isolated OpenRC QMP VM")
     suffix = uuid.uuid4().hex
     application = f"com.example.zup-openrc-{suffix}"
+    transaction_root = "/var/lib/zup/apps/" + hashlib.sha256(b"zup:application-state:1\0" + application.encode()).hexdigest() + "/transactions"
     ids = {name: f"{suffix}-{name}" for name in ("storage", "api")}
     names = {name: f"zup-openrc-{identity.encode().hex()}" if options.manager == "openrc" else f"zup-{identity}-{hashlib.sha256(identity.encode()).hexdigest()[:12]}.service" for name, identity in ids.items()}
     source_root = "/etc/init.d" if options.manager == "openrc" else "/usr/local/lib/systemd/system"
@@ -43,14 +44,13 @@ def verify(options):
         if options.manager == "systemd":
             result = guest("/usr/bin/systemctl", "show", native, "--property=MainPID", "--value")
             return result.stdout.strip() if result.stdout.strip() != "0" else None
-        record = f"/run/openrc/supervise-{native}.child"
+        record = f"/run/openrc/options/{native}/child_pid" if options.supervised and name == "api" else f"/run/{native}.pid"
         result = guest("cat", record, check=False)
         if result.returncode:
             return None
-        fields = result.stdout.split()
-        if len(fields) != 5 or fields[4] != "running":
+        pid = result.stdout.strip()
+        if not pid.isdecimal() or int(pid) <= 1:
             return None
-        pid = fields[1]
         if guest("test", "-d", f"/proc/{pid}", check=False).returncode:
             return None
         return pid
@@ -147,19 +147,23 @@ scope = "machine"
 [install.directory]
 machine = "${{location.programs}}/{application}"
 [[files]]
+id = "storage"
 source = "storage"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 executable = true
 [[files]]
+id = "api"
 source = "api"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 executable = true
 [[files]]
+id = "shared"
 source = "shared.conf"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 [[files]]
+id = "unrelated"
 source = "unrelated.txt"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 {declaration}''')
             setup = root / f"setup-{version}"
             subprocess.run([str(options.zup), "build", "--manifest", str(manifest), "--runtime", str(options.runtime), "--output", str(setup)], check=True, timeout=240)
@@ -193,7 +197,7 @@ destination = "${{install}}"
             second = build(2, options.service_v2, config="updated", registration=True)
             failed = build(3, options.service_v2, config="failed", fail_start=True, registration=True)
             guest("sysctl", "-w", "kernel.core_pattern=/dev/null")
-            baseline = set(guest("find", "/var/lib/zup/transactions", "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines())
+            baseline = set(guest("find", transaction_root, "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines())
             baseline_generations = execution_generations()
 
             tag = f"zup-{suffix}"
@@ -230,8 +234,8 @@ destination = "${{install}}"
                 ("verified_persisted", "service_restore", "committed", False),
                 ("commit_before", "", "committed", False),
                 ("committed", "", "committed", False),
-                ("ledger_publish_before", "", "committed", False),
-                ("ledger_published", "", "committed", False),
+                ("reconciliation_before", "", "committed", False),
+                ("reconciled", "", "committed", False),
                 ("rollback_intent_persisted", "service_restore", "rolled_back", True),
                 ("rollback_returned", "service_restore", "rolled_back", True),
                 ("rollback_returned", "file_mutation:api", "rolled_back", True),
@@ -260,7 +264,7 @@ destination = "${{install}}"
                     occurrence = "2" if selector == "start" else "1"
                     crashed = guest("env", f"ZUP_TEST_FAULT_POINT={point}", f"ZUP_TEST_FAULT_OPERATION={filter_for(selector)}", f"ZUP_TEST_FAULT_OCCURRENCE={occurrence}", setup, "upgrade", "--scope", "machine", "--non-interactive", "--yes", "--output", "json", check=False)
                     assert crashed.returncode != 0, f"fault did not fire: {point}/{selector}"
-                    journals = set(guest("find", "/var/lib/zup/transactions", "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines()) - baseline
+                    journals = set(guest("find", transaction_root, "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines()) - baseline
                     assert len(journals) == 1, f"{point}/{selector}: unexpected crash journals: {journals}\n{crashed.stdout}"
                     journal = journals.pop()
                     record = json.loads(guest("cat", journal).stdout)
@@ -307,7 +311,7 @@ destination = "${{install}}"
                         assert guest("sha256sum", *paths).stdout == before_files, "ambiguous recovery changed payload"
                         assert {name: process(name) for name in ids} == before_processes, "ambiguous recovery controlled a runtime"
                     else:
-                        assert recovered.returncode == (0 if expected == "committed" else 1), recovered.stdout
+                        assert recovered.returncode == 0, recovered.stdout
                         assert all(process(name) for name in ids), "recovery did not restore running state"
                         assert guest("cat", f"{directory}/shared.conf").stdout == ("updated" if expected == "committed" else "initial")
                     results.append({"point": point, "operation": selector, "phase": record["phase"], "recovery_interrupted": bool(recovery_fault)})
@@ -317,7 +321,7 @@ destination = "${{install}}"
                     crashed = guest("env", "ZUP_TEST_FAULT_POINT=rollback_intent_persisted", "ZUP_TEST_FAULT_OPERATION=service_restore",
                         failed, "upgrade", "--scope", "machine", "--non-interactive", "--yes", "--output", "json", check=False)
                     assert crashed.returncode != 0, "rollback fault did not fire"
-                    journals = set(guest("find", "/var/lib/zup/transactions", "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines()) - baseline
+                    journals = set(guest("find", transaction_root, "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines()) - baseline
                     assert len(journals) == 1, f"unexpected rollback journals: {journals}"
                     journal = journals.pop()
                     before_record = guest("cat", journal).stdout
@@ -367,11 +371,11 @@ destination = "${{install}}"
             if options.manager == "openrc":
                 orphan = guest("python3", "-c", "import subprocess; p=subprocess.Popen(['sleep','300'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True); print(p.pid)").stdout.strip()
                 ticks = guest("cat", f"/proc/{orphan}/stat").stdout.rsplit(") ", 1)[1].split()[19]
-                identity = f"/run/openrc/supervise-{names['api']}.identity"
-                guest("tee", identity, input_text=f"{'0' * 32} {orphan} {ticks}\n")
+                identity = f"/run/{names['api']}.pid"
+                guest("tee", identity, input_text=f"{orphan}\n")
                 guest("chmod", "600", identity)
                 try:
-                    assert install(first, "install", check=False).returncode != 0, "absent registration accepted a live controller record"
+                    assert install(first, "install", check=False).returncode != 0, "absent registration accepted a live native PID record"
                     assert guest("test", "-e", f"{directory}/api", check=False).returncode != 0, "orphan rejection occurred after payload mutation"
                     assert guest("cat", f"/proc/{orphan}/stat").stdout.rsplit(") ", 1)[1].split()[19] == ticks, "orphan rejection controlled an unrelated process"
                 finally:
@@ -402,7 +406,6 @@ destination = "${{install}}"
                     monitor(f"savevm {tag}")
                 finally:
                     monitor("cont")
-                enabled_source = guest("cat", f"{source_root}/{names['api']}").stdout
                 interference = build(20, options.service_v2, config="interference")
                 latch = f"{remote}/dependent-state"
                 paths = [f"{directory}/{name}" for name in ("api", "storage", "shared.conf")]
@@ -418,12 +421,13 @@ destination = "${{install}}"
                         assert pending.poll() is None, "upgrade exited before the interference boundary"
                         assert time.monotonic() < deadline, "upgrade did not reach the interference boundary"
                         time.sleep(0.05)
-                    disabled_source = guest("cat", f"{source_root}/{names['api']}").stdout
-                    guest("tee", f"{source_root}/{names['api']}", input_text=enabled_source)
+                    gate = f"/etc/conf.d/{names['api']}"
+                    disabled_gate = guest("cat", gate).stdout
+                    guest("rm", gate)
                     control("api", "start")
                     unmarked_pid = process("api")
                     assert unmarked_pid, "external dependent did not start"
-                    guest("tee", f"{source_root}/{names['api']}", input_text=disabled_source)
+                    guest("tee", gate, input_text=disabled_gate)
                     control("api", "zap")
                     guest("test", "-d", f"/proc/{unmarked_pid}")
                     assert guest("test", "-e", f"/run/openrc/started/{names['api']}", check=False).returncode != 0
@@ -432,7 +436,7 @@ destination = "${{install}}"
                     assert pending.returncode != 0, f"unmarked live dependent was accepted: {output}"
                     assert execution_generations()["storage"] == original_storage, "prerequisite stopped while its unmarked dependent was live"
                     assert guest("sha256sum", *paths).stdout == original_files, "interference allowed payload mutation"
-                    records = guest("find", "/var/lib/zup/transactions", "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines()
+                    records = guest("find", transaction_root, "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines()
                     failed = [json.loads(guest("cat", path).stdout) for path in records]
                     failed = [record for record in failed if record["app_id"] == application and journal_phase(record) == "recovery_required"]
                     assert len(failed) == 1, "external interference did not retain one recovery intent"
@@ -473,13 +477,12 @@ destination = "${{install}}"
                 assert {name: process(name) for name in ids} == before, "format rejection interrupted running services"
                 assert guest("sha256sum", f"{directory}/storage", f"{directory}/api").stdout == before_images, "format rejection replaced installed images"
             if options.manager == "openrc":
-                generation_record = f"/run/openrc/supervise-{names['api']}.identity"
+                generation_record = f"/run/{names['api']}.pid"
                 saved_generation = guest("cat", generation_record).stdout
-                instance, controller_pid, _ = saved_generation.split()
-                guest("tee", generation_record, input_text=f"{instance} {controller_pid} 0\n")
+                guest("tee", generation_record, input_text="1\n")
                 try:
-                    assert install(metadata, "repair", check=False).returncode != 0, "stale native PID generation was accepted"
-                    assert execution_generations() == generations, "stale identity rejection controlled a runtime"
+                    assert install(metadata, "repair", check=False).returncode != 0, "foreign native PID was accepted"
+                    assert execution_generations() == generations, "native evidence rejection controlled a runtime"
                 finally:
                     guest("tee", generation_record, input_text=saved_generation)
                 scope_control = f"/sys/fs/cgroup/openrc.{names['api']}/cgroup.procs"
@@ -541,11 +544,11 @@ destination = "${{install}}"
                 assert control(name, "start", check=False).returncode != 0, "disabled service accepted native activation"
             assert not any(execution_generations().values()), "disabled native activation created a process"
             disabled_update = build(21, options.service_v1, config="disabled update", unrelated="unrelated update", startup="disabled", app_version="3.18.1")
-            baseline = set(guest("find", "/var/lib/zup/transactions", "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines())
+            baseline = set(guest("find", transaction_root, "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines())
             interrupted = guest("env", "ZUP_TEST_FAULT_POINT=apply_returned", "ZUP_TEST_FAULT_OPERATION=service_quiesce",
                 disabled_update, "upgrade", "--scope", "machine", "--non-interactive", "--yes", "--output", "json", check=False)
             assert interrupted.returncode != 0, "disabled quiescence fault did not fire"
-            journals = set(guest("find", "/var/lib/zup/transactions", "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines()) - baseline
+            journals = set(guest("find", transaction_root, "-maxdepth", "2", "-name", "transaction.json").stdout.splitlines()) - baseline
             assert len(journals) == 1, "disabled upgrade did not retain one recovery journal"
             journal = journals.pop()
             transaction = json.loads(guest("cat", journal).stdout)["transaction_id"]
@@ -609,16 +612,17 @@ destination = "${{install}}"
                 membership = guest("cat", f"/proc/{child}/cgroup").stdout.strip()
                 assert membership == f"0::/openrc.{names['api']}", "detached child escaped its native process scope"
                 control("api", "stop")
-                guest("test", "-d", f"/proc/{child}")
-                before_images = guest("sha256sum", f"{directory}/storage", f"{directory}/api", f"{directory}/shared.conf").stdout
-                assert install(child_setup, "repair", check=False).returncode != 0, "repair accepted a detached runtime after main process exit"
-                assert guest("sha256sum", f"{directory}/storage", f"{directory}/api", f"{directory}/shared.conf").stdout == before_images, "ambiguous runtime observation mutated service inputs"
-                guest("kill", "-KILL", child)
                 deadline = time.monotonic() + 10
-                while guest("cat", f"/sys/fs/cgroup/openrc.{names['api']}/cgroup.events").stdout.split("populated ")[1].splitlines()[0] != "0":
-                    assert time.monotonic() < deadline, "detached child remained populated after exit"
+                scope = f"/sys/fs/cgroup/openrc.{names['api']}"
+                while guest("test", "-e", scope, check=False).returncode == 0:
+                    if "populated 0" in guest("cat", scope + "/cgroup.events").stdout:
+                        break
+                    assert time.monotonic() < deadline, "native cleanup left detached descendants running"
                     time.sleep(0.1)
-                # Replace the child-launching definition while stopped before starting it again.
+                before_images = guest("sha256sum", f"{directory}/storage", f"{directory}/api", f"{directory}/shared.conf").stdout
+                install(child_setup, "repair")
+                assert process("api") is None, "unchanged repair restarted a previously stopped service"
+                assert guest("sha256sum", f"{directory}/storage", f"{directory}/api", f"{directory}/shared.conf").stdout == before_images
             graceful = build(15, options.service_v1, config="custom shutdown", stop_after_ms=1500, stop_grace_seconds=4)
             install(graceful, "upgrade")
             last_setup = graceful
@@ -654,7 +658,7 @@ destination = "${{install}}"
             guest("rmdir", directory, check=False)
             checks = ["install", "foreign_service_refused", "argument_escaping", "least_privilege", "running_upgrade", "managed_service_dependency", "shared_configuration_dependency", "unchanged_repair", "unrelated_file_update", "stopped_upgrade", "definition_tampering", "startup_override_tampering", "failed_start_compensation", "uninstall", "foreign_file_preserved"]
             if options.supervised: checks.append("native_restart_budget")
-            if options.manager == "openrc": checks.extend(["shebang_refused_before_mutation", "detached_child_refuses_false_quiescence", "stale_pid_generation_refused", "delegated_cgroup_refused"])
+            if options.manager == "openrc": checks.extend(["shebang_refused_before_mutation", "native_detached_child_cleanup", "foreign_native_pid_refused", "delegated_cgroup_refused"])
             checks.extend(["running_boot_policy_preserves_generation", "stopped_boot_policy_preserves_state"])
             checks.extend(["disabled_refuses_native_activation", "disabled_upgrade_lost_quiescence_reply"])
             checks.extend(["custom_graceful_shutdown", "native_timeout_escalation", "saved_timeout_policy_uninstall", "display_name_preserves_generation"])

@@ -34,7 +34,7 @@ The manifest is strict: unknown fields are rejected.
 | `name`        | yes      | display name                             |
 | `version`     | yes      | application version                      |
 | `publisher`   | no       | publisher display name                   |
-| `main`        | no       | main application executable/template     |
+| `main`        | no       | logical reference to the main executable |
 | `description` | no       | user-facing description                  |
 | `icon`        | no       | icon path or `{ source, padding }` table |
 
@@ -78,6 +78,17 @@ Optional. With no declared artifacts, Zup builds one installer per selected targ
 | `output`  | no       | derived     | output file name         |
 
 ## `[install]`
+
+`data` is an optional array of persistent-directory declarations. Each declaration
+has a stable `id`, exactly one of `path` or `service`, and an optional
+`compatibility` contract. Path placement defaults to owner-only access. Machine
+paths can declare `access = { kind = "services", services = ["worker"] }`.
+Service placement delegates state provisioning to the native service mechanism;
+its writer is the named service. Empty or duplicate writer lists are invalid.
+The default `{ kind = "stable" }` declares release-independent data. A schema
+contract has `{ kind = "schema", writes = N, reads = [N, ...] }`, with positive
+schema numbers. See [Persistent data](../guide/payload.md) for ownership and
+rollback behavior.
 
 | Key                        | Required | Default | Meaning                              |
 | -------------------------- | -------- | ------- | ------------------------------------ |
@@ -138,7 +149,52 @@ See [Presets](/presets/).
 
 ### `[[files]]`
 
-`source` and `destination` are required. Optional: `component`, `when`, `allow_empty` (default `false`), `executable` (default `false`), `targets`.
+`id` and `source` are required. `id` is a stable logical name for the mapping;
+`source` is a pattern within the target's source directory. Optional fields are
+`placement`, `component`, `when`, `allow_empty`, `executable`, and `targets`.
+Both boolean fields default to `false`.
+
+With no `placement`, matched files belong to an immutable generation and retain
+their relative paths. For example:
+
+```toml
+[[files]]
+id = "application"
+source = "**/*"
+```
+
+Directory mappings append each matched relative path. Use
+`placement = { kind = "generation", directory = "lib" }` to place a tree below
+`lib`, or `placement = { kind = "fixed", directory = "${install}/shared" }`
+when the files require that physical directory.
+
+Single-file mappings require exactly one source match and name its destination
+explicitly. Their logical identity remains the mapping's `id` even if the source
+file is renamed:
+
+```toml
+[[files]]
+id = "program"
+source = "release/acme-linux"
+placement = { kind = "generation_file", path = "bin/acme" }
+```
+
+Use `fixed_file` with a path template for a physically fixed single file.
+Placement never changes automatically after an activation failure.
+
+Fixed placement defaults to `replacement = "atomic"`. The public file must stay
+present while its owned instance is replaced. `replacement = "quiescent"` permits
+a temporary absence only within a verified runtime boundary. Declaring this
+policy does not establish that boundary. Zup refuses replacement when the native
+filesystem or runtime coordination cannot meet the declared requirement.
+
+`app.main = "bin/acme"` refers to that member of the `application` tree mapping.
+For a single-file mapping, use
+`main = { kind = "file", declaration = "program" }` in `[app]`.
+Other tree mappings use
+`main = { kind = "tree_member", declaration = "tools", member = "bin/acme" }`.
+The main reference must select a shipped payload. It automatically grants that
+payload executable intent; `executable = true` marks additional executables.
 
 `executable` states that the shipped file is meant to be runnable. It is an
 intent, not a permission: the platform decides how to satisfy it. It is never
@@ -147,17 +203,23 @@ a build machine's mode bits are not portable truth.
 
 ### `[[launchers]]`
 
-Required: `location`, `name`, `target`. Optional: `arguments`, `working_directory`, `component`, `when`, `targets`. `location` is `menu` or `desktop`.
+Required: `id`, `location`, `name`, `target`. Keep `id` stable when the display name or executable path changes. Optional: `arguments`, `working_directory`, `component`, `when`, `targets`. `location` is `menu` or `desktop`.
 
 ### `[[path]]`
 
-Required: `value`. Optional: `component`, `when`, `targets`.
+Required: `id`, `value`. `id` is a stable logical declaration name; it remains unchanged when a generation directory changes. Optional: `component`, `when`, `targets`.
 
 ### `[[services]]`
 
-Required: `id`, `name`, `binary`, `start`, `execution`. Optional: `display_name`, `arguments`, `lifecycle`, `readiness`, `requires_files`, `component`, `when`, `targets`. `start` is `automatic`, `manual`, or `disabled` and controls boot policy independently of installation-time execution.
+Required: `id`, `binary`, `start`, `execution`. Optional: `native_name`, `display_name`, `arguments`, `lifecycle`, `readiness`, `requires_files`, `component`, `when`, `targets`. `start` is `automatic`, `manual`, or `disabled` and controls boot policy independently of installation-time execution.
 
-`execution` is explicit owned configuration. Windows accepts `{ type = "windows", account = "local_service" }`, `network_service`, or an explicitly selected `local_system`. Managed Windows registrations use an unrestricted service SID. Credential-bearing accounts are not supported. systemd accepts `{ type = "systemd_dynamic_user" }` or `{ type = "systemd_user", user = "account", group = "optional-group" }`. Named accounts must already exist; numeric identities and account provisioning are not supported. Generated units require `NoNewPrivileges=yes`.
+The default native name is scoped to the application and logical service ID.
+Use `native_name` for a hard-coded native contract, including the `.service` suffix
+for systemd. `display_name` is a presentation label and defaults to the logical ID.
+A whole `"${service.worker}"` argument resolves the native name of declared service
+`worker`; `"${job.worker}"` supplies its Windows job locator.
+
+`execution` is explicit owned configuration. Windows accepts `{ type = "windows_job", account = "local_service" }`, `network_service`, or an explicitly selected `local_system`. Managed Windows registrations use an unrestricted service SID. Credential-bearing accounts are not supported. systemd accepts `{ type = "systemd_dynamic_user" }` or `{ type = "systemd_user", user = "account", group = "optional-group" }`. Named accounts must already exist; numeric identities and account provisioning are not supported. Generated units require `NoNewPrivileges=yes`.
 
 `lifecycle = { install = "stopped", change = "preserve" }` is the default. Set `install = "running"` to request startup after a new registration. `change = "preserve"` restores a previously running service after its executable or registration changes and leaves a stopped service stopped. `change = "stopped"` leaves it stopped after a change. Disabled services cannot request startup.
 

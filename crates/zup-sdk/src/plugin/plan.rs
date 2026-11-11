@@ -1,13 +1,14 @@
 use zup_plugin_abi as abi;
 
 pub use super::exports::zup::plugin::planner::{
-    ChangedServiceState, FileAssociation, GeneratedFile, InitialServiceState, Launcher,
-    LauncherLocation, OpenrcFailurePolicy, OpenrcTimeouts, Protocol, Service, ServiceExecution,
-    ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart, ServiceTimeouts,
-    SystemdFailurePolicy, SystemdRestartCondition, SystemdTimeouts, SystemdUser,
+    ChangedServiceState, DataAccess, DataCompatibility, DataDirectory, DataLocation, DataPath,
+    DataSchema, FileAssociation, FixedReplacement, GeneratedFile, InitialServiceState, Launcher,
+    LauncherLocation, OpenrcFailurePolicy, OpenrcTimeouts, PathEntry, Protocol, Service,
+    ServiceExecution, ServiceFailurePolicy, ServiceLifecycle, ServiceReadiness, ServiceStart,
+    ServiceTimeouts, SystemdFailurePolicy, SystemdRestartCondition, SystemdTimeouts, SystemdUser,
     WindowsFailurePolicy, WindowsServiceAccount, WindowsTimeouts,
 };
-use super::exports::zup::plugin::planner::{PathEntry, PluginError, ResourceItem};
+use super::exports::zup::plugin::planner::{PluginError, ResourceItem};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
@@ -57,9 +58,35 @@ impl From<Error> for PluginError {
     }
 }
 
-impl Launcher {
-    pub fn menu(name: impl Into<String>, target: impl Into<String>) -> Self {
+impl DataDirectory {
+    pub fn path(id: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
+            id: id.into(),
+            location: DataLocation::Path(DataPath {
+                path: path.into(),
+                access: DataAccess::Owner,
+            }),
+            compatibility: DataCompatibility::Stable,
+        }
+    }
+    pub fn service(id: impl Into<String>, service: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            location: DataLocation::Service(service.into()),
+            compatibility: DataCompatibility::Stable,
+        }
+    }
+    #[must_use]
+    pub fn with_schema(mut self, writes: u32, reads: Vec<u32>) -> Self {
+        self.compatibility = DataCompatibility::Schema(DataSchema { writes, reads });
+        self
+    }
+}
+
+impl Launcher {
+    pub fn menu(id: impl Into<String>, name: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
             location: LauncherLocation::Menu,
             name: name.into(),
             target: target.into(),
@@ -68,8 +95,13 @@ impl Launcher {
         }
     }
 
-    pub fn desktop(name: impl Into<String>, target: impl Into<String>) -> Self {
+    pub fn desktop(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        target: impl Into<String>,
+    ) -> Self {
         Self {
+            id: id.into(),
             location: LauncherLocation::Desktop,
             name: name.into(),
             target: target.into(),
@@ -98,7 +130,6 @@ impl Launcher {
 impl Service {
     pub fn new(
         id: impl Into<String>,
-        name: impl Into<String>,
         binary: impl Into<String>,
         execution: ServiceExecution,
     ) -> Self {
@@ -106,7 +137,7 @@ impl Service {
             failure: super::ServiceFailurePolicy::None,
             execution,
             id: id.into(),
-            name: name.into(),
+            native_name: None,
             display_name: None,
             binary: binary.into(),
             arguments: Vec::new(),
@@ -120,6 +151,12 @@ impl Service {
                 timeouts: None,
             },
         }
+    }
+
+    #[must_use]
+    pub fn with_native_name(mut self, native_name: impl Into<String>) -> Self {
+        self.native_name = Some(native_name.into());
+        self
     }
 
     #[must_use]
@@ -224,34 +261,39 @@ impl FileAssociation {
 }
 
 impl GeneratedFile {
-    pub fn new(destination: impl Into<String>, contents: impl Into<Vec<u8>>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        destination: impl Into<String>,
+        contents: impl Into<Vec<u8>>,
+    ) -> Self {
         Self {
+            id: id.into(),
+            replacement: FixedReplacement::Atomic,
             destination: destination.into(),
             contents: contents.into(),
         }
     }
 
-    pub fn text(destination: impl Into<String>, contents: impl AsRef<str>) -> Self {
-        Self::new(destination, contents.as_ref().as_bytes().to_vec())
+    pub fn text(
+        id: impl Into<String>,
+        destination: impl Into<String>,
+        contents: impl AsRef<str>,
+    ) -> Self {
+        Self::new(id, destination, contents.as_ref().as_bytes().to_vec())
+    }
+
+    pub fn replacement(mut self, replacement: FixedReplacement) -> Self {
+        self.replacement = replacement;
+        self
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Path(String);
-
-impl Path {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<Path> for ResourceItem {
-    fn from(path: Path) -> Self {
-        Self::PathEntry(PathEntry { value: path.0 })
+impl PathEntry {
+    pub fn new(id: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            value: value.into(),
+        }
     }
 }
 
@@ -275,8 +317,13 @@ impl Plan {
         self
     }
 
-    pub fn path_entry(mut self, path: impl Into<Path>) -> Self {
-        self.resources.push(path.into().into());
+    pub fn path_entry(mut self, path: PathEntry) -> Self {
+        self.resources.push(ResourceItem::PathEntry(path));
+        self
+    }
+
+    pub fn data(mut self, directory: DataDirectory) -> Self {
+        self.resources.push(ResourceItem::Data(directory));
         self
     }
 

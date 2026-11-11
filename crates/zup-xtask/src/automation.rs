@@ -212,12 +212,14 @@ fn plan() -> AutomationResult {
             change_count: 2,
             resources: vec![
                 PlanResource::File {
+                    placement: zup_automation::PlanFilePlacement::Generation,
                     destination: r"${location.user_data}/Acme/app.exe".to_owned(),
                     size: ByteCount::new(248_512_832),
                     digest: Digest::sha256("a".repeat(64)),
                     generated: false,
                 },
                 PlanResource::File {
+                    placement: zup_automation::PlanFilePlacement::FixedAtomic,
                     destination: r"${location.user_data}/Acme/configure.txt".to_owned(),
                     size: ByteCount::new(64),
                     digest: Digest::sha256("b".repeat(64)),

@@ -186,7 +186,7 @@
         "main": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Template"
+              "$ref": "#/$defs/MainReference"
             },
             {
               "type": "null"
@@ -212,10 +212,60 @@
       "additionalProperties": false,
       "required": ["id", "name", "version"]
     },
-    "Template": {
-      "description": "A path or command template using zup variables such as ${install} and ${location.user_data}.",
+    "MainReference": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PayloadId"
+        },
+        {
+          "$ref": "#/$defs/RelativePath"
+        }
+      ]
+    },
+    "PayloadId": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "file"
+            },
+            "declaration": {
+              "$ref": "#/$defs/ResourceId"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "declaration"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "tree_member"
+            },
+            "declaration": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "member": {
+              "$ref": "#/$defs/RelativePath"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "declaration", "member"]
+        }
+      ]
+    },
+    "ResourceId": {
       "type": "string",
-      "examples": ["${install}/app.exe", "${location.programs}/Acme"]
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "RelativePath": {
+      "description": "A `/`-separated path relative to the project directory. Absolute paths and `..` are refused.",
+      "type": "string"
     },
     "IconSetting": {
       "description": "An application icon: a path in the project, or a table with `source` and optional `padding`.",
@@ -364,6 +414,16 @@
         "scope": {
           "$ref": "#/$defs/InstallScope"
         },
+        "generation_readers": {
+          "$ref": "#/$defs/GenerationReaders",
+          "default": "untracked"
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PersistentDirectory_Template"
+          }
+        },
         "directory": {
           "$ref": "#/$defs/InstallDirectory",
           "default": {
@@ -383,6 +443,138 @@
       "description": "Scope an installer may target.",
       "type": "string",
       "enum": ["user", "machine", "either"]
+    },
+    "GenerationReaders": {
+      "type": "string",
+      "enum": ["untracked", "native_executables"]
+    },
+    "PersistentDirectory_Template": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "path": {
+              "$ref": "#/$defs/Template"
+            },
+            "access": {
+              "$ref": "#/$defs/PersistentAccess",
+              "default": {
+                "kind": "owner"
+              }
+            },
+            "compatibility": {
+              "$ref": "#/$defs/DataCompatibility",
+              "default": {
+                "kind": "stable"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": ["id", "path"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/ResourceId"
+            },
+            "service": {
+              "type": "string"
+            },
+            "compatibility": {
+              "$ref": "#/$defs/DataCompatibility",
+              "default": {
+                "kind": "stable"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": ["id", "service"]
+        }
+      ]
+    },
+    "Template": {
+      "description": "A path or command template using zup variables such as ${install} and ${location.user_data}.",
+      "type": "string",
+      "examples": ["${install}/app.exe", "${location.programs}/Acme"]
+    },
+    "PersistentAccess": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "owner"
+            }
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "services"
+            },
+            "services": {
+              "$ref": "#/$defs/ServiceDataWriters"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "services"]
+        }
+      ]
+    },
+    "ServiceDataWriters": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "DataCompatibility": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "stable"
+            }
+          },
+          "required": ["kind"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "schema"
+            },
+            "writes": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 1
+            },
+            "reads": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 1
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "writes"]
+        }
+      ]
     },
     "InstallDirectory": {
       "description": "Unresolved install-root templates by scope.",
@@ -1112,11 +1304,18 @@
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
+        "id": {
+          "$ref": "#/$defs/ResourceId"
+        },
         "source": {
           "type": "string"
         },
-        "destination": {
-          "$ref": "#/$defs/Template"
+        "placement": {
+          "$ref": "#/$defs/PayloadMapping",
+          "default": {
+            "kind": "generation",
+            "directory": null
+          }
         },
         "component": {
           "type": ["string", "null"],
@@ -1139,7 +1338,7 @@
           "default": false
         },
         "executable": {
-          "description": "This file is intended to be executable.\n\nThe intent is portable; how it is honoured is not. A backend that has\nfilesystem modes applies one, and a backend that does not has nothing to\nchange. What is *not* portable is a raw mode, so there is deliberately no\nway to write `0755` here: a build machine on Windows has no meaningful mode\nbits to preserve, and a mode authored on Linux would silently disagree with\nthe same manifest built elsewhere.\n\nNot inferred from the file's bytes either. A script, a data file and an ELF\nare each identifiable without permission bits, but a file happening to be\nELF does not make it something a user should be able to run.",
+          "description": "Additional executable payloads. The application main is executable automatically.",
           "type": "boolean",
           "default": false
         },
@@ -1152,12 +1351,94 @@
         }
       },
       "additionalProperties": false,
-      "required": ["source", "destination"]
+      "required": ["id", "source"]
+    },
+    "PayloadMapping": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "generation"
+            },
+            "directory": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RelativePath"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "generation_file"
+            },
+            "path": {
+              "$ref": "#/$defs/RelativePath"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "path"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fixed"
+            },
+            "directory": {
+              "$ref": "#/$defs/Template"
+            },
+            "replacement": {
+              "$ref": "#/$defs/FixedReplacement",
+              "default": "atomic"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "directory"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fixed_file"
+            },
+            "path": {
+              "$ref": "#/$defs/Template"
+            },
+            "replacement": {
+              "$ref": "#/$defs/FixedReplacement",
+              "default": "atomic"
+            }
+          },
+          "additionalProperties": false,
+          "required": ["kind", "path"]
+        }
+      ]
+    },
+    "FixedReplacement": {
+      "type": "string",
+      "enum": ["atomic", "quiescent"]
     },
     "Targeted6": {
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
+        "id": {
+          "$ref": "#/$defs/ResourceId"
+        },
         "location": {
           "$ref": "#/$defs/LauncherLocation"
         },
@@ -1209,7 +1490,7 @@
         }
       },
       "additionalProperties": false,
-      "required": ["location", "name", "target"]
+      "required": ["id", "location", "name", "target"]
     },
     "LauncherLocation": {
       "description": "Portable application launcher location.",
@@ -1220,6 +1501,9 @@
       "description": "A resource declaration with optional target-profile applicability.",
       "type": "object",
       "properties": {
+        "id": {
+          "$ref": "#/$defs/ResourceId"
+        },
         "value": {
           "$ref": "#/$defs/Template"
         },
@@ -1247,7 +1531,7 @@
         }
       },
       "additionalProperties": false,
-      "required": ["value"]
+      "required": ["id", "value"]
     },
     "Targeted8": {
       "description": "A resource declaration with optional target-profile applicability.",
@@ -1265,8 +1549,9 @@
         "id": {
           "type": "string"
         },
-        "name": {
-          "type": "string"
+        "native_name": {
+          "type": ["string", "null"],
+          "default": null
         },
         "display_name": {
           "type": ["string", "null"],
@@ -1343,7 +1628,7 @@
         }
       },
       "additionalProperties": false,
-      "required": ["execution", "id", "name", "binary", "start"]
+      "required": ["execution", "id", "binary", "start"]
     },
     "ServiceFailurePolicy": {
       "oneOf": [
@@ -1468,7 +1753,7 @@
           "properties": {
             "type": {
               "type": "string",
-              "const": "windows"
+              "const": "windows_job"
             },
             "account": {
               "$ref": "#/$defs/WindowsServiceAccount"

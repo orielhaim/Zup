@@ -4,16 +4,17 @@ use std::fs;
 use rstest::rstest;
 use tempfile::TempDir;
 use zup_build::materialize;
+use zup_core::TargetOverrides;
 use zup_core::{ComponentId, InstallScope, Privilege, ProtocolScheme, ServiceId, Target, Template};
 use zup_core::{ResourceKey, SelectedScope};
-use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
+use zup_manifest::{compile, parse, parse_and_compile, select_targets};
 use zup_plan::{ComponentOverrides, DesiredState, PlanError, PlanRequest, plan};
 
 fn target() -> Target {
     Target::parse("windows-x64").unwrap()
 }
 
-fn build_plan_from(source: &str, files: &[(&str, &[u8])]) -> zup_build::BuildPlan {
+fn build_plan_from(source: &str, files: &[(&str, &[u8])]) -> zup_core::BuildPlan {
     let dir = TempDir::new().unwrap();
     for (rel, contents) in files {
         let path = dir.path().join(rel);
@@ -349,10 +350,12 @@ name = "CLI"
 requires = ["core"]
 
 [[path]]
+id = "cli-1"
 value = "${install}/bin"
 when = 'component("cli")'
 
 [[path]]
+id = "cli-2"
 value = "${install}/extra"
 when = '!component("cli")'
 "#,
@@ -366,6 +369,7 @@ when = '!component("cli")'
             scope: SelectedScope::User,
             install_directory: None,
             components: overrides(&["cli"], &[]),
+            ..PlanRequest::new(target(), SelectedScope::User)
         },
         None,
         &zup_plan::NeverCancelled,
@@ -385,6 +389,7 @@ when = '!component("cli")'
             scope: SelectedScope::User,
             install_directory: None,
             components: overrides(&[], &["cli"]),
+            ..PlanRequest::new(target(), SelectedScope::User)
         },
         None,
         &zup_plan::NeverCancelled,
@@ -412,8 +417,9 @@ name = "CLI"
 requires = ["core"]
 
 [[files]]
+id = "payload-1"
 source = "a.txt"
-destination = "${install}/a.txt"
+placement = { kind = "fixed_file", path = "${install}/a.txt" }
 component = "cli"
 when = 'component("core") && component("cli")'
 "#,
@@ -426,6 +432,7 @@ when = 'component("core") && component("cli")'
             scope: SelectedScope::User,
             install_directory: None,
             components: overrides(&[], &["cli"]),
+            ..PlanRequest::new(target(), SelectedScope::User)
         },
         None,
         &zup_plan::NeverCancelled,
@@ -441,6 +448,7 @@ when = 'component("core") && component("cli")'
             scope: SelectedScope::User,
             install_directory: None,
             components: overrides(&["cli"], &[]),
+            ..PlanRequest::new(target(), SelectedScope::User)
         },
         None,
         &zup_plan::NeverCancelled,
@@ -465,13 +473,15 @@ default = false
 requires = ["core"]
 
 [[files]]
+id = "payload-2"
 source = "a.txt"
-destination = "${install}/a.txt"
+placement = { kind = "fixed_file", path = "${install}/a.txt" }
 component = "core"
 
 [[files]]
+id = "payload-3"
 source = "b.txt"
-destination = "${install}/b.txt"
+placement = { kind = "fixed_file", path = "${install}/b.txt" }
 component = "cli"
 "#,
     );
@@ -501,8 +511,9 @@ fn selected_files_retain_digest_and_relative_path() {
     let source = with(
         r#"
 [[files]]
+id = "payload-4"
 source = "bin/**/*"
-destination = "${install}/tools"
+placement = { kind = "fixed", directory = "${install}/tools" }
 "#,
     );
     let build = build_plan_from(&source, &[("dist/bin/acme.exe", b"exe!")]);
@@ -520,7 +531,7 @@ destination = "${install}/tools"
 
     assert_eq!(file.sha256, zup_core::hash_bytes(b"exe!"));
     assert_eq!(
-        file.destination.to_string(),
+        file.destination().to_string(),
         "${location.user_data}/Programs/Acme/tools/acme.exe"
     );
 
@@ -532,11 +543,13 @@ destination = "${install}/tools"
 #[case::launchers(
     r#"
 [[launchers]]
+id = "main"
 location = "menu"
 name = "Acme"
 target = "${install}/a.exe"
 
 [[launchers]]
+id = "launcher-2"
 location = "menu"
 name = "Acme"
 target = "${install}/b.exe"
@@ -564,9 +577,11 @@ when = 'component("core")'
 #[case::path_entries(
     r#"
 [[path]]
+id = "cli-3"
 value = "${install}/bin"
 
 [[path]]
+id = "cli-4"
 value = "${install}/bin"
 "#,
     None
@@ -584,12 +599,14 @@ default = false
 requires = ["core"]
 
 [[launchers]]
+id = "launcher-3"
 location = "menu"
 name = "Acme"
 target = "${install}/a.exe"
 component = "core"
 
 [[launchers]]
+id = "launcher-4"
 location = "menu"
 name = "Acme"
 target = "${install}/b.exe"
@@ -600,19 +617,23 @@ component = "cli"
 #[case::distinct_resources(
     r#"
 [[launchers]]
+id = "launcher-5"
 location = "menu"
 name = "Acme"
 target = "${install}/a.exe"
 
 [[launchers]]
+id = "launcher-6"
 location = "desktop"
 name = "Acme"
 target = "${install}/a.exe"
 
 [[path]]
+id = "cli-5"
 value = "${install}/bin"
 
 [[path]]
+id = "cli-6"
 value = "${install}/tools"
 "#,
     Some(4)
@@ -667,15 +688,18 @@ fn scope_decides_the_store_and_privilege_of_registered_resources(
     let source = with(
         r#"
 [[files]]
+id = "payload-5"
 source = "a.txt"
-destination = "${install}/a.txt"
+placement = { kind = "fixed_file", path = "${install}/a.txt" }
 
 [[launchers]]
+id = "launcher-7"
 location = "desktop"
 name = "Acme"
 target = "${install}/a.txt"
 
 [[path]]
+id = "cli-7"
 value = "${install}/bin"
 
 [[protocols]]
@@ -729,9 +753,9 @@ name = "Service"
 default = false
 
 [[services]]
-execution = { type = "windows", account = "local_service" }
+execution = { type = "windows_job", account = "local_service" }
 id = "acme-agent"
-name = "acme-agent"
+display_name = "acme-agent"
 binary = "${install}/acme-agent.exe"
 start = "automatic"
 component = "service"
@@ -771,16 +795,18 @@ id = "core"
 name = "Core"
 
 [[files]]
+id = "payload-6"
 source = "a.txt"
-destination = "${install}/${app.name}/a.txt"
+placement = { kind = "fixed_file", path = "${install}/${app.name}/a.txt" }
 
 [[path]]
+id = "cli-8"
 value = "${install}/bin/${app.version}"
 
 [[services]]
-execution = { type = "windows", account = "local_service" }
+execution = { type = "windows_job", account = "local_service" }
 id = "svc"
-name = "svc"
+display_name = "svc"
 binary = "${install}/svc.exe"
 start = "manual"
 
@@ -836,18 +862,20 @@ id = "configuration"
 name = "Configuration"
 default = false
 [[files]]
+id = "payload-7"
 source = "worker.exe"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 executable = true
 [[files]]
+id = "payload-8"
 source = "worker.conf"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 component = "configuration"
 [[services]]
 id = "worker"
-name = "Worker"
+display_name = "Worker"
 binary = "${install}/worker.exe"
-execution = { type = "windows", account = "local_service" }
+execution = { type = "windows_job", account = "local_service" }
 start = "manual"
 requires_components = ["configuration"]
 "#,
@@ -906,6 +934,74 @@ user = "${install}/Acme"
     assert!(err.to_string().contains("install"));
 }
 
+#[rstest]
+#[case("windows-x64", "windows_job", "KnownWorker")]
+#[case("linux-x64", "systemd_dynamic_user", "known-worker.service")]
+fn service_names_are_application_scoped_with_explicit_native_overrides(
+    #[case] target_name: &str,
+    #[case] execution: &str,
+    #[case] native_name: &str,
+) {
+    let account = if execution == "windows_job" {
+        ", account = \"local_service\""
+    } else {
+        ""
+    };
+    let source = with(&format!(
+        r#"
+[[files]]
+id = "worker"
+source = "worker"
+executable = true
+[[services]]
+id = "worker"
+binary = "${{payload}}/worker"
+arguments = ["${{service.worker}}"]
+execution = {{ type = "{execution}"{account} }}
+start = "manual"
+"#
+    ))
+    .replace("windows-x64", target_name);
+    let request = PlanRequest::new(Target::parse(target_name).unwrap(), SelectedScope::Machine);
+    let planned = |source: &str| {
+        let build = build_plan_from(source, &[("dist/worker", b"worker")]);
+        plan(&build, &request, None, &zup_plan::NeverCancelled)
+            .unwrap()
+            .plan
+    };
+    let first = planned(&source);
+    let second = planned(&source.replace("com.example.acme", "com.example.other"));
+    assert_eq!(first.services[0].id, second.services[0].id);
+    assert_ne!(first.services[0].name, second.services[0].name);
+    assert_eq!(
+        first.services[0].display_name.as_ref().unwrap().as_str(),
+        "worker"
+    );
+    let explicit_source = source.replace(
+        "id = \"worker\"\nbinary",
+        &format!("id = \"worker\"\nnative_name = \"{native_name}\"\nbinary"),
+    );
+    let explicit = planned(&explicit_source);
+    assert_eq!(explicit.services[0].name.as_str(), native_name);
+    let collision = if target_name.starts_with("windows") {
+        native_name.to_lowercase()
+    } else {
+        native_name.into()
+    };
+    let duplicate = format!(
+        r#"{explicit_source}
+[[services]]
+id = "another"
+native_name = "{collision}"
+binary = "${{payload}}/worker"
+execution = {{ type = "{execution}"{account} }}
+start = "manual"
+"#
+    );
+    let build = build_plan_from(&duplicate, &[("dist/worker", b"worker")]);
+    assert!(plan(&build, &request, None, &zup_plan::NeverCancelled).is_err());
+}
+
 #[test]
 fn plan_selects_the_requested_target_and_rejects_unknown_targets() {
     let source = r#"
@@ -933,8 +1029,9 @@ scope = "user"
 user = "${location.user_data}/Targets"
 
 [[files]]
+id = "payload-9"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#;
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join("dist/linux-arm64")).unwrap();
@@ -1014,5 +1111,85 @@ fn an_explicit_group_requires_an_optional_component_in_every_frontend() {
         plan(&build, &request, None, &zup_plan::NeverCancelled)
             .map(|installation| installation.plan)
             .is_ok()
+    );
+}
+
+#[test]
+fn deployment_contract_excludes_materialization_but_covers_payload_and_launch_behavior() {
+    let source = with(
+        r#"
+[[files]]
+id = "application"
+source = "app.exe"
+[[files]]
+id = "notes"
+source = "app.dat"
+[[launchers]]
+id = "launcher-8"
+location = "menu"
+name = "Acme"
+target = "${payload}/app.exe"
+"#,
+    );
+    let build = build_plan_from(
+        &source,
+        &[("dist/app.exe", b"build one"), ("dist/app.dat", b"data")],
+    );
+    let selected = &build;
+    let prepare = || {
+        plan(
+            selected,
+            &PlanRequest::new(target(), SelectedScope::User),
+            None,
+            &zup_plan::NeverCancelled,
+        )
+        .unwrap()
+        .plan
+    };
+    let a = prepare();
+    let b = prepare();
+    assert_ne!(
+        a.generation.as_ref().unwrap().id,
+        b.generation.as_ref().unwrap().id
+    );
+    let contract = zup_plan::DeploymentRequirements::capture(&a).unwrap();
+    assert_eq!(
+        contract,
+        zup_plan::DeploymentRequirements::capture(&b).unwrap()
+    );
+    assert_eq!(a.launchers[0].target.to_string(), "${payload}/app.exe");
+    assert!(matches!(&contract.files[0].placement,
+        zup_core::PayloadPlacement::Generation { path } if path.as_str() == "app.exe"));
+    let mut reordered = contract.clone();
+    reordered.files.reverse();
+    assert_eq!(contract.identity(), reordered.identity());
+    assert!(reordered.validate().is_err());
+    let mut changed_launch = b.clone();
+    changed_launch.launchers[0]
+        .arguments
+        .push("--different-mode".into());
+    assert_ne!(
+        contract.identity(),
+        zup_plan::DeploymentRequirements::capture(&changed_launch)
+            .unwrap()
+            .identity()
+    );
+    let different = build_plan_from(
+        &source,
+        &[("dist/app.exe", b"build two"), ("dist/app.dat", b"data")],
+    );
+    let c = plan(
+        &different,
+        &PlanRequest::new(target(), SelectedScope::User),
+        None,
+        &zup_plan::NeverCancelled,
+    )
+    .unwrap();
+    assert_eq!(a.app.version, c.plan.app.version);
+    assert_ne!(
+        contract.identity(),
+        zup_plan::DeploymentRequirements::capture(&c.plan)
+            .unwrap()
+            .identity()
     );
 }

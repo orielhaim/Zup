@@ -31,8 +31,9 @@ scope = "user"
 [install.directory]
 user = "\${location.programs}/musl-verification"
 [[files]]
+id = "tool"
 source = "tool"
-destination = "\${install}"
+placement = { kind = "fixed", directory = "\${install}" }
 executable = true
 [[plugins]]
 id = "configure"

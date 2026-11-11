@@ -9,10 +9,10 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use zup_acquire::{CachePolicy, CatalogEntry, ContentCache, ContentCatalog};
-use zup_build::TargetBuildPlan;
 use zup_bundle::{BundleWriter, Package, PayloadSource};
+use zup_core::TargetBuildPlan;
+use zup_core::TargetOverrides;
 use zup_core::{RelativePath, Sha256Digest, hash_reader};
-use zup_manifest::TargetOverrides;
 
 fn plan(root: &Path) -> TargetBuildPlan {
     fs::create_dir_all(root.join("dist")).unwrap();
@@ -41,8 +41,8 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/ThinTest"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
 "#,
         target = zup_plugin_contract::HOST_TARGET
     );

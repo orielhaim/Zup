@@ -40,7 +40,7 @@ pub fn run_stage(
         .zip(&loaded.build.targets)
         .enumerate()
     {
-        let mut natives = if thin {
+        let mut natives = if thin || config.target.is_windows() {
             vec![(
                 zup_artifact::MediaType::RUNTIME,
                 plan_only_runtime(&runtimes[index], plan, config)?,
@@ -192,7 +192,7 @@ fn stage_text(
         args.channel,
         tree.root.display(),
         tree.blob_count,
-        zup_presentation::format_bytes(tree.blob_bytes),
+        zup_core::format_bytes(tree.blob_bytes),
         tree.variant_count,
         tree.release_digest,
         tree.tuf_targets.len(),
@@ -241,7 +241,7 @@ fn resolve_runtimes(
 
 fn plan_only_runtime(
     template: &Path,
-    plan: &zup_build::TargetBuildPlan,
+    plan: &zup_core::TargetBuildPlan,
     config: &zup_core::ResolvedTargetConfig,
 ) -> miette::Result<Vec<u8>> {
     if config.target.operating_system() == zup_core::TargetOperatingSystem::Linux {
@@ -358,13 +358,23 @@ fn stage_thin_windows(
     for (label, pin) in [
         (
             "version",
-            zup_acquire::ReleasePin::Version {
-                version: loaded.manifest.app.version.to_string(),
+            zup_core::ReleasePin::Release {
+                version: loaded.manifest.app.version.clone(),
+                document: zup_core::hash_bytes(
+                    &std::fs::read(
+                        tree.join(
+                            zup_acquire::release_path(&args.channel)
+                                .map_err(|error| miette::miette!("{error}"))?
+                                .to_string(),
+                        ),
+                    )
+                    .map_err(|error| miette::miette!("published release document: {error}"))?,
+                ),
             },
         ),
         (
             "channel",
-            zup_acquire::ReleasePin::Channel {
+            zup_core::ReleasePin::Channel {
                 channel: args.channel.clone(),
             },
         ),
@@ -379,7 +389,6 @@ fn stage_thin_windows(
         );
         let request = zup_artifact::ArtifactRequest::thin_online(
             format!("{app_id}-{label}"),
-            &loaded.manifest.app,
             trust,
             format!("{name}-Setup-{label}.exe"),
         );
@@ -419,9 +428,8 @@ fn stage_thin_windows(
     reporter.log(
         LogLevel::Info,
         format!(
-            "\nThin installers\n{}\n\nThe two differ only in which document they authenticate:\n  \
-             version  releases/{}/versions/{}.json - the release it was built for\n  channel  \
-             releases/{}.json - whatever the channel currently says",
+            "\nThin installers\n{}\n\nThe version installer selects this published build of {}.\n\
+             The channel installer follows the authenticated {} channel.",
             written
                 .iter()
                 .map(|(label, file)| {
@@ -429,12 +437,11 @@ fn stage_thin_windows(
                     format!(
                         "  {label:<8} {} · {}",
                         file.display(),
-                        zup_presentation::format_bytes(size)
+                        zup_core::format_bytes(size)
                     )
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
-            args.channel,
             loaded.manifest.app.version,
             args.channel,
         ),
@@ -469,14 +476,19 @@ fn stage_packages(
     reporter: &Reporter,
 ) -> miette::Result<Vec<StagedPackage>> {
     let channel = args.channel.as_str();
-    let catalog_bytes = std::fs::read(
+    let release_bytes = std::fs::read(
         tree.root.join(
-            zup_acquire::WebLayout::catalog(channel)
-                .map_err(|error| {
-                    crate::failure::error("zup.publish.catalog_unreadable", error.to_string())
-                })?
+            zup_acquire::release_path(channel)
+                .map_err(|error| miette::miette!("{error}"))?
                 .to_string(),
         ),
+    )
+    .map_err(|error| miette::miette!("published release: {error}"))?;
+    let release = zup_acquire::ReleaseDescriptor::parse(&release_bytes)
+        .map_err(|error| miette::miette!("published release: {error}"))?;
+    let catalog_bytes = std::fs::read(
+        tree.root
+            .join(zup_acquire::document_path(&release.catalog.digest).to_string()),
     )
     .map_err(|error| {
         crate::failure::error_with_help(
@@ -545,7 +557,7 @@ fn stage_packages(
         rendered.push(format!(
             "  {:<24} {} · {} objects · {}",
             variant.id,
-            zup_publish::format_bytes(written.size),
+            zup_core::format_bytes(written.size),
             written.blob_count,
             written
                 .names
@@ -1057,7 +1069,9 @@ fn content_origin(
 
 fn documents(web: &Path) -> miette::Result<Vec<(String, PathBuf)>> {
     let mut out = Vec::new();
-    collect_documents(web, web, &mut out)?;
+    for namespace in ["metadata", "releases", "documents"] {
+        collect_documents(web, &web.join(namespace), &mut out)?;
+    }
     out.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(out)
 }
@@ -1075,10 +1089,18 @@ fn collect_documents(
         }
     };
     for entry in entries {
-        let path = entry
-            .map_err(|error| miette::miette!("`{}`: {error}", directory.display()))?
-            .path();
-        if path.is_dir() {
+        let entry = entry.map_err(|error| miette::miette!("`{}`: {error}", directory.display()))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;
+        if kind.is_symlink() || (!kind.is_file() && !kind.is_dir()) {
+            return Err(miette::miette!(
+                "published document `{}` must be a regular file or directory",
+                path.display()
+            ));
+        }
+        if kind.is_dir() {
             collect_documents(root, &path, out)?;
             continue;
         }
@@ -1345,7 +1367,7 @@ fn search_tree(web: Option<&Path>, asset: &str, original: &str) -> miette::Resul
 
 pub fn matrix(manifest: &zup_manifest::Manifest) -> miette::Result<Vec<MatrixTarget>> {
     let selected =
-        zup_manifest::select_targets(manifest, &[], &zup_manifest::TargetOverrides::default())
+        zup_manifest::select_targets(manifest, &[], &zup_core::TargetOverrides::default())
             .map_err(|error| miette::miette!("{error}"))?;
     Ok(selected
         .iter()
@@ -1431,4 +1453,25 @@ fn size_of(path: &Path) -> miette::Result<u64> {
     std::fs::metadata(path)
         .map(|meta| meta.len())
         .map_err(|error| miette::miette!("`{}`: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod document_tests {
+    #[test]
+    fn publication_includes_immutable_documents_and_excludes_signing_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let digest = zup_core::hash_bytes(b"release document");
+        let path = zup_acquire::document_path(&digest).to_string();
+        let published = root.path().join(&path);
+        std::fs::create_dir_all(published.parent().unwrap()).unwrap();
+        std::fs::write(&published, b"release document").unwrap();
+        let signing = root.path().join("tuf-input").join(&path);
+        std::fs::create_dir_all(signing.parent().unwrap()).unwrap();
+        std::fs::write(&signing, b"unpublished input").unwrap();
+        let documents = super::documents(root.path()).unwrap();
+        assert_eq!(
+            documents,
+            vec![(format!("zup-document-{}.json", digest.to_hex()), published)]
+        );
+    }
 }

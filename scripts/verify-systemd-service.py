@@ -85,12 +85,14 @@ scope = "machine"
 [install.directory]
 machine = "${{location.programs}}/{application}"
 [[files]]
+id = "application"
 source = "{binary}"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 executable = true
 [[files]]
+id = "worker"
 source = "worker.conf"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 {declaration}''')
             installer = root / f"setup-{version}"
             run(zup, "build", "--manifest", manifest, "--runtime", runtime, "--output", installer)

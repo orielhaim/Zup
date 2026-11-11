@@ -22,6 +22,10 @@ name = "install_preset"
 required-features = ["test-support"]
 
 [[bin]]
+name = "recovery_preset"
+required-features = ["test-support"]
+
+[[bin]]
 name = "install_close_preset"
 required-features = ["test-support"]
 

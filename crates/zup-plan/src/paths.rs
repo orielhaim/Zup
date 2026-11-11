@@ -2,7 +2,7 @@ use thiserror::Error;
 use zup_core::{Template, TemplatePart, Variable};
 
 use crate::install_locations::{InstallLocationError, InstallLocationResolver};
-use crate::target_path::{TargetPath, TargetPathError, suffix_components};
+use zup_core::{TargetPath, TargetPathError};
 
 #[derive(Debug, Error)]
 pub enum TemplateResolveError {
@@ -66,13 +66,12 @@ pub fn resolve_template_path<R: InstallLocationResolver + ?Sized>(
                 }
                 output = Some(match output {
                     None => TargetPath::new(target, text)?,
-                    Some(existing) => {
-                        existing.join_segments(suffix_components(target, text).map_err(
-                            |segment| TemplateResolveError::InvalidSegment {
-                                segment: segment.to_owned(),
-                            },
-                        )?)?
-                    }
+                    Some(existing) => existing.join_suffix(text).map_err(|error| match error {
+                        TargetPathError::InvalidSuffix { component } => {
+                            TemplateResolveError::InvalidSegment { segment: component }
+                        }
+                        other => TemplateResolveError::InvalidPath(other),
+                    })?,
                 });
             }
         }

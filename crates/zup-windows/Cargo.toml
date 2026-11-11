@@ -39,6 +39,10 @@ zup-plan.workspace = true
 zup-transaction.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+zup-storage.workspace = true
+async-trait = "0.1"
+tough = { version = "0.24", features = ["http"] }
+url.workspace = true
 directories.workspace = true
 private-fs.workspace = true
 futures-util = { version = "0.3", features = ["sink"] }
@@ -46,6 +50,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { version = "1", features = [
+  "fs",
   "net",
   "io-util",
   "time",
@@ -53,7 +58,7 @@ tokio = { version = "1", features = [
   "macros",
   "rt-multi-thread",
 ] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
 uuid = { workspace = true, features = ["v4"] }
 windows-link.workspace = true
 windows-registry.workspace = true
@@ -68,7 +73,7 @@ zup-runtime.workspace = true
 zup-preset-host.workspace = true
 zup-preset-protocol.workspace = true
 zup-signing.workspace = true
-zup-update.workspace = true
+zup-update = { workspace = true, features = ["bundle"] }
 zstd.workspace = true
 semver.workspace = true
 windows = { version = "0.62", features = [
@@ -78,12 +83,15 @@ windows = { version = "0.62", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_ApplicationInstallationAndServicing",
   "Win32_System_Memory",
+  "Win32_System_JobObjects",
+  "Win32_System_LibraryLoader",
   "Win32_System_RestartManager",
   "Win32_System_Services",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_RemoteDesktop",
+  "Win32_System_Registry",
 ] }
 
 [build-dependencies]

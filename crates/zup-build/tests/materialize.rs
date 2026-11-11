@@ -4,9 +4,11 @@ use std::path::Path;
 use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zup_build::{BuildError, FilePattern, Sha256Digest, Writes, materialize};
+use zup_build::{BuildError, FilePattern, Writes, materialize};
+use zup_core::Sha256Digest;
+use zup_core::TargetOverrides;
 use zup_core::{MAX_PLUGIN_ARTIFACTS, Target};
-use zup_manifest::{TargetOverrides, compile, parse, parse_and_compile, select_targets};
+use zup_manifest::{compile, parse, parse_and_compile, select_targets};
 
 fn write_file(path: &Path, contents: &[u8]) {
     if let Some(parent) = path.parent() {
@@ -54,7 +56,7 @@ fn materialize_one(
     manifest_path: &Path,
     manifest: &zup_manifest::Manifest,
     installer: zup_core::Installer,
-) -> Result<zup_build::TargetBuildPlan, BuildError> {
+) -> Result<zup_core::TargetBuildPlan, BuildError> {
     let config = select_targets(manifest, &["default"], &TargetOverrides::default())
         .expect("target")
         .into_iter()
@@ -81,7 +83,7 @@ fn unwrap_target_error(error: BuildError) -> BuildError {
 fn materialize_project(
     dir: &Path,
     files_block: &str,
-) -> Result<zup_build::TargetBuildPlan, BuildError> {
+) -> Result<zup_core::TargetBuildPlan, BuildError> {
     let source = manifest_toml(files_block);
     let manifest = parse(&source).expect("parse");
     let installer = parse_and_compile(&source, "default").expect("compile");
@@ -123,8 +125,9 @@ package = {{ type = "embedded", path = "runtime.exe", sha256 = "{digest}", size 
         manifest_toml(
             r#"
 [[files]]
+id = "payload-1"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#,
         ),
         bytes.len()
@@ -180,25 +183,77 @@ fn a_glob_with_a_static_root_does_not_copy_the_root_into_the_destination() {
         dir.path(),
         r#"
 [[files]]
+id = "payload-2"
 source = "bin/**/*"
-destination = "${install}/tools"
+placement = { kind = "fixed", directory = "${install}/tools" }
 "#,
     )
     .unwrap();
 
-    let mut dests: Vec<_> = plan
-        .files
-        .iter()
-        .map(|f| f.destination.to_string())
-        .collect();
+    let mut dests: Vec<_> = plan.files.iter().map(|f| f.placement.to_string()).collect();
     dests.sort();
     assert_eq!(
         dests,
         [
-            "${install}/tools/acme.exe".to_owned(),
-            "${install}/tools/helpers/foo.dll".to_owned(),
+            "fixed:${install}/tools/acme.exe".to_owned(),
+            "fixed:${install}/tools/helpers/foo.dll".to_owned(),
         ]
     );
+}
+
+#[rstest]
+#[case(
+    r#"{ kind = "generation_file", path = "bin/application" }"#,
+    "generation:bin/application"
+)]
+#[case(
+    r#"{ kind = "fixed_file", path = "${install}/application.exe" }"#,
+    "fixed:${install}/application.exe"
+)]
+fn a_single_file_mapping_can_rename_its_payload(
+    #[case] placement: &str,
+    #[case] destination: &str,
+) {
+    let root = project(&[("dist/original.bin", b"payload")]);
+    let source = manifest_toml(&format!(
+        "[[files]]\nid = \"program\"\nsource = \"original.bin\"\nplacement = {placement}\n"
+    ))
+    .replace(
+        "version = \"1.0.0\"",
+        "version = \"1.0.0\"\nmain = { kind = \"file\", declaration = \"program\" }",
+    );
+    let manifest = parse(&source).unwrap();
+    let installer = parse_and_compile(&source, "default").unwrap();
+    let plan = materialize_one(&root.path().join("zup.toml"), &manifest, installer).unwrap();
+    let file = &plan.files[0];
+    assert_eq!(file.placement.to_string(), destination);
+    assert_eq!(file.source_relative.as_str(), "original.bin");
+    assert_eq!(
+        file.id,
+        zup_core::PayloadId::File {
+            declaration: zup_core::ResourceId::new("program").unwrap()
+        }
+    );
+    assert!(file.executable);
+    let bytes = zup_bundle::BundleWriter::encode(&plan, &[]).unwrap();
+    let package = zup_bundle::Package::parse(&bytes).unwrap();
+    assert_eq!(package.plan().entries[0].id, file.id);
+    assert!(package.plan().entries[0].executable);
+}
+
+#[rstest]
+#[case(r#"{ kind = "generation_file", path = "bin/application" }"#)]
+#[case(r#"{ kind = "fixed_file", path = "${install}/application.exe" }"#)]
+fn a_single_destination_refuses_multiple_sources(#[case] placement: &str) {
+    let root = project(&[("dist/first.bin", b"one"), ("dist/second.bin", b"two")]);
+    let result = materialize_project(
+        root.path(),
+        &format!("[[files]]\nid = \"program\"\nsource = \"*.bin\"\nplacement = {placement}\n"),
+    );
+    assert!(matches!(
+        result,
+        Err(BuildError::MultipleFilesForSingleMapping { .. })
+    ));
 }
 
 #[rstest]
@@ -212,7 +267,7 @@ fn a_glob_matches_the_depth_it_names(#[case] expected: &[&str], #[case] pattern:
     ]);
     let plan = materialize_project(
         dir.path(),
-        &format!("[[files]]\nsource = \"{pattern}\"\ndestination = \"${{install}}\"\n"),
+        &format!("[[files]]\nid = \"application\"\nsource = \"{pattern}\"\nplacement = {{ kind = \"fixed\", directory = \"${{install}}\" }}\n"),
     )
     .unwrap();
     let matched: Vec<_> = plan
@@ -234,8 +289,9 @@ fn a_pattern_that_matches_nothing_is_refused_unless_allowed(
     let files_block = format!(
         r#"
 [[files]]
+id = "payload-3"
 source = "{pattern}"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 allow_empty = {allow_empty}
 "#
     );
@@ -257,8 +313,9 @@ fn dotfiles_are_included() {
         dir.path(),
         r#"
 [[files]]
+id = "payload-4"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#,
     )
     .unwrap();
@@ -278,12 +335,14 @@ fn overlapping_globs_same_destination() {
         dir.path(),
         r#"
 [[files]]
+id = "payload-5"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 
 [[files]]
+id = "payload-6"
 source = "*.dll"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#,
     )
     .unwrap_err();
@@ -297,28 +356,32 @@ destination = "${install}"
 #[case::case_only_destinations(
     r#"
 [[files]]
+id = "payload-7"
 source = "x/Foo.dll"
-destination = "${install}/Foo.dll"
+placement = { kind = "fixed", directory = "${install}/Foo.dll" }
 
 [[files]]
+id = "payload-8"
 source = "y/foo.dll"
-destination = "${install}/foo.dll"
+placement = { kind = "fixed", directory = "${install}/foo.dll" }
 "#,
     2
 )]
 #[case::reserved_device_name(
     r#"
 [[files]]
+id = "payload-9"
 source = "file.txt"
-destination = "${install}/CON"
+placement = { kind = "fixed", directory = "${install}/CON" }
 "#,
     1
 )]
 #[case::trailing_dot(
     r#"
 [[files]]
+id = "payload-10"
 source = "file.txt"
-destination = "${install}/bad."
+placement = { kind = "fixed", directory = "${install}/bad." }
 "#,
     1
 )]
@@ -345,8 +408,9 @@ fn symlink_file_rejected() {
         dir.path(),
         r#"
 [[files]]
+id = "payload-11"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#,
     )
     .unwrap_err();
@@ -363,8 +427,9 @@ fn symlink_directory_not_followed_or_matched_as_payload() {
         dir.path(),
         r#"
 [[files]]
+id = "payload-12"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#,
     );
     match result {
@@ -399,8 +464,9 @@ fn source_paths_are_not_the_portable_identity() {
         dir.path(),
         r#"
 [[files]]
+id = "payload-13"
 source = "a.txt"
-destination = "${install}/a.txt"
+placement = { kind = "fixed", directory = "${install}/a.txt" }
 "#,
     )
     .unwrap();
@@ -465,7 +531,7 @@ fn rejects_excess_plugin_declarations_before_source_access() {
 #[test]
 fn rejects_oversized_plugin_source() {
     let dir = project(&[("dist/app.bin", b"app")]);
-    let oversized = vec![0; zup_build::MAX_PLUGIN_SOURCE_BYTES as usize + 1];
+    let oversized = vec![0; zup_bundle::MAX_PLUGIN_SOURCE_BYTES as usize + 1];
     write_file(&dir.path().join("plugins/helper.wasm"), &oversized);
     let source = manifest_toml(
         r#"
@@ -543,8 +609,9 @@ scope = "user"
 user = "${location.user_data}/Matrix"
 
 [[files]]
+id = "payload-14"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 targets = ["linux-arm64", "windows-x64"]
 "#;
 
@@ -570,7 +637,7 @@ fn selected_targets(
 fn materialize_targets(
     manifest_path: &Path,
     source: &str,
-) -> Result<zup_build::BuildPlan, BuildError> {
+) -> Result<zup_core::BuildPlan, BuildError> {
     let (manifest, mut selected) = selected_targets(source);
     selected.reverse();
     materialize(manifest_path, &manifest, selected, Writes::None)
@@ -648,14 +715,15 @@ fn target_matrix_materializes_independent_payloads_in_profile_order() {
 fn destination_collisions_are_isolated_per_target() {
     let source = TARGET_MATRIX.replace(
         r#"source = "**/*"
-destination = "${install}""#,
+placement = { kind = "fixed", directory = "${install}" }"#,
         r#"source = "a/**/*"
-destination = "${install}/shared"
+placement = { kind = "fixed", directory = "${install}/shared" }
 allow_empty = true
 
 [[files]]
+id = "payload-15"
 source = "b/**/*"
-destination = "${install}/shared"
+placement = { kind = "fixed", directory = "${install}/shared" }
 allow_empty = true"#,
     );
     let dir = project(&[
@@ -667,12 +735,12 @@ allow_empty = true"#,
     assert_eq!(plan.targets[0].files.len(), 1);
     assert_eq!(plan.targets[1].files.len(), 1);
     assert_eq!(
-        plan.targets[0].files[0].destination.to_string(),
-        "${install}/shared/foo"
+        plan.targets[0].files[0].placement.to_string(),
+        "fixed:${install}/shared/foo"
     );
     assert_eq!(
-        plan.targets[1].files[0].destination.to_string(),
-        "${install}/shared/foo"
+        plan.targets[1].files[0].placement.to_string(),
+        "fixed:${install}/shared/foo"
     );
 }
 

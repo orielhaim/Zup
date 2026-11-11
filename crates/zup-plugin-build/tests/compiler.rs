@@ -5,9 +5,10 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
-use zup_build::{TargetBuildPlan, materialize};
+use zup_build::materialize;
+use zup_core::TargetBuildPlan;
+use zup_core::TargetOverrides;
 use zup_core::{Sha256Digest, Target};
-use zup_manifest::TargetOverrides;
 use zup_plugin_build::{PluginBuildError, compile_plugins};
 use zup_plugin_contract::{ContractError, HOST_TARGET, PluginEngine};
 
@@ -49,8 +50,9 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/PluginBuild"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 [[plugins]]
 id = "helper"
 source = "plugins/helper.wasm"
@@ -150,7 +152,7 @@ fn compiles_for_the_plan_target() {
 #[test]
 fn rejects_oversized_sources_before_compilation() {
     let (root, mut plan) = project();
-    let oversized = vec![0; zup_build::MAX_PLUGIN_SOURCE_BYTES as usize + 1];
+    let oversized = vec![0; zup_bundle::MAX_PLUGIN_SOURCE_BYTES as usize + 1];
     update_source(
         &mut plan,
         &root.path().join("plugins/helper.wasm"),

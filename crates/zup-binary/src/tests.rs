@@ -543,3 +543,23 @@ fn static_pie_with_an_entrypoint_is_an_executable() {
             .matches_target(&target("linux-x64-musl"))
     );
 }
+
+#[cfg(any(windows, all(target_os = "linux", target_env = "gnu")))]
+#[test]
+fn native_imports_report_the_platform_library() {
+    let executable = Executable::read(&std::env::current_exe().unwrap()).unwrap();
+    #[cfg(windows)]
+    assert!(
+        executable
+            .libraries()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("kernel32.dll"))
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        executable
+            .libraries()
+            .iter()
+            .any(|name| name == "libc.so.6")
+    );
+}

@@ -71,6 +71,8 @@ fn release(
         }),
         updates: None,
         install: zup_core::Install {
+            generation_readers: Default::default(),
+            data: Vec::new(),
             scope: zup_core::InstallScope::User,
             directory: zup_core::InstallDirectory {
                 user: Some(zup_core::Template::parse("${install}").expect("a dir")),
@@ -90,7 +92,7 @@ fn release(
         file_associations: Vec::new(),
     };
     installer.files = Vec::new();
-    let plan = zup_bundle::PortableBuildPlan {
+    let plan = zup_core::PackagePlan {
         installer,
         entries: Vec::new(),
         prerequisite_artifacts: Vec::new(),

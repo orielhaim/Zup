@@ -20,6 +20,7 @@ fn product() -> ProductIdentity {
 
 fn snapshot() -> Snapshot {
     Snapshot {
+        recovery_transaction: None,
         product: product(),
         surface: Surface::Install(InstallOptions {
             existing_version: None,
@@ -246,6 +247,7 @@ fn a_snapshot_carries_the_whole_presentation_and_not_a_delta() {
 fn a_maintenance_snapshot_reports_what_can_be_done_to_an_installation() {
     let frame = envelope(Message::Snapshot(Box::new(Snapshot {
         surface: Surface::Maintenance(MaintenanceState {
+            retained: Vec::new(),
             installed_version: "1.3.0".into(),
             components: Vec::new(),
             groups: Vec::new(),

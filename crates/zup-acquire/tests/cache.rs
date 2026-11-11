@@ -11,6 +11,103 @@ use std::fs;
 use zup_acquire::{CachePolicy, CacheProbe, ContentCache, ContentDescriptor, ContentKind, Verify};
 
 #[test]
+fn collection_cannot_remove_a_live_writers_lock_or_partial_content() {
+    let fixture = TestCache::new();
+    let cache = fixture.open(CachePolicy::Temporary);
+    let logical = payload(31, 1024);
+    let descriptor = payload_descriptor(&logical, LEVEL);
+    let mut writer = cache.writer(&descriptor).unwrap();
+    writer.write(&wire_of(&logical, LEVEL)).unwrap();
+    writer.commit().unwrap();
+    let writer = cache.writer(&descriptor).unwrap();
+    let state = zup_acquire::RetentionState::record(
+        CachePolicy::Temporary,
+        zup_core::hash_bytes(b"release"),
+        Default::default(),
+    );
+    let report = zup_acquire::sweep(&cache, &state, std::time::Duration::ZERO).unwrap();
+    assert_eq!(report.busy, 1);
+    assert_eq!(report.removed, 0);
+    assert!(matches!(
+        cache.writer(&descriptor),
+        Err(zup_acquire::CacheError::Locked { .. })
+    ));
+    assert!(cache.get(&descriptor, Verify::Full).unwrap().is_some());
+    drop(writer);
+    assert_eq!(
+        zup_acquire::sweep(&cache, &state, std::time::Duration::ZERO)
+            .unwrap()
+            .removed,
+        1
+    );
+    assert!(cache.get(&descriptor, Verify::Full).unwrap().is_none());
+}
+
+#[test]
+fn abandoned_transfer_collection_preserves_active_writers_and_unrelated_entries() {
+    let fixture = TestCache::new();
+    let cache = fixture.open(CachePolicy::Temporary);
+    let logical = payload(41, 4096);
+    let descriptor = payload_descriptor(&logical, LEVEL);
+    let paths = cache.paths(&descriptor).unwrap();
+    let mut writer = cache.writer(&descriptor).unwrap();
+    let wire = wire_of(&logical, LEVEL);
+    writer.write(&wire[..wire.len() / 2]).unwrap();
+    let foreign = paths.parent().join("unrelated.partial");
+    fs::write(&foreign, b"unrelated").unwrap();
+    let state = zup_acquire::RetentionState::record(
+        CachePolicy::Temporary,
+        zup_core::hash_bytes(b"release"),
+        Default::default(),
+    );
+    zup_acquire::sweep(&cache, &state, std::time::Duration::ZERO).unwrap();
+    assert!(paths.partial_path.exists());
+    assert!(paths.lock_path.exists());
+    drop(writer);
+    let report = zup_acquire::sweep(&cache, &state, std::time::Duration::ZERO).unwrap();
+    assert!(report.transfer_bytes_freed > 0);
+    assert!(!paths.partial_path.exists());
+    assert!(!paths.resume_path.exists());
+    assert!(!paths.lock_path.exists());
+    assert_eq!(fs::read(foreign).unwrap(), b"unrelated");
+    let mut writer = cache.writer(&descriptor).unwrap();
+    assert_eq!(writer.wire_offset(), 0);
+    writer.write(&wire_of(&logical, LEVEL)).unwrap();
+    writer.commit().unwrap();
+    assert!(cache.get(&descriptor, Verify::Full).unwrap().is_some());
+}
+
+#[test]
+fn unreadable_retention_never_becomes_permission_to_collect_offline_content() {
+    let fixture = TestCache::new();
+    let cache = fixture.open(CachePolicy::Keep);
+    let logical = payload(32, 1024);
+    let descriptor = payload_descriptor(&logical, LEVEL);
+    let mut writer = cache.writer(&descriptor).unwrap();
+    writer.write(&wire_of(&logical, LEVEL)).unwrap();
+    writer.commit().unwrap();
+    let state = zup_acquire::RetentionState::record(
+        CachePolicy::Keep,
+        zup_core::hash_bytes(b"release"),
+        [descriptor.digest].into(),
+    );
+    zup_acquire::write_retention(cache.root(), &state).unwrap();
+    assert_eq!(
+        zup_acquire::sweep_root(cache.root(), std::time::Duration::ZERO)
+            .unwrap()
+            .pinned,
+        1
+    );
+    fs::write(
+        zup_acquire::retention_path(cache.root()),
+        b"interrupted state",
+    )
+    .unwrap();
+    assert!(zup_acquire::sweep_root(cache.root(), std::time::Duration::ZERO).is_err());
+    assert!(cache.get(&descriptor, Verify::Full).unwrap().is_some());
+}
+
+#[test]
 fn a_blob_is_only_published_after_its_digest_matches() {
     let cache = TestCache::new();
     let cache = cache.open(CachePolicy::Keep);

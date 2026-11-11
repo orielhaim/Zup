@@ -25,6 +25,7 @@ pub enum Variable {
     AppName,
     AppVersion,
     Install,
+    Payload,
     Location(crate::InstallLocation),
 }
 
@@ -40,6 +41,7 @@ impl Variable {
             "app.name" => Ok(Self::AppName),
             "app.version" => Ok(Self::AppVersion),
             "install" => Ok(Self::Install),
+            "payload" => Ok(Self::Payload),
             other => Err(TemplateError::UnknownVariable {
                 name: other.to_owned(),
             }),
@@ -52,6 +54,7 @@ impl Variable {
             Self::AppName => Cow::Borrowed("app.name"),
             Self::AppVersion => Cow::Borrowed("app.version"),
             Self::Install => Cow::Borrowed("install"),
+            Self::Payload => Cow::Borrowed("payload"),
             Self::Location(location) => Cow::Owned(format!("location.{location}")),
         }
     }

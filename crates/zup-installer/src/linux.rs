@@ -73,7 +73,7 @@ fn run_gui() -> miette::Result<()> {
         ));
     }
     let cli = Cli::parse();
-    if cli.install_dir.is_some() || cli.state_root.is_some() {
+    if cli.install_dir.is_some() {
         return Err(miette::miette!(
             "the graphical installer takes no operation arguments; choose the operation in the window"
         ));
@@ -90,7 +90,7 @@ fn run_gui() -> miette::Result<()> {
             &executable,
             zup_session::SessionLaunch {
                 scope,
-                state_root: None,
+                state_root: cli.state_root,
                 interactive: true,
                 ..Default::default()
             },
@@ -126,7 +126,7 @@ fn worker_session_args() -> Option<(String, u32, PathBuf)> {
 }
 
 fn run_worker(session: String, client_pid: u32, socket_path: PathBuf) -> miette::Result<()> {
-    let session: zup_protocol::SessionId = session
+    let session: zup_core::SessionId = session
         .parse()
         .map_err(|_| miette::miette!("the worker serves one session, named by uuid"))?;
     match zup_linux::run_worker_mode(session, client_pid, &socket_path) {

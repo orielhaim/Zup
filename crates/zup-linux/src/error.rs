@@ -5,7 +5,7 @@ pub enum PathError {
     #[error("Linux path component `{component}` is invalid: {reason}")]
     InvalidComponent { component: String, reason: String },
     #[error(transparent)]
-    Path(#[from] zup_plan::TargetPathError),
+    Path(#[from] zup_core::TargetPathError),
     #[error("cannot resolve {kind} `{path}`: {reason}")]
     Invalid {
         kind: &'static str,
@@ -163,8 +163,11 @@ pub enum ExecError {
     LedgerUncommitted,
     #[error("transaction plan does not match committed ownership: {0}")]
     Ownership(String),
-    #[error("unfinished transaction {0} requires recovery")]
-    RecoveryRequired(String),
+    #[error("{detail}")]
+    RecoveryRequired {
+        transaction: Option<zup_core::TransactionId>,
+        detail: String,
+    },
     #[error("cancelled")]
     Cancelled,
     #[error("cannot refresh derived integration state: `{tool}` is not available: {reason}")]
@@ -194,7 +197,7 @@ pub enum ExecError {
     #[error("lifecycle: {0}")]
     Lifecycle(#[from] zup_plan::LifecycleError),
     #[error("transaction plan: {0}")]
-    Compile(#[from] zup_transaction::TransactionPlanError),
+    Compile(#[from] zup_plan::DeploymentPlanError),
     #[error("transaction store: {0}")]
     Store(#[from] zup_transaction::StoreError),
     #[error("transaction executor: {0}")]
@@ -220,9 +223,10 @@ impl From<zup_runtime::OperationError> for ExecError {
     fn from(error: zup_runtime::OperationError) -> Self {
         match error {
             zup_runtime::OperationError::Cancelled => Self::Cancelled,
-            zup_runtime::OperationError::RecoveryRequired(transaction) => {
-                Self::RecoveryRequired(transaction.to_string())
-            }
+            zup_runtime::OperationError::RecoveryRequired(transaction) => Self::RecoveryRequired {
+                transaction: Some(transaction),
+                detail: format!("Transaction {transaction} must be recovered before maintenance"),
+            },
             zup_runtime::OperationError::Downgrade {
                 installed,
                 requested,
@@ -285,8 +289,11 @@ pub enum IpcError {
     Policy(String),
     #[error("worker transaction failed: {0}")]
     Transaction(String),
-    #[error("transaction {0} requires explicit recovery")]
-    RecoveryRequired(String),
+    #[error("{detail}")]
+    RecoveryRequired {
+        transaction: Option<zup_core::TransactionId>,
+        detail: String,
+    },
     #[error("cancelled")]
     Cancelled,
     #[error("the confirmed plan went stale during preparation")]
@@ -321,7 +328,11 @@ impl IpcError {
             }
             Self::Policy(_) => zup_protocol::WorkerFailure::Policy,
             Self::Transaction(_) => zup_protocol::WorkerFailure::Transaction,
-            Self::RecoveryRequired(_) => zup_protocol::WorkerFailure::RecoveryRequired,
+            Self::RecoveryRequired { transaction, .. } => {
+                zup_protocol::WorkerFailure::RecoveryRequired {
+                    transaction: *transaction,
+                }
+            }
             Self::Cancelled | Self::PkexecCancelled => zup_protocol::WorkerFailure::Cancelled,
             Self::WorkerStalePlan => zup_protocol::WorkerFailure::StalePlan,
             Self::WorkerBusy => zup_protocol::WorkerFailure::InstallationBusy,

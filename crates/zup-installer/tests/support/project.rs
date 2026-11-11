@@ -106,7 +106,7 @@ pub struct State {
 
 impl State {
     pub fn new() -> Self {
-        let parent = TempDir::new().expect("a state parent");
+        let parent = TempDir::new_in(zup_windows::user_data().unwrap()).expect("a state parent");
         Self {
             root: parent.path().join("state"),
             _parent: Some(parent),
@@ -128,17 +128,18 @@ impl State {
         &self.root
     }
 
-    /// Where the persisted maintenance copy for one application and version lives.
-    ///
-    /// Built one segment at a time, because a path containing a forward slash is
-    /// the same path to the filesystem and a different string to everything that
-    /// compares paths - which is exactly what a registry assertion does.
     pub fn maintenance(&self, app: &AppSpec) -> PathBuf {
-        self.root
-            .join("maintenance")
-            .join(&app.id)
-            .join("user")
-            .join(&app.version)
+        let record = zup_windows::InstallationRecordStore::new(&self.root)
+            .load(&AppId::new(&app.id).unwrap(), zup_core::SelectedScope::User)
+            .unwrap()
+            .unwrap();
+        let snapshot = std::iter::once(&record.current)
+            .chain(record.retained.iter().rev())
+            .find(|snapshot| {
+                snapshot.version.to_string() == app.version && snapshot.maintenance.is_some()
+            })
+            .unwrap();
+        PathBuf::from(snapshot.maintenance.as_ref().unwrap().directory().as_str())
             .join("maintenance.exe")
     }
 }
@@ -407,7 +408,7 @@ pub fn compose_with_corrupt_package(app: &AppSpec, frontend: Frontend) -> Setup 
 }
 
 /// The plan for one application, with its payload written beside it.
-fn plan(
+pub fn plan(
     app: &AppSpec,
     frontend: Frontend,
     payload: &[Payload],
@@ -418,12 +419,19 @@ fn plan(
         .iter()
         .map(|entry| {
             let source = scratch.join(&entry.name);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
             std::fs::write(&source, &entry.bytes).expect("a payload file");
             let (size, sha256) = hash_reader(entry.bytes.as_slice()).expect("a payload hashes");
             ResolvedFile {
                 source,
                 source_relative: RelativePath::new(&entry.name).expect("a relative path"),
-                destination: Template::parse(&entry.destination()).expect("a destination"),
+                id: zup_core::PayloadId::File {
+                    declaration: payload_id(entry),
+                },
+                placement: zup_core::PayloadPlacement::Fixed {
+                    replacement: zup_core::FixedReplacement::Quiescent,
+                    path: Template::parse(&entry.destination()).expect("a destination"),
+                },
                 size,
                 sha256,
                 component: component_of(entry),
@@ -481,6 +489,8 @@ fn installer_ir(
         frontend,
         updates: None,
         install: Install {
+            generation_readers: Default::default(),
+            data: Vec::new(),
             scope: InstallScope::User,
             directory: InstallDirectory {
                 user: Some(Template::parse(&app.install_directory).expect("a directory")),
@@ -499,12 +509,21 @@ fn installer_ir(
                 when: None,
             })
             .collect(),
-        // The IR's file mappings are the *declarations* a manifest carries, with
-        // their patterns unexpanded. The materialized inventory is `plan.files`.
-        // Putting the expanded files in both would describe every destination
-        // twice, and Windows lowering reads that as two files colliding on one
-        // path.
-        files: Vec::new(),
+        files: payload
+            .iter()
+            .map(|entry| zup_core::FileMapping {
+                id: payload_id(entry),
+                source: entry.name.clone(),
+                placement: zup_core::PayloadMapping::FixedFile {
+                    replacement: zup_core::FixedReplacement::Quiescent,
+                    path: Template::parse(&entry.destination()).unwrap(),
+                },
+                component: component_of(entry),
+                when: None,
+                allow_empty: false,
+                executable: false,
+            })
+            .collect(),
         launchers: Vec::new(),
         path: Vec::new(),
         services: Vec::new(),
@@ -623,3 +642,11 @@ const EXECUTABLE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
 
 /// The build host's compiler target, for the plugin engine.
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
+
+fn payload_id(entry: &Payload) -> zup_core::ResourceId {
+    zup_core::ResourceId::new(format!(
+        "file-{}",
+        zup_core::hash_bytes(entry.name.as_bytes())
+    ))
+    .unwrap()
+}

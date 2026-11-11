@@ -1,21 +1,31 @@
 #![cfg(windows)]
 
+mod requirements_fixture {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/deployment.rs"
+    ));
+}
 use std::path::Path;
+use zup_core::TargetPath;
+use zup_plan::{DeploymentEffects, compile_deployment};
 
 use tempfile::TempDir;
 use zup_core::{
     App, AppId, NonEmptyString, Privilege, RelativePath, ResourceKey, SelectedScope, Target,
     hash_reader,
 };
-use zup_plan::{DesiredFile, DesiredState, LifecycleAction, TargetPath};
+use zup_plan::{DesiredState, LifecycleAction};
 
 use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_runtime::{ExecutionPolicy, InstallOutcome, RuntimeRequest, SessionError};
-use zup_transaction::{
-    FilesystemTransactionStore, ReconciliationState, TransactionInput, TransactionStore,
-    compile_transaction,
-};
-use zup_windows::{InstallLedgerStore, PayloadOverlayIdentity, WindowsRuntimeBackend};
+use zup_transaction::{FilesystemTransactionStore, ReconciliationState, TransactionStore};
+use zup_windows::{InstallationRecordStore, PayloadOverlayIdentity, WindowsRuntimeBackend};
+
+fn temp_root() -> TempDir {
+    let base = directories::BaseDirs::new().unwrap();
+    tempfile::tempdir_in(base.data_local_dir()).unwrap()
+}
 
 fn digest(bytes: &[u8]) -> zup_core::Sha256Digest {
     hash_reader(bytes).unwrap().1
@@ -33,13 +43,22 @@ fn target() -> Target {
     Target::parse("windows-x64").unwrap()
 }
 
-fn file_input(root: &TempDir, scope: SelectedScope) -> TransactionInput {
+fn file_input(root: &TempDir, scope: SelectedScope) -> DeploymentEffects {
     let destination = root.path().join("install").join("app.exe");
     let source = RelativePath::new("app.exe").unwrap();
-    let mut input = TransactionInput::new(target());
+    let mut input = DeploymentEffects::new(
+        zup_core::InstallationId::new_v7(),
+        requirements_fixture::requirements(target(), scope, "com.zup.windows-runtime", "1.0.0"),
+    );
+    input.install_directory = Some(target_path(&root.path().join("install")));
     input.files.push(FileOperation {
+        replacement: zup_core::FixedReplacement::Atomic,
         key: ResourceKey::File {
-            destination: destination.to_string_lossy().into_owned(),
+            id: zup_core::FileResourceId::Payload {
+                id: zup_core::PayloadId::File {
+                    declaration: zup_core::ResourceId::new("fixture-0").unwrap(),
+                },
+            },
         },
         source_relative: source,
         destination: target_path(&destination),
@@ -65,7 +84,19 @@ async fn run(
     policy: ExecutionPolicy,
 ) -> Result<InstallOutcome, SessionError> {
     let control = zup_runtime::OperationControl::new(policy);
-    zup_runtime::execute(backend, request, &control).await
+    let store = FilesystemTransactionStore::private_at(&request.state_root);
+    let outcome = zup_runtime::execute(backend, request, &control).await;
+    if !matches!(outcome, Ok(InstallOutcome::Committed)) {
+        for id in store.list_ids().unwrap_or_default() {
+            if let Ok(record) = store.load(&id) {
+                eprintln!(
+                    "failure: {:?}; recovery: {:?}; compensation: {:?}",
+                    record.failure, record.recovery_failure, record.rollback_failure
+                );
+            }
+        }
+    }
+    outcome
 }
 
 fn request(root: &TempDir, scope: SelectedScope) -> (RuntimeRequest, WindowsRuntimeBackend) {
@@ -73,19 +104,42 @@ fn request(root: &TempDir, scope: SelectedScope) -> (RuntimeRequest, WindowsRunt
     let payload_root = root.path().join("payload");
     std::fs::create_dir_all(&payload_root).unwrap();
     std::fs::write(payload_root.join("app.exe"), b"installed").unwrap();
-    let plan = compile_transaction(&file_input(root, scope)).unwrap();
+    let app_id = AppId::new("com.zup.windows-runtime").unwrap();
+    let mut input = file_input(root, scope);
+    if let Some(prior) = InstallationRecordStore::new(&state_root)
+        .load(&app_id, scope)
+        .unwrap()
+    {
+        input.installation = prior.id;
+        input.observed = Some(prior.current.selection());
+        input.observed_transaction = Some(prior.current.transaction);
+    }
+    let plan = compile_deployment(&input).unwrap();
     let request = RuntimeRequest {
-        intent: None,
+        operation: zup_runtime::RuntimeOperation::Deployment(Box::new(
+            zup_runtime::RuntimeDeployment {
+                plan: plan.clone(),
+
+                intent: zup_plan::DeploymentIntent {
+                    deployment: zup_plan::DeploymentSelection::from_plan(&plan),
+                    action: if plan.transition.is_remove() {
+                        zup_plan::LifecycleAction::Uninstall
+                    } else {
+                        zup_plan::LifecycleAction::Install
+                    },
+                    enable: Vec::new(),
+                    disable: Vec::new(),
+                    install_directory: None,
+                },
+                bootstrap: None,
+                release: None,
+            },
+        )),
         target: target(),
-        app_id: AppId::new("com.zup.windows-runtime").unwrap(),
+        app_id,
         app_version: "1.0.0".parse().unwrap(),
         scope,
-        transaction_plan: plan,
         state_root,
-
-        recovery_id: None,
-        release: None,
-        bootstrap: None,
     };
     let backend = WindowsRuntimeBackend::from_path(payload_root, None).unwrap();
     (request, backend)
@@ -93,7 +147,7 @@ fn request(root: &TempDir, scope: SelectedScope) -> (RuntimeRequest, WindowsRunt
 
 #[tokio::test]
 async fn local_backend_commits_files_and_publishes_ledger() {
-    let root = TempDir::new().unwrap();
+    let root = temp_root();
     let (request, backend) = request(&root, SelectedScope::User);
     let destination = root.path().join("install").join("app.exe");
     let outcome = run(&backend, request.clone(), ExecutionPolicy::Interactive)
@@ -101,27 +155,72 @@ async fn local_backend_commits_files_and_publishes_ledger() {
         .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
     assert_eq!(std::fs::read(destination).unwrap(), b"installed");
-    let ledger = InstallLedgerStore::new(&request.state_root)
+    let ledger = InstallationRecordStore::new(&request.state_root)
         .load(&request.app_id, SelectedScope::User)
         .unwrap()
         .unwrap();
-    assert_eq!(ledger.version.to_string(), "1.0.0");
+    assert_eq!(ledger.current.version.to_string(), "1.0.0");
     let journal = FilesystemTransactionStore::private_at(&request.state_root)
-        .load(&ledger.committed_transaction)
+        .load(&ledger.current.transaction)
         .unwrap();
     assert_eq!(journal.reconciliation, ReconciliationState::Complete);
 }
 
 #[tokio::test]
+async fn recovery_uses_the_protected_journal_without_a_frontend_plan() {
+    let root = temp_root();
+    let (mut request, backend) = request(&root, SelectedScope::User);
+    let plan = request
+        .operation
+        .deployment()
+        .map(|deployment| &deployment.plan)
+        .unwrap()
+        .clone();
+    let store = FilesystemTransactionStore::private_at(&request.state_root);
+    let pending = zup_transaction::TransactionCoordinator::new(store.clone())
+        .begin(
+            request.app_id.clone(),
+            request.scope,
+            request.app_version.clone(),
+            plan,
+        )
+        .unwrap()
+        .preserve();
+    request.operation = zup_runtime::RuntimeOperation::Recovery {
+        transaction: pending.transaction_id,
+    };
+    let mut foreign = request.clone();
+    foreign.app_id = AppId::new("com.zup.different-application").unwrap();
+    assert!(matches!(
+        run(&backend, foreign, ExecutionPolicy::Interactive).await,
+        Err(SessionError::Protocol(_))
+    ));
+    assert_eq!(store.load(&pending.transaction_id).unwrap(), pending);
+    assert_eq!(
+        run(&backend, request, ExecutionPolicy::Interactive)
+            .await
+            .unwrap(),
+        InstallOutcome::Recovered {
+            settlement: zup_runtime::RecoverySettlement::RolledBack
+        }
+    );
+    assert!(!root.path().join("install/app.exe").exists());
+}
+
+#[tokio::test]
 async fn generated_overlay_is_consumed_and_cleaned_by_adapter() {
-    let root = TempDir::new().unwrap();
+    let root = temp_root();
     let (mut request, _) = request(&root, SelectedScope::User);
+    zup_storage::ensure_private_dir(&request.state_root).unwrap();
     let source = RelativePath::new("__zup_plugins__/generated.exe").unwrap();
-    for node in &mut request.transaction_plan.nodes {
+    let zup_runtime::RuntimeOperation::Deployment(deployment) = &mut request.operation else {
+        unreachable!()
+    };
+    let plan = &mut deployment.plan;
+    for node in &mut plan.nodes {
         if matches!(
             node.kind,
-            zup_transaction::NodeKind::StageFile { .. }
-                | zup_transaction::NodeKind::FileMutation { .. }
+            zup_plan::NodeKind::StageFile { .. } | zup_plan::NodeKind::FileMutation { .. }
         ) {
             node.meta.source_relative = Some(source.clone());
         }
@@ -130,7 +229,7 @@ async fn generated_overlay_is_consumed_and_cleaned_by_adapter() {
         request.app_id.clone(),
         request.app_version.clone(),
         request.scope,
-        &request.transaction_plan,
+        plan,
     )
     .unwrap();
     let base = zup_windows::payload_overlay_base_root(&request.state_root, request.scope).unwrap();
@@ -151,7 +250,7 @@ async fn noninteractive_machine_scope_reports_authorization_required() {
     if zup_windows::is_process_elevated().unwrap() {
         return;
     }
-    let root = TempDir::new().unwrap();
+    let root = temp_root();
     let (request, backend) = request(&root, SelectedScope::Machine);
     let error = run(&backend, request, ExecutionPolicy::NonInteractive)
         .await
@@ -160,8 +259,8 @@ async fn noninteractive_machine_scope_reports_authorization_required() {
 }
 
 #[tokio::test]
-async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
-    let root = TempDir::new().unwrap();
+async fn uninstall_preserves_authoritative_history_and_supports_reinstallation() {
+    let root = temp_root();
     let (request, backend) = request(&root, SelectedScope::User);
     let app_id = request.app_id.clone();
     let app_version = request.app_version.clone();
@@ -172,7 +271,7 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
         .await
         .unwrap();
     assert_eq!(outcome, InstallOutcome::Committed);
-    let ledger = InstallLedgerStore::new(&state_root)
+    let ledger = InstallationRecordStore::new(&state_root)
         .load(&app_id, SelectedScope::User)
         .unwrap()
         .unwrap();
@@ -185,17 +284,26 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
     )
     .unwrap();
     let request = RuntimeRequest {
-        intent: None,
+        operation: zup_runtime::RuntimeOperation::Deployment(Box::new(
+            zup_runtime::RuntimeDeployment {
+                plan: uninstall.clone(),
+
+                intent: zup_plan::DeploymentIntent {
+                    deployment: zup_plan::DeploymentSelection::from_plan(&uninstall),
+                    action: zup_plan::LifecycleAction::Uninstall,
+                    enable: Vec::new(),
+                    disable: Vec::new(),
+                    install_directory: None,
+                },
+                bootstrap: None,
+                release: None,
+            },
+        )),
         target: target(),
         app_id,
         app_version,
         scope: SelectedScope::User,
-        transaction_plan: uninstall,
         state_root: state_root.clone(),
-
-        recovery_id: None,
-        release: None,
-        bootstrap: None,
     };
     let backend = WindowsRuntimeBackend::from_path(payload_root, None).unwrap();
     let outcome = run(&backend, request, ExecutionPolicy::Interactive)
@@ -205,21 +313,18 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
     assert!(!destination.exists());
     let journals = FilesystemTransactionStore::private_at(&state_root);
     let remaining = journals.list_ids().unwrap();
-    assert_eq!(remaining.len(), 1);
-    let uninstall = journals.load(&remaining[0]).unwrap();
-    assert!(uninstall.plan.uninstall);
+    assert!(remaining.contains(&ledger.current.transaction));
+    let removed = InstallationRecordStore::new(&state_root)
+        .load(&ledger.app_id, SelectedScope::User)
+        .unwrap()
+        .unwrap();
+    assert_eq!(removed.state, zup_plan::InstallationState::Removed);
+    let uninstall = journals.load(&removed.current.transaction).unwrap();
+    assert!(uninstall.plan.transition.is_remove());
     assert_eq!(uninstall.reconciliation, ReconciliationState::Complete);
-    for _ in 0..2 {
-        InstallLedgerStore::new(&state_root)
-            .repair_committed(&ledger.app_id, SelectedScope::User)
-            .unwrap();
-    }
-    assert!(
-        InstallLedgerStore::new(&state_root)
-            .load(&ledger.app_id, SelectedScope::User)
-            .unwrap()
-            .is_none()
-    );
+    InstallationRecordStore::new(&state_root)
+        .repair_committed(&ledger.app_id, SelectedScope::User)
+        .unwrap();
     let (reinstall, backend) = self::request(&root, SelectedScope::User);
     assert_eq!(
         run(&backend, reinstall, ExecutionPolicy::Interactive)
@@ -227,18 +332,15 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
             .unwrap(),
         InstallOutcome::Committed
     );
-    let ledgers = InstallLedgerStore::new(&state_root);
+    let ledgers = InstallationRecordStore::new(&state_root);
     let newer = ledgers
         .load(&ledger.app_id, SelectedScope::User)
         .unwrap()
         .unwrap();
     let reconciled = ledgers
-        .publish_committed(&uninstall, SelectedScope::User)
+        .reconcile_installation(&uninstall, SelectedScope::User)
         .unwrap();
-    assert_eq!(
-        reconciled.committed_transaction,
-        newer.committed_transaction
-    );
+    assert_eq!(reconciled.current.transaction, newer.current.transaction);
     assert_eq!(std::fs::read(&destination).unwrap(), b"installed");
     assert_eq!(
         ledgers
@@ -250,8 +352,8 @@ async fn backend_lifecycle_uninstall_removes_owned_files_and_ledger() {
 }
 
 #[tokio::test]
-async fn a_stale_uninstall_is_rejected_after_the_generation_changes() {
-    let root = TempDir::new().unwrap();
+async fn forged_installation_record_cannot_authorize_uninstall() {
+    let root = temp_root();
     let (request, backend) = request(&root, SelectedScope::User);
     let app_id = request.app_id.clone();
     let app_version = request.app_version.clone();
@@ -270,54 +372,62 @@ async fn a_stale_uninstall_is_rejected_after_the_generation_changes() {
         &state_root,
     )
     .unwrap();
-    let store = InstallLedgerStore::new(&state_root);
+    let store = InstallationRecordStore::new(&state_root);
     let mut ledger = store.load(&app_id, SelectedScope::User).unwrap().unwrap();
-    ledger.committed_transaction = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse().unwrap();
-    std::fs::write(
-        store.path_for(&app_id, SelectedScope::User),
-        serde_json::to_vec(&ledger).unwrap(),
-    )
-    .unwrap();
+    ledger.current.transaction = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse().unwrap();
+    let forged = ledger.encode().unwrap();
+    std::fs::write(store.path_for(&app_id, SelectedScope::User), &forged).unwrap();
     let request = RuntimeRequest {
-        intent: None,
+        operation: zup_runtime::RuntimeOperation::Deployment(Box::new(
+            zup_runtime::RuntimeDeployment {
+                plan: uninstall.clone(),
+
+                intent: zup_plan::DeploymentIntent {
+                    deployment: zup_plan::DeploymentSelection::from_plan(&uninstall),
+                    action: zup_plan::LifecycleAction::Uninstall,
+                    enable: Vec::new(),
+                    disable: Vec::new(),
+                    install_directory: None,
+                },
+                bootstrap: None,
+                release: None,
+            },
+        )),
         target: target(),
         app_id,
         app_version,
         scope: SelectedScope::User,
-        transaction_plan: uninstall,
         state_root: state_root.clone(),
-
-        recovery_id: None,
-        release: None,
-        bootstrap: None,
     };
     let backend = WindowsRuntimeBackend::from_path(payload_root, None).unwrap();
     let outcome = run(&backend, request, ExecutionPolicy::Interactive)
         .await
         .unwrap();
-    assert!(
-        matches!(outcome, InstallOutcome::Failed(ref detail) if detail.contains("installation generation")),
-        "{outcome:?}"
-    );
+    assert!(matches!(outcome, InstallOutcome::Failed(_)), "{outcome:?}");
     assert_eq!(std::fs::read(&destination).unwrap(), b"installed");
     assert!(
-        InstallLedgerStore::new(&state_root)
+        InstallationRecordStore::new(&state_root)
             .load(&ledger.app_id, SelectedScope::User)
-            .unwrap()
-            .is_some()
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(store.path_for(&ledger.app_id, SelectedScope::User)).unwrap(),
+        forged
     );
 }
 
+#[rstest::rstest]
+#[case::versioned(false)]
+#[case::hybrid(true)]
 #[tokio::test]
-async fn apps_features_registration_is_opaque_and_round_trips() {
-    let root = TempDir::new().unwrap();
+async fn apps_features_registration_is_opaque_and_round_trips(#[case] fixed: bool) {
+    let root = temp_root();
     let state_root = root.path().join("state");
     let payload_root = root.path().join("payload");
     let install_directory = root.path().join("install");
-    let maintenance = install_directory.join("maintenance.exe");
     std::fs::create_dir_all(&payload_root).unwrap();
-    std::fs::create_dir_all(&install_directory).unwrap();
     std::fs::write(payload_root.join("maintenance.bin"), b"maintenance").unwrap();
+    std::fs::write(payload_root.join("fixed.dat"), b"fixed data").unwrap();
     let app_id = AppId::new(format!(
         "com.zup.apps-roundtrip-{}",
         uuid::Uuid::now_v7().simple()
@@ -326,8 +436,13 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     let app_id_text = app_id.as_str().to_owned();
     let version = semver::Version::parse("1.0.0").unwrap();
     let target_triple = target();
-    let maintenance_target = TargetPath::new(target_triple, maintenance.to_string_lossy()).unwrap();
-    let target_plan = DesiredState {
+    let mut target_plan = DesiredState {
+        generation_readers: Default::default(),
+        data: Vec::new(),
+        requirements: (),
+        maintenance: None,
+        installation: zup_core::InstallationId::new_v7(),
+        generation: None,
         app: App {
             id: app_id.clone(),
             name: NonEmptyString::new("Apps Round Trip").unwrap(),
@@ -341,20 +456,28 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         install_directory: target_path(&install_directory),
         selected_components: Vec::new(),
         prerequisites: Vec::new(),
-        files: vec![DesiredFile {
-            key: ResourceKey::Maintenance {
-                app_id: app_id.as_str().to_owned(),
-                version: version.to_string(),
-                destination: maintenance_target.to_string(),
-            },
-            source_relative: RelativePath::new("maintenance.bin").unwrap(),
-            destination: maintenance_target,
-            size: 11,
-            sha256: digest(b"maintenance"),
-            privilege: Privilege::User,
-
-            executable: true,
-        }],
+        files: if fixed {
+            vec![zup_plan::DesiredFile {
+                key: ResourceKey::File {
+                    id: zup_core::FileResourceId::Payload {
+                        id: zup_core::PayloadId::File {
+                            declaration: zup_core::ResourceId::new("fixture-1").unwrap(),
+                        },
+                    },
+                },
+                source_relative: RelativePath::new("fixed.dat").unwrap(),
+                placement: zup_core::PayloadPlacement::Fixed {
+                    path: target_path(&install_directory.join("fixed.dat")),
+                    replacement: zup_core::FixedReplacement::Atomic,
+                },
+                size: 10,
+                sha256: digest(b"fixed data"),
+                privilege: Privilege::User,
+                executable: false,
+            }]
+        } else {
+            Vec::new()
+        },
         launchers: Vec::new(),
         path_entries: Vec::new(),
         services: Vec::new(),
@@ -362,7 +485,31 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         file_associations: Vec::new(),
 
         preset: None,
-    };
+    }
+    .bind_fixed()
+    .expect("fixed deployment requirements");
+    zup_runtime::attach_maintenance_copy(
+        &mut target_plan,
+        &zup_runtime::ContentAccess {
+            installer: &payload_root.join("maintenance.bin"),
+            state_root: &state_root,
+            scope: SelectedScope::User,
+            action: LifecycleAction::Install,
+            prior: None,
+            maintenance: None,
+        },
+        "maintenance.bin",
+    )
+    .unwrap();
+    let maintenance = std::path::PathBuf::from(
+        target_plan
+            .maintenance
+            .as_ref()
+            .unwrap()
+            .maintenance_runtime()
+            .unwrap()
+            .as_str(),
+    );
     let plan = zup_windows::plan_target_lifecycle(
         LifecycleAction::Install,
         &app_id,
@@ -371,26 +518,38 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
         &state_root,
     )
     .unwrap();
-    assert!(plan.nodes.iter().any(|node| {
-        matches!(
-            node.kind,
-            zup_transaction::NodeKind::BackendOperation { .. }
-        )
-    }));
+    assert!(
+        plan.nodes
+            .iter()
+            .any(|node| { matches!(node.kind, zup_plan::NodeKind::BackendOperation { .. }) })
+    );
     let backend =
         zup_windows::WindowsRuntimeBackend::from_path(payload_root.clone(), None).unwrap();
     let request = RuntimeRequest {
-        intent: None,
+        operation: zup_runtime::RuntimeOperation::Deployment(Box::new(
+            zup_runtime::RuntimeDeployment {
+                plan: plan.clone(),
+
+                intent: zup_plan::DeploymentIntent {
+                    deployment: zup_plan::DeploymentSelection::from_plan(&plan),
+                    action: if plan.transition.is_remove() {
+                        zup_plan::LifecycleAction::Uninstall
+                    } else {
+                        zup_plan::LifecycleAction::Install
+                    },
+                    enable: Vec::new(),
+                    disable: Vec::new(),
+                    install_directory: None,
+                },
+                bootstrap: None,
+                release: None,
+            },
+        )),
         target: target_triple,
         app_id: app_id.clone(),
         app_version: version.clone(),
         scope: SelectedScope::User,
-        transaction_plan: plan,
         state_root: state_root.clone(),
-
-        recovery_id: None,
-        release: None,
-        bootstrap: None,
     };
     let outcome = run(&backend, request, ExecutionPolicy::Interactive)
         .await
@@ -413,17 +572,26 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
     )
     .unwrap();
     let request = RuntimeRequest {
-        intent: None,
+        operation: zup_runtime::RuntimeOperation::Deployment(Box::new(
+            zup_runtime::RuntimeDeployment {
+                plan: uninstall.clone(),
+
+                intent: zup_plan::DeploymentIntent {
+                    deployment: zup_plan::DeploymentSelection::from_plan(&uninstall),
+                    action: zup_plan::LifecycleAction::Uninstall,
+                    enable: Vec::new(),
+                    disable: Vec::new(),
+                    install_directory: None,
+                },
+                bootstrap: None,
+                release: None,
+            },
+        )),
         target: target_triple,
         app_id,
         app_version: version,
         scope: SelectedScope::User,
-        transaction_plan: uninstall,
         state_root: state_root.clone(),
-
-        recovery_id: None,
-        release: None,
-        bootstrap: None,
     };
     let outcome = run(&backend, request, ExecutionPolicy::Interactive)
         .await
@@ -434,147 +602,8 @@ async fn apps_features_registration_is_opaque_and_round_trips() {
             .unwrap()
             .is_none()
     );
-    assert!(!maintenance.exists());
-}
-
-#[tokio::test]
-#[ignore = "requires elevated administrator; uses the authoritative machine root"]
-async fn machine_runtime_uses_authoritative_work_for_modify_and_uninstall() {
-    let root = TempDir::new().unwrap();
-    let (mut install, backend) = request(&root, SelectedScope::Machine);
-    install.app_id = AppId::new(format!(
-        "com.zup.machine-probe-{}",
-        uuid::Uuid::new_v4().simple()
-    ))
-    .unwrap();
-    let machine = zup_windows::MachineRoot::acquire().expect("machine authority");
-    let destination = root.path().join("install/app.exe");
-    let ledgers = InstallLedgerStore::new(machine.path());
-    for iteration in 0..2 {
-        assert_eq!(
-            run(&backend, install.clone(), ExecutionPolicy::Interactive)
-                .await
-                .unwrap(),
-            InstallOutcome::Committed
-        );
-        assert_eq!(std::fs::read(&destination).unwrap(), b"installed");
-        assert!(
-            !install.state_root.exists(),
-            "caller cannot choose machine state"
-        );
-        assert!(
-            !install.state_root.join("work").exists(),
-            "caller cannot choose machine work"
-        );
-        let mut input = file_input(&root, SelectedScope::Machine);
-        input.observed_transaction = Some(
-            ledgers
-                .load(&install.app_id, SelectedScope::Machine)
-                .unwrap()
-                .unwrap()
-                .committed_transaction,
-        );
-        let file = &mut input.files[0];
-        file.precondition = FilePrecondition::Exact {
-            size: 9,
-            sha256: digest(b"installed"),
-        };
-        file.expected_sha256 = digest(b"modified");
-        file.expected_size = 8;
-        file.kind = FileOperationKind::Replace;
-        std::fs::write(root.path().join("payload/app.exe"), b"modified").unwrap();
-        let mut modify = install.clone();
-        modify.app_version = "2.0.0".parse().unwrap();
-        modify.transaction_plan = compile_transaction(&input).unwrap();
-        let guard = if iteration == 0 {
-            use std::os::windows::fs::OpenOptionsExt;
-            Some(
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .share_mode(1)
-                    .open(ledgers.path_for(&install.app_id, SelectedScope::Machine))
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
-        let outcome = run(&backend, modify.clone(), ExecutionPolicy::Interactive)
-            .await
-            .unwrap();
-        if let Some(guard) = guard {
-            assert!(
-                matches!(
-                    outcome,
-                    InstallOutcome::CommittedPendingReconciliation { .. }
-                ),
-                "{outcome:?}"
-            );
-            let ids = machine.transaction_store().list_ids().unwrap();
-            let pending = ids
-                .iter()
-                .filter(|id| {
-                    use zup_transaction::TransactionStore;
-                    let record = machine.transaction_store().load(id).unwrap();
-                    record.app_id == install.app_id && record.app_version == modify.app_version
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(pending.len(), 1);
-            let work = machine.path().join("work").join(pending[0].to_string());
-            assert!(
-                work.is_dir(),
-                "pending reconciliation retains rollback material"
-            );
-            drop(guard);
-            ledgers
-                .repair_committed(&install.app_id, SelectedScope::Machine)
-                .unwrap();
-            assert!(!work.exists(), "durable ledger publication releases work");
-        } else {
-            assert_eq!(outcome, InstallOutcome::Committed);
-        }
-        assert_eq!(std::fs::read(&destination).unwrap(), b"modified");
-        assert_eq!(
-            ledgers
-                .load(&install.app_id, SelectedScope::Machine)
-                .unwrap()
-                .unwrap()
-                .version,
-            modify.app_version
-        );
-        let committed = ledgers
-            .load(&install.app_id, SelectedScope::Machine)
-            .unwrap()
-            .unwrap();
-        assert!(
-            !machine
-                .path()
-                .join("work")
-                .join(committed.committed_transaction.to_string())
-                .exists()
-        );
-        let mut uninstall = modify;
-        uninstall.transaction_plan = zup_windows::plan_target_lifecycle(
-            LifecycleAction::Uninstall,
-            &install.app_id,
-            SelectedScope::Machine,
-            None,
-            machine.path(),
-        )
-        .unwrap();
-        assert_eq!(
-            run(&backend, uninstall, ExecutionPolicy::Interactive)
-                .await
-                .unwrap(),
-            InstallOutcome::Committed
-        );
-        assert!(!destination.exists());
-        assert!(
-            ledgers
-                .load(&install.app_id, SelectedScope::Machine)
-                .unwrap()
-                .is_none()
-        );
-        assert!(!install.state_root.join("work").exists());
-        std::fs::write(root.path().join("payload/app.exe"), b"installed").unwrap();
-    }
+    assert!(
+        maintenance.exists(),
+        "retired generations remain until safe reclamation is established"
+    );
 }

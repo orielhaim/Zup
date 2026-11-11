@@ -687,8 +687,9 @@ scope = "user"
 [install.directory]
 user = "${location.user_data}/ComposeTest"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#;
         let parsed = zup_manifest::parse(manifest).expect("parse");
         let installer = zup_manifest::parse_and_compile(manifest, "default").expect("compile");

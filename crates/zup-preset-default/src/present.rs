@@ -233,6 +233,7 @@ mod tests {
 
     fn surface(components: Vec<ComponentOption>, groups: Vec<ComponentGroupOption>) -> Snapshot {
         Snapshot {
+            recovery_transaction: None,
             product: ProductIdentity {
                 name: "Demo".into(),
                 publisher: None,

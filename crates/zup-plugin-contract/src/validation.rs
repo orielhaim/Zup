@@ -378,7 +378,32 @@ fn plan_output_size(plan: &InstallationPlan) -> usize {
     for resource in &plan.resources {
         size = size.saturating_add(1);
         size = match resource {
+            ResourceItem::Data(directory) => {
+                let location = match &directory.location {
+                    crate::DataLocation::Service(service) => string_size(service),
+                    crate::DataLocation::Path(path) => {
+                        string_size(&path.path).saturating_add(match &path.access {
+                            crate::DataAccess::Owner => 1,
+                            crate::DataAccess::Services(services) => {
+                                string_list_size(services).saturating_add(1)
+                            }
+                        })
+                    }
+                };
+                let compatibility = match &directory.compatibility {
+                    crate::DataCompatibility::Stable => 1,
+                    crate::DataCompatibility::Schema(schema) => 5usize
+                        .saturating_add(list_size(schema.reads.len()))
+                        .saturating_add(schema.reads.len().saturating_mul(4)),
+                };
+                size.saturating_add(string_size(&directory.id))
+                    .saturating_add(1)
+                    .saturating_add(location)
+                    .saturating_add(compatibility)
+            }
             ResourceItem::GeneratedFile(file) => size
+                .saturating_add(1)
+                .saturating_add(string_size(&file.id))
                 .saturating_add(string_size(&file.destination))
                 .saturating_add(list_size(file.contents.len()))
                 .saturating_add(file.contents.len()),
@@ -388,10 +413,12 @@ fn plan_output_size(plan: &InstallationPlan) -> usize {
                 .saturating_add(string_size(&launcher.target))
                 .saturating_add(string_list_size(&launcher.arguments))
                 .saturating_add(option_string_size(&launcher.working_directory)),
-            ResourceItem::PathEntry(entry) => size.saturating_add(string_size(&entry.value)),
+            ResourceItem::PathEntry(entry) => size
+                .saturating_add(string_size(&entry.id))
+                .saturating_add(string_size(&entry.value)),
             ResourceItem::Service(service) => size
                 .saturating_add(string_size(&service.id))
-                .saturating_add(string_size(&service.name))
+                .saturating_add(option_string_size(&service.native_name))
                 .saturating_add(option_string_size(&service.display_name))
                 .saturating_add(string_size(&service.binary))
                 .saturating_add(string_list_size(&service.arguments))
@@ -451,6 +478,8 @@ mod tests {
     #[case::a_generated_file_larger_than_the_limit(
         Over::Plan(InstallationPlan {
             resources: vec![ResourceItem::GeneratedFile(GeneratedFile {
+                replacement: crate::FixedReplacement::Atomic,
+                id: "configuration".to_owned(),
                 destination: "file".to_owned(),
                 contents: vec![0; MAX_PLAN_OUTPUT_BYTES + 1],
             })],

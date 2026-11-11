@@ -1,6 +1,20 @@
 #[cfg(windows)]
+#[path = "test_service/job.rs"]
+mod service_job;
+
+#[cfg(windows)]
 fn main() -> windows_service::Result<()> {
     let name = std::env::args().nth(1).expect("service name");
+    let arguments: Vec<_> = std::env::args().collect();
+    let _scope = arguments
+        .iter()
+        .position(|argument| argument == "--job")
+        .map(|index| {
+            let job = arguments.get(index + 1).expect("job name");
+            let scope = service_job::create(&name, job).expect("native service job scope");
+            assert!(service_job::mutation_denied(job).expect("restricted native scope"));
+            scope
+        });
     fixture::dispatch(name)
 }
 
@@ -82,6 +96,49 @@ mod fixture {
         if mode == "reported-never-started" {
             return publish(ServiceState::Stopped, 0, 1077);
         }
+        if mode == "data" {
+            let root =
+                std::path::PathBuf::from(std::env::args_os().nth(3).expect("service data path"));
+            let executable = std::env::current_exe().expect("native image path");
+            std::fs::write(
+                root.join("native-image.txt"),
+                executable.to_string_lossy().as_bytes(),
+            )
+            .expect("service data access");
+        }
+        if mode == "job-foreign" {
+            let arguments: Vec<_> = std::env::args().collect();
+            let target = arguments
+                .iter()
+                .position(|argument| argument == "--probe-job")
+                .and_then(|index| arguments.get(index + 1))
+                .expect("foreign scope name");
+            let denied =
+                super::service_job::mutation_denied(target).expect("native scope access check");
+            let root = std::path::PathBuf::from(std::env::args_os().nth(3).expect("data root"));
+            std::fs::write(root.join("foreign-job-mutation-denied"), denied.to_string())
+                .expect("scope probe output");
+        }
+        let mut child = if mode == "job-workers" || mode == "job-orphan" {
+            use std::os::windows::process::CommandExt;
+            Some(
+                std::process::Command::new(
+                    std::path::PathBuf::from(
+                        std::env::var_os("SystemRoot").expect("Windows directory"),
+                    )
+                    .join("System32/PING.EXE"),
+                )
+                .args(["-n", "600", "127.0.0.1"])
+                .creation_flags(0x08000000)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("contained native worker"),
+            )
+        } else {
+            None
+        };
         publish(ServiceState::Running, 0, 0)?;
         if mode == "crash" {
             if stopped.recv_timeout(Duration::from_millis(500)).is_err() {
@@ -89,6 +146,12 @@ mod fixture {
             }
         } else {
             let _ = stopped.recv();
+        }
+        if mode == "job-workers"
+            && let Some(child) = &mut child
+        {
+            child.kill().expect("stop owned worker");
+            child.wait().expect("join owned worker");
         }
         for checkpoint in 1..=if mode == "slow-stop" { 50 } else { 3 } {
             publish(ServiceState::StopPending, checkpoint, 0)?;

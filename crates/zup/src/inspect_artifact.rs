@@ -102,7 +102,7 @@ pub fn run(args: crate::cli::ArtifactInspectCommand) -> miette::Result<Automatio
                 report.application,
                 report.application_version,
                 report.variants.len(),
-                zup_presentation::format_bytes(report.content.file_size)
+                zup_core::format_bytes(report.content.file_size)
             )),
     )
 }
@@ -331,7 +331,7 @@ fn authenticode(path: &std::path::Path) -> String {
 
 impl Inspection {
     pub fn human(&self) -> String {
-        use zup_presentation::format_bytes;
+        use zup_core::format_bytes;
         let mut out = String::new();
         out.push_str(&format!(
             "{} {}\n",

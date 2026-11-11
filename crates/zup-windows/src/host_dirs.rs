@@ -1,10 +1,11 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use zup_core::TargetPath;
 
 use directories::{BaseDirs, UserDirs};
 use zup_core::{InstallLocation, SelectedScope, Target};
-use zup_plan::{InstallLocationError, InstallLocationResolver, TargetPath};
+use zup_plan::{InstallLocationError, InstallLocationResolver};
 
 use crate::bindings::{
     CoTaskMemFree, FOLDERID_CommonStartMenu, FOLDERID_ProgramData, FOLDERID_ProgramFiles,

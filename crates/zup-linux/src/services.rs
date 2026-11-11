@@ -1,6 +1,7 @@
 use crate::error::PlanError;
+use zup_core::CommandSpec;
 use zup_core::{ServiceId, ServiceStart};
-use zup_plan::{CommandSpec, DesiredService};
+use zup_plan::DesiredService;
 
 pub const MINIMUM_SYSTEMD_VERSION: u32 = 254;
 
@@ -20,11 +21,7 @@ pub const SERVICE_TYPE: &str = "exec";
 
 pub const WANTED_BY: &str = "multi-user.target";
 
-pub const UNIT_PREFIX: &str = "zup-";
-
 pub const SYSTEMD_UNIT_DIR: &str = "/usr/local/lib/systemd/system";
-
-const MAX_UNIT_LEN: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemdUnit {
@@ -46,8 +43,8 @@ pub struct SystemdUnit {
 }
 
 impl SystemdUnit {
-    pub fn derive(service: &DesiredService<zup_plan::TargetPath>) -> Result<Self, PlanError> {
-        let unit = unit_name(&service.id)?;
+    pub fn derive(service: &DesiredService<zup_core::TargetPath>) -> Result<Self, PlanError> {
+        let unit = service.name.to_string();
         let display_name = service
             .display_name
             .as_ref()
@@ -72,59 +69,6 @@ impl SystemdUnit {
     }
 }
 
-pub fn unit_name(id: &ServiceId) -> Result<String, PlanError> {
-    let raw = id.as_str();
-    if raw.is_empty() {
-        return Err(PlanError::ServiceRefused {
-            id: raw.to_owned(),
-            reason: "a service id is never empty".into(),
-        });
-    }
-    let mut escaped = String::with_capacity(raw.len());
-    for byte in raw.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => {
-                escaped.push(byte as char);
-            }
-            _ => {
-                escaped.push_str(&format!("\\x{byte:02x}"));
-            }
-        }
-    }
-    let digest = zup_core::hash_bytes(raw.as_bytes());
-    let suffix: String = digest.as_bytes()[..6]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let mut stem = format!("{UNIT_PREFIX}{escaped}-{suffix}");
-    if stem.len() > MAX_UNIT_LEN - ".service".len() {
-        let keep = (MAX_UNIT_LEN - ".service".len()).saturating_sub(suffix.len() + 1);
-        let truncated: String = escaped.chars().take(keep.min(escaped.len())).collect();
-        stem = format!("{UNIT_PREFIX}{truncated}-{suffix}");
-    }
-    let unit = format!("{stem}.service");
-    if unit.len() > MAX_UNIT_LEN || !is_valid_unit_name(&unit) {
-        return Err(PlanError::ServiceRefused {
-            id: raw.to_owned(),
-            reason: "the derived unit name is not a valid systemd unit name".into(),
-        });
-    }
-    Ok(unit)
-}
-
-fn is_valid_unit_name(unit: &str) -> bool {
-    let Some(stem) = unit.strip_suffix(".service") else {
-        return false;
-    };
-    !stem.is_empty()
-        && stem.len() <= 200
-        && stem.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'\\' | b'x' | b'.')
-        })
-        && !stem.contains('/')
-        && !stem.contains('\0')
-}
-
 pub(crate) fn dynamic_user_name(unit: &str) -> String {
     let digest = zup_core::hash_bytes(unit.as_bytes());
     format!(
@@ -137,7 +81,7 @@ pub(crate) fn dynamic_user_name(unit: &str) -> String {
 }
 
 pub fn render_unit(
-    service: &DesiredService<zup_plan::TargetPath>,
+    service: &DesiredService<zup_core::TargetPath>,
     display_name: &str,
 ) -> Result<Vec<u8>, PlanError> {
     let executable =
@@ -146,6 +90,7 @@ pub fn render_unit(
             reason,
         })?;
     let definition = UnitDefinition {
+        state_directories: service.state_directories.clone(),
         native_timeouts: service.lifecycle.timeouts_for(&service.execution).native(),
         display_name: display_name.into(),
         argv: std::iter::once(executable)
@@ -157,10 +102,7 @@ pub fn render_unit(
         execution: service.execution.clone(),
     };
     definition
-        .render(
-            *service.command.executable.target(),
-            &unit_name(&service.id)?,
-        )
+        .render(*service.command.executable.target(), service.name.as_str())
         .map_err(|reason| PlanError::ServiceRefused {
             id: service.id.to_string(),
             reason,
@@ -168,6 +110,7 @@ pub fn render_unit(
 }
 
 pub struct UnitDefinition {
+    pub state_directories: Vec<zup_core::RelativePath>,
     pub native_timeouts: zup_core::NativeServiceTimeouts,
     pub failure: zup_core::ServiceFailurePolicy,
     pub dependencies: Vec<String>,
@@ -183,6 +126,7 @@ pub(crate) fn render_registration(
     state: &zup_plan::ServiceState,
 ) -> Result<Vec<u8>, String> {
     let zup_plan::ServiceState::Registration {
+        state_directories,
         native_timeouts,
         failure,
         dependencies,
@@ -196,6 +140,7 @@ pub(crate) fn render_registration(
         return Err("service registration required".into());
     };
     UnitDefinition {
+        state_directories: state_directories.clone(),
         native_timeouts: *native_timeouts,
         failure: *failure,
         dependencies: dependencies.clone(),
@@ -268,11 +213,28 @@ impl UnitDefinition {
                 }
                 value
             }
-            zup_core::ServiceExecution::Windows { .. }
+            zup_core::ServiceExecution::WindowsJob { .. }
             | zup_core::ServiceExecution::OpenrcUser { .. } => {
                 return Err("Windows execution identity cannot run under systemd".into());
             }
         };
+        let mut state = String::new();
+        let mut names = std::collections::BTreeSet::new();
+        for name in &self.state_directories {
+            if !name.as_str().starts_with("zup-")
+                || name.as_str().len() != 68
+                || !name.as_str()[4..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                || !names.insert(name)
+            {
+                return Err("invalid or repeated native state namespace".into());
+            }
+            state.push_str(&format!("StateDirectory={name}\n"));
+        }
+        if !state.is_empty() {
+            state.push_str("StateDirectoryMode=0700\n");
+        }
         let service_type = match self.readiness {
             zup_core::ServiceReadiness::Manager => SERVICE_TYPE,
             zup_core::ServiceReadiness::Notify => "notify",
@@ -293,7 +255,7 @@ impl UnitDefinition {
         else {
             return Err("systemd requires native systemd timeout settings".into());
         };
-        Ok(format!("[Unit]\nDescription={description}\n{dependencies}StartLimitIntervalSec={interval}\nStartLimitBurst={burst}\n\n[Service]\nType={service_type}\n{notify}{execution}NoNewPrivileges=yes\nKillMode=control-group\nSendSIGKILL=yes\nRestart={restart}\nRestartSec={delay}\nExecStart={exec_start}\nTimeoutStartSec={start_timeout_seconds}\nTimeoutStopSec={stop_grace_seconds}\nTimeoutAbortSec={abort_timeout_seconds}\n\n[Install]\nWantedBy={WANTED_BY}\n").into_bytes())
+        Ok(format!("[Unit]\nDescription={description}\n{dependencies}StartLimitIntervalSec={interval}\nStartLimitBurst={burst}\n\n[Service]\nType={service_type}\n{notify}{execution}{state}NoNewPrivileges=yes\nKillMode=control-group\nSendSIGKILL=yes\nRestart={restart}\nRestartSec={delay}\nExecStart={exec_start}\nTimeoutStartSec={start_timeout_seconds}\nTimeoutStopSec={stop_grace_seconds}\nTimeoutAbortSec={abort_timeout_seconds}\n\n[Install]\nWantedBy={WANTED_BY}\n").into_bytes())
     }
 }
 
@@ -450,6 +412,7 @@ pub fn parse_unit(
     let mut group = None;
     let mut dynamic = false;
     let mut no_new_privileges = false;
+    let mut state_directories = Vec::new();
     let mut section = "";
     for line in text.lines() {
         let line = line.trim();
@@ -472,6 +435,8 @@ pub fn parse_unit(
             continue;
         };
         match (section, key.trim()) {
+            ("Service", "StateDirectory") => state_directories
+                .push(zup_core::RelativePath::new(value).map_err(|error| error.to_string())?),
             ("Service", "TimeoutStartSec") => start_timeout = value.parse::<u32>().ok(),
             ("Service", "TimeoutStopSec") => stop_grace = value.parse::<u32>().ok(),
             ("Service", "TimeoutAbortSec") => abort_timeout = value.parse::<u32>().ok(),
@@ -544,6 +509,7 @@ pub fn parse_unit(
         _ => return Err("runtime failure policy is missing or unsupported".into()),
     };
     let definition = UnitDefinition {
+        state_directories,
         native_timeouts: zup_core::NativeServiceTimeouts::Systemd {
             start_timeout_seconds: start_timeout.ok_or("startup timeout is required")?,
             stop_grace_seconds: stop_grace.ok_or("shutdown grace is required")?,
@@ -571,9 +537,10 @@ mod tests {
         executable: &str,
         args: Vec<&str>,
         start: ServiceStart,
-    ) -> DesiredService<zup_plan::TargetPath> {
+    ) -> DesiredService<zup_core::TargetPath> {
         let target = zup_core::Target::parse("linux-x64").unwrap();
         DesiredService {
+            state_directories: Vec::new(),
             failure: Default::default(),
             execution: zup_core::ServiceExecution::SystemdUser {
                 user: "root".into(),
@@ -588,10 +555,10 @@ mod tests {
                 id: ServiceId::new(id).unwrap(),
             },
             id: ServiceId::new(id).unwrap(),
-            name: zup_core::NonEmptyString::new("Tool").unwrap(),
+            name: zup_core::NonEmptyString::new(format!("{id}.service")).unwrap(),
             display_name: None,
             command: CommandSpec::new(
-                zup_plan::TargetPath::new(target, executable).unwrap(),
+                zup_core::TargetPath::new(target, executable).unwrap(),
                 args.into_iter().map(|a| a.to_owned()).collect(),
             ),
             start,
@@ -609,21 +576,6 @@ mod tests {
     #[case::prefixed("v259", None)]
     fn manager_versions_parse_to_their_major(#[case] raw: &str, #[case] expected: Option<u32>) {
         assert_eq!(parse_manager_version(raw), expected);
-    }
-
-    #[test]
-    fn unit_names_are_stable_and_injective() {
-        let first = unit_name(&ServiceId::new("tool").unwrap()).unwrap();
-        let second = unit_name(&ServiceId::new("tool").unwrap()).unwrap();
-        assert_eq!(first, second);
-        assert!(first.starts_with("zup-") && first.ends_with(".service"));
-        let other = unit_name(&ServiceId::new("tool2").unwrap()).unwrap();
-        assert_ne!(first, other);
-        let tricky_a = unit_name(&ServiceId::new("a/b").unwrap()).unwrap();
-        let tricky_b = unit_name(&ServiceId::new("a\\xb").unwrap()).unwrap();
-        assert_ne!(tricky_a, tricky_b, "escaping never merges identities");
-        let upper = unit_name(&ServiceId::new("Tool").unwrap()).unwrap();
-        assert_ne!(first, upper, "case is significant");
     }
 
     #[test]
@@ -750,7 +702,7 @@ mod tests {
         let parsed = parse_unit(
             changed.as_bytes(),
             *desired.command.executable.target(),
-            &unit_name(&desired.id).unwrap(),
+            desired.name.as_str(),
         );
         if let Ok(parsed) = parsed {
             assert_ne!(parsed.execution, desired.execution);

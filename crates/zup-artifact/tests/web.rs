@@ -78,8 +78,9 @@ fn a_build_stages_a_complete_immutable_web_tree() {
     // The catalog describes every object the origin can serve: the composed
     // blobs plus one native runtime per variant, so a client knows every wire
     // length before it fetches a byte.
-    let catalog_bytes = std::fs::read(web.join("releases").join("stable").join("catalog.json"))
-        .expect("the catalog is staged");
+    let catalog_bytes =
+        std::fs::read(web.join(zup_acquire::document_path(&release.catalog.digest).to_string()))
+            .expect("the catalog is staged");
     let catalog = ContentCatalog::parse(&catalog_bytes).expect("the catalog parses");
     assert_eq!(
         catalog.blobs.len(),
@@ -119,7 +120,7 @@ async fn the_staged_tree_is_a_valid_local_source_for_a_client() {
     )
     .expect("the release parses");
     let catalog = ContentCatalog::parse(
-        &std::fs::read(web.join("releases").join("stable").join("catalog.json"))
+        &std::fs::read(web.join(zup_acquire::document_path(&release.catalog.digest).to_string()))
             .expect("the catalog is staged"),
     )
     .expect("the catalog parses");
@@ -207,8 +208,10 @@ async fn a_second_client_with_a_warm_cache_moves_no_bytes() {
     let variant = release.variant("windows-x64").expect("a variant");
     let plan = AcquisitionPlan::for_variant(
         &ContentCatalog::parse(
-            &std::fs::read(web.join("releases").join("stable").join("catalog.json"))
-                .expect("the catalog is staged"),
+            &std::fs::read(
+                web.join(zup_acquire::document_path(&release.catalog.digest).to_string()),
+            )
+            .expect("the catalog is staged"),
         )
         .expect("the catalog parses"),
         &variant.content,
@@ -263,7 +266,7 @@ async fn a_corrupt_blob_in_the_staged_tree_is_refused_rather_than_installed() {
     )
     .expect("the release parses");
     let catalog = ContentCatalog::parse(
-        &std::fs::read(web.join("releases").join("stable").join("catalog.json"))
+        &std::fs::read(web.join(zup_acquire::document_path(&release.catalog.digest).to_string()))
             .expect("the catalog is staged"),
     )
     .expect("the catalog parses");
@@ -303,7 +306,7 @@ async fn a_corrupt_blob_in_the_staged_tree_is_refused_rather_than_installed() {
         .await
         .expect_err("a corrupt blob cannot satisfy the closure");
     assert!(matches!(error, AcquireError::Unavailable { .. }), "{error}");
-    assert!(error.left_machine_unchanged());
+
     assert!(
         cache
             .get(&entry.descriptor(ContentKind::Payload), Verify::Full)

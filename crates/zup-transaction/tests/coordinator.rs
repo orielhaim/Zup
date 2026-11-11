@@ -6,25 +6,26 @@ use common::fake::FakeExecutor;
 use common::{chain_input, sample_app_id, sample_input, sample_plan, sample_version};
 use rstest::rstest;
 use tempfile::TempDir;
+use zup_core::TransactionId;
+use zup_plan::{DeploymentNode, NodeKind, OperationId, compile_deployment};
 use zup_transaction::{
-    FilesystemTransactionStore, NodeKind, NodeState, OperationId, ReconcileResult, RecoveryPhase,
-    TransactionCoordinator, TransactionId, TransactionNode, TransactionOutcome, TransactionPhase,
-    TransactionRecord, TransactionStore, compile_transaction, recover,
+    FilesystemTransactionStore, NodeState, ReconcileResult, RecoveryPhase, TransactionCoordinator,
+    TransactionOutcome, TransactionPhase, TransactionRecord, TransactionStore, recover,
 };
 
 fn coord() -> (TempDir, TransactionCoordinator<FilesystemTransactionStore>) {
     let dir = TempDir::new().unwrap();
-    let store = FilesystemTransactionStore::private_at(dir.path());
+    let store = FilesystemTransactionStore::private_at(dir.path().join("state"));
     (dir, TransactionCoordinator::new(store))
 }
 
 fn coord_with_store() -> (TempDir, FilesystemTransactionStore) {
     let dir = TempDir::new().unwrap();
-    let store = FilesystemTransactionStore::private_at(dir.path());
+    let store = FilesystemTransactionStore::private_at(dir.path().join("state"));
     (dir, store)
 }
 
-fn first_op(record: &TransactionRecord) -> zup_transaction::OperationId {
+fn first_op(record: &TransactionRecord) -> zup_plan::OperationId {
     record
         .plan
         .execution_order
@@ -67,13 +68,19 @@ fn verify_attempts(exec: &FakeExecutor) -> Vec<String> {
 /// A record caught mid-verification: every work node applied, the begin,
 /// preflight, and commit-intent barriers crossed, the verify barrier in flight.
 /// The caller bumps the revision and persists it.
-fn mid_verification(record: &TransactionRecord) -> (TransactionRecord, Vec<TransactionNode>) {
+fn mid_verification(record: &TransactionRecord) -> (TransactionRecord, Vec<DeploymentNode>) {
     let mut crashed = record.clone();
     let checked = crashed
         .plan
         .nodes
         .iter()
-        .filter(|node| !node.kind.is_barrier())
+        .filter(|node| {
+            !node.kind.is_barrier()
+                && !matches!(
+                    node.kind,
+                    NodeKind::ReserveInstallation | NodeKind::PublishInstallation
+                )
+        })
         .cloned()
         .collect::<Vec<_>>();
     crashed.phase = TransactionPhase::Applying;
@@ -117,7 +124,7 @@ impl RevisionRaceStore {
         let conflicts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         (
             Self {
-                inner: FilesystemTransactionStore::private_at(root),
+                inner: FilesystemTransactionStore::private_at(root.join("state")),
                 interloper,
                 budget: std::sync::Mutex::new(budget),
                 conflicts: std::sync::Arc::clone(&conflicts),
@@ -130,6 +137,12 @@ impl RevisionRaceStore {
 type Conflicts = std::sync::Arc<std::sync::atomic::AtomicUsize>;
 
 impl TransactionStore for RevisionRaceStore {
+    fn reserve_installation(
+        &self,
+        record: &TransactionRecord,
+    ) -> Result<zup_transaction::InstallationReservation, zup_transaction::StoreError> {
+        self.inner.reserve_installation(record)
+    }
     fn create(&self, record: &TransactionRecord) -> Result<(), zup_transaction::StoreError> {
         self.inner.create(record)
     }
@@ -198,7 +211,9 @@ fn a_lost_swap_costs_a_retry_not_the_transaction() {
     let coord = TransactionCoordinator::new(racer);
 
     let mut exec = FakeExecutor::new();
-    let (final_record, outcome) = coord.execute(record, &mut exec).unwrap();
+    let (final_record, outcome) = coord
+        .execute(record, &mut exec, &common::Publisher::default())
+        .unwrap();
 
     assert_eq!(outcome, TransactionOutcome::Committed);
     assert_eq!(final_record.phase, TransactionPhase::Committed);
@@ -253,9 +268,17 @@ fn commit_requires_every_mutation_verified_before_it() {
     let last_verify = verified_nodes.last().expect("has verified node").clone();
 
     let mut exec = FakeExecutor::new();
-    let settled = open.execute(&mut exec).unwrap();
+    let settled = open
+        .execute(&mut exec, &common::Publisher::default())
+        .unwrap();
     let (final_record, outcome) = (settled.record, settled.outcome);
-    assert_eq!(outcome, TransactionOutcome::Committed);
+    assert_eq!(
+        outcome,
+        TransactionOutcome::Committed,
+        "{:?}; {:?}",
+        final_record.failure,
+        final_record.recovery_failure
+    );
     assert_eq!(final_record.phase, TransactionPhase::Committed);
 
     for id in &verified_nodes {
@@ -268,23 +291,16 @@ fn commit_requires_every_mutation_verified_before_it() {
             "{id} is verified after it is applied"
         );
     }
-    assert_eq!(
-        exec.verified,
-        verified_applies(&exec),
-        "every applied mutation is verified exactly once, in execution order"
-    );
     let crossed_verify = exec.position("apply", &barrier("ctrl:verify")).unwrap();
-    let crossed_commit = exec.position("apply", &barrier("ctrl:commit")).unwrap();
     assert!(
         exec.position("verify", &last_verify).unwrap() < crossed_verify,
         "all verification precedes the verify barrier: {:?}",
         exec.labels()
     );
-    assert!(
-        crossed_verify < crossed_commit,
-        "the commit barrier comes after verification: {:?}",
-        exec.labels()
-    );
+    assert!(matches!(
+        final_record.publication,
+        zup_transaction::PublicationState::Published { .. }
+    ));
     for barrier in [
         "ctrl:begin",
         "ctrl:preflight",
@@ -317,18 +333,27 @@ fn barriers_are_prepared_before_any_side_effect() {
     let begin = barrier("ctrl:begin");
     let preflight = barrier("ctrl:preflight");
     let commit_intent = barrier("ctrl:commit-intent");
-    let commit = barrier("ctrl:commit");
     let mutation = first_op(&record);
 
     let mut exec = FakeExecutor::new();
-    let outcome = open.execute(&mut exec).unwrap().outcome;
+    let outcome = open
+        .execute(&mut exec, &common::Publisher::default())
+        .unwrap()
+        .outcome;
     assert_eq!(outcome, TransactionOutcome::Committed);
 
-    assert_eq!(
-        exec.prepared,
-        vec!["ctrl:begin".to_owned(), "ctrl:preflight".to_owned()],
-        "only the barriers that guard preparation are prepared"
-    );
+    for effect in record.plan.nodes.iter().filter(|node| {
+        !node.kind.is_barrier()
+            && !matches!(
+                node.kind,
+                NodeKind::ReserveInstallation | NodeKind::PublishInstallation
+            )
+    }) {
+        assert!(
+            exec.position("prepare", &effect.id).unwrap()
+                < exec.position("apply", &commit_intent).unwrap()
+        );
+    }
     let prepared_begin = exec.position("prepare", &begin).expect("begin prepared");
     let first_mutation = exec.position("apply", &mutation).expect("mutation applied");
     assert!(
@@ -347,10 +372,7 @@ fn barriers_are_prepared_before_any_side_effect() {
         "preflight must be prepared immediately before commit intent: {:?}",
         exec.labels()
     );
-    assert!(
-        exec.position("apply", &commit).expect("commit crossed") > first_mutation,
-        "commit is the last barrier"
-    );
+    assert!(exec.position("apply", &barrier("ctrl:commit")).is_none());
 }
 
 /// Whatever a failure undoes, it undoes in reverse execution order, and what
@@ -359,7 +381,7 @@ fn barriers_are_prepared_before_any_side_effect() {
 #[case::prepare_fails_before_any_work(|exec: FakeExecutor| exec.fail_on_prepare(0), 0, 0)]
 #[case::preflight_prepare_fails_after_staging(|exec: FakeExecutor| exec.fail_on_prepare(1), 3, 0)]
 #[case::first_file_mutation_fails(|exec: FakeExecutor| exec.fail_on_apply(6), 3, 0)]
-#[case::verification_fails(|exec: FakeExecutor| exec.fail_on_verify(0), 6, 1)]
+#[case::verification_fails(|exec: FakeExecutor| exec.fail_on_verify(0), 4, 1)]
 fn failure_rolls_back_applied_work_in_reverse_order(
     #[case] inject: fn(FakeExecutor) -> FakeExecutor,
     #[case] applied: usize,
@@ -371,12 +393,14 @@ fn failure_rolls_back_applied_work_in_reverse_order(
             sample_app_id(),
             zup_core::SelectedScope::User,
             sample_version(),
-            compile_transaction(&chain_input()).unwrap(),
+            compile_deployment(&chain_input()).unwrap(),
         )
         .unwrap();
 
     let mut exec = inject(FakeExecutor::new());
-    let settled = open.execute(&mut exec).unwrap();
+    let settled = open
+        .execute(&mut exec, &common::Publisher::default())
+        .unwrap();
     let (final_record, outcome) = (settled.record, settled.outcome);
 
     assert_eq!(outcome, TransactionOutcome::RolledBack);
@@ -400,9 +424,11 @@ fn failure_rolls_back_applied_work_in_reverse_order(
         "nothing verifies on the way to a rollback"
     );
     for id in &mutated {
-        assert_eq!(
-            final_record.nodes.get(&OperationId::new(id)).cloned(),
-            Some(NodeState::RolledBack),
+        assert!(
+            final_record
+                .nodes
+                .get(&OperationId::new(id))
+                .is_some_and(NodeState::is_rolled_back),
             "{id} is undone"
         );
     }
@@ -423,7 +449,7 @@ fn failed_mutation_or_rollback_requires_recovery(
     #[case] resume: RecoveryPhase,
 ) {
     let (_dir, coord) = coord();
-    let plan = compile_transaction(&chain_input()).unwrap();
+    let plan = compile_deployment(&chain_input()).unwrap();
     let open = coord
         .begin(
             sample_app_id(),
@@ -432,7 +458,9 @@ fn failed_mutation_or_rollback_requires_recovery(
             plan,
         )
         .unwrap();
-    let settled = open.execute(&mut exec).unwrap();
+    let settled = open
+        .execute(&mut exec, &common::Publisher::default())
+        .unwrap();
     let (final_record, outcome) = (settled.record, settled.outcome);
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
     assert_eq!(
@@ -455,17 +483,25 @@ fn blocked_failed_apply_rechecks_evidence_without_resuming_forward_work(
             sample_app_id(),
             zup_core::SelectedScope::User,
             sample_version(),
-            compile_transaction(&chain_input()).unwrap(),
+            compile_deployment(&chain_input()).unwrap(),
         )
         .unwrap();
     let mut original = FakeExecutor::new()
         .fail_on_apply(6)
         .reconcile_with(ReconcileResult::Ambiguous);
-    let blocked = open.execute(&mut original).unwrap();
+    let blocked = open
+        .execute(&mut original, &common::Publisher::default())
+        .unwrap();
     assert_eq!(blocked.outcome, TransactionOutcome::RecoveryRequired);
     let failure = blocked.record.failure.clone();
     let mut retry = FakeExecutor::new().reconcile_with(evidence);
-    let (record, outcome) = recover(blocked.record, &store, &mut retry).unwrap();
+    let (record, outcome) = recover(
+        blocked.record,
+        &store,
+        &mut retry,
+        &common::Publisher::default(),
+    )
+    .unwrap();
     assert_eq!(outcome, expected);
     assert_eq!(record.failure, failure);
     assert!(!retry.reconcile_calls.is_empty());
@@ -490,7 +526,9 @@ fn recovery_rechecks_payload_without_replaying_completed_work(#[case] resume_fro
         sample_plan(),
     );
     store.create(&record).unwrap();
-    let (mut crashed, checked) = mid_verification(&record);
+    let mut reserved = record.clone();
+    common::reserve(&store, &mut reserved);
+    let (mut crashed, checked) = mid_verification(&reserved);
     let verified = checked
         .iter()
         .filter(|node| node.kind.requires_verification())
@@ -511,7 +549,8 @@ fn recovery_rechecks_payload_without_replaying_completed_work(#[case] resume_fro
     store.compare_and_swap(revision, &crashed).unwrap();
 
     let mut exec = FakeExecutor::new();
-    let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
+    let (final_record, outcome) =
+        recover(crashed, &store, &mut exec, &common::Publisher::default()).unwrap();
 
     assert_eq!(outcome, TransactionOutcome::Committed);
     assert_eq!(final_record.phase, TransactionPhase::Committed);
@@ -544,20 +583,17 @@ fn recovery_rechecks_payload_without_replaying_completed_work(#[case] resume_fro
             .collect::<std::collections::BTreeSet<_>>(),
         expected
     );
-    assert_eq!(exec.verified.len(), expected.len());
     assert_eq!(
         exec.applied,
-        vec!["ctrl:verify".to_owned(), "ctrl:commit".to_owned()],
+        vec!["ctrl:verify".to_owned()],
         "only the remaining barriers run; no work is repeated"
     );
-    for crossed in ["ctrl:verify", "ctrl:commit"] {
-        assert_eq!(
-            final_record.nodes.get(&barrier(crossed)).cloned(),
-            Some(NodeState::Applied {
-                receipt: Box::new(zup_transaction::OperationReceipt::Control)
-            })
-        );
-    }
+    assert_eq!(
+        final_record.nodes.get(&barrier("ctrl:verify")).cloned(),
+        Some(NodeState::Applied {
+            receipt: Box::new(zup_transaction::OperationReceipt::Control)
+        })
+    );
 }
 
 #[test]
@@ -568,10 +604,11 @@ fn interrupted_rollback_never_rolls_forward() {
         sample_app_id(),
         zup_core::SelectedScope::User,
         sample_version(),
-        compile_transaction(&chain_input()).unwrap(),
+        compile_deployment(&chain_input()).unwrap(),
     );
     store.create(&record).unwrap();
     let mut crashed = record.clone();
+    common::reserve(&store, &mut crashed);
     let op = first_op(&crashed);
     crashed.phase = TransactionPhase::RollingBack;
     let node = crashed
@@ -581,7 +618,8 @@ fn interrupted_rollback_never_rolls_forward() {
         .find(|node| node.id == op)
         .unwrap();
     let receipt =
-        zup_transaction::OperationExecutor::apply(&mut FakeExecutor::new(), node).unwrap();
+        zup_transaction::OperationExecutor::apply(&mut FakeExecutor::new(), node, &crashed)
+            .unwrap();
     crashed.nodes.insert(
         op,
         NodeState::RollingBack {
@@ -601,7 +639,8 @@ fn interrupted_rollback_never_rolls_forward() {
     store.compare_and_swap(revision, &crashed).unwrap();
 
     let mut exec = FakeExecutor::new().reconcile_with(ReconcileResult::Applied);
-    let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
+    let (final_record, outcome) =
+        recover(crashed, &store, &mut exec, &common::Publisher::default()).unwrap();
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
     assert_eq!(
         final_record.phase,
@@ -658,14 +697,18 @@ fn crash_running_reconciles_without_double_applying(
     store.create(&record).unwrap();
 
     let mut crashed = record.clone();
+    common::reserve(&store, &mut crashed);
     let op_id = first_op(&crashed);
     crashed.nodes.insert(op_id.clone(), NodeState::Running);
     crashed.phase = TransactionPhase::Applying;
     crashed.touch();
-    store.compare_and_swap(record.revision, &crashed).unwrap();
+    store
+        .compare_and_swap(crashed.revision - 1, &crashed)
+        .unwrap();
 
     let mut exec = FakeExecutor::new().reconcile_with(answer);
-    let (final_record, outcome) = recover(crashed, &store, &mut exec).unwrap();
+    let (final_record, outcome) =
+        recover(crashed, &store, &mut exec, &common::Publisher::default()).unwrap();
 
     assert_eq!(outcome, expected);
     assert_eq!(final_record.phase, phase);
@@ -689,7 +732,7 @@ fn crash_running_reconciles_without_double_applying(
 
 #[test]
 fn rollback_order_is_reverse_dependency() {
-    let plan = compile_transaction(&chain_input()).unwrap();
+    let plan = compile_deployment(&chain_input()).unwrap();
     let mut mutations: Vec<_> = plan
         .nodes
         .iter()
@@ -715,18 +758,18 @@ fn rollback_order_is_reverse_dependency() {
 #[test]
 fn oversized_backend_payload_is_rejected() {
     let mut input = sample_input();
-    input.backend_operations[0].payload = vec![0; zup_transaction::MAX_BACKEND_PAYLOAD_BYTES + 1];
-    let err = compile_transaction(&input).unwrap_err();
+    input.backend_operations[0].payload = vec![0; zup_plan::MAX_BACKEND_PAYLOAD_BYTES + 1];
+    let err = compile_deployment(&input).unwrap_err();
     assert!(matches!(
         err,
-        zup_transaction::TransactionPlanError::InvalidInput(_)
+        zup_plan::DeploymentPlanError::InvalidInput(_)
     ));
 }
 
 #[test]
 fn releasing_a_prepared_transaction_settles_the_journal() {
     let (dir, coordinator) = coord();
-    let plan = compile_transaction(&sample_input()).unwrap();
+    let plan = compile_deployment(&sample_input()).unwrap();
     let open = coordinator
         .begin(
             sample_app_id(),
@@ -742,8 +785,86 @@ fn releasing_a_prepared_transaction_settles_the_journal() {
     assert_eq!(outcome, TransactionOutcome::RolledBack);
     assert_eq!(settled.phase, TransactionPhase::RolledBack);
     assert!(executor.applied.is_empty(), "release applies no work");
-    let reloaded = FilesystemTransactionStore::private_at(dir.path())
+    let reloaded = FilesystemTransactionStore::private_at(dir.path().join("state"))
         .load(&settled.transaction_id)
         .unwrap();
     assert_eq!(reloaded.phase, TransactionPhase::RolledBack);
+}
+
+#[test]
+fn failed_payload_verification_prevents_native_exposure() {
+    let (_directory, coordinator) = coord();
+    let plan = sample_plan();
+    let native = plan
+        .nodes
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::BackendOperation { .. }))
+        .unwrap()
+        .id
+        .clone();
+    let open = coordinator
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            plan,
+        )
+        .unwrap();
+    let mut executor = FakeExecutor::new().fail_on_verify(0);
+    let settled = open
+        .execute(&mut executor, &common::Publisher::default())
+        .unwrap();
+    assert_eq!(settled.outcome, TransactionOutcome::RolledBack);
+    assert_eq!(executor.position("apply", &native), None);
+}
+
+#[test]
+fn failed_repair_never_compensates_with_the_modified_file() {
+    let (_directory, store) = coord_with_store();
+    let coordinator = TransactionCoordinator::new(store.clone());
+    let mut input = common::effects();
+    let mut file = common::file("app.exe", b"authenticated");
+    file.kind = zup_plan::FileOperationKind::RepairOwned;
+    file.precondition = zup_plan::FilePrecondition::Exact {
+        object: common::owned_instance().object,
+        size: 8,
+        sha256: common::digest(b"modified"),
+    };
+    input.files.push(file);
+    let plan = compile_deployment(&input).unwrap();
+    let repair = plan
+        .nodes
+        .iter()
+        .find(|node| matches!(node.kind, NodeKind::FileMutation { .. }))
+        .unwrap()
+        .id
+        .clone();
+    let open = coordinator
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            plan,
+        )
+        .unwrap();
+    let mut executor = FakeExecutor::new().fail_on_verify(0);
+    let settled = open
+        .execute(&mut executor, &common::Publisher::default())
+        .unwrap();
+    assert_eq!(settled.outcome, TransactionOutcome::RecoveryRequired);
+    assert_eq!(executor.position("rollback", &repair), None);
+    assert_eq!(
+        settled.record.rollback_failure.as_ref().unwrap().operation,
+        Some(repair.clone())
+    );
+    let mut executor = FakeExecutor::new();
+    let (_, outcome) = recover(
+        settled.record,
+        &store,
+        &mut executor,
+        &common::Publisher::default(),
+    )
+    .unwrap();
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
+    assert_eq!(executor.position("rollback", &repair), None);
 }

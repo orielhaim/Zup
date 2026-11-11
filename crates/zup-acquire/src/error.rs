@@ -164,15 +164,6 @@ impl AcquireError {
             source,
         }
     }
-
-    /// Whether this failure left the machine untouched.
-    ///
-    /// The acquisition barrier is the guarantee: every variant of this error
-    /// is raised before any application-owned mutation begins, so the answer
-    /// is always yes.
-    pub const fn left_machine_unchanged(&self) -> bool {
-        true
-    }
 }
 
 /// Why the verified cache could not serve or accept content.

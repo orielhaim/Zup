@@ -210,8 +210,9 @@ fn malformed_condition_rejected() {
         r#"{}
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 when = 'component()'
 "#,
         minimal("user")

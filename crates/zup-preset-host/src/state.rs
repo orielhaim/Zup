@@ -28,7 +28,10 @@ impl Selection {
                 .map(|component| zup_core::ComponentId::new(component.id.as_str()))
                 .collect::<Result<Vec<_>, _>>()
                 .expect("a protocol component id came from an engine component id"),
-            install_directory: surface.install_directory().map(str::to_owned),
+            install_directory: surface
+                .allows_directory_override()
+                .then(|| surface.install_directory().map(str::to_owned))
+                .flatten(),
         }
     }
 }
@@ -41,6 +44,9 @@ pub struct Launchable {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostDecision {
+    Recover {
+        transaction: zup_core::TransactionId,
+    },
     Run {
         action: LifecycleAction,
         selection: Selection,
@@ -57,6 +63,10 @@ pub enum HostDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActionRefusal {
+    #[error("recover the pending transaction before requesting another operation")]
+    RecoveryRequired,
+    #[error("there is no known transaction requiring recovery")]
+    NoRecovery,
     #[error("this surface does not offer that operation")]
     UnsupportedSurface,
     #[error("an operation is already running")]
@@ -77,6 +87,8 @@ pub enum ActionRefusal {
     NothingToConfirm,
     #[error("there is no session log to open yet")]
     NoLog,
+    #[error("saved deployment {0} is not available in this installation")]
+    RetainedDeploymentNotFound(zup_core::ActivationRevision),
     #[error("there is nothing installed to start")]
     NothingToLaunch,
 }
@@ -91,6 +103,14 @@ pub struct HostState {
 }
 
 impl HostState {
+    pub fn refresh_installation(&mut self, fresh: Self) {
+        self.snapshot.product = fresh.snapshot.product;
+        self.snapshot.surface = fresh.snapshot.surface;
+        self.snapshot.plan = fresh.snapshot.plan;
+        self.capabilities = fresh.capabilities;
+        self.launchers = fresh.launchers;
+    }
+
     pub fn install(
         product: ProductIdentity,
         options: zup_preset_protocol::InstallOptions,
@@ -126,6 +146,7 @@ impl HostState {
                 progress: None,
                 plan,
                 diagnostic: None,
+                recovery_transaction: None,
                 update: None,
                 repair_drift: Vec::new(),
                 launch: None,
@@ -163,6 +184,18 @@ impl HostState {
     }
 
     pub fn accept(&mut self, action: Action) -> HostDecision {
+        if self.snapshot.state == InstallerState::RecoveryRequired
+            && !matches!(
+                action,
+                Action::Recover { .. }
+                    | Action::OpenLog
+                    | Action::CopyDiagnostics
+                    | Action::Close
+                    | Action::Retry
+            )
+        {
+            return HostDecision::Refused(ActionRefusal::RecoveryRequired);
+        }
         match action {
             Action::SetScope { scope } => self.set_scope(scope),
             Action::SetComponent {
@@ -176,7 +209,23 @@ impl HostState {
             Action::Install => self.start(LifecycleAction::Install),
             Action::Update => self.update(),
             Action::Modify => self.maintenance_op(LifecycleAction::Modify),
+            Action::Downgrade => self.maintenance_op(LifecycleAction::Downgrade),
+            Action::Cleanup { keep } => self.maintenance_op(LifecycleAction::Cleanup { keep }),
+            Action::Rollback { revision } => {
+                self.maintenance_op(LifecycleAction::Rollback { revision })
+            }
             Action::Repair => self.maintenance_op(LifecycleAction::Repair { force: false }),
+            Action::Recover { transaction } => {
+                if self.running {
+                    HostDecision::Refused(ActionRefusal::Busy)
+                } else if self.snapshot.recovery_transaction != Some(transaction) {
+                    HostDecision::Refused(ActionRefusal::NoRecovery)
+                } else {
+                    self.snapshot.operation = Some(OperationKind::Recover);
+                    self.begin();
+                    HostDecision::Recover { transaction }
+                }
+            }
             Action::RequestUninstall => self.request_uninstall(),
             Action::ConfirmUninstall => self.confirm_uninstall(),
             Action::DismissUninstall => self.dismiss_uninstall(),
@@ -265,6 +314,9 @@ impl HostState {
         match action {
             LifecycleAction::Uninstall => OperationKind::Uninstall,
             LifecycleAction::Modify => OperationKind::Modify,
+            LifecycleAction::Downgrade => OperationKind::Downgrade,
+            LifecycleAction::Rollback { .. } => OperationKind::Rollback,
+            LifecycleAction::Cleanup { .. } => OperationKind::Cleanup,
             LifecycleAction::Repair { .. } => OperationKind::Repair,
             _ => match &self.snapshot.surface {
                 Surface::Install(options) if options.existing_version.is_some() => {
@@ -290,6 +342,11 @@ impl HostState {
         if !self.capabilities.contains(Capability::Maintenance) {
             return HostDecision::Refused(ActionRefusal::UnsupportedSurface);
         }
+        if let LifecycleAction::Rollback { revision } = action
+            && !matches!(&self.snapshot.surface, Surface::Maintenance(state) if state.retained.iter().any(|snapshot| snapshot.revision == revision))
+        {
+            return HostDecision::Refused(ActionRefusal::RetainedDeploymentNotFound(revision));
+        }
         self.start(action)
     }
 
@@ -301,8 +358,8 @@ impl HostState {
             return HostDecision::Refused(ActionRefusal::Busy);
         }
         let request = match self.snapshot.update.as_ref().map(|update| &update.state) {
-            Some(UpdateState::Available { available, .. }) => zup_runtime::UpdateRequest::Install {
-                version: Some(available.clone()),
+            Some(UpdateState::Available { candidate, .. }) => zup_runtime::UpdateRequest::Install {
+                expected: Some(candidate.clone()),
             },
             _ => zup_runtime::UpdateRequest::Check,
         };
@@ -348,6 +405,9 @@ impl HostState {
     }
 
     fn retry(&mut self) -> HostDecision {
+        if self.snapshot.state == InstallerState::RecoveryRequired {
+            return HostDecision::Refused(ActionRefusal::NoRecovery);
+        }
         let Some((action, selection)) = self.retry.clone() else {
             return HostDecision::Refused(ActionRefusal::NothingToRetry);
         };
@@ -429,8 +489,27 @@ impl HostState {
         self.finish();
     }
 
+    pub fn recovery_required(
+        &mut self,
+        transaction: Option<zup_core::TransactionId>,
+        detail: String,
+    ) {
+        self.fail(detail, zup_presentation::ProcessOutcome::RecoveryRequired);
+        self.snapshot.recovery_transaction = transaction;
+    }
+
     pub fn observe(&mut self, event: &RuntimeEvent) {
         match event {
+            RuntimeEvent::PlanPrepared { plan } => {
+                match zup_presentation::PlanPreview::from_transaction_plan(
+                    plan,
+                    plan.requirements.scope,
+                    None,
+                ) {
+                    Ok(preview) => self.set_plan(preview),
+                    Err(error) => self.plan_failed(error.to_string()),
+                }
+            }
             RuntimeEvent::WaitingForAuthorization => {
                 self.advance(OperationPhase::Prepare, "Waiting for approval…")
             }
@@ -492,7 +571,8 @@ impl HostState {
                 self.advance(OperationPhase::System, "Restoring the previous state…")
             }
             RuntimeEvent::Completed { outcome } => match outcome {
-                zup_runtime::CompletionOutcome::Committed => self.succeed(),
+                zup_runtime::CompletionOutcome::Committed
+                | zup_runtime::CompletionOutcome::Recovered { .. } => self.succeed(),
                 zup_runtime::CompletionOutcome::RebootRequired => {
                     self.snapshot.state = InstallerState::RebootRequired;
                     self.finish();
@@ -547,7 +627,8 @@ impl HostState {
 
     pub fn finish_with(&mut self, outcome: &InstallOutcome) {
         match outcome {
-            InstallOutcome::Committed => {
+            InstallOutcome::Committed | InstallOutcome::Recovered { .. } => {
+                self.snapshot.recovery_transaction = None;
                 self.retry = None;
                 self.succeed();
             }
@@ -570,16 +651,17 @@ impl HostState {
                 self.snapshot.diagnostic = None;
                 self.finish();
             }
-            InstallOutcome::RecoveryRequired => self.fail(
-                "recovery required".into(),
-                zup_presentation::ProcessOutcome::RecoveryRequired,
-            ),
-            InstallOutcome::CommittedPendingReconciliation { detail, .. } => {
-                self.fail(
-                    detail.clone(),
-                    zup_presentation::ProcessOutcome::RecoveryRequired,
-                );
+            InstallOutcome::RecoveryRequired {
+                transaction,
+                detail,
             }
+            | InstallOutcome::CommittedPendingReconciliation {
+                transaction,
+                detail,
+            } => self.recovery_required(
+                transaction.map(zup_core::TransactionId::from_uuid),
+                detail.clone(),
+            ),
             InstallOutcome::AuthorizationRequired => {
                 self.fail(
                     "authorization required".into(),
@@ -615,6 +697,12 @@ impl HostState {
                 self.fail(message.clone(), zup_presentation::ProcessOutcome::Failure);
             }
         }
+    }
+
+    pub fn finish_update_check(&mut self) {
+        self.snapshot.state = self.resting_state();
+        self.snapshot.diagnostic = None;
+        self.finish();
     }
 
     fn succeed(&mut self) {

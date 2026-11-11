@@ -7,9 +7,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
+use zup_core::SessionId;
 use zup_linux::test_support::validate_rendezvous_for_test;
 use zup_linux::{Rendezvous, peer_alive, peer_identity, pin_peer};
-use zup_protocol::SessionId;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 

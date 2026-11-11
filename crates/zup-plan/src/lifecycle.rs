@@ -2,32 +2,77 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::DesiredState;
 use thiserror::Error;
 use zup_core::ResourceKey;
 
 use crate::{
     ExecutionPlan, ExecutionPlanError, ExtensionState, FileAssociationState, FileOperationKind,
-    FilePrecondition, HostSnapshot, InstallLedger, IntegrationChangeKind, LauncherState,
+    FilePrecondition, HostSnapshot, InstallationRecord, IntegrationChangeKind, LauncherState,
     ObservedExtensionState, ObservedFileAssociationState, ObservedFileState, ObservedLauncherState,
     ObservedProtocolState, ObservedServiceState, OwnedResource, PathOperationKind, ProtocolState,
     RemovalKind, RemovalOperation, plan_execution,
 };
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentTransition {
+    #[default]
+    Deploy,
+    Maintain,
+    Remove,
+}
+
+impl DeploymentTransition {
+    pub const fn is_deploy(self) -> bool {
+        matches!(self, Self::Deploy)
+    }
+    pub const fn is_maintain(self) -> bool {
+        matches!(self, Self::Maintain)
+    }
+    pub const fn is_remove(self) -> bool {
+        matches!(self, Self::Remove)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum LifecycleAction {
+    Cleanup {
+        keep: u16,
+    },
     Install,
     Upgrade,
+    Downgrade,
+    Rollback {
+        revision: zup_core::ActivationRevision,
+    },
     Modify,
-    Repair { force: bool },
+    Repair {
+        force: bool,
+    },
     Uninstall,
+}
+
+impl LifecycleAction {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Cleanup { .. } => "cleanup",
+            Self::Install => "install",
+            Self::Upgrade => "upgrade",
+            Self::Downgrade => "downgrade",
+            Self::Rollback { .. } => "rollback",
+            Self::Modify => "modify",
+            Self::Repair { .. } => "repair",
+            Self::Uninstall => "uninstall",
+        }
+    }
 }
 
 /// Unprivileged choices that an execution authority independently plans.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeploymentIntent {
+    pub deployment: crate::DeploymentSelection,
     pub action: LifecycleAction,
     pub enable: Vec<String>,
     pub disable: Vec<String>,
@@ -49,12 +94,27 @@ pub enum LifecycleError {
         installed: semver::Version,
         requested: semver::Version,
     },
+    #[error(
+        "requested downgrade version {requested} is not older than installed version {installed}"
+    )]
+    NotDowngrade {
+        installed: semver::Version,
+        requested: semver::Version,
+    },
+    #[error(
+        "rollback must select a retained deployment with its exact requirements and materialization"
+    )]
+    InvalidRollback,
     #[error("{action} requires version {installed}, found {requested}")]
     VersionMismatch {
         action: &'static str,
         installed: semver::Version,
         requested: semver::Version,
     },
+    #[error(
+        "repair requirements differ from the committed deployment; use Upgrade or Modify for application changes"
+    )]
+    RepairRequirementsChanged,
     #[error("repair target differs from committed owned state: {key:?}")]
     RepairDesiredChanged { key: ResourceKey },
     #[error("missing ownership observation for {0:?}")]
@@ -67,21 +127,35 @@ pub enum LifecycleError {
 /// Executors repeat every ownership check immediately before mutation.
 pub fn plan_lifecycle(
     action: LifecycleAction,
-    target: Option<&DesiredState<crate::TargetPath, crate::TargetPath>>,
+    target: Option<&crate::BoundDeployment>,
     snapshot: Option<&HostSnapshot>,
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
     owned_matches: &BTreeMap<ResourceKey, bool>,
 ) -> Result<ExecutionPlan, LifecycleError> {
+    if let LifecycleAction::Cleanup { .. } = action {
+        let record = ledger.ok_or(LifecycleError::NotInstalled)?;
+        record
+            .validate()
+            .map_err(|_| LifecycleError::Execution(ExecutionPlanError::LedgerMismatch))?;
+        return Ok(ExecutionPlan {
+            binding: Some(crate::DeploymentBinding::recorded(record)),
+            selected_components: record.current.selected_components.clone(),
+            install_directory: Some(record.directory.clone()),
+            transition: DeploymentTransition::Maintain,
+            ..ExecutionPlan::default()
+        });
+    }
     let desired = match action {
         LifecycleAction::Uninstall => None,
         _ => Some(target.ok_or(LifecycleError::MissingTarget)?),
     };
+    let installed = ledger.is_some_and(InstallationRecord::is_installed);
     match action {
-        LifecycleAction::Install if ledger.is_some() => {
+        LifecycleAction::Install if installed => {
             return Err(LifecycleError::AlreadyInstalled);
         }
         LifecycleAction::Install => {}
-        _ if ledger.is_none() => return Err(LifecycleError::NotInstalled),
+        _ if !installed => return Err(LifecycleError::NotInstalled),
         _ => {}
     }
     if let (Some(target), Some(ledger)) = (desired, ledger) {
@@ -91,21 +165,41 @@ pub fn plan_lifecycle(
             ));
         }
         match action {
-            LifecycleAction::Upgrade if target.app.version < ledger.version => {
-                return Err(LifecycleError::Downgrade {
-                    installed: ledger.version.clone(),
+            LifecycleAction::Downgrade if target.app.version >= ledger.current.version => {
+                return Err(LifecycleError::NotDowngrade {
+                    installed: ledger.current.version.clone(),
                     requested: target.app.version.clone(),
                 });
             }
-            LifecycleAction::Upgrade if target.app.version == ledger.version => {
-                return Err(LifecycleError::VersionMismatch {
-                    action: "upgrade",
-                    installed: ledger.version.clone(),
+            LifecycleAction::Rollback { revision } => {
+                let retained = ledger
+                    .retained
+                    .iter()
+                    .find(|snapshot| snapshot.revision == revision)
+                    .ok_or(LifecycleError::InvalidRollback)?;
+                if target.requirements != retained.requirements
+                    || target.generation.as_ref().map(|generation| generation.id)
+                        != retained
+                            .materialization
+                            .as_ref()
+                            .map(|generation| generation.id())
+                    || target.maintenance.as_ref().map(|generation| generation.id)
+                        != retained
+                            .maintenance
+                            .as_ref()
+                            .map(|generation| generation.id())
+                {
+                    return Err(LifecycleError::InvalidRollback);
+                }
+            }
+            LifecycleAction::Upgrade if target.app.version < ledger.current.version => {
+                return Err(LifecycleError::Downgrade {
+                    installed: ledger.current.version.clone(),
                     requested: target.app.version.clone(),
                 });
             }
             LifecycleAction::Modify | LifecycleAction::Repair { .. }
-                if target.app.version != ledger.version =>
+                if target.app.version != ledger.current.version =>
             {
                 return Err(LifecycleError::VersionMismatch {
                     action: if matches!(action, LifecycleAction::Modify) {
@@ -113,7 +207,7 @@ pub fn plan_lifecycle(
                     } else {
                         "repair"
                     },
-                    installed: ledger.version.clone(),
+                    installed: ledger.current.version.clone(),
                     requested: target.app.version.clone(),
                 });
             }
@@ -127,15 +221,18 @@ pub fn plan_lifecycle(
             ledger,
         )?,
         None => ExecutionPlan {
-            binding: ledger.map(crate::DeploymentBinding::uninstall),
+            binding: ledger.map(crate::DeploymentBinding::recorded),
             selected_components: ledger
-                .map(|ledger| ledger.selected_components.clone())
+                .map(|ledger| ledger.current.selected_components.clone())
                 .unwrap_or_default(),
-            install_directory: ledger.and_then(|ledger| ledger.install_directory.clone()),
+            install_directory: ledger.map(|ledger| ledger.directory.clone()),
             ..ExecutionPlan::default()
         },
     };
     if let LifecycleAction::Repair { force } = action {
+        if desired.unwrap().requirements != ledger.unwrap().current.requirements {
+            return Err(LifecycleError::RepairRequirementsChanged);
+        }
         repair_owned(
             &mut execution,
             desired.unwrap(),
@@ -148,7 +245,7 @@ pub fn plan_lifecycle(
     if let Some(ledger) = ledger
         && !matches!(action, LifecycleAction::Repair { .. })
     {
-        for (key, owned) in &ledger.resources {
+        for (key, owned) in &ledger.current.resources {
             if desired_keys.contains(key) || matches!(owned, OwnedResource::Backend { .. }) {
                 continue;
             }
@@ -157,14 +254,13 @@ pub fn plan_lifecycle(
                     desired.canonical_for(&target.target) == key.canonical_for(&target.target)
                 }) || match owned {
                     OwnedResource::File { destination, .. } => target
-                        .files
-                        .iter()
-                        .any(|file| destination.equivalent(&file.destination)),
+                        .fixed_files()
+                        .any(|file| destination.equivalent(file.destination())),
                     OwnedResource::Launcher { launcher_path, .. } => target
                         .launchers
                         .iter()
                         .any(|launcher| launcher_path.equivalent(&launcher.launcher_path)),
-                    OwnedResource::Service { name, .. }
+                    OwnedResource::Service(crate::OwnedService { name, .. })
                         if target.target.operating_system()
                             == zup_core::TargetOperatingSystem::Windows =>
                     {
@@ -197,16 +293,14 @@ pub fn plan_lifecycle(
         }
     }
     if action == LifecycleAction::Uninstall {
-        execution.uninstall = true;
+        execution.transition = crate::DeploymentTransition::Remove;
     }
     Ok(execution)
 }
 
-fn target_keys(
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
-) -> BTreeSet<ResourceKey> {
+fn target_keys(target: &crate::BoundDeployment) -> BTreeSet<ResourceKey> {
     let mut keys = BTreeSet::new();
-    keys.extend(target.files.iter().map(|item| item.key.clone()));
+    keys.extend(target.fixed_files().map(|item| item.key.clone()));
     keys.extend(target.launchers.iter().map(|item| item.key.clone()));
     keys.extend(target.path_entries.iter().map(|item| item.key.clone()));
     keys.extend(target.services.iter().map(|item| item.key.clone()));
@@ -222,11 +316,13 @@ fn target_keys(
 
 fn repair_owned(
     execution: &mut ExecutionPlan,
-    target: &DesiredState<crate::TargetPath, crate::TargetPath>,
+    target: &crate::BoundDeployment,
     snapshot: &HostSnapshot,
-    ledger: &InstallLedger,
+    ledger: &InstallationRecord,
     force: bool,
 ) -> Result<(), LifecycleError> {
+    let rebinding = crate::rebinding::GenerationRebinding::new(target, ledger);
+    let may_rebind = |key: &ResourceKey| rebinding.as_ref().is_some_and(|proof| proof.permits(key));
     let observations: BTreeMap<_, _> = snapshot
         .files
         .iter()
@@ -234,7 +330,13 @@ fn repair_owned(
         .collect();
     for op in execution.files.iter_mut() {
         let observed = observations[&op.key];
-        let owned = ledger.resources.get(&op.key);
+        let owned = ledger.current.resources.get(&op.key);
+        if matches!(owned, Some(OwnedResource::File { replacement, .. }) if *replacement != op.replacement)
+        {
+            return Err(LifecycleError::RepairDesiredChanged {
+                key: op.key.clone(),
+            });
+        }
         match (owned, op.kind, &observed.state) {
             (
                 Some(OwnedResource::File {
@@ -261,15 +363,18 @@ fn repair_owned(
                     size,
                     destination,
                     executable,
+                    instance,
                     ..
                 }),
                 FileOperationKind::Drift,
                 ObservedFileState::File {
+                    object,
                     size: found_size,
                     sha256: found_hash,
                     ..
                 },
             ) if force
+                && instance.object == *object
                 && destination.equivalent(&op.destination)
                 && *sha256 == op.expected_sha256
                 && *size == op.expected_size
@@ -277,6 +382,7 @@ fn repair_owned(
             {
                 op.kind = FileOperationKind::RepairOwned;
                 op.precondition = FilePrecondition::Exact {
+                    object: *object,
                     size: *found_size,
                     sha256: *found_hash,
                 };
@@ -315,19 +421,20 @@ fn repair_owned(
         if force
             && op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedLauncherState::Launcher { .. })
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Launcher { installed: LauncherState::Launcher { target, arguments, working_directory }, .. }) if target == &op.target && arguments == &op.arguments && working_directory == &op.working_directory)
+            && matches!(ledger.current.resources.get(&op.key), Some(OwnedResource::Launcher { installed: LauncherState::Launcher { target, arguments, working_directory }, .. }) if target == &op.target && arguments == &op.arguments && working_directory == &op.working_directory)
         {
             op.kind = IntegrationChangeKind::RepairOwned;
             op.conflict = None;
         }
         if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedLauncherState::Absent)
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Launcher { installed: LauncherState::Launcher { target, arguments, working_directory }, .. }) if target == &op.target && arguments == &op.arguments && working_directory == &op.working_directory)
+            && matches!(ledger.current.resources.get(&op.key), Some(OwnedResource::Launcher { installed: LauncherState::Launcher { target, arguments, working_directory }, .. }) if target == &op.target && arguments == &op.arguments && working_directory == &op.working_directory)
         {
             op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;
-        } else if op.kind == IntegrationChangeKind::UpdateOwned
-            || (op.kind == IntegrationChangeKind::Create && !ledger.resources.contains_key(&op.key))
+        } else if op.kind == IntegrationChangeKind::UpdateOwned && !may_rebind(&op.key)
+            || (op.kind == IntegrationChangeKind::Create
+                && !ledger.current.resources.contains_key(&op.key))
         {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
@@ -335,10 +442,14 @@ fn repair_owned(
         }
     }
     for op in &mut execution.path_entries {
-        if op.kind == PathOperationKind::Drift && op.previously_owned {
+        if op.kind == PathOperationKind::Drift
+            && matches!(&op.precondition, crate::PathPrecondition::Owned { binding, previous: crate::PathPresence::Missing, desired: crate::PathPresence::Missing } if binding.value.equivalent(&op.value))
+        {
             op.kind = PathOperationKind::RestoreOwned;
             op.conflict = None;
-        } else if op.kind == PathOperationKind::Add && !op.previously_owned {
+        } else if op.kind == PathOperationKind::Add
+            || op.kind == PathOperationKind::RebindOwned && !may_rebind(&op.key)
+        {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
             });
@@ -357,19 +468,20 @@ fn repair_owned(
                 observed.state,
                 ObservedServiceState::Service { .. } | ObservedServiceState::InvalidService
             )
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed, .. }) if installed.as_ref() == &op.desired_configuration())
+            && matches!(ledger.current.resources.get(&op.key), Some(OwnedResource::Service(crate::OwnedService { installed, .. })) if installed.as_ref() == &op.desired_configuration())
         {
             op.kind = IntegrationChangeKind::RepairOwned;
             op.conflict = None;
         }
         if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedServiceState::Absent)
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Service { installed, .. }) if installed.as_ref() == &op.desired_configuration())
+            && matches!(ledger.current.resources.get(&op.key), Some(OwnedResource::Service(crate::OwnedService { installed, .. })) if installed.as_ref() == &op.desired_configuration())
         {
             op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;
-        } else if op.kind == IntegrationChangeKind::UpdateOwned
-            || (op.kind == IntegrationChangeKind::Create && !ledger.resources.contains_key(&op.key))
+        } else if op.kind == IntegrationChangeKind::UpdateOwned && !may_rebind(&op.key)
+            || (op.kind == IntegrationChangeKind::Create
+                && !ledger.current.resources.contains_key(&op.key))
         {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
@@ -392,19 +504,20 @@ fn repair_owned(
                     ..
                 }
             )
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Protocol { installed: ProtocolState::Registration { command }, .. }) if command == &op.command)
+            && matches!(ledger.current.resources.get(&op.key), Some(OwnedResource::Protocol { installed: ProtocolState::Registration { command }, .. }) if command == &op.command)
         {
             op.kind = IntegrationChangeKind::RepairOwned;
             op.conflict = None;
         }
         if op.kind == IntegrationChangeKind::Drift
             && matches!(observed.state, ObservedProtocolState::Absent)
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::Protocol { installed: ProtocolState::Registration { command }, .. }) if command == &op.command)
+            && matches!(ledger.current.resources.get(&op.key), Some(OwnedResource::Protocol { installed: ProtocolState::Registration { command }, .. }) if command == &op.command)
         {
             op.kind = IntegrationChangeKind::RestoreOwned;
             op.conflict = None;
-        } else if op.kind == IntegrationChangeKind::UpdateOwned
-            || (op.kind == IntegrationChangeKind::Create && !ledger.resources.contains_key(&op.key))
+        } else if op.kind == IntegrationChangeKind::UpdateOwned && !may_rebind(&op.key)
+            || (op.kind == IntegrationChangeKind::Create
+                && !ledger.current.resources.contains_key(&op.key))
         {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
@@ -424,7 +537,7 @@ fn repair_owned(
                 observed.association_state,
                 ObservedFileAssociationState::Registration { .. }
             )
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::FileAssociation { installed: FileAssociationState::Registration { description, command }, .. }) if description == &op.description && command == &op.command)
+            && matches!(ledger.current.resources.get(&op.key), Some(OwnedResource::FileAssociation { installed: FileAssociationState::Registration { description, command }, .. }) if description == &op.description && command == &op.command)
         {
             op.association_kind = IntegrationChangeKind::RepairOwned;
         }
@@ -433,7 +546,7 @@ fn repair_owned(
                 observed.association_state,
                 ObservedFileAssociationState::Absent
             )
-            && matches!(ledger.resources.get(&op.key), Some(OwnedResource::FileAssociation { installed: FileAssociationState::Registration { description, command }, .. }) if description == &op.description && command == &op.command)
+            && matches!(ledger.current.resources.get(&op.key), Some(OwnedResource::FileAssociation { installed: FileAssociationState::Registration { description, command }, .. }) if description == &op.description && command == &op.command)
         {
             op.association_kind = IntegrationChangeKind::RestoreOwned;
         }
@@ -452,23 +565,23 @@ fn repair_owned(
                 observed.extension_state,
                 ObservedExtensionState::Mapped { .. }
             )
-            && matches!(ledger.resources.get(&extension_key), Some(OwnedResource::Extension { installed: ExtensionState::Mapped { association_id }, .. }) if association_id == &op.id)
+            && matches!(ledger.current.resources.get(&extension_key), Some(OwnedResource::Extension { installed: ExtensionState::Mapped { association_id }, .. }) if association_id == &op.id)
         {
             op.extension_kind = IntegrationChangeKind::RepairOwned;
         }
         if op.extension_kind == IntegrationChangeKind::Drift
             && matches!(observed.extension_state, ObservedExtensionState::Absent)
-            && matches!(ledger.resources.get(&extension_key), Some(OwnedResource::Extension { installed: ExtensionState::Mapped { association_id }, .. }) if association_id == &op.id)
+            && matches!(ledger.current.resources.get(&extension_key), Some(OwnedResource::Extension { installed: ExtensionState::Mapped { association_id }, .. }) if association_id == &op.id)
         {
             op.extension_kind = IntegrationChangeKind::RestoreOwned;
         }
-        if matches!(
-            op.association_kind,
-            IntegrationChangeKind::Create | IntegrationChangeKind::UpdateOwned
-        ) || matches!(
-            op.extension_kind,
-            IntegrationChangeKind::Create | IntegrationChangeKind::UpdateOwned
-        ) {
+        if op.association_kind == IntegrationChangeKind::Create
+            || op.association_kind == IntegrationChangeKind::UpdateOwned && !may_rebind(&op.key)
+            || matches!(
+                op.extension_kind,
+                IntegrationChangeKind::Create | IntegrationChangeKind::UpdateOwned
+            )
+        {
             return Err(LifecycleError::RepairDesiredChanged {
                 key: op.key.clone(),
             });

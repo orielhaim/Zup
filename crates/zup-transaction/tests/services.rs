@@ -1,20 +1,24 @@
 mod common;
 
+use zup_core::CommandSpec;
 use zup_core::{Privilege, ResourceKey, ServiceId, ServiceStart};
-use zup_plan::{CommandSpec, ServiceRuntimeState, ServiceState};
+use zup_plan::{
+    NodeKind, OperationId, ServiceControlOperation, ServiceControlStage, ServiceTerminalState,
+    compile_deployment,
+};
+use zup_plan::{ServiceRuntimeState, ServiceState};
 use zup_transaction::{
-    NativeServiceManager, NodeKind, OperationId, ReconcileResult, ServiceControlOperation,
-    ServiceControlStage, ServiceObservation, ServiceTerminalState, apply_service_control,
-    compile_transaction, reconcile_service_control, rollback_service_control,
-    verify_service_control,
+    NativeServiceManager, ReconcileResult, ServiceObservation, apply_service_control,
+    reconcile_service_control, rollback_service_control, verify_service_control,
 };
 
 fn control(id: &str, stage: ServiceControlStage) -> ServiceControlOperation {
     let configuration = ServiceState::Registration {
+        state_directories: Vec::new(),
         native_timeouts: zup_core::NativeServiceTimeouts::Scm,
         dependencies: Vec::new(),
         failure: Default::default(),
-        execution: zup_core::ServiceExecution::Windows {
+        execution: zup_core::ServiceExecution::WindowsJob {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
         readiness: Default::default(),
@@ -26,7 +30,11 @@ fn control(id: &str, stage: ServiceControlStage) -> ServiceControlOperation {
         start: ServiceStart::Manual,
     };
     ServiceControlOperation {
-        intent: zup_transaction::ServiceControlIntent::Transition,
+        requires_files: Vec::new(),
+        registration: zup_core::NativeServiceRegistration::Scm {
+            installation: common::installation_id(),
+        },
+        intent: zup_plan::ServiceControlIntent::Transition,
         key: ResourceKey::Service {
             id: ServiceId::new(id).unwrap(),
         },
@@ -47,6 +55,10 @@ fn control(id: &str, stage: ServiceControlStage) -> ServiceControlOperation {
             ServiceTerminalState::Running
         },
         manager_generation: "boot:manager".into(),
+        process_scope: zup_plan::ServiceScopeObservation::WindowsJob {
+            boot_sequence: 1,
+            state: zup_plan::WindowsJobState::Absent,
+        },
         before_execution_generation: if stage == ServiceControlStage::Quiesce {
             "execution-1"
         } else {
@@ -62,11 +74,11 @@ fn control(id: &str, stage: ServiceControlStage) -> ServiceControlOperation {
 }
 
 #[rstest::rstest]
-#[case::payload_replacement(true, zup_transaction::ServiceControlIntent::Transition)]
-#[case::observation_policy_only(false, zup_transaction::ServiceControlIntent::Preserve)]
+#[case::payload_replacement(true, zup_plan::ServiceControlIntent::Transition)]
+#[case::observation_policy_only(false, zup_plan::ServiceControlIntent::Preserve)]
 fn lifecycle_changes_bind_observations_and_their_respective_deadlines(
     #[case] payload_changed: bool,
-    #[case] expected_intent: zup_transaction::ServiceControlIntent,
+    #[case] expected_intent: zup_plan::ServiceControlIntent,
 ) {
     let intent = control("worker", ServiceControlStage::Quiesce);
     let ServiceState::Registration {
@@ -80,8 +92,10 @@ fn lifecycle_changes_bind_observations_and_their_respective_deadlines(
         unreachable!();
     };
     let service = zup_plan::ServiceOperation {
+        state_directories: Vec::new(),
+        registration: intent.registration,
         failure: Default::default(),
-        execution: zup_core::ServiceExecution::Windows {
+        execution: zup_core::ServiceExecution::WindowsJob {
             account: zup_core::WindowsServiceAccount::LocalService,
         },
         requires_files: Vec::new(),
@@ -104,10 +118,11 @@ fn lifecycle_changes_bind_observations_and_their_respective_deadlines(
         },
         privilege: Privilege::System,
         previous: zup_plan::ObservedServiceState::Service {
+            state_directories: Vec::new(),
             native_timeouts: zup_core::NativeServiceTimeouts::Scm,
             dependencies: Vec::new(),
             failure: Default::default(),
-            execution: zup_core::ServiceExecution::Windows {
+            execution: zup_core::ServiceExecution::WindowsJob {
                 account: zup_core::WindowsServiceAccount::LocalService,
             },
             readiness,
@@ -118,7 +133,8 @@ fn lifecycle_changes_bind_observations_and_their_respective_deadlines(
         },
         conflict: None,
     };
-    let owned = zup_plan::OwnedResource::Service {
+    let owned = zup_plan::OwnedResource::Service(zup_plan::OwnedService {
+        registration: intent.registration,
         timeouts: zup_core::ServiceTimeouts::Windows {
             start_observation_seconds: 90,
             stop_observation_seconds: 90,
@@ -127,16 +143,19 @@ fn lifecycle_changes_bind_observations_and_their_respective_deadlines(
         requires_services: Vec::new(),
         name: "worker".into(),
         privilege: Privilege::System,
-        previous: ServiceState::Absent,
         installed: Box::new(intent.configuration),
-    };
-    let operations = zup_transaction::plan_service_controls(
+    });
+    let operations = zup_plan::plan_service_controls(
         &service,
         Some(&owned),
         payload_changed,
         "worker".into(),
         "boot:manager".into(),
         "execution-1".into(),
+        zup_plan::ServiceScopeObservation::WindowsJob {
+            boot_sequence: 1,
+            state: zup_plan::WindowsJobState::Absent,
+        },
     )
     .unwrap();
     assert_eq!(operations.len(), 2);
@@ -172,7 +191,7 @@ fn dependency_order_surrounds_all_mutations_and_reverses_for_compensation() {
         });
         input.service_controls.push(dependent);
     }
-    let plan = compile_transaction(&input).unwrap();
+    let plan = compile_deployment(&input).unwrap();
     let position = |name: &str, stage| {
         let node = plan.nodes.iter().find(|node| matches!(&node.kind, NodeKind::ServiceControl { operation } if operation.native_name == name && operation.stage == stage)).unwrap();
         plan.execution_order
@@ -221,7 +240,7 @@ fn missing_stop_edge_is_not_a_valid_serialized_plan() {
     input
         .service_controls
         .push(control("worker", ServiceControlStage::Quiesce));
-    let mut plan = compile_transaction(&input).unwrap();
+    let mut plan = compile_deployment(&input).unwrap();
     let stop = plan
         .nodes
         .iter()
@@ -247,7 +266,7 @@ fn serialized_service_plans_cannot_bypass_staging_or_durable_intent() {
     input
         .service_controls
         .push(control("worker", ServiceControlStage::Quiesce));
-    let plan = compile_transaction(&input).unwrap();
+    let plan = compile_deployment(&input).unwrap();
     for edge in plan.dependencies.iter().filter(|edge| {
         edge.to.as_str() == OperationId::PREFLIGHT
             || edge.to.as_str() == OperationId::COMMIT_INTENT
@@ -256,8 +275,7 @@ fn serialized_service_plans_cannot_bypass_staging_or_durable_intent() {
         let mut altered = plan.clone();
         altered.dependencies.retain(|candidate| candidate != edge);
         let serialized = serde_json::to_vec(&altered).unwrap();
-        let restored: zup_transaction::TransactionPlan =
-            serde_json::from_slice(&serialized).unwrap();
+        let restored: zup_plan::DeploymentPlan = serde_json::from_slice(&serialized).unwrap();
         assert!(
             restored.validate().is_err(),
             "removed safety dependency: {edge:?}"
@@ -271,7 +289,7 @@ fn an_ordered_graph_without_staged_content_cannot_quiesce_a_service() {
     input
         .service_controls
         .push(control("worker", ServiceControlStage::Quiesce));
-    let mut plan = compile_transaction(&input).unwrap();
+    let mut plan = compile_deployment(&input).unwrap();
     let stages: std::collections::BTreeSet<_> = plan
         .nodes
         .iter()
@@ -287,7 +305,7 @@ fn an_ordered_graph_without_staged_content_cannot_quiesce_a_service() {
     plan.rollback_order.retain(|id| !stages.contains(id));
     plan.dependencies
         .retain(|edge| !stages.contains(&edge.from) && !stages.contains(&edge.to));
-    plan.dependencies.push(zup_transaction::Dependency {
+    plan.dependencies.push(zup_plan::Dependency {
         from: OperationId::new(OperationId::BEGIN),
         to: OperationId::new(OperationId::PREFLIGHT),
     });
@@ -302,7 +320,7 @@ fn service_dependency_cycle_is_refused() {
     a.dependencies.push(b.key.clone());
     b.dependencies.push(a.key.clone());
     input.service_controls = vec![a, b];
-    assert!(compile_transaction(&input).is_err());
+    assert!(compile_deployment(&input).is_err());
 }
 
 #[test]
@@ -311,7 +329,7 @@ fn stop_verification_precedes_the_first_file_mutation() {
     let mut stop_intent = control("worker", ServiceControlStage::Quiesce);
     stop_intent.privilege = Privilege::User;
     input.service_controls.push(stop_intent);
-    let plan = compile_transaction(&input).unwrap();
+    let plan = compile_deployment(&input).unwrap();
     let stop = plan
         .nodes
         .iter()
@@ -327,7 +345,7 @@ fn stop_verification_precedes_the_first_file_mutation() {
         .collect::<Vec<_>>();
     let root = tempfile::tempdir().unwrap();
     let coordinator = zup_transaction::TransactionCoordinator::new(
-        zup_transaction::FilesystemTransactionStore::private_at(root.path()),
+        zup_transaction::FilesystemTransactionStore::private_at(root.path().join("state")),
     );
     let open = coordinator
         .begin(
@@ -338,7 +356,9 @@ fn stop_verification_precedes_the_first_file_mutation() {
         )
         .unwrap();
     let mut executor = common::fake::FakeExecutor::new();
-    let settled = open.execute(&mut executor).unwrap();
+    let settled = open
+        .execute(&mut executor, &common::Publisher::default())
+        .unwrap();
     assert_eq!(
         settled.outcome,
         zup_transaction::TransactionOutcome::Committed
@@ -364,7 +384,7 @@ fn modified_files_are_verified_before_any_service_is_started() {
     let mut restore = control("worker", ServiceControlStage::Restore);
     restore.privilege = Privilege::User;
     input.service_controls.push(restore);
-    let plan = compile_transaction(&input).unwrap();
+    let plan = compile_deployment(&input).unwrap();
     let start = plan
         .nodes
         .iter()
@@ -380,7 +400,7 @@ fn modified_files_are_verified_before_any_service_is_started() {
         .collect::<Vec<_>>();
     let root = tempfile::tempdir().unwrap();
     let open = zup_transaction::TransactionCoordinator::new(
-        zup_transaction::FilesystemTransactionStore::private_at(root.path()),
+        zup_transaction::FilesystemTransactionStore::private_at(root.path().join("state")),
     )
     .begin(
         common::sample_app_id(),
@@ -391,7 +411,9 @@ fn modified_files_are_verified_before_any_service_is_started() {
     .unwrap();
     let mut executor = common::fake::FakeExecutor::new();
     assert_eq!(
-        open.execute(&mut executor).unwrap().outcome,
+        open.execute(&mut executor, &common::Publisher::default())
+            .unwrap()
+            .outcome,
         zup_transaction::TransactionOutcome::Committed
     );
     let started = executor.position("apply", &start).unwrap();
@@ -412,7 +434,7 @@ fn failed_compensation_cannot_restore_files_under_a_new_runtime_or_restart_old_r
         operation.privilege = Privilege::User;
         input.service_controls.push(operation);
     }
-    let plan = compile_transaction(&input).unwrap();
+    let plan = compile_deployment(&input).unwrap();
     let stop = plan.nodes.iter().find(|node| matches!(&node.kind, NodeKind::ServiceControl { operation } if operation.stage == ServiceControlStage::Quiesce)).unwrap().id.clone();
     let start = plan.nodes.iter().find(|node| matches!(&node.kind, NodeKind::ServiceControl { operation } if operation.stage == ServiceControlStage::Restore)).unwrap().id.clone();
     let files = plan
@@ -423,7 +445,7 @@ fn failed_compensation_cannot_restore_files_under_a_new_runtime_or_restart_old_r
         .collect::<Vec<_>>();
     let root = tempfile::tempdir().unwrap();
     let coordinator = zup_transaction::TransactionCoordinator::new(
-        zup_transaction::FilesystemTransactionStore::private_at(root.path()),
+        zup_transaction::FilesystemTransactionStore::private_at(root.path().join("state")),
     );
     let open = coordinator
         .begin(
@@ -435,7 +457,9 @@ fn failed_compensation_cannot_restore_files_under_a_new_runtime_or_restart_old_r
         .unwrap();
     let mut executor = common::fake::FakeExecutor::new().fail_on_rollback(fail_at);
     executor.fail_verify_operation = Some(start.clone());
-    let settled = open.execute(&mut executor).unwrap();
+    let settled = open
+        .execute(&mut executor, &common::Publisher::default())
+        .unwrap();
     assert_eq!(
         settled.outcome,
         zup_transaction::TransactionOutcome::RecoveryRequired
@@ -538,10 +562,20 @@ fn manager(operation: &ServiceControlOperation) -> Manager {
     Manager {
         observation_delay: std::time::Duration::ZERO,
         observation: ServiceObservation {
+            registration: zup_core::ObservedServiceRegistration::Scm {
+                claim: operation
+                    .registration
+                    .claim(match &operation.key {
+                        ResourceKey::Service { id } => id.clone(),
+                        _ => unreachable!(),
+                    })
+                    .unwrap(),
+            },
             configuration: operation.configuration.clone(),
             runtime: ServiceRuntimeState::Running,
             manager_generation: operation.manager_generation.clone(),
             execution_generation: operation.before_execution_generation.clone(),
+            process_scope: operation.process_scope.clone(),
         },
         requests: 0,
         fail_after_request: false,
@@ -559,7 +593,7 @@ fn a_start_that_exits_after_native_completion_keeps_its_execution_receipt(#[case
     let mut operation = control("worker", ServiceControlStage::Restore);
     if inhibited {
         operation.before_configuration =
-            zup_transaction::disabled_startup(&operation.configuration).unwrap();
+            zup_plan::disabled_startup(&operation.configuration).unwrap();
     }
     let mut manager = manager(&operation);
     manager.observation.configuration = operation.before_configuration.clone();
@@ -614,7 +648,7 @@ fn expired_observation_cannot_authorize_start_or_recovery(#[case] recovering: bo
 
 fn preserved_policy_update() -> [ServiceControlOperation; 2] {
     let mut before = control("worker", ServiceControlStage::Quiesce);
-    before.intent = zup_transaction::ServiceControlIntent::Preserve;
+    before.intent = zup_plan::ServiceControlIntent::Preserve;
     before.after = before.before;
     let mut after = before.clone();
     after.stage = ServiceControlStage::Restore;
@@ -629,8 +663,7 @@ fn preserved_policy_update() -> [ServiceControlOperation; 2] {
 #[test]
 fn an_inhibited_uncertain_start_can_only_be_compensated() {
     let mut operation = control("worker", ServiceControlStage::Restore);
-    operation.before_configuration =
-        zup_transaction::disabled_startup(&operation.configuration).unwrap();
+    operation.before_configuration = zup_plan::disabled_startup(&operation.configuration).unwrap();
     let mut manager = manager(&operation);
     manager.observation.configuration = operation.before_configuration.clone();
     manager.observation.runtime = ServiceRuntimeState::Stopped;
@@ -665,9 +698,9 @@ fn policy_preservation_never_controls_runtime_and_rejects_external_restarts() {
 #[test]
 fn preservation_cannot_authorize_replacing_a_running_service_image() {
     let controls = preserved_policy_update();
-    let mut input = zup_transaction::TransactionInput::new(common::target());
+    let mut input = common::effects();
     input.service_controls = controls.into();
-    compile_transaction(&input).unwrap();
+    compile_deployment(&input).unwrap();
     input.files = common::sample_input().files;
     let executable = input.files[0].destination.clone();
     for operation in &mut input.service_controls {
@@ -682,7 +715,7 @@ fn preservation_cannot_authorize_replacing_a_running_service_image() {
             command.executable = executable.clone();
         }
     }
-    assert!(compile_transaction(&input).is_err());
+    assert!(compile_deployment(&input).is_err());
 }
 
 #[test]
@@ -691,7 +724,12 @@ fn a_stopped_service_with_a_possible_queued_restart_does_not_release_compensatio
     let receipt = zup_transaction::ServiceControlReceipt {
         operation: operation.clone(),
         completion: zup_transaction::ServiceControlCompletion::Reached,
+        authority: zup_transaction::ServiceControlAuthority::Planned,
         execution_generation: "execution-2".into(),
+        process_scope: zup_plan::ServiceScopeObservation::WindowsJob {
+            boot_sequence: 1,
+            state: zup_plan::WindowsJobState::Absent,
+        },
     };
     let mut manager = manager(&operation);
     manager.observation.runtime = ServiceRuntimeState::Stopped;
@@ -772,14 +810,16 @@ fn settled_failed_start_can_only_be_compensated_and_never_verified_as_success() 
     assert_eq!(manager.requests, 0);
 }
 
-#[test]
-fn recovery_verifies_a_receipted_stop_before_resuming_file_mutation() {
+#[rstest::rstest]
+#[case::applied(false)]
+#[case::verified(true)]
+fn recovery_verifies_a_receipted_stop_before_resuming_file_mutation(#[case] verified: bool) {
     use zup_transaction::{NodeState, TransactionStore};
     let mut input = common::sample_input();
     let mut operation = control("worker", ServiceControlStage::Quiesce);
     operation.privilege = Privilege::User;
     input.service_controls.push(operation);
-    let plan = compile_transaction(&input).unwrap();
+    let plan = compile_deployment(&input).unwrap();
     let stop = plan
         .nodes
         .iter()
@@ -787,14 +827,16 @@ fn recovery_verifies_a_receipted_stop_before_resuming_file_mutation() {
         .unwrap()
         .clone();
     let root = tempfile::tempdir().unwrap();
-    let store = zup_transaction::FilesystemTransactionStore::private_at(root.path());
+    let store = zup_transaction::FilesystemTransactionStore::private_at(root.path().join("state"));
     let mut record = zup_transaction::TransactionRecord::new(
-        zup_transaction::TransactionId::new_v7(),
+        zup_core::TransactionId::new_v7(),
         common::sample_app_id(),
         zup_core::SelectedScope::User,
         common::sample_version(),
         plan,
     );
+    store.create(&record).unwrap();
+    common::reserve(&store, &mut record);
     record.phase = zup_transaction::TransactionPhase::Applying;
     for id in &record.plan.execution_order {
         if id == &stop.id {
@@ -815,14 +857,24 @@ fn recovery_verifies_a_receipted_stop_before_resuming_file_mutation() {
     }
     record.nodes.insert(
         stop.id.clone(),
-        NodeState::Applied {
-            receipt: Box::new(common::fake::receipt_for(&stop)),
+        if verified {
+            NodeState::Verified {
+                receipt: Box::new(common::fake::receipt_for(&stop)),
+            }
+        } else {
+            NodeState::Applied {
+                receipt: Box::new(common::fake::receipt_for(&stop)),
+            }
         },
     );
     record.validate().unwrap();
-    store.create(&record).unwrap();
+    let revision = record.revision;
+    record.touch();
+    store.compare_and_swap(revision, &record).unwrap();
     let mut executor = common::fake::FakeExecutor::new().fail_on_verify(0);
-    let (_, outcome) = zup_transaction::recover(record, &store, &mut executor).unwrap();
+    let (_, outcome) =
+        zup_transaction::recover(record, &store, &mut executor, &common::Publisher::default())
+            .unwrap();
     assert_eq!(outcome, zup_transaction::TransactionOutcome::RolledBack);
     assert!(executor.applied.is_empty());
     assert!(executor.position("verify", &stop.id).is_some());
@@ -848,6 +900,52 @@ fn external_execution_change_refuses_control_and_compensation() {
 }
 
 #[rstest::rstest]
+#[case::closed_gate(true, true, true)]
+#[case::open_gate(false, true, false)]
+#[case::remaining_processes(true, false, false)]
+fn restarted_manager_requires_fresh_closed_scope_before_compensation(
+    #[case] disabled: bool,
+    #[case] empty: bool,
+    #[case] allowed: bool,
+) {
+    let mut operation = control("worker", ServiceControlStage::Quiesce);
+    operation.before_configuration = operation.configuration.clone();
+    operation.configuration = zup_plan::disabled_startup(&operation.configuration).unwrap();
+    let mut manager = manager(&operation);
+    manager.observation.configuration = operation.before_configuration.clone();
+    let zup_transaction::OperationReceipt::ServiceControl(receipt) =
+        apply_service_control(&mut manager, &operation).unwrap()
+    else {
+        panic!("service receipt required")
+    };
+    manager.observation.manager_generation = "new-boot-manager".into();
+    manager.quiescent = empty;
+    if !disabled {
+        manager.observation.configuration = operation.before_configuration.clone();
+    }
+    let recovered = zup_transaction::prepare_service_compensation(&mut manager, &receipt);
+    assert_eq!(recovered.is_ok(), allowed);
+    assert_eq!(manager.requests, 1);
+    assert_eq!(receipt.operation, operation);
+    if let Ok(recovered) = recovered {
+        assert_eq!(recovered.operation, operation);
+        assert_eq!(
+            recovered.authority,
+            zup_transaction::ServiceControlAuthority::ReobservedQuiescent {
+                manager_generation: "new-boot-manager".into(),
+            }
+        );
+        rollback_service_control(&mut manager, &recovered).unwrap();
+        assert_eq!(
+            manager.observation.configuration,
+            operation.before_configuration
+        );
+        assert_eq!(manager.observation.runtime, ServiceRuntimeState::Running);
+        assert_eq!(manager.requests, 2);
+    }
+}
+
+#[rstest::rstest]
 #[case(ServiceStart::Automatic)]
 #[case(ServiceStart::Manual)]
 #[case(ServiceStart::Disabled)]
@@ -861,37 +959,31 @@ fn owned_executable_mutation_requires_quiescence_even_without_registration_nodes
     };
     *policy = start;
     operation.owned_configuration = operation.before_configuration.clone();
-    operation.configuration =
-        zup_transaction::disabled_startup(&operation.before_configuration).unwrap();
+    operation.configuration = zup_plan::disabled_startup(&operation.before_configuration).unwrap();
     if start == ServiceStart::Disabled {
         operation.before = ServiceTerminalState::Stopped;
         operation.before_execution_generation = "stopped".into();
     }
-    let mut ledger = zup_plan::InstallLedger::new(
-        common::sample_app_id(),
-        common::target(),
-        zup_core::SelectedScope::Machine,
-        zup_core::TransactionId::new_v7(),
-    );
-    ledger.resources.insert(
+    let mut ledger = common::installed(zup_core::SelectedScope::Machine);
+    ledger.current.resources.insert(
         operation.key.clone(),
-        zup_plan::OwnedResource::Service {
+        zup_plan::OwnedResource::Service(zup_plan::OwnedService {
+            registration: operation.registration,
             timeouts: operation.timeouts,
             requires_files: Vec::new(),
             requires_services: Vec::new(),
             name: operation.native_name.clone(),
             privilege: Privilege::System,
-            previous: ServiceState::Absent,
             installed: Box::new(operation.owned_configuration.clone()),
-        },
+        }),
     );
     let mut input = common::sample_input();
     input.backend_operations.clear();
-    let unprotected = compile_transaction(&input).unwrap();
-    assert!(zup_transaction::validate_owned_service_inputs(&unprotected, Some(&ledger)).is_err());
+    let unprotected = compile_deployment(&input).unwrap();
+    assert!(zup_plan::validate_owned_service_inputs(&unprotected, Some(&ledger)).is_err());
     input.service_controls.push(operation);
-    let protected = compile_transaction(&input).unwrap();
-    zup_transaction::validate_owned_service_inputs(&protected, Some(&ledger)).unwrap();
+    let protected = compile_deployment(&input).unwrap();
+    zup_plan::validate_owned_service_inputs(&protected, Some(&ledger)).unwrap();
 }
 
 #[rstest::rstest]
@@ -899,7 +991,7 @@ fn owned_executable_mutation_requires_quiescence_even_without_registration_nodes
 #[case::unproven_scope(false)]
 fn lost_quiescence_reply_uses_closed_activation_and_scope_evidence(#[case] quiescent: bool) {
     let mut operation = control("worker", ServiceControlStage::Quiesce);
-    let disabled = zup_transaction::disabled_startup(&operation.configuration).unwrap();
+    let disabled = zup_plan::disabled_startup(&operation.configuration).unwrap();
     operation.before_configuration = disabled.clone();
     operation.configuration = disabled.clone();
     operation.owned_configuration = disabled;
@@ -928,8 +1020,7 @@ fn interrupted_start_compensation_requires_current_scope_evidence(
     #[case] expected: zup_transaction::RollbackReconcileResult,
 ) {
     let mut operation = control("worker", ServiceControlStage::Restore);
-    operation.before_configuration =
-        zup_transaction::disabled_startup(&operation.configuration).unwrap();
+    operation.before_configuration = zup_plan::disabled_startup(&operation.configuration).unwrap();
     let mut manager = manager(&operation);
     manager.observation.runtime = ServiceRuntimeState::Stopped;
     manager.observation.execution_generation = "stopped".into();
@@ -941,7 +1032,12 @@ fn interrupted_start_compensation_requires_current_scope_evidence(
     let receipt = zup_transaction::ServiceControlReceipt {
         operation,
         completion: zup_transaction::ServiceControlCompletion::CompensationOnly,
+        authority: zup_transaction::ServiceControlAuthority::Planned,
         execution_generation: "stopped".into(),
+        process_scope: zup_plan::ServiceScopeObservation::WindowsJob {
+            boot_sequence: 1,
+            state: zup_plan::WindowsJobState::Absent,
+        },
     };
     assert_eq!(
         zup_transaction::reconcile_service_rollback(&mut manager, &receipt).unwrap(),

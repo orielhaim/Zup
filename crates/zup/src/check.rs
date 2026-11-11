@@ -57,13 +57,14 @@ pub fn run_check(
     if let Some(composition) = &composition {
         reporter.log(LogLevel::Info, composition_text(composition));
     }
-    let diagnostics = match &composition {
+    let mut diagnostics = loaded.diagnostics.clone();
+    diagnostics.extend(match &composition {
         Some(composition) if !composition.composable => vec![
             Diagnostic::warning("zup.check.not_composable", composition.detail.clone())
                 .with_help("Build them separately with `zup build --target <profile>`."),
         ],
         _ => Vec::new(),
-    };
+    });
     let result = AutomationResult::new(zup_automation::OPERATION_CHECK)
         .with_application(crate::automation::application(&loaded.manifest.app))
         .with_targets(crate::automation::targets(&loaded.selected_targets))
@@ -134,8 +135,8 @@ fn composition(
                 detail: format!(
                     "one Windows universal installer · {} shared of {} standalone across {} \
                      blobs",
-                    zup_presentation::format_bytes(savings.shared_size),
-                    zup_presentation::format_bytes(savings.standalone_size),
+                    zup_core::format_bytes(savings.shared_size),
+                    zup_core::format_bytes(savings.standalone_size),
                     savings.unique_blob_count
                 ),
             },
@@ -238,18 +239,37 @@ fn plan_installation(
     use zup_automation::PlanResource;
     let mut resources = Vec::new();
     for file in &target.files {
+        let (placement, label) = match &file.placement {
+            zup_core::PayloadPlacement::Generation { .. } => (
+                zup_automation::PlanFilePlacement::Generation,
+                "Generation file",
+            ),
+            zup_core::PayloadPlacement::Fixed {
+                replacement: zup_core::FixedReplacement::Atomic,
+                ..
+            } => (
+                zup_automation::PlanFilePlacement::FixedAtomic,
+                "Fixed file (atomic replacement required)",
+            ),
+            zup_core::PayloadPlacement::Fixed {
+                replacement: zup_core::FixedReplacement::Quiescent,
+                ..
+            } => (
+                zup_automation::PlanFilePlacement::FixedQuiescent,
+                "Fixed file (quiescence required)",
+            ),
+        };
         reporter.log(
             LogLevel::Info,
-            format!("  File {} ({} bytes)", file.destination, file.size),
+            format!("  {label} {} ({} bytes)", file.destination(), file.size),
         );
         resources.push(PlanResource::File {
-            destination: file.destination.to_string(),
+            placement,
+            destination: file.destination().to_string(),
             size: ByteCount::new(file.size),
             digest: zup_automation::Digest::sha256(file.sha256.to_hex()),
-            generated: !loaded.build.targets[0]
-                .files
-                .iter()
-                .any(|input| input.source_relative == file.source_relative),
+            generated: !matches!(&file.key, zup_core::ResourceKey::File { id: zup_core::FileResourceId::Payload { id } }
+                if loaded.build.targets[0].files.iter().any(|input| &input.id == id)),
         });
     }
     for launcher in &target.launchers {
@@ -302,6 +322,7 @@ fn plan_installation(
             .human(),
     );
     Ok(AutomationResult::new(zup_automation::OPERATION_PLAN)
+        .with_diagnostics(loaded.diagnostics.clone())
         .with_application(crate::automation::application(&installer.app))
         .with_targets(crate::automation::targets(&loaded.selected_targets))
         .with_details(Details::Plan(PlanDetails {

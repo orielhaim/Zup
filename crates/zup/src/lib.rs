@@ -25,7 +25,9 @@ use zup_presentation::ProcessOutcome;
 
 pub use crate::cli::{FrontendArg, OutputArg, ScopeArg, ScopePolicyArg};
 pub use crate::failure::Reporter;
-pub use crate::toolchain::{ToolchainResolver, ToolchainSource, missing_component_message};
+pub use crate::toolchain::{
+    ToolchainCache, ToolchainResolver, ToolchainSource, missing_component_message,
+};
 
 pub const DEFAULT_MANIFEST: &str = "zup.toml";
 
@@ -55,12 +57,19 @@ pub fn toolchain_state_root() -> miette::Result<PathBuf> {
 fn host_state_root() -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
-        zup_windows::default_state_root(zup_core::SelectedScope::User)
-            .map_err(|error| error.to_string())
+        zup_windows::default_state_root(
+            &zup_core::AppId::new("dev.zup.toolchain").expect("toolchain application identity"),
+            zup_core::SelectedScope::User,
+        )
+        .map_err(|error| error.to_string())
     }
     #[cfg(target_os = "linux")]
     {
-        zup_linux::state_root(zup_core::SelectedScope::User).map_err(|error| error.to_string())
+        zup_linux::state_root(
+            &zup_core::AppId::new("dev.zup.toolchain").expect("toolchain application identity"),
+            zup_core::SelectedScope::User,
+        )
+        .map_err(|error| error.to_string())
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
@@ -72,7 +81,7 @@ pub fn resolver(toolchain_root: Option<PathBuf>) -> miette::Result<ToolchainReso
     let executable = std::env::current_exe()
         .map_err(|error| failure::error("zup.toolchain.executable", error.to_string()))?;
     Ok(
-        ToolchainResolver::new(ZUP_VERSION.to_owned(), executable, toolchain_state_root()?)
+        ToolchainResolver::new(ZUP_VERSION.to_owned(), executable, ToolchainCache::Host)
             .with_root(toolchain_root),
     )
 }

@@ -7,7 +7,8 @@ pub enum LinuxOutcome {
     },
     RolledBack,
     RecoveryRequired {
-        transaction: String,
+        transaction: Option<uuid::Uuid>,
+        detail: String,
     },
     CommittedPendingReconciliation {
         transaction: uuid::Uuid,
@@ -21,7 +22,13 @@ impl LinuxOutcome {
         match self {
             Self::Committed { .. } => InstallOutcome::Committed,
             Self::RolledBack => InstallOutcome::RolledBack,
-            Self::RecoveryRequired { .. } => InstallOutcome::RecoveryRequired,
+            Self::RecoveryRequired {
+                transaction,
+                detail,
+            } => InstallOutcome::RecoveryRequired {
+                transaction: *transaction,
+                detail: detail.clone(),
+            },
             Self::CommittedPendingReconciliation {
                 transaction,
                 detail,
@@ -55,10 +62,14 @@ mod tests {
         );
         assert_eq!(
             LinuxOutcome::RecoveryRequired {
-                transaction: "id".to_owned()
+                transaction: None,
+                detail: "Recover the interrupted transaction".into(),
             }
             .as_install_outcome(),
-            InstallOutcome::RecoveryRequired,
+            InstallOutcome::RecoveryRequired {
+                transaction: None,
+                detail: "Recover the interrupted transaction".into(),
+            },
         );
         assert!(matches!(
             LinuxOutcome::Busy.as_install_outcome(),

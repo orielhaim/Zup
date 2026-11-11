@@ -81,8 +81,9 @@ scope = "user"
 user = "${{location.user_data}}/JunctionApp"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 
 [[prerequisites]]
 id = "runtime"

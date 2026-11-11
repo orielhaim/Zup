@@ -203,6 +203,7 @@ pub struct Executable {
     program: Option<ProgramKind>,
     operating_system: Option<TargetOperatingSystem>,
     interpreter: Option<String>,
+    libraries: Vec<String>,
 }
 
 impl Executable {
@@ -235,6 +236,22 @@ impl Executable {
             architectures: Architectures(architectures),
             program,
             operating_system,
+            libraries: if matches!(format, BinaryFormat::Pe | BinaryFormat::Elf) {
+                let file = File::parse(bytes).map_err(malformed)?;
+                let mut libraries = file
+                    .import_libraries()
+                    .map_err(malformed)?
+                    .map(|library| {
+                        library.map(|value| String::from_utf8_lossy(value.name()).into_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(malformed)?;
+                libraries.sort();
+                libraries.dedup();
+                libraries
+            } else {
+                Vec::new()
+            },
             interpreter: if format == BinaryFormat::Elf {
                 elf_interpreter(bytes)?
             } else {
@@ -269,6 +286,10 @@ impl Executable {
 
     pub fn operating_system(&self) -> Option<TargetOperatingSystem> {
         self.operating_system
+    }
+
+    pub fn libraries(&self) -> &[String] {
+        &self.libraries
     }
 
     pub fn interpreter(&self) -> Option<&str> {

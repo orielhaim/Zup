@@ -70,6 +70,10 @@ scope = "user"
 
 [install.directory]
 user = "${location.user_data}/Acme"
+
+[[files]]
+id = "application"
+source = "**/*"
 ```
 
 Put the built application in `dist/`.

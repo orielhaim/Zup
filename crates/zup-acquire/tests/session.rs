@@ -434,7 +434,6 @@ async fn a_source_that_returns_the_wrong_bytes_cannot_publish() {
             .is_some(),
         "the lying source published nothing"
     );
-    assert!(error.left_machine_unchanged());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -500,7 +499,6 @@ async fn a_cancelled_session_publishes_nothing_and_keeps_what_it_proved() {
         2,
         "verified blobs are kept across a cancellation"
     );
-    assert!(error.left_machine_unchanged());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -647,7 +645,6 @@ async fn staging_sees_only_verified_blobs_and_a_failure_closes_the_barrier() {
         .await
         .expect_err("a staging failure must not reach the barrier");
     assert!(matches!(error, AcquireError::Staging { .. }), "{error}");
-    assert!(error.left_machine_unchanged());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -813,14 +810,14 @@ async fn a_closure_the_engine_cannot_build_is_refused() {
 /// in the error a library caller gets. A chain with nothing in it still has to
 /// say something.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_refusal_names_every_source_it_tried_and_leaves_the_machine_untouched() {
+async fn a_refusal_reports_sources_without_publishing_unverified_content() {
     let cache = TestCache::new();
     let cache = cache.shared(CachePolicy::Keep);
     let blobs = fixture(2);
 
     let (sink, mut events) = ProgressSink::channel(64);
     let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
+    AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
         .run(
             chain(vec![FailingSource::new("primary", "connection reset")]),
             never(),
@@ -828,7 +825,7 @@ async fn a_refusal_names_every_source_it_tried_and_leaves_the_machine_untouched(
         )
         .await
         .expect_err("no source can satisfy the closure");
-    assert!(error.left_machine_unchanged());
+
     assert!(cache.digests().expect("the cache lists").is_empty());
 
     let mut failure = None;
@@ -844,16 +841,6 @@ async fn a_refusal_names_every_source_it_tried_and_leaves_the_machine_untouched(
         "the transport reason survives to the caller: {:?}",
         event.reasons()
     );
-    match &event {
-        AcquisitionEvent::Failed {
-            machine_unchanged, ..
-        } => assert!(
-            *machine_unchanged,
-            "the event states the machine is unchanged"
-        ),
-        other => panic!("expected a failure, got {other:?}"),
-    }
-
     let one = fixture(1);
     let plan = AcquisitionPlan::build(items_for(&one)).expect("the closure is well formed");
     let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
@@ -898,7 +885,7 @@ async fn a_partially_satisfied_closure_is_a_refusal_and_not_a_partial_barrier() 
     // The origin carries only some of what the closure names.
     let partial: Vec<(ContentDescriptor, Vec<u8>)> = blobs[..2].to_vec();
     let plan = AcquisitionPlan::build(items_for(&blobs)).expect("the closure is well formed");
-    let error = AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
+    AcquisitionSession::new(plan, Arc::clone(&cache), SchedulerConfig::default())
         .run(
             chain(vec![memory_source("origin", &partial)]),
             never(),
@@ -906,7 +893,7 @@ async fn a_partially_satisfied_closure_is_a_refusal_and_not_a_partial_barrier() 
         )
         .await
         .expect_err("a partially satisfied closure is a refusal");
-    assert!(error.left_machine_unchanged());
+
     assert!(
         cache
             .get(&blobs[3].0, Verify::Full)

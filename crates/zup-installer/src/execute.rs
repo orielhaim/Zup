@@ -111,26 +111,27 @@ pub fn execute_with_policy(
     policy: ExecutionPolicy,
 ) -> Result<(), ExecutionError> {
     let drifted = drifted_keys(&prepared.request);
+    let application = prepared.request.app_id.to_string();
+    let version = prepared.request.app_version.to_string();
+    let scope = prepared.request.scope;
+    let directory = prepared
+        .request
+        .operation
+        .deployment()
+        .and_then(|deployment| deployment.plan.install_directory.as_ref())
+        .map(ToString::to_string);
     let control = OperationControl::new(policy);
-    match execute_with_control_signal(prepared, &control)? {
-        InstallOutcome::Committed => {
-            println!("committed");
-            for key in drifted {
-                eprintln!("left drifted resource untouched: {key}");
-            }
-            Ok(())
-        }
-        other => Err(ExecutionError::silent(miette::miette!(
-            "transaction: {other:?}"
-        ))),
-    }
-}
-
-pub fn execute_with_control_signal(
-    prepared: PreparedRuntime,
-    control: &OperationControl,
-) -> miette::Result<InstallOutcome> {
-    execute_observing(prepared, control, |_| {})
+    let outcome = execute_observing(prepared, &control, |_| {});
+    publish_outcome(
+        OutputFormat::Human,
+        &application,
+        &version,
+        Some(scope),
+        directory,
+        None,
+        &drifted,
+        outcome,
+    )
 }
 
 pub fn execute_observing(
@@ -202,9 +203,32 @@ async fn observe_execution<T>(
 
 fn drifted_keys(request: &RuntimeRequest) -> Vec<String> {
     request
-        .transaction_plan
-        .retired_keys
-        .iter()
+        .operation
+        .deployment()
+        .map(|deployment| &deployment.plan)
+        .into_iter()
+        .flat_map(|plan| {
+            plan.retired_keys.iter().filter(|key| {
+                !plan.nodes.iter().any(|node| match &node.kind {
+                    zup_plan::NodeKind::FileRemoval { key: removed }
+                    | zup_plan::NodeKind::BackendRemoval { key: removed } => removed == *key,
+                    zup_plan::NodeKind::BackendOperation { key: removed, .. } => {
+                        removed == *key
+                            && node.meta.backend.as_ref().is_some_and(|operation| {
+                                operation.intent == zup_plan::BackendOperationIntent::Remove
+                            })
+                    }
+                    zup_plan::NodeKind::NativeService { operation } => {
+                        operation.key() == *key
+                            && matches!(
+                                operation.as_ref(),
+                                zup_plan::NativeServiceOperation::Remove { .. }
+                            )
+                    }
+                    _ => false,
+                })
+            })
+        })
         .map(|key| format!("{key:?}"))
         .collect()
 }
@@ -219,9 +243,10 @@ pub fn execute_frontend(
     let version = request.app_version.to_string();
     let scope = Some(request.scope);
     let install_directory = request
-        .transaction_plan
-        .install_directory
-        .as_ref()
+        .operation
+        .deployment()
+        .map(|deployment| &deployment.plan)
+        .and_then(|plan| plan.install_directory.as_ref())
         .map(ToString::to_string);
     let drifted = drifted_keys(&request);
     let control = OperationControl::new(ExecutionPolicy::NonInteractive);
@@ -280,27 +305,25 @@ fn publish_outcome(
         }
     };
     let process = ProcessOutcome::from(&outcome);
+    let mut result = InstallerResult::new(process, application, version);
+    result.scope = scope;
+    result.install_directory = install_directory;
+    result.log_path = log_path;
+    result.drift = drifted.to_vec();
+    result.apply_outcome(&outcome);
     match output {
         OutputFormat::Human => {
-            if outcome == InstallOutcome::Committed {
-                println!("committed");
+            if process == ProcessOutcome::Success {
+                println!("{}", result.message.as_deref().unwrap_or("Committed"));
                 for key in drifted {
                     eprintln!("left drifted resource untouched: {key}");
                 }
                 Ok(())
             } else {
-                Err(ExecutionError::silent(outcome_error(&outcome)))
+                Err(ExecutionError::silent(outcome_error(&result)))
             }
         }
         OutputFormat::Json => {
-            let mut result = InstallerResult::new(process, application, version);
-            result.scope = scope;
-            result.install_directory = install_directory;
-            result.log_path = log_path;
-            result.drift = drifted.to_vec();
-            if process != ProcessOutcome::Success {
-                result.message = Some(format!("{outcome:?}"));
-            }
             emit_line(
                 &result
                     .to_json()
@@ -309,14 +332,17 @@ fn publish_outcome(
             if process == ProcessOutcome::Success {
                 Ok(())
             } else {
-                Err(ExecutionError::reported(outcome_error(&outcome)))
+                Err(ExecutionError::reported(outcome_error(&result)))
             }
         }
         OutputFormat::Jsonl => {
             let event = if process == ProcessOutcome::Success {
                 InstallerEvent::Completed { outcome: process }
             } else {
-                let message = format!("{outcome:?}");
+                let message = result
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "The operation failed".into());
                 InstallerEvent::Failed {
                     outcome: process,
                     code: process.code(),
@@ -330,18 +356,21 @@ fn publish_outcome(
                 &serde_json::to_string(&event)
                     .map_err(|error| ExecutionError::silent(miette::miette!("output: {error}")))?,
             );
-            if !matches!(outcome, InstallOutcome::Committed) {
-                return Err(ExecutionError::reported(outcome_error(&outcome)));
+            if process != ProcessOutcome::Success {
+                return Err(ExecutionError::reported(outcome_error(&result)));
             }
             Ok(())
         }
     }
 }
 
-fn outcome_error(outcome: &InstallOutcome) -> miette::Report {
+fn outcome_error(result: &InstallerResult) -> miette::Report {
     crate::terminal::Failure {
-        outcome: ProcessOutcome::from(outcome),
-        message: format!("transaction: {outcome:?}"),
+        outcome: result.outcome,
+        message: result
+            .message
+            .clone()
+            .unwrap_or_else(|| "The operation failed".into()),
     }
     .into()
 }

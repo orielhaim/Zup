@@ -493,7 +493,8 @@ pub(crate) fn prepare(
     .map_err(|error| error.to_string())?;
     let plan = zup_bootstrap::BoundBootstrapPlan::new(plan, BTreeMap::new())
         .map_err(|error| error.to_string())?;
-    let state_root = crate::paths::user_state_root().map_err(|error| error.to_string())?;
+    let state_root =
+        crate::paths::user_state_root(&install.app.id).map_err(|error| error.to_string())?;
     Ok(Some(BootstrapRequest {
         plan,
         quarantine_root: state_root.join("bootstrap"),
@@ -514,7 +515,7 @@ fn execute_inner(request: &BootstrapRequest, control: &RuntimeControl) -> Result
     });
     let plan = &request.plan.plan;
     let lock_key = format!("bootstrap-{}", request.plan.id);
-    let _lock = zup_transaction::InstallationLock::try_acquire(&request.state_root, &lock_key)
+    let _lock = zup_transaction::ResourceLock::try_acquire(&request.state_root, &lock_key)
         .map_err(|error| BootstrapError::Provider(error.to_string()))?
         .ok_or_else(|| {
             BootstrapError::ProviderPreflight("prerequisite bootstrap is busy".into())
@@ -559,7 +560,7 @@ fn execute_inner(request: &BootstrapRequest, control: &RuntimeControl) -> Result
     };
     let mut persist = |state: &BootstrapState| {
         let bytes = serde_json::to_vec(state)?;
-        zup_transaction::publish_full(
+        zup_storage::publish_full(
             &directory,
             "state.json",
             &bytes,

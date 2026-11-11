@@ -29,8 +29,9 @@ scope = "either"
 user = "${{location.user_data}}/Preview"
 machine = "${{location.programs}}/Preview"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#
     );
     let manifest = zup_manifest::parse(&text).unwrap();

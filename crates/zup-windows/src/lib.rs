@@ -27,13 +27,21 @@ mod bootstrap_fs;
 #[cfg(windows)]
 mod bootstrap_plan;
 mod bundle_packager;
+#[cfg(windows)]
+mod cleanup;
 mod cmdline;
+#[cfg(windows)]
+mod collection;
 #[cfg(windows)]
 mod content_store;
 #[cfg(windows)]
 mod durable;
 #[cfg(windows)]
 mod file_executor;
+#[cfg(windows)]
+mod filesystem;
+#[cfg(windows)]
+mod generation;
 #[cfg(windows)]
 mod host;
 #[cfg(windows)]
@@ -49,8 +57,6 @@ mod lowering;
 #[cfg(windows)]
 mod machine_authority;
 #[cfg(windows)]
-mod machine_fs;
-#[cfg(windows)]
 mod machine_state;
 #[cfg(windows)]
 mod operation_host;
@@ -59,6 +65,10 @@ mod path_safety;
 #[cfg(windows)]
 mod payload_overlay;
 mod pe_resources;
+#[cfg(windows)]
+mod peer_access;
+#[cfg(windows)]
+mod persistent;
 #[cfg(windows)]
 mod pipe;
 #[cfg(windows)]
@@ -81,7 +91,11 @@ mod scm;
 #[cfg(windows)]
 mod search_path;
 #[cfg(windows)]
+mod service_claim;
+#[cfg(windows)]
 mod service_control;
+#[cfg(windows)]
+mod service_scope;
 #[cfg(windows)]
 mod services;
 #[cfg(windows)]
@@ -103,8 +117,8 @@ mod worker_rt;
 
 #[cfg(windows)]
 pub use acquired::{
-    AcquiredBundle, AcquiredRelease, HandoffRejection, VerifiedHandoff, accept_handoff, frontend,
-    open_cache, own_digest, verify, write_handoff,
+    AcquiredBundle, AcquiredRuntime, HandoffContent, HandoffRejection, accept_handoff, frontend,
+    own_digest, verify_handoff_content, write_handoff,
 };
 #[cfg(windows)]
 pub use bootstrap_fs::{WindowsBootstrapFileSystem, windows_bootstrap_file_system};
@@ -126,13 +140,13 @@ pub use content_store::{
     validate_content_store_base, verify_directory_chain,
 };
 #[cfg(windows)]
-pub use durable::{DurableError, copy_new_durable, move_durable, volume_root, write_durable};
+pub use durable::{DurableError, copy_new_durable, move_durable, write_durable};
 #[cfg(windows)]
 pub use file_executor::{
-    CreateFileReceipt, FileProgress, NullProgress, OperationReceipt, ProgressSink,
-    ReplaceFileReceipt, StageFileReceipt, WindowsFileExecutor, WindowsFileExecutorError,
-    apply_node, reconcile_node, transaction_receipt, verify_installed_file,
+    WindowsFileExecutor, WindowsFileExecutorError, apply_node, verify_installed_file,
 };
+#[cfg(windows)]
+pub use filesystem::FilesystemError;
 #[cfg(windows)]
 pub use host::{
     HostError, MachineSupport, NativeMachine, ProcessMachines, emulated_architectures,
@@ -143,14 +157,16 @@ pub use host_dirs::{
     HostDirError, WindowsInstallLocationResolver, shared_data, user_data, user_desktop,
 };
 #[cfg(windows)]
-pub use inspect::{InspectError, InspectReads, inspect_files, inspect_target, inspect_target_with};
-#[cfg(windows)]
-pub use integration::{
-    IntegrationError, apply_managed, apply_owned_removal, inspect_uninstall_registration,
-    notify_committed_path_change, reconcile_managed, reconcile_owned_removal, rollback_managed,
+pub use inspect::{
+    InspectError, InspectReads, inspect_file, inspect_files, inspect_target, inspect_target_with,
 };
 #[cfg(windows)]
-pub use ledger::{InstallLedgerStore, LedgerError};
+pub use integration::{
+    IntegrationError, inspect_uninstall_registration, notify_committed_path_change,
+    reconcile_managed, reconcile_owned_removal,
+};
+#[cfg(windows)]
+pub use ledger::{InstallationRecordStore, LedgerError};
 pub use locations::CanonicalWindowsLocations;
 pub use lowering::{
     TargetPathLoweringError, TargetPathValidationError, to_host_path, validate_windows_target_path,
@@ -158,9 +174,7 @@ pub use lowering::{
 #[cfg(windows)]
 pub use machine_authority::MachineRoot;
 #[cfg(windows)]
-pub use machine_state::{
-    MachineStateError, default_state_root, plain_path_text, resolve_state_root,
-};
+pub use machine_state::{default_state_root, plain_path_text, resolve_state_root};
 #[cfg(windows)]
 pub use operation_host::{WindowsContent, WindowsOperationHost};
 #[cfg(windows)]
@@ -195,7 +209,7 @@ pub use registry::{RegistryError, RegistryValue, open_classes_key, open_environm
 pub use resolve::{TargetResolveError, WindowsTargetContext, resolve_target};
 #[cfg(windows)]
 pub use restart_manager::{
-    BlockingProcess, FilePreflight, blocked_reason, mutating_paths, plan_mutating_paths, preflight,
+    BlockingProcess, FilePreflight, blocked_reason, preflight, preflight_paths,
 };
 #[cfg(windows)]
 pub use runtime::{OverlayPolicy, WindowsRuntimeBackend};
@@ -207,7 +221,7 @@ pub use search_path::{
     contains as search_path_contains, lost_expansion, split as split_search_path, write_value_type,
 };
 #[cfg(windows)]
-pub use services::{ServiceError, read_service};
+pub use services::ServiceError;
 #[cfg(windows)]
 pub use shell_link::ShellLinkError;
 pub use shortcut_name::{ShortcutNameError, validate_shortcut_filename};
@@ -224,7 +238,7 @@ pub use transport::launch_worker_for_test;
 #[cfg(windows)]
 pub use transport::{
     ProcessHandle, TransportError, UserSid, is_process_elevated, launch_elevated_worker, pipe_name,
-    pipe_path, verify_client_pid, verify_server_pid, wait_for_process_exit,
+    pipe_path, verify_client_pid, verify_server_pid,
 };
 #[cfg(windows)]
 pub use universal::stage_variant;
@@ -237,9 +251,17 @@ pub use universal::{
 pub use worker_rt::run_worker_for_test;
 #[cfg(windows)]
 pub use worker_rt::{
-    WorkerBootstrap, WorkerError, WorkerSession, current_exe, decode_frame, encode_reply,
-    format_bootstrap, parse_bootstrap, plan_hash_hex, run_worker, worker_capabilities,
+    WorkerBootstrap, WorkerError, current_exe, format_bootstrap, parse_bootstrap,
+    request_digest_hex, run_worker, worker_capabilities,
 };
 
 #[cfg(target_os = "windows")]
 mod runtime_failure;
+
+#[cfg(all(test, windows))]
+mod requirements_fixture {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/deployment.rs"
+    ));
+}

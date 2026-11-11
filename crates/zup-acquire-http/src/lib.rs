@@ -16,6 +16,6 @@ pub use client::{
     USER_AGENT,
 };
 pub use error::{HttpError, RetryDecision, is_resumable, is_retryable_status, retry_after};
-pub use origin::{Origin, OriginSet, RepositoryLocation};
+pub use origin::{Origin, OriginSet};
 pub use retry::BackoffPolicy;
 pub use source::{HttpSource, MetadataRequest, fetch_metadata};

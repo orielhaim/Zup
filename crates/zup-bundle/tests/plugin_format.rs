@@ -1,14 +1,14 @@
 use std::fs;
+use zup_core::PluginArtifact;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zup_build::{ResolvedPrerequisite, TargetBuildPlan, materialize};
-use zup_bundle::{
-    BundleWriter, CompiledPluginArtifact, PACKAGE_SCHEMA, Package, PackageError, PluginArtifact,
-};
+use zup_build::materialize;
+use zup_bundle::{BundleWriter, CompiledPluginArtifact, PACKAGE_SCHEMA, Package, PackageError};
+use zup_core::TargetOverrides;
 use zup_core::{MAX_PLUGIN_ARTIFACTS, PluginBinding, PluginId, Sha256Digest, Target};
-use zup_manifest::TargetOverrides;
+use zup_core::{ResolvedPrerequisite, TargetBuildPlan};
 use zup_plugin_contract::{
     AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
     wit_package_digest,
@@ -37,8 +37,8 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/BundlePlugins"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
 [[plugins]]
 id = "z-plugin"
 source = "plugins/one.wasm"

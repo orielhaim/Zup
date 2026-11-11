@@ -7,16 +7,23 @@ use crate::host::{OperationContext, SessionDiscovery, SessionHost, selection_of}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionKind {
+    Recovery,
     Lifecycle,
     UpdateCheck,
     UpdateInstall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionOutcome {
+    UpdateChecked,
+    Deployment(InstallOutcome),
 }
 
 pub struct OperationCompletion {
     pub update: Option<zup_preset_protocol::UpdateState>,
     pub kind: CompletionKind,
     pub id: uuid::Uuid,
-    pub outcome: InstallOutcome,
+    pub outcome: SessionOutcome,
     pub repair_drift: Vec<String>,
 }
 
@@ -40,7 +47,7 @@ pub async fn complete_operation<H: SessionHost>(
         update: None,
         kind: CompletionKind::Lifecycle,
         id,
-        outcome: outcome.0,
+        outcome: SessionOutcome::Deployment(outcome.0),
         repair_drift,
     }
 }
@@ -61,7 +68,14 @@ async fn drive_operation<H: SessionHost>(
         Ok(context) => context,
         Err(message) => return (InstallOutcome::Failed(message), Vec::new()),
     };
-    let (enable, disable) = selection_of(discovery.installer(), selection);
+    let (enable, disable) = if matches!(
+        action,
+        LifecycleAction::Rollback { .. } | LifecycleAction::Cleanup { .. }
+    ) {
+        (Vec::new(), Vec::new())
+    } else {
+        selection_of(discovery.installer(), selection)
+    };
     let cancel = control.cancellation();
     let query = CancelQuery(&cancel);
     let prepared = {
@@ -71,13 +85,21 @@ async fn drive_operation<H: SessionHost>(
         };
         let input = zup_runtime::OperationInput {
             build: &discovery.build,
-            installer: executable,
+            installer: &host.content_executable(executable),
             scope: context.scope,
             operation: zup_runtime::Operation::from(action),
             selection: zup_runtime::OperationSelection {
+                deployment: None,
                 enable,
                 disable,
-                install_directory: selection.install_directory.as_deref().map(PathBuf::from),
+                install_directory: if matches!(
+                    action,
+                    LifecycleAction::Rollback { .. } | LifecycleAction::Cleanup { .. }
+                ) {
+                    None
+                } else {
+                    selection.install_directory.as_deref().map(PathBuf::from)
+                },
             },
             prior: context.ledger.as_ref(),
             state_root: &context.state_root,
@@ -85,6 +107,15 @@ async fn drive_operation<H: SessionHost>(
         };
         match zup_runtime::prepare_operation(&input, &bound) {
             Ok(prepared) => prepared,
+            Err(error @ zup_runtime::OperationError::RecoveryRequired(transaction)) => {
+                return (
+                    InstallOutcome::RecoveryRequired {
+                        transaction: Some(transaction.0),
+                        detail: error.to_string(),
+                    },
+                    Vec::new(),
+                );
+            }
             Err(error) => return (InstallOutcome::Failed(error.to_string()), Vec::new()),
         }
     };
@@ -132,25 +163,17 @@ impl zup_plan::CancellationQuery for CancelQuery<'_> {
 pub async fn run_operation<H: SessionHost>(
     host: &H,
     context: &OperationContext,
-    build: &zup_core::TargetBuildPlan,
+    _build: &zup_core::TargetBuildPlan,
     prepared: &PreparedOperation,
     control: &OperationControl,
 ) -> Result<InstallOutcome, zup_runtime::SessionError> {
     let backend = host.backend(context, prepared).map_err(session_error)?;
     let runtime = runtime_request(
         prepared,
-        build.installer.app.id.clone(),
-        prepared
-            .target_plan()
-            .map(|target| target.app.version.clone())
-            .or_else(|| context.ledger.as_ref().map(|ledger| ledger.version.clone()))
-            .unwrap_or_else(|| build.installer.app.version.clone()),
-        context.scope,
         context.state_root.clone(),
         zup_runtime::RequestOptions {
             bootstrap: prepared.bootstrap().cloned(),
             release: host.release_identity(),
-            recovery_id: None,
         },
     );
     zup_runtime::execute(&*backend, runtime, control).await

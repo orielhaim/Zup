@@ -18,7 +18,7 @@ struct Configure;
 
 impl Plugin for Configure {
     fn plan(context: Context) -> Result<Plan, Error> {
-        Ok(Plan::new().path_entry(Path::new("${install}/bin")))
+        Ok(Plan::new().path_entry(PathEntry::new("cli", "${install}/bin")))
     }
 }
 

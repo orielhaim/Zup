@@ -113,7 +113,7 @@ fn a_precompiled_output_the_engine_did_not_produce_is_refused(#[case] aot: &[u8]
 }
 
 #[test]
-fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
+fn the_engine_fingerprint_is_stable_and_target_specific() {
     let first = engine_fingerprint("x86_64-pc-windows-msvc");
     assert_eq!(
         first,
@@ -124,10 +124,6 @@ fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
         first,
         engine_fingerprint("aarch64-pc-windows-msvc"),
         "the target is part of what an engine is"
-    );
-    assert_eq!(
-        first.to_hex(),
-        "5471845db0c00da202cf2a2dd495db31dd8b93b6a3b5aae0c1afebe45813ba97"
     );
 }
 

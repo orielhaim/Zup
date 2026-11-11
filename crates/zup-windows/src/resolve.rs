@@ -1,14 +1,16 @@
 use std::collections::BTreeMap;
+use zup_core::TargetPath;
 
 use thiserror::Error;
 use tracing::{info, info_span};
+use zup_core::CommandSpec;
 use zup_core::{
     InstallLocation, LauncherLocation, ResourceKey, SelectedScope, TargetOperatingSystem, Template,
 };
 use zup_plan::{
-    CommandSpec, DesiredFileAssociation, DesiredLauncher, DesiredPathEntry, DesiredProtocol,
-    DesiredService, DesiredState, InstallLocationResolver, TargetPath, TemplateResolveError,
-    resolve_files, resolve_template_path,
+    DesiredFileAssociation, DesiredLauncher, DesiredPathEntry, DesiredProtocol, DesiredService,
+    DesiredState, InstallLocationResolver, TemplateResolveError, resolve_files,
+    resolve_template_path,
 };
 
 #[cfg(windows)]
@@ -58,7 +60,7 @@ pub enum TargetResolveError {
     Template(#[from] TemplateResolveError),
 
     #[error(transparent)]
-    TargetPath(#[from] zup_plan::TargetPathError),
+    TargetPath(#[from] zup_core::TargetPathError),
 
     #[error("invalid Windows target path for {kind} `{path}` (component `{component}`): {reason}")]
     InvalidTargetPath {
@@ -91,7 +93,7 @@ pub enum TargetResolveError {
 pub fn resolve_target<R: InstallLocationResolver>(
     plan: &DesiredState,
     context: &WindowsTargetContext<R>,
-) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, TargetResolveError> {
+) -> Result<zup_plan::BoundDeployment, TargetResolveError> {
     let _span = info_span!("resolve_target", scope = %context.scope).entered();
     if plan.target.operating_system() != TargetOperatingSystem::Windows {
         return Err(TargetResolveError::UnsupportedTarget {
@@ -104,13 +106,37 @@ pub fn resolve_target<R: InstallLocationResolver>(
     plan.validate()?;
     let scope = context.scope;
     let resolve = |template: &Template, kind: &'static str| {
-        let path = resolve_template_path(template, &plan.target, &context.locations, scope)?;
+        let template = template.substitute(|variable| match variable {
+            zup_core::Variable::Payload => plan
+                .generation
+                .as_ref()
+                .map(|generation| zup_core::VariableValue::Template(generation.directory.clone())),
+            _ => None,
+        });
+        let path = resolve_template_path(&template, &plan.target, &context.locations, scope)?;
         validate_target_path(kind, &path)?;
         Ok::<TargetPath, TargetResolveError>(path)
     };
     let mut collisions = TargetCollisionIndex::default();
 
     let install_directory = resolve(&plan.install_directory, "install directory")?;
+    let generation = plan
+        .generation
+        .as_ref()
+        .map(|generation| {
+            generation.resolve_directory(|directory| resolve(directory, "generation directory"))
+        })
+        .transpose()?;
+
+    let maintenance = plan
+        .maintenance
+        .as_ref()
+        .map(|generation| {
+            generation.resolve_directory(|directory| {
+                resolve(directory, "maintenance generation directory")
+            })
+        })
+        .transpose()?;
 
     let files = resolve_files(plan, resolve)?;
 
@@ -145,10 +171,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
             .map(|directory| resolve(directory, "launcher working directory"))
             .transpose()?;
         launchers.push(DesiredLauncher {
-            key: ResourceKey::Launcher {
-                location: launcher.location,
-                name: launcher.name.to_string(),
-            },
+            key: launcher.key.clone(),
             location: launcher.location,
             name: launcher.name.clone(),
             launcher_path,
@@ -164,9 +187,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
         let value = resolve(&entry.value, "PATH entry")?;
         collisions.register_path_entry(&value)?;
         path_entries.push(DesiredPathEntry {
-            key: ResourceKey::PathEntry {
-                value: value.to_string(),
-            },
+            key: entry.key.clone(),
             value,
 
             scope: entry.scope,
@@ -179,6 +200,7 @@ pub fn resolve_target<R: InstallLocationResolver>(
         let binary = resolve(&service.command.executable, "service binary")?;
         collisions.register_service(service.id.as_str(), service.name.as_str())?;
         services.push(DesiredService {
+            state_directories: service.state_directories.clone(),
             failure: service.failure,
             execution: service.execution.clone(),
             lifecycle: service.lifecycle,
@@ -273,10 +295,21 @@ pub fn resolve_target<R: InstallLocationResolver>(
 
     let prerequisites = plan.prerequisites.clone();
     let mut resolved = DesiredState {
+        generation_readers: plan.generation_readers,
+        requirements: zup_plan::DeploymentRequirements::capture(plan)?
+            .bind_locations(&context.locations)?,
+        maintenance,
+        installation: plan.installation,
+        generation,
         app: plan.app.clone(),
         target: plan.target,
         scope: plan.scope,
         install_directory,
+        data: plan
+            .data
+            .iter()
+            .map(|directory| directory.map_path(|path| resolve(path, "persistent data")))
+            .collect::<Result<_, _>>()?,
 
         preset: None,
         selected_components: plan.selected_components.clone(),
@@ -288,6 +321,9 @@ pub fn resolve_target<R: InstallLocationResolver>(
         protocols,
         file_associations,
     };
+    let bindings = resolve_persistent_bindings(&resolved, &context.locations)
+        .map_err(zup_plan::ContractError::Capability)?;
+    zup_plan::bind_service_arguments(&mut resolved, &bindings)?;
     resolved.canonicalize_keys();
     resolved.validate_resolved()?;
     Ok(resolved)
@@ -390,4 +426,51 @@ fn insert_identity(
     }
     identities.insert(identity.to_owned(), value.to_owned());
     Ok(())
+}
+
+pub(crate) fn resolve_persistent_bindings(
+    target: &zup_plan::BoundDeployment,
+    locations: &impl InstallLocationResolver,
+) -> Result<std::collections::BTreeMap<zup_core::ResourceId, zup_plan::PersistentBinding>, String> {
+    target
+        .data
+        .iter()
+        .map(|directory| {
+            let writers = directory
+                .location
+                .services()
+                .map(|id| {
+                    let service = target
+                        .services
+                        .iter()
+                        .find(|service| &service.id == id)
+                        .ok_or_else(|| format!("data {} requires service {id}", directory.id))?;
+                    Ok(zup_plan::ServiceDataWriter {
+                        service: id.clone(),
+                        principal: zup_plan::ServiceDataPrincipal::WindowsService {
+                            name: service.name.to_string(),
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let path = match &directory.location {
+                zup_core::PersistentLocation::Path { path, .. } => path.clone(),
+                zup_core::PersistentLocation::Service { service } => locations
+                    .resolve(InstallLocation::SharedData, target.scope, &target.target)
+                    .map_err(|error| error.to_string())?
+                    .join(
+                        zup_plan::service_state_name(&target.app.id, service, &directory.id)
+                            .as_str(),
+                    )
+                    .map_err(|error| error.to_string())?,
+            };
+            Ok((
+                directory.id.clone(),
+                zup_plan::PersistentBinding::Filesystem(zup_plan::FilesystemDataBinding {
+                    path,
+                    writers,
+                }),
+            ))
+        })
+        .collect()
 }

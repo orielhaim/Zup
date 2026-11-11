@@ -172,6 +172,7 @@ struct MyPlugin;
 impl Plugin for MyPlugin {
     fn plan(context: Context) -> Result<Plan, Error> {
         Ok(Plan::new().generated_file(GeneratedFile::text(
+            "configuration",
             "${install}/installed-by.txt",
             format!("installed by {}", context.plugin_id),
         )))

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::format_bytes;
 use crate::receipt::{Notice, PublishReceipt};
+use zup_core::format_bytes;
 
 pub const REPORT_SCHEMA: u32 = 1;
 

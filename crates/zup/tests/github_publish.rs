@@ -69,8 +69,9 @@ scope = "user"
 [install.directory]
 user = "${{location.programs}}/Github"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 {extra}
 "#
             ),

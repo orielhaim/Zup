@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
+use zup_core::TargetPath;
 
 use rstest::rstest;
 use zup_core::{InstallLocation, SelectedScope, Target, Template, Variable, VariableValue};
 use zup_plan::{
-    InstallLocationError, InstallLocationResolver, TargetPath, TemplateResolveError,
-    resolve_template_path,
+    InstallLocationError, InstallLocationResolver, TemplateResolveError, resolve_template_path,
 };
 
 #[derive(Debug, Default, Clone)]

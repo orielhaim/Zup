@@ -3,23 +3,25 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use zup_core::TargetPath;
+use zup_plan::{NodeKind, compile_deployment};
 
 use zup_bundle::DirectoryPayloadSource;
+use zup_core::CommandSpec;
 use zup_core::{AppId, Privilege, ResourceKey, SelectedScope, ServiceStart, Target};
 use zup_linux::test_support::SharedFakeSystemd;
 use zup_linux::{
-    LinuxFileExecutor, LinuxLedgerStore, MachineRoots, ServiceCompilation, ServiceSupport,
+    LinuxFileExecutor, LinuxInstallationStore, MachineRoots, ServiceCompilation, ServiceSupport,
     SystemdManager as _, SystemdRoots, SystemdUnit, compile_machine_execution_plan,
     snapshot_services, snapshot_target,
 };
 use zup_plan::{
-    CommandSpec, DesiredFile, DesiredState, HostSnapshot, InstallLedger, LifecycleAction,
-    OwnedResource, TargetPath,
+    DesiredFile, DesiredState, HostSnapshot, InstallationRecord, LifecycleAction, OwnedResource,
 };
 
 use zup_transaction::{
-    FilesystemTransactionStore, NodeKind, NodeState, TransactionCoordinator, TransactionOutcome,
-    TransactionPhase, TransactionStore, compile_transaction,
+    FilesystemTransactionStore, NodeState, TransactionCoordinator, TransactionOutcome,
+    TransactionPhase, TransactionStore,
 };
 
 const APP_ID: &str = "com.example.tool";
@@ -48,7 +50,7 @@ fn explicit_start_and_upgrade_preserve_runtime_state() {
         .manager
         .control(
             &unit,
-            zup_transaction::ServiceTerminalState::Stopped,
+            zup_plan::ServiceTerminalState::Stopped,
             std::time::Duration::from_secs(1),
             &[],
         )
@@ -133,7 +135,7 @@ fn declared_file_changes_and_retired_dependencies_control_only_their_consumer() 
         second
     );
     assert!(
-        matches!(ledger.resources.get(&declared.services[0].key), Some(OwnedResource::Service { requires_files, .. }) if requires_files == &declared.services[0].requires_files)
+        matches!(ledger.current.resources.get(&declared.services[0].key), Some(OwnedResource::Service(zup_plan::OwnedService { requires_files, .. })) if requires_files == &declared.services[0].requires_files)
     );
 
     let changed = fixture.configured_plan("5.0.0", b"fourth", true);
@@ -184,6 +186,7 @@ fn app(version: &str) -> zup_core::App {
 }
 
 struct Fixture {
+    installation: zup_core::InstallationId,
     _base: tempfile::TempDir,
     roots: MachineRoots,
     systemd: SystemdRoots,
@@ -199,7 +202,7 @@ impl Fixture {
         version: &str,
         bytes: &[u8],
         declared: bool,
-    ) -> DesiredState<TargetPath, TargetPath> {
+    ) -> zup_plan::BoundDeployment {
         let mut plan = self.plan(version, ServiceStart::Manual, Vec::new());
         let destination = TargetPath::new(
             target(),
@@ -212,10 +215,17 @@ impl Fixture {
         std::fs::write(self.payload.join("worker.conf"), bytes).unwrap();
         plan.files.push(DesiredFile {
             key: ResourceKey::File {
-                destination: destination.to_string(),
+                id: zup_core::FileResourceId::Payload {
+                    id: zup_core::PayloadId::File {
+                        declaration: zup_core::ResourceId::new("fixture-0").unwrap(),
+                    },
+                },
             },
             source_relative: zup_core::RelativePath::new("worker.conf").unwrap(),
-            destination: destination.clone(),
+            placement: zup_core::PayloadPlacement::Fixed {
+                path: destination.clone(),
+                replacement: zup_core::FixedReplacement::Atomic,
+            },
             size: bytes.len() as u64,
             sha256: zup_core::hash_bytes(bytes),
             privilege: Privilege::System,
@@ -243,6 +253,7 @@ impl Fixture {
         std::fs::create_dir_all(&payload).expect("a payload tree");
         std::fs::write(payload.join("tool"), PAYLOAD_BYTES).expect("a service binary");
         Self {
+            installation: zup_core::InstallationId::new_v7(),
             state: roots.state.clone(),
             _base: base,
             roots,
@@ -270,11 +281,12 @@ impl Fixture {
         version: &str,
         start: ServiceStart,
         arguments: Vec<String>,
-    ) -> DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
+    ) -> zup_plan::BoundDeployment {
         let binary = self.binary();
         let destination = binary.clone();
         let (size, sha256) = zup_core::hash_reader(PAYLOAD_BYTES).expect("bytes hash");
         let service = zup_plan::DesiredService {
+            state_directories: Vec::new(),
             failure: Default::default(),
             execution: zup_core::ServiceExecution::SystemdUser {
                 user: "root".into(),
@@ -289,13 +301,19 @@ impl Fixture {
                 id: zup_core::ServiceId::new(SERVICE_ID).expect("an id"),
             },
             id: zup_core::ServiceId::new(SERVICE_ID).expect("an id"),
-            name: zup_core::NonEmptyString::new("Tool").expect("a name"),
+            name: zup_core::NonEmptyString::new("tool.service").expect("a name"),
             display_name: None,
             command: CommandSpec::new(binary, arguments),
             start,
             privilege: Privilege::System,
         };
         DesiredState {
+            generation_readers: Default::default(),
+            data: Vec::new(),
+            requirements: (),
+            maintenance: None,
+            installation: self.installation,
+            generation: None,
             app: app(version),
             target: target(),
             scope: SelectedScope::Machine,
@@ -308,10 +326,17 @@ impl Fixture {
             prerequisites: Vec::new(),
             files: vec![DesiredFile {
                 key: ResourceKey::File {
-                    destination: destination.to_string(),
+                    id: zup_core::FileResourceId::Payload {
+                        id: zup_core::PayloadId::File {
+                            declaration: zup_core::ResourceId::new("fixture-1").unwrap(),
+                        },
+                    },
                 },
                 source_relative: zup_core::RelativePath::new("tool").expect("a path"),
-                destination,
+                placement: zup_core::PayloadPlacement::Fixed {
+                    path: destination,
+                    replacement: zup_core::FixedReplacement::Atomic,
+                },
                 size,
                 sha256,
                 privilege: Privilege::System,
@@ -325,9 +350,11 @@ impl Fixture {
 
             preset: None,
         }
+        .bind_fixed()
+        .expect("fixed deployment requirements")
     }
 
-    fn unit(&self, plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>) -> String {
+    fn unit(&self, plan: &zup_plan::BoundDeployment) -> String {
         SystemdUnit::derive(&plan.services[0])
             .expect("a service derives")
             .unit
@@ -343,10 +370,7 @@ impl Fixture {
         self.manager.borrow_mut().seed_fragment(unit, &fragment);
     }
 
-    fn snapshot(
-        &self,
-        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-    ) -> HostSnapshot {
+    fn snapshot(&self, plan: &zup_plan::BoundDeployment) -> HostSnapshot {
         let mut snapshot = snapshot_target(plan);
         snapshot.services =
             snapshot_services(plan, &mut self.manager.clone(), &self.systemd).expect("a snapshot");
@@ -355,14 +379,14 @@ impl Fixture {
 
     fn owned_matches(
         &self,
-        ledger: Option<&InstallLedger>,
+        ledger: Option<&InstallationRecord>,
         snapshot: &HostSnapshot,
     ) -> BTreeMap<ResourceKey, bool> {
         let mut matches = BTreeMap::new();
         let Some(ledger) = ledger else {
             return matches;
         };
-        for (key, owned) in &ledger.resources {
+        for (key, owned) in &ledger.current.resources {
             let found = match owned {
                 OwnedResource::File {
                     destination,
@@ -379,7 +403,7 @@ impl Fixture {
                         })
                         .unwrap_or(false)
                 }
-                OwnedResource::Service { installed, .. } => {
+                OwnedResource::Service(zup_plan::OwnedService { installed, .. }) => {
                     snapshot.services.iter().any(|observed| {
                         observed.key == *key
                             && observed.state.configuration().as_ref() == Some(installed.as_ref())
@@ -392,21 +416,57 @@ impl Fixture {
         matches
     }
 
-    fn ledgers(&self) -> LinuxLedgerStore {
-        LinuxLedgerStore::new(&self.state)
+    fn ledgers(&self) -> LinuxInstallationStore {
+        LinuxInstallationStore::new(&self.state)
     }
 
-    fn load_ledger(&self) -> Option<InstallLedger> {
+    fn load_ledger(&self) -> Option<InstallationRecord> {
         self.ledgers()
             .load(&AppId::new(APP_ID).expect("an id"), SelectedScope::Machine)
             .expect("a ledger reads")
     }
 
+    fn with_service_sources(&self, plan: &zup_plan::BoundDeployment) -> zup_plan::BoundDeployment {
+        let mut plan = plan.clone();
+        for service in &plan.services {
+            let derived = SystemdUnit::derive(service).unwrap();
+            let source = format!("service-{}.unit", service.id);
+            std::fs::write(self.payload.join(&source), &derived.bytes).unwrap();
+            let key = ResourceKey::File {
+                id: zup_core::FileResourceId::Native {
+                    id: zup_core::NativeFileId::ServiceSource {
+                        id: service.id.clone(),
+                    },
+                },
+            };
+            plan.files.retain(|file| file.key != key);
+            plan.files.push(DesiredFile {
+                key,
+                source_relative: zup_core::RelativePath::new(source).unwrap(),
+                placement: zup_core::PayloadPlacement::Fixed {
+                    path: TargetPath::new(
+                        target(),
+                        self.systemd.unit_dir.join(&derived.unit).to_string_lossy(),
+                    )
+                    .unwrap(),
+                    replacement: zup_core::FixedReplacement::Atomic,
+                },
+                size: derived.bytes.len() as u64,
+                sha256: zup_core::hash_bytes(&derived.bytes),
+                privilege: Privilege::System,
+                executable: false,
+            });
+        }
+        plan
+    }
+
     fn run(
         &mut self,
-        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        plan: &zup_plan::BoundDeployment,
         action: LifecycleAction,
-    ) -> Result<(TransactionOutcome, Option<InstallLedger>), String> {
+    ) -> Result<(TransactionOutcome, Option<InstallationRecord>), String> {
+        let prepared = self.with_service_sources(plan);
+        let plan = &prepared;
         let ledgers = self.ledgers();
         let ledger = self.load_ledger();
         let snapshot = self.snapshot(plan);
@@ -422,7 +482,7 @@ impl Fixture {
         let mut manager = self.manager.clone();
         let mut input = compile_machine_execution_plan(
             &execution,
-            (!execution.uninstall).then_some(plan),
+            (!execution.transition.is_remove()).then_some(plan),
             ServiceCompilation {
                 ledger: ledger.as_ref(),
                 roots: &self.roots,
@@ -431,16 +491,11 @@ impl Fixture {
             },
         )
         .map_err(|error| format!("input: {error}"))?;
-        input.observed_transaction = ledger.as_ref().map(|ledger| ledger.committed_transaction);
+        input.observed_transaction = ledger.as_ref().map(|ledger| ledger.current.transaction);
         let plan_compiled =
-            compile_transaction(&input).map_err(|error| format!("transaction: {error}"))?;
+            compile_deployment(&input).map_err(|error| format!("transaction: {error}"))?;
         ledgers
-            .validate_plan(
-                &plan.app.id,
-                SelectedScope::Machine,
-                &plan.app.version,
-                &plan_compiled,
-            )
+            .validate_plan(&plan.app.id, SelectedScope::Machine, &plan_compiled)
             .map_err(|error| format!("ledger validation: {error}"))?;
         let store = FilesystemTransactionStore::private_at(&self.state);
         let coordinator = TransactionCoordinator::new(store);
@@ -466,13 +521,13 @@ impl Fixture {
             .map_err(|error| format!("register: {error}"))?;
         executor.set_transaction_id(record.transaction_id);
         let settled = record
-            .execute(&mut executor)
+            .execute(&mut executor, &ledgers)
             .map_err(|error| format!("execute: {error}"))?;
         let (record, outcome) = (settled.record, settled.outcome);
         match outcome {
             TransactionOutcome::Committed => {
                 let ledger = ledgers
-                    .publish_committed(&record, SelectedScope::Machine)
+                    .reconcile_installation(&record, SelectedScope::Machine)
                     .map_err(|error| format!("publish: {error}"))?;
                 Ok((outcome, Some(ledger)))
             }
@@ -484,9 +539,9 @@ impl Fixture {
 
     fn commit(
         &mut self,
-        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        plan: &zup_plan::BoundDeployment,
         action: LifecycleAction,
-    ) -> Option<InstallLedger> {
+    ) -> Option<InstallationRecord> {
         let (outcome, ledger) = self
             .run(plan, action)
             .expect("planning accepts the transition");
@@ -494,10 +549,9 @@ impl Fixture {
         ledger
     }
 
-    fn begin(
-        &mut self,
-        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-    ) -> zup_transaction::TransactionRecord {
+    fn begin(&mut self, plan: &zup_plan::BoundDeployment) -> zup_transaction::TransactionRecord {
+        let prepared = self.with_service_sources(plan);
+        let plan = &prepared;
         let snapshot = self.snapshot(plan);
         let owned_matches = self.owned_matches(None, &snapshot);
         let execution = zup_plan::plan_lifecycle(
@@ -511,7 +565,7 @@ impl Fixture {
         let mut manager = self.manager.clone();
         let input = compile_machine_execution_plan(
             &execution,
-            (!execution.uninstall).then_some(plan),
+            (!execution.transition.is_remove()).then_some(plan),
             ServiceCompilation {
                 ledger: None,
                 roots: &self.roots,
@@ -520,14 +574,9 @@ impl Fixture {
             },
         )
         .expect("an input compiles");
-        let compiled = compile_transaction(&input).expect("a transaction compiles");
+        let compiled = compile_deployment(&input).expect("a transaction compiles");
         self.ledgers()
-            .validate_plan(
-                &plan.app.id,
-                SelectedScope::Machine,
-                &plan.app.version,
-                &compiled,
-            )
+            .validate_plan(&plan.app.id, SelectedScope::Machine, &compiled)
             .expect("a plan validates");
         let store = FilesystemTransactionStore::private_at(&self.state);
         TransactionCoordinator::new(store)
@@ -543,7 +592,7 @@ impl Fixture {
 
     fn begin_uninstall(
         &mut self,
-        plan: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        plan: &zup_plan::BoundDeployment,
     ) -> zup_transaction::TransactionRecord {
         let ledger = self.load_ledger().expect("an installation exists");
         let snapshot = self.snapshot(plan);
@@ -559,7 +608,7 @@ impl Fixture {
         let mut manager = self.manager.clone();
         let mut input = compile_machine_execution_plan(
             &execution,
-            (!execution.uninstall).then_some(plan),
+            (!execution.transition.is_remove()).then_some(plan),
             ServiceCompilation {
                 ledger: Some(&ledger),
                 roots: &self.roots,
@@ -568,15 +617,10 @@ impl Fixture {
             },
         )
         .expect("an input compiles");
-        input.observed_transaction = Some(ledger.committed_transaction);
-        let compiled = compile_transaction(&input).expect("a transaction compiles");
+        input.observed_transaction = Some(ledger.current.transaction);
+        let compiled = compile_deployment(&input).expect("a transaction compiles");
         self.ledgers()
-            .validate_plan(
-                &plan.app.id,
-                SelectedScope::Machine,
-                &plan.app.version,
-                &compiled,
-            )
+            .validate_plan(&plan.app.id, SelectedScope::Machine, &compiled)
             .expect("a plan validates");
         let store = FilesystemTransactionStore::private_at(&self.state);
         TransactionCoordinator::new(store)
@@ -608,7 +652,8 @@ impl Fixture {
             .register_plan(&record.plan)
             .expect("a plan registers");
         executor.set_transaction_id(record.transaction_id);
-        zup_transaction::recover(record, &store, &mut executor).expect("recovery settles")
+        zup_transaction::recover(record, &store, &mut executor, &self.ledgers())
+            .expect("recovery settles")
     }
 
     fn crash_mid_apply(
@@ -619,12 +664,7 @@ impl Fixture {
             .plan
             .nodes
             .iter()
-            .filter(|node| {
-                matches!(
-                    &node.kind,
-                    NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. }
-                )
-            })
+            .filter(|node| matches!(&node.kind, NodeKind::NativeService { .. }))
             .map(|node| node.id.clone())
             .collect();
         assert!(!ids.is_empty(), "the plan holds service work");
@@ -639,48 +679,79 @@ impl Fixture {
             ));
         executor.register_plan(&record.plan).unwrap();
         executor.set_transaction_id(record.transaction_id);
-        for id in &record.plan.execution_order {
+        let store = FilesystemTransactionStore::private_at(&self.state);
+        record = store
+            .update(&record.transaction_id, &mut |current| {
+                current.phase = TransactionPhase::Applying;
+                Ok(())
+            })
+            .unwrap();
+        for id in record.plan.execution_order.clone() {
             let node = record
                 .plan
                 .nodes
                 .iter()
-                .find(|node| &node.id == id)
+                .find(|node| node.id == id)
+                .unwrap()
+                .clone();
+            record = store
+                .update(&record.transaction_id, &mut |current| {
+                    current.nodes.insert(id.clone(), NodeState::Running);
+                    Ok(())
+                })
                 .unwrap();
-            if ids.contains(id) {
-                record.nodes.insert(id.clone(), NodeState::Running);
-                break;
+            if ids.contains(&id) {
+                return record;
+            }
+            if matches!(node.kind, NodeKind::ReserveInstallation) {
+                let reservation = store.reserve_installation(&record).unwrap();
+                record = store
+                    .update(&record.transaction_id, &mut |current| {
+                        current.reservation = Some(reservation.clone());
+                        current.nodes.insert(
+                            id.clone(),
+                            NodeState::Applied {
+                                receipt: Box::new(zup_transaction::OperationReceipt::Control),
+                            },
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+                continue;
             }
             let receipt = if node.kind.is_barrier() {
                 zup_transaction::OperationReceipt::Control
             } else {
-                executor.prepare(node).unwrap();
-                let receipt = executor.apply(node).unwrap();
-                executor.verify(node, &receipt).unwrap();
+                executor.prepare(&node).unwrap();
+                let receipt = executor.apply(&node, &record).unwrap();
+                executor.verify(&node, &receipt).unwrap();
                 receipt
             };
             let receipt = Box::new(receipt);
-            record.nodes.insert(
-                id.clone(),
-                if !node.kind.requires_verification() {
-                    NodeState::Applied { receipt }
-                } else {
-                    NodeState::Verified { receipt }
-                },
-            );
+            record = store
+                .update(&record.transaction_id, &mut |current| {
+                    current.nodes.insert(
+                        id.clone(),
+                        if node.kind.requires_verification() {
+                            NodeState::Verified {
+                                receipt: receipt.clone(),
+                            }
+                        } else {
+                            NodeState::Applied {
+                                receipt: receipt.clone(),
+                            }
+                        },
+                    );
+                    Ok(())
+                })
+                .unwrap();
         }
-        let store = FilesystemTransactionStore::private_at(&self.state);
-        store
-            .update(&record.transaction_id, &mut |journaled| {
-                journaled.phase = TransactionPhase::Applying;
-                journaled.nodes = record.nodes.clone();
-                Ok(())
-            })
-            .expect("the journal advances")
+        panic!("service operation was not reached")
     }
 
     fn publish(&self, record: &zup_transaction::TransactionRecord) {
         self.ledgers()
-            .publish_committed(record, SelectedScope::Machine)
+            .reconcile_installation(record, SelectedScope::Machine)
             .expect("a commit publishes");
     }
 
@@ -726,6 +797,7 @@ fn install_registers_boot_policy_without_starting() {
     );
     let ledger = ledger.expect("a ledger publishes");
     let owned = ledger
+        .current
         .resources
         .get(&ResourceKey::Service {
             id: zup_core::ServiceId::new(SERVICE_ID).expect("an id"),
@@ -734,7 +806,7 @@ fn install_registers_boot_policy_without_starting() {
     assert!(
         matches!(
             owned,
-            OwnedResource::Service { installed, .. }
+            OwnedResource::Service(zup_plan::OwnedService { installed, .. })
                 if matches!(installed.as_ref(), zup_plan::ServiceState::Registration { start: ServiceStart::Automatic, .. })
         ),
         "the ledger owns the portable registration, not systemd state"
@@ -800,8 +872,10 @@ fn source_updates_land_transactionally() {
     );
 }
 
-#[test]
-fn repair_restores_the_source() {
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn repair_restores_the_source(#[case] fail_reload: bool) {
     let mut fixture = Fixture::new();
     let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
     let unit = fixture.unit(&plan);
@@ -810,12 +884,10 @@ fn repair_restores_the_source() {
     let healthy = fixture.source(&unit).expect("a source exists");
 
     std::fs::remove_file(fixture.systemd.unit_dir.join(&unit)).expect("a deletion");
-    eprintln!("STEP repair-after-delete");
     fixture.commit(&plan, LifecycleAction::Repair { force: false });
     assert_eq!(fixture.source(&unit).expect("a source restores"), healthy);
 
     std::fs::write(fixture.systemd.unit_dir.join(&unit), b"[Unit]\n# damaged\n").expect("damage");
-    eprintln!("STEP repair-damaged-no-force");
     assert!(
         fixture
             .run(&plan, LifecycleAction::Repair { force: false })
@@ -829,21 +901,24 @@ fn repair_restores_the_source() {
             .starts_with(b"[Unit]\n#"),
         "nothing was overwritten without force"
     );
-    let damaged = fixture.source(&unit).expect("damaged source");
-    fixture
-        .manager
-        .borrow_mut()
-        .fail_next
-        .insert("reload".into(), "injected failure".into());
+    if fail_reload {
+        fixture
+            .manager
+            .borrow_mut()
+            .fail_next
+            .insert("reload".into(), "injected failure".into());
+    }
     let (outcome, _) = fixture
         .run(&plan, LifecycleAction::Repair { force: true })
-        .expect("failed repair settles");
-    assert_eq!(outcome, TransactionOutcome::RolledBack);
+        .expect("repair settles");
     assert_eq!(
-        fixture.source(&unit).expect("previous source survives"),
-        damaged
+        outcome,
+        if fail_reload {
+            TransactionOutcome::RecoveryRequired
+        } else {
+            TransactionOutcome::Committed
+        }
     );
-    fixture.commit(&plan, LifecycleAction::Repair { force: true });
     assert_eq!(fixture.source(&unit).expect("force restores"), healthy);
 }
 
@@ -896,7 +971,10 @@ fn uninstall_retires_only_what_zup_owns() {
         "disabled",
         "the mask/enablement retires"
     );
-    assert!(fixture.load_ledger().is_none(), "the ledger retires");
+    assert!(
+        !fixture.load_ledger().unwrap().is_installed(),
+        "the installation retains its ownership tombstone"
+    );
     assert_eq!(
         std::fs::read(&neighbor)
             .expect("a neighbor survives")
@@ -952,10 +1030,7 @@ fn unrelated_admin_enablement_is_preserved() {
     );
     let result = fixture.run(&v2, LifecycleAction::Upgrade);
     let outcome = result.expect("the transition reaches a stable outcome").0;
-    assert!(
-        !matches!(outcome, TransactionOutcome::Committed),
-        "a broad disable never deletes unrelated state"
-    );
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
     assert_eq!(fixture.policy(&unit), "enabled", "nothing was removed");
 
     let v1_bytes = SystemdUnit::derive(&v1.services[0]).expect("a service derives");
@@ -963,13 +1038,11 @@ fn unrelated_admin_enablement_is_preserved() {
         fixture.source(&unit).expect("a source remains"),
         v1_bytes.bytes
     );
-    assert!(
-        fixture.run(&v2, LifecycleAction::Upgrade).is_ok(),
-        "the compensated world plans cleanly"
+    assert!(fixture.run(&v2, LifecycleAction::Upgrade).is_err());
+    assert_eq!(
+        fixture.manager.borrow().extra_links.get(&unit).unwrap(),
+        &["/etc/systemd/system/graphical.target.wants/unit"]
     );
-    fixture.manager.borrow_mut().extra_links.clear();
-    fixture.commit(&v2, LifecycleAction::Upgrade);
-    assert_eq!(fixture.policy(&unit), "disabled");
 }
 
 #[test]
@@ -1051,7 +1124,10 @@ fn an_interrupted_uninstall_converges(#[case] mask_retired: bool) {
 
     let record = fixture.begin_uninstall(&plan);
     let record = fixture.crash_mid_apply(record);
-    std::fs::remove_file(fixture.systemd.unit_dir.join(&unit)).expect("source gone");
+    assert!(
+        fixture.source(&unit).is_none(),
+        "owned source removal precedes native deregistration"
+    );
     assert_eq!(fixture.policy(&unit), "masked");
     if mask_retired {
         fixture
@@ -1063,7 +1139,7 @@ fn an_interrupted_uninstall_converges(#[case] mask_retired: bool) {
     let (record, outcome) = fixture.recover(record);
     assert_eq!(outcome, TransactionOutcome::Committed);
     fixture.publish(&record);
-    assert!(fixture.load_ledger().is_none());
+    assert!(!fixture.load_ledger().unwrap().is_installed());
 }
 
 #[test]
@@ -1088,7 +1164,11 @@ fn a_swapped_binary_refuses_before_registration() {
 #[test]
 fn tampered_unit_bytes_refuse_at_apply() {
     let fixture = Fixture::new();
-    let plan = fixture.plan("1.0.0", ServiceStart::Automatic, vec!["--serve".into()]);
+    let plan = fixture.with_service_sources(&fixture.plan(
+        "1.0.0",
+        ServiceStart::Automatic,
+        vec!["--serve".into()],
+    ));
     let unit = fixture.unit(&plan);
     fixture.seed(&unit);
 
@@ -1103,7 +1183,7 @@ fn tampered_unit_bytes_refuse_at_apply() {
     )
     .expect("lifecycle plans");
     let mut manager = fixture.manager.clone();
-    let mut input = compile_machine_execution_plan(
+    let input = compile_machine_execution_plan(
         &execution,
         Some(&plan),
         zup_linux::ServiceCompilation {
@@ -1114,15 +1194,14 @@ fn tampered_unit_bytes_refuse_at_apply() {
         },
     )
     .expect("an input compiles");
-    for operation in &mut input.backend_operations {
-        let mut payload: zup_linux::ServicePayload =
-            zup_linux::decode_payload(&operation.payload).expect("a payload decodes");
-        if let zup_linux::ServicePayload::Apply { unit_bytes, .. } = &mut payload {
-            *unit_bytes = b"[Unit]\nDescription=Forged\n".to_vec();
-        }
-        operation.payload = zup_linux::encode_payload(&payload).expect("a payload encodes");
-    }
-    let compiled = compile_transaction(&input).expect("a transaction compiles");
+    let compiled = compile_deployment(&input).expect("a transaction compiles");
+    std::fs::write(
+        fixture
+            .payload
+            .join(format!("service-{}.unit", plan.services[0].id)),
+        b"[Unit]\nDescription=Forged\n",
+    )
+    .unwrap();
     let store = FilesystemTransactionStore::private_at(&fixture.state);
     let coordinator = TransactionCoordinator::new(store);
     let record = coordinator
@@ -1147,7 +1226,7 @@ fn tampered_unit_bytes_refuse_at_apply() {
         .expect("a plan registers");
     executor.set_transaction_id(record.transaction_id);
     let outcome = record
-        .execute(&mut executor)
+        .execute(&mut executor, &fixture.ledgers())
         .expect("execution reaches a stable outcome")
         .outcome;
     assert!(
@@ -1167,15 +1246,10 @@ fn serialized_updates_cannot_claim_service_ownership() {
     let mut plan = record.plan.clone();
     let mut changed = false;
     for node in &mut plan.nodes {
-        let Some(backend) = &mut node.meta.backend else {
-            continue;
-        };
-        let Ok(mut payload) = zup_linux::decode_payload(&backend.payload) else {
-            continue;
-        };
-        if let zup_linux::ServicePayload::Apply { service, .. } = &mut payload {
+        if let NodeKind::NativeService { operation } = &mut node.kind
+            && let zup_plan::NativeServiceOperation::Configure { service, .. } = operation.as_mut()
+        {
             service.kind = zup_plan::IntegrationChangeKind::UpdateOwned;
-            backend.payload = zup_linux::encode_payload(&payload).unwrap();
             changed = true;
         }
     }
@@ -1183,12 +1257,7 @@ fn serialized_updates_cannot_claim_service_ownership() {
     assert!(
         fixture
             .ledgers()
-            .validate_plan(
-                &desired.app.id,
-                SelectedScope::Machine,
-                &desired.app.version,
-                &plan,
-            )
+            .validate_plan(&desired.app.id, SelectedScope::Machine, &plan,)
             .is_err()
     );
     assert!(fixture.source(&unit).is_none());

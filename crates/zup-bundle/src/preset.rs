@@ -1,38 +1,4 @@
-//! Where an installation keeps the preset content it will present.
-//!
-//! Two things live here, and they are the same thing: the preset executable and
-//! the application-provided assets its settings named. Both are addressed by
-//! content, because that is the only addressing that survives the installer that
-//! supplied them being deleted, that deduplicates two assets the application
-//! configured with the same bytes, and that lets a repair ask for exactly the
-//! bytes the ledger recorded.
-//!
-//! Under the runtime's own directory, and for the same reason the runtime is
-//! there: it is installed content in the scope's state root, owned by the same
-//! transaction as everything else this installation owns, and removed by the same
-//! uninstall. A store anywhere else would need its own ownership record, its own
-//! cleanup, and its own recovery, and would eventually disagree with the
-//! installation it belongs to.
-//!
-//! The path of every byte is derived here, from a digest and a logical name
-//! alone. The writer that publishes them and the reader that launches them are
-//! the same derivation, because a store whose two ends spell its layout
-//! differently is a store that works until an update changes the spelling.
-//!
-//! # Why the executable suffix is an argument
-//!
-//! Nothing here knows what a native executable is called on any platform. A
-//! reserved name ending in `.exe` would be a portable concept naming one
-//! platform's convention, and it would be wrong the moment a Linux or macOS
-//! runtime resolved one of these paths: it would look for a file no composition
-//! for that target ever writes. The suffix therefore arrives from the target the
-//! content is for, through [`zup_core::Target::executable_suffix`], and
-//! this module's job is the part that is genuinely the same everywhere.
-//!
-//! That is also why [`PRESET_SOURCE`] - the payload-relative name a build stage
-//! addresses the runtime's own preset by - carries no suffix. A build stage
-//! addressing a file by name needs one reserved name, not one per platform, and
-//! the *payload* it belongs to is already a single target's.
+//! Native preset content inside a verified maintenance generation.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -198,25 +164,6 @@ pub fn resolve(
 fn digest_of(path: &Path) -> Result<(u64, Sha256Digest), ()> {
     let mut file = std::fs::File::open(path).map_err(|_| ())?;
     zup_core::hash_reader(&mut file).map_err(|_| ())
-}
-
-/// Whether a destination is one of an installation's preset content files.
-///
-/// Asked of the ledger rather than assumed, so that retiring a window's bytes is
-/// decided by where they are and not by a marker that could go stale. Scoped to
-/// the application's maintenance root rather than to one version's directory,
-/// because the question is asked of every generation an installation has owned.
-pub fn is_content_path(maintenance_root: &Path, destination: &str) -> bool {
-    let Ok(relative) = Path::new(destination).strip_prefix(maintenance_root) else {
-        return false;
-    };
-    // One version segment, then the content directory, then at least one more.
-    let mut components = relative.components();
-    components.next();
-    components
-        .next()
-        .is_some_and(|component| component.as_os_str() == PRESET_DIRECTORY)
-        && components.next().is_some()
 }
 
 #[cfg(test)]
