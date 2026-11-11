@@ -23,6 +23,7 @@ pub enum Boundary {
     MaterializationPreparationRecorded,
     MaterializationPublicationRequested,
     MaterializationMemberExposed,
+    MaterializationNamespaceExposed,
     MaterializationAccessPublished,
     MaterializationDirectoryPublished,
     IntentBefore,

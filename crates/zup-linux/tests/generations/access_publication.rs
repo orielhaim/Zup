@@ -2,7 +2,7 @@ use super::*;
 use std::os::unix::{fs::PermissionsExt, process::ExitStatusExt};
 use zup_transaction::{MaterializationRecord, MaterializationState, TransactionStore};
 
-const FILES: [(&str, &[u8], bool); 3] = [
+pub(super) const FILES: [(&str, &[u8], bool); 3] = [
     (
         "bin/tools/run",
         b"#!/bin/sh\nprintf 'generation executable'\n",
@@ -20,7 +20,7 @@ const DIRECTORIES: [&str; 6] = [
     "bin/tools",
 ];
 
-fn effects(root: &Path, source: &Path, scope: SelectedScope) -> DeploymentEffects {
+pub(super) fn effects(root: &Path, source: &Path, scope: SelectedScope) -> DeploymentEffects {
     let mut effects = deployment_effects(root, source, b"nested data", None, None);
     effects.requirements.scope = scope;
     effects.requirements.data.clear();
@@ -99,6 +99,7 @@ fn nested_generation_access_recovers_at_publication_boundaries(
         "apply_returned",
         "materialization_publication_requested",
         "materialization_member_exposed",
+        "materialization_namespace_exposed",
         "materialization_access_published",
         "materialization_directory_published"
     )]
@@ -200,6 +201,20 @@ fn nested_generation_access_recovers_at_publication_boundaries(
         .iter()
         .map(|path| mode(&observed.join(path)))
         .collect();
+    if rustix::process::geteuid().as_raw() == 0
+        && matches!(
+            point,
+            "apply_returned"
+                | "materialization_publication_requested"
+                | "materialization_member_exposed"
+                | "materialization_namespace_exposed"
+        )
+    {
+        super::consumer_access::assert_consumer(
+            "deny sh -c 'cd \"$1\"' sh \"$1\"; deny cat \"$1/lib/data.txt\"; deny cat \"$2\"",
+            &[observed, &record_path],
+        );
+    }
     match point {
         "apply_returned" | "materialization_publication_requested" => {
             assert!(modes.iter().all(|mode| *mode == 0o700))
@@ -215,6 +230,10 @@ fn nested_generation_access_recovers_at_publication_boundaries(
                 assert!(modes.contains(&0o755));
                 assert!(modes.contains(&0o700));
             }
+        }
+        "materialization_namespace_exposed" => {
+            assert_eq!(mode(observed), 0o700);
+            assert!(modes[1..].iter().all(|mode| *mode == published_mode));
         }
         _ => assert!(modes.iter().all(|mode| *mode == published_mode)),
     }
@@ -243,6 +262,12 @@ fn nested_generation_access_recovers_at_publication_boundaries(
         .unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"generation executable");
+    if rustix::process::geteuid().as_raw() == 0 && scope == SelectedScope::Machine {
+        super::consumer_access::assert_consumer(
+            "test \"$(cat \"$1/lib/data.txt\")\" = 'nested data'; test \"$(\"$1/bin/tools/run\")\" = 'generation executable'",
+            &[published],
+        );
+    }
     let sealed: MaterializationRecord =
         serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
     assert_eq!(sealed.object, object);

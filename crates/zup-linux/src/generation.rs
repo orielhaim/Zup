@@ -3,16 +3,14 @@ use std::path::Path;
 
 use rustix::fs::Mode;
 use zup_bundle::PayloadSource;
-use zup_core::{
-    GenerationFile, MaterializationTree, NativeObjectIdentity, Privilege, TransactionId,
-};
+use zup_core::{GenerationFile, MaterializationTree, NativeObjectIdentity, TransactionId};
 use zup_plan::GenerationIntent;
 use zup_transaction::{
     GenerationAccess, GenerationFilesystem, MaterializationRecord, TransactionRecord,
 };
 
 use crate::error::ExecError;
-use crate::fs::{EntryKind, OwnedDirectory};
+use crate::fs::{DirectoryAccess, EntryKind, OwnedDirectory};
 use crate::lowering::to_host_path;
 
 pub(crate) struct LinuxGenerationFilesystem {
@@ -33,13 +31,13 @@ impl LinuxGenerationFilesystem {
         let directory = child(
             &root,
             "materializations",
-            Mode::from_bits_truncate(0o700),
+            DirectoryAccess::Private.mode(),
             create,
         )?;
         let directory = child(
             &directory,
             &intent.materialization.installation().to_string(),
-            Mode::from_bits_truncate(0o700),
+            DirectoryAccess::Private.mode(),
             create,
         )?;
         Ok((directory, format!("{}.json", intent.materialization.id())))
@@ -101,7 +99,7 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
         parent: &OwnedDirectory,
         name: &str,
     ) -> Result<OwnedDirectory, ExecError> {
-        let directory = parent.create_exclusive_directory(name, Mode::from_bits_truncate(0o700))?;
+        let directory = parent.create_exclusive_directory(name, DirectoryAccess::Private.mode())?;
         parent.sync()?;
         Ok(directory)
     }
@@ -209,8 +207,7 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
                     "generation directory changed before access publication",
                 ));
             }
-            directory.chmod_self(published_directory_mode(intent))?;
-            directory.sync()?;
+            directory.publish_access(DirectoryAccess::PublishedContent(intent.privilege))?;
             zup_transaction::fault_injection::boundary(
                 zup_transaction::fault_injection::Boundary::MaterializationMemberExposed,
                 intent
@@ -224,8 +221,24 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
                 "generation root changed during access publication",
             ));
         }
-        root.chmod_self(published_directory_mode(intent))?;
-        root.sync()?;
+        let installation = root
+            .path()
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .ok_or_else(|| refused(intent, "generation has no installation root"))?;
+        OwnedDirectory::open(installation)?.publish_namespace_access(
+            Path::new(intent.publication.namespace()),
+            &root,
+            intent.privilege,
+        )?;
+        zup_transaction::fault_injection::boundary(
+            zup_transaction::fault_injection::Boundary::MaterializationNamespaceExposed,
+            intent
+                .operation_id(zup_plan::GenerationOperation::Seal)
+                .as_str(),
+        );
+        root.publish_access(DirectoryAccess::PublishedContent(intent.privilege))?;
         Ok(root)
     }
 
@@ -291,13 +304,13 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
         let directory = child(
             &root,
             "materializations",
-            Mode::from_bits_truncate(0o700),
+            DirectoryAccess::Private.mode(),
             create_new,
         )?;
         let directory = child(
             &directory,
             &record.specification.installation().to_string(),
-            Mode::from_bits_truncate(0o700),
+            DirectoryAccess::Private.mode(),
             create_new,
         )?;
         let name = format!("{}.json", record.specification.id());
@@ -337,13 +350,16 @@ fn namespace(intent: &GenerationIntent, create: bool) -> Result<OwnedDirectory, 
     }
     let host = to_host_path(&root)?;
     let mut parent = if create {
-        OwnedDirectory::create(&host, published_directory_mode(intent))?
+        OwnedDirectory::create(
+            &host,
+            DirectoryAccess::PublishedNamespace(intent.privilege).mode(),
+        )?
     } else {
         OwnedDirectory::open(&host)?
     };
     parent.verify_descendants(Path::new("."), rustix::process::geteuid().as_raw())?;
     for component in intent.publication.namespace().split('/') {
-        parent = child(&parent, component, Mode::from_bits_truncate(0o700), create)?;
+        parent = child(&parent, component, DirectoryAccess::Private.mode(), create)?;
     }
     Ok(parent)
 }
@@ -531,11 +547,7 @@ fn object(directory: &OwnedDirectory) -> Result<NativeObjectIdentity, ExecError>
 }
 
 fn published_directory_mode(intent: &GenerationIntent) -> Mode {
-    Mode::from_bits_truncate(if intent.privilege == Privilege::System {
-        0o755
-    } else {
-        0o700
-    })
+    DirectoryAccess::PublishedContent(intent.privilege).mode()
 }
 
 fn file_mode(file: &GenerationFile) -> u32 {

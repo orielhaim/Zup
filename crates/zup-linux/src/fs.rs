@@ -20,6 +20,25 @@ pub const USER_INSTALL_DIRECTORY_MODE: Mode = Mode::from_bits_truncate(0o700);
 
 pub const MACHINE_INSTALL_DIRECTORY_MODE: Mode = Mode::from_bits_truncate(0o755);
 
+#[derive(Clone, Copy)]
+pub(crate) enum DirectoryAccess {
+    Private,
+    PublishedNamespace(zup_core::Privilege),
+    PublishedContent(zup_core::Privilege),
+}
+
+impl DirectoryAccess {
+    pub(crate) fn mode(self) -> Mode {
+        Mode::from_bits_truncate(match self {
+            Self::Private => 0o700,
+            // Consumers can resolve known names without listing or changing namespace entries.
+            Self::PublishedNamespace(zup_core::Privilege::System) => 0o711,
+            Self::PublishedContent(zup_core::Privilege::System) => 0o755,
+            Self::PublishedNamespace(_) | Self::PublishedContent(_) => 0o700,
+        })
+    }
+}
+
 const DIR_FLAGS: OFlags = OFlags::from_bits_truncate(
     OFlags::RDONLY.bits()
         | OFlags::DIRECTORY.bits()
@@ -254,6 +273,125 @@ impl OwnedDirectory {
 
     pub fn chmod_self(&self, mode: Mode) -> Result<(), PathError> {
         rustix::fs::fchmod(self.as_fd(), mode).map_err(|error| PathError::errno(&self.path, error))
+    }
+
+    pub(crate) fn publish_access(&self, access: DirectoryAccess) -> Result<(), PathError> {
+        self.verify_access_authority()?;
+        self.chmod_self(access.mode())?;
+        self.sync()
+    }
+
+    fn verify_access_authority(&self) -> Result<(), PathError> {
+        let state = self.stat_self()?;
+        if state.uid != rustix::process::geteuid().as_raw()
+            || !matches!(state.mode, 0o700 | 0o711 | 0o755)
+        {
+            return Err(PathError::Refused {
+                path: self.path.display().to_string(),
+                reason:
+                    "access publication requires an installer-owned directory with protected writes"
+                        .into(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_namespace_access(
+        &self,
+        namespace: &Path,
+        member: &Self,
+        privilege: zup_core::Privilege,
+    ) -> Result<(), PathError> {
+        self.verify_descendants(namespace, rustix::process::geteuid().as_raw())?;
+        let mut directories = vec![self.duplicate()?];
+        let mut names = Vec::new();
+        for component in namespace.components() {
+            let Component::Normal(name) = component else {
+                return Err(PathError::Refused {
+                    path: namespace.display().to_string(),
+                    reason: "publication namespace requires plain child names".into(),
+                });
+            };
+            let name = name.to_str().ok_or_else(|| PathError::InvalidComponent {
+                component: namespace.display().to_string(),
+                reason: "publication namespace requires text names".into(),
+            })?;
+            let child = directories
+                .last()
+                .expect("namespace root")
+                .open_child(name)?;
+            directories.push(child);
+            names.push(name);
+        }
+        let member_name = member
+            .path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or_else(|| PathError::Refused {
+                path: member.path.display().to_string(),
+                reason: "published member requires a child name".into(),
+            })?;
+        let verify_links = || -> Result<(), PathError> {
+            if Self::open(&self.path)?.stat_self()?.object() != self.stat_self()?.object() {
+                return Err(PathError::Refused {
+                    path: self.path.display().to_string(),
+                    reason: "installation root changed during access publication".into(),
+                });
+            }
+            for (pair, name) in directories.windows(2).zip(&names) {
+                if pair[0].stat_child(name)?.object() != pair[1].stat_self()?.object() {
+                    return Err(PathError::Refused {
+                        path: pair[1].path.display().to_string(),
+                        reason: "held namespace parent changed during access publication".into(),
+                    });
+                }
+            }
+            if directories
+                .last()
+                .expect("namespace root")
+                .stat_child(member_name)?
+                .object()
+                != member.stat_self()?.object()
+            {
+                return Err(PathError::Refused {
+                    path: member.path.display().to_string(),
+                    reason: "held generation parent changed during access publication".into(),
+                });
+            }
+            Ok(())
+        };
+        verify_links()?;
+        {
+            let mut ancestor =
+                Self::open(self.path.parent().ok_or_else(|| PathError::Refused {
+                    path: self.path.display().to_string(),
+                    reason: "installation root requires an external parent".into(),
+                })?)?;
+            loop {
+                ancestor.verify_descendants(Path::new("."), rustix::process::geteuid().as_raw())?;
+                if privilege == zup_core::Privilege::System
+                    && ancestor.stat_self()?.mode & 0o001 == 0
+                {
+                    return Err(PathError::Refused {
+                        path: ancestor.path.display().to_string(),
+                        reason: "an unrelated ancestor blocks consumer traversal".into(),
+                    });
+                }
+                let Some(parent) = ancestor.path.parent() else {
+                    break;
+                };
+                ancestor = Self::open(parent)?;
+            }
+        }
+        // Validate every owned component before changing any permissions.
+        for directory in &directories {
+            directory.verify_access_authority()?;
+        }
+        for directory in directories.iter().rev() {
+            verify_links()?;
+            directory.publish_access(DirectoryAccess::PublishedNamespace(privilege))?;
+        }
+        verify_links()
     }
 
     pub fn chmod_child(&self, name: &str, mode: Mode) -> Result<(), PathError> {
@@ -1188,6 +1326,138 @@ mod tests {
 
     fn directory() -> tempfile::TempDir {
         tempfile::tempdir().expect("a temp directory")
+    }
+
+    #[rstest::rstest]
+    fn namespace_publication_refuses_unverified_authority(
+        #[values("external_private", "writable_namespace", "replaced_member")] conflict: &str,
+    ) {
+        let fixture = directory();
+        let external = OwnedDirectory::open(fixture.path()).unwrap();
+        external
+            .chmod_self(Mode::from_bits_truncate(0o711))
+            .unwrap();
+        let application = external
+            .create_exclusive_directory("application", STATE_DIRECTORY_MODE)
+            .unwrap();
+        let namespace = application
+            .create_exclusive_directory("namespace", STATE_DIRECTORY_MODE)
+            .unwrap();
+        let member = namespace
+            .create_exclusive_directory("member", STATE_DIRECTORY_MODE)
+            .unwrap();
+        match conflict {
+            "external_private" => external.chmod_self(STATE_DIRECTORY_MODE).unwrap(),
+            "writable_namespace" => namespace
+                .chmod_self(Mode::from_bits_truncate(0o777))
+                .unwrap(),
+            "replaced_member" => {
+                namespace.rename_noreplace("member", "held").unwrap();
+                namespace
+                    .create_exclusive_directory("member", STATE_DIRECTORY_MODE)
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = [
+            external.stat_self().unwrap(),
+            application.stat_self().unwrap(),
+            namespace.stat_self().unwrap(),
+            member.stat_self().unwrap(),
+        ];
+        assert!(
+            application
+                .publish_namespace_access(
+                    Path::new("namespace"),
+                    &member,
+                    zup_core::Privilege::System
+                )
+                .is_err()
+        );
+        assert_eq!(
+            before,
+            [
+                external.stat_self().unwrap(),
+                application.stat_self().unwrap(),
+                namespace.stat_self().unwrap(),
+                member.stat_self().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn namespace_publication_converges_from_partial_access_without_exposing_staging() {
+        let fixture = directory();
+        let external = OwnedDirectory::open(fixture.path()).unwrap();
+        external
+            .chmod_self(Mode::from_bits_truncate(0o711))
+            .unwrap();
+        let application = external
+            .create_exclusive_directory("application", STATE_DIRECTORY_MODE)
+            .unwrap();
+        let namespace = application
+            .create_exclusive_directory("namespace", Mode::from_bits_truncate(0o711))
+            .unwrap();
+        let member = namespace
+            .create_exclusive_directory("member", STATE_DIRECTORY_MODE)
+            .unwrap();
+        let identity = member.stat_self().unwrap().object();
+        for _ in 0..2 {
+            application
+                .publish_namespace_access(
+                    Path::new("namespace"),
+                    &member,
+                    zup_core::Privilege::System,
+                )
+                .unwrap();
+            assert_eq!(application.stat_self().unwrap().mode, 0o711);
+            assert_eq!(namespace.stat_self().unwrap().mode, 0o711);
+            assert_eq!(member.stat_self().unwrap().mode, 0o700);
+            assert_eq!(member.stat_self().unwrap().object(), identity);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires root to create a foreign-owned namespace"]
+    fn namespace_publication_refuses_foreign_owned_components() {
+        assert_eq!(
+            rustix::process::geteuid().as_raw(),
+            0,
+            "run this test as root"
+        );
+        let fixture = directory();
+        let external = OwnedDirectory::open(fixture.path()).unwrap();
+        external
+            .chmod_self(Mode::from_bits_truncate(0o711))
+            .unwrap();
+        let application = external
+            .create_exclusive_directory("application", STATE_DIRECTORY_MODE)
+            .unwrap();
+        let namespace = application
+            .create_exclusive_directory("namespace", STATE_DIRECTORY_MODE)
+            .unwrap();
+        let member = namespace
+            .create_exclusive_directory("member", STATE_DIRECTORY_MODE)
+            .unwrap();
+        rustix::fs::fchown(
+            namespace.as_fd(),
+            Some(rustix::process::Uid::from_raw(65534)),
+            None,
+        )
+        .unwrap();
+        let before = namespace.stat_self().unwrap();
+        assert!(
+            application
+                .publish_namespace_access(
+                    Path::new("namespace"),
+                    &member,
+                    zup_core::Privilege::System
+                )
+                .is_err()
+        );
+        assert_eq!(namespace.stat_self().unwrap(), before);
+        assert_eq!(application.stat_self().unwrap().mode, 0o700);
+        assert_eq!(member.stat_self().unwrap().mode, 0o700);
     }
 
     #[test]

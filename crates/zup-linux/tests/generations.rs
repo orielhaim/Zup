@@ -223,6 +223,10 @@ fn native_publisher(state: &Path) -> LinuxInstallationStore {
 #[path = "generations/access_publication.rs"]
 mod access_publication;
 
+#[cfg(feature = "test-faults")]
+#[path = "generations/consumer_access.rs"]
+mod consumer_access;
+
 #[test]
 fn upgrade_and_repair_create_verified_instances_without_mutating_prior_content() {
     let temporary = tempfile::tempdir().unwrap();
