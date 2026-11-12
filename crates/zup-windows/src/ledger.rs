@@ -5,6 +5,7 @@ use zup_core::TargetPath;
 #[cfg(test)]
 use zup_plan::DeploymentEffects;
 use zup_plan::{BackendOperationIntent, DeploymentPlan, NodeKind};
+use zup_transaction::TransactionStore;
 use zup_transaction::valid_file_key;
 
 use thiserror::Error;
@@ -171,6 +172,10 @@ impl InstallationRecordStore {
                 TransactionPhase::RolledBack => {}
                 _ => unreachable!("settled_records accepts only terminal journals"),
             }
+            let durable = journals
+                .load(&record.transaction_id)
+                .map_err(|error| LedgerError::Ownership(error.to_string()))?;
+            crate::recovery::collect(&self.root, &durable).map_err(LedgerError::Ownership)?;
         }
         Ok(())
     }

@@ -80,6 +80,8 @@ mod preset_stage;
 #[cfg(windows)]
 mod process;
 #[cfg(windows)]
+mod recovery;
+#[cfg(windows)]
 mod registry;
 mod resolve;
 #[cfg(windows)]

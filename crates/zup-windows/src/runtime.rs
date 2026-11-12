@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use zup_core::TransactionId;
 use zup_plan::DeploymentNode;
 
 use tokio::sync::broadcast;
@@ -25,9 +24,8 @@ use zup_transaction::{
 type SharedPayloadSource = Arc<dyn PayloadSource + Send + Sync>;
 
 use crate::{
-    AutoPayloadSource, BundleError, InstallationRecordStore, PAYLOAD_OVERLAY_DIRECTORY,
-    PayloadOverlayIdentity, WindowsFileExecutor, cleanup_payload_overlay,
-    payload_overlay_base_root, verify_payload_overlay,
+    AutoPayloadSource, BundleError, InstallationRecordStore, PayloadOverlayIdentity,
+    WindowsFileExecutor, cleanup_payload_overlay, payload_overlay_base_root,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,38 +120,14 @@ impl WindowsRuntimeBackend {
         Ok(self)
     }
 
-    pub fn for_recovery(
-        payload_root: impl Into<PathBuf>,
-        state_root: &Path,
-        scope: SelectedScope,
-        transaction_id: TransactionId,
-    ) -> Result<Self, String> {
-        if scope == SelectedScope::Machine {
-            return Self::from_path(payload_root, None).map_err(|error| error.to_string());
+    pub fn for_recovery() -> Self {
+        Self {
+            payload: Arc::new(crate::recovery::RetainedSource::empty()),
+            payload_root: PathBuf::new(),
+            payload_overlay_root: None,
+            retain_on_blocked: false,
+            content: None,
         }
-        let record = FilesystemTransactionStore::private_at(state_root)
-            .load(&transaction_id)
-            .map_err(|error| error.to_string())?;
-        let identity = PayloadOverlayIdentity::from_transaction(
-            record.app_id,
-            record.app_version,
-            record.scope,
-            &record.plan,
-        )
-        .map_err(|error| error.to_string())?;
-        let base = if identity.has_files() {
-            Some(
-                crate::payload_overlay_base_root(state_root, scope)
-                    .map_err(|error| error.to_string())?,
-            )
-        } else {
-            None
-        };
-        let overlay = base.as_deref().and_then(|base| identity.path_under(base));
-        if let (Some(base), Some(overlay)) = (base.as_deref(), overlay.as_deref()) {
-            verify_payload_overlay(base, &identity, overlay).map_err(|error| error.to_string())?;
-        }
-        Self::from_path(payload_root, overlay).map_err(|error| error.to_string())
     }
 
     pub fn from_acquired(
@@ -779,7 +753,9 @@ impl WindowsRuntimeBackend {
             return Err(SessionError::AuthorizationRequired);
         }
 
-        if needs_authorization && already_authorized == Some(false) {
+        if request.scope == SelectedScope::Machine
+            || needs_authorization && already_authorized == Some(false)
+        {
             return run_elevated_worker(
                 request,
                 &self.payload_root,
@@ -800,7 +776,7 @@ impl WindowsRuntimeBackend {
     }
 }
 
-struct SharedPayload(SharedPayloadSource);
+pub(crate) struct SharedPayload(pub(crate) SharedPayloadSource);
 
 impl PayloadSource for SharedPayload {
     fn open(
@@ -814,15 +790,6 @@ impl PayloadSource for SharedPayload {
 }
 
 async fn run_local_install_control(
-    request: RuntimeRequest,
-    backend: &WindowsRuntimeBackend,
-    cancel: CancellationHandle,
-    events: broadcast::Sender<RuntimeEvent>,
-) -> Result<InstallOutcome, SessionError> {
-    run_local_install_control_inner(request, backend, cancel, events).await
-}
-
-async fn run_local_install_control_inner(
     request: RuntimeRequest,
     backend: &WindowsRuntimeBackend,
     cancel: CancellationHandle,
@@ -863,7 +830,14 @@ async fn run_local_install_control_inner(
         let cancel = cancel.probe();
         let events = events.clone();
         let payload = backend.payload.clone();
-        move || execute_local_blocking_with_events(request, payload, cancel, Some(events))
+        move || {
+            execute_local_blocking_with_events(
+                request,
+                SharedPayload(payload),
+                cancel,
+                Some(events),
+            )
+        }
     })
     .await
     .map_err(|error| SessionError::WorkerCrashed(error.to_string()))?;
@@ -904,58 +878,22 @@ async fn run_elevated_worker(
     let mut server =
         crate::PipeServer::create(&pipe).map_err(|e| SessionError::Protocol(e.to_string()))?;
 
-    let machine_recovery = request.scope == SelectedScope::Machine
-        && request.operation.recovery_transaction().is_some();
-    let plan = if machine_recovery {
-        None
-    } else if let Some(id) = request.operation.recovery_transaction() {
-        let record = FilesystemTransactionStore::private_at(&request.state_root)
-            .load(&id)
-            .map_err(|e| SessionError::Transaction(e.to_string()))?;
-        if record.app_id != request.app_id
-            || record.scope != request.scope
-            || record.app_version != request.app_version
-            || record.target != request.target
-        {
-            return Err(SessionError::Protocol("recovery identity mismatch".into()));
-        }
-        let identity = PayloadOverlayIdentity::from_transaction(
-            request.app_id.clone(),
-            request.app_version.clone(),
-            request.scope,
-            &record.plan,
-        )
-        .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
-        validate_overlay_identity(
-            &request.state_root,
-            request.scope,
-            &identity,
-            payload_overlay_root.as_deref(),
-            payload_overlay_base_root.as_deref(),
-            true,
-        )
-        .map_err(SessionError::PlanInvalid)?;
-        if identity.has_files() {
-            verify_payload_overlay(
-                payload_overlay_base_root
-                    .as_deref()
-                    .expect("validated overlay base"),
-                &identity,
-                payload_overlay_root
-                    .as_deref()
-                    .expect("validated overlay path"),
-            )
-            .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
-        }
-        Some(record.plan)
+    let recovering = request.operation.recovery_transaction().is_some();
+    let (payload_root, payload_overlay_root, payload_overlay_base_root, content) = if recovering {
+        (Path::new(""), None, None, None)
     } else {
-        request
-            .operation
-            .deployment()
-            .map(|deployment| &deployment.plan)
-            .cloned()
+        (
+            payload_root,
+            payload_overlay_root,
+            payload_overlay_base_root,
+            content,
+        )
     };
-    let has_lifecycle = machine_recovery
+    let plan = request
+        .operation
+        .deployment()
+        .map(|deployment| deployment.plan.clone());
+    let has_lifecycle = recovering
         || plan.as_ref().is_some_and(|plan| {
             plan.transition.is_remove()
                 || !plan.retired_keys.is_empty()
@@ -969,7 +907,7 @@ async fn run_elevated_worker(
                     )
                 })
         });
-    let has_backend = machine_recovery
+    let has_backend = recovering
         || plan.as_ref().is_some_and(|plan| {
             plan.nodes.iter().any(|node| {
                 matches!(
@@ -1134,7 +1072,7 @@ async fn run_elevated_worker(
                                || prepared.plan.requirements.app.id != request.app_id
                                || prepared.plan.requirements.scope != request.scope
                                || prepared.plan.fingerprint().to_hex() != prepared.plan_digest
-                               || prepared.plan.requirements.app.version != request.app_version
+                               || (!recovering && prepared.plan.requirements.app.version != request.app_version)
                                || plan.as_ref().is_some_and(|expected| expected.requirements != prepared.plan.requirements
                                    || expected.install_directory != prepared.plan.install_directory || expected.transition.is_remove() != prepared.plan.transition.is_remove())
                            {
@@ -1225,43 +1163,12 @@ fn validate_runtime_request(
         .load(&id)
         .map_err(|error| SessionError::Transaction(error.to_string()))?;
     if record.app_id != request.app_id
-        || record.app_version != request.app_version
         || record.scope != request.scope
         || record.target != request.target
     {
         return Err(SessionError::Protocol("recovery identity mismatch".into()));
     }
-    let identity = PayloadOverlayIdentity::from_transaction(
-        request.app_id.clone(),
-        request.app_version.clone(),
-        request.scope,
-        &record.plan,
-    )
-    .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
-    let base = backend
-        .payload_overlay_root
-        .as_ref()
-        .and_then(|_| crate::payload_overlay_base_root(&request.state_root, request.scope).ok());
-    validate_overlay_identity(
-        &request.state_root,
-        request.scope,
-        &identity,
-        backend.payload_overlay_root.as_deref(),
-        base.as_deref(),
-        true,
-    )
-    .map_err(SessionError::PlanInvalid)?;
-    if identity.has_files() {
-        verify_payload_overlay(
-            base.as_deref().expect("validated overlay base"),
-            &identity,
-            backend
-                .payload_overlay_root
-                .as_deref()
-                .expect("validated overlay path"),
-        )
-        .map_err(|error| SessionError::PlanInvalid(error.to_string()))?;
-    }
+
     Ok(())
 }
 
@@ -1271,7 +1178,6 @@ fn validate_overlay_identity(
     identity: &PayloadOverlayIdentity,
     actual: Option<&Path>,
     overlay_base_root: Option<&Path>,
-    recovery: bool,
 ) -> Result<(), String> {
     let expected_base =
         crate::payload_overlay_base_root(state_root, scope).map_err(|error| error.to_string())?;
@@ -1301,17 +1207,8 @@ fn validate_overlay_identity(
         }
         return Ok(());
     }
-    if overlay_base_root.is_some() {
-        return Err("overlay base supplied without generated plugin payload".into());
-    }
-    if let Some(actual) = actual {
-        if recovery {
-            return Err("recovery supplied an overlay without generated plugin payload".into());
-        }
-        let namespace = expected_base.join(PAYLOAD_OVERLAY_DIRECTORY);
-        if !actual.is_absolute() || !actual.starts_with(namespace) {
-            return Err("payload overlay path is outside the state overlay namespace".into());
-        }
+    if overlay_base_root.is_some() || actual.is_some() {
+        return Err("overlay supplied without generated plugin payload".into());
     }
     Ok(())
 }
@@ -1350,7 +1247,6 @@ fn validate_request(
         &identity,
         backend.payload_overlay_root.as_deref(),
         base.as_deref(),
-        false,
     )
     .map_err(SessionError::PlanInvalid)?;
     Ok(())
@@ -1358,47 +1254,19 @@ fn validate_request(
 
 fn execute_local_blocking_with_events(
     request: RuntimeRequest,
-    payload: SharedPayloadSource,
-    cancel: impl CancellationProbe + Send + 'static,
-    events: Option<broadcast::Sender<RuntimeEvent>>,
-) -> InstallOutcome {
-    let payload = SharedPayload(payload);
-    execute_local_blocking_with_events_inner(request, payload, cancel, events)
-}
-
-fn execute_local_blocking_with_events_inner(
-    request: RuntimeRequest,
     payload: SharedPayload,
     cancel: impl CancellationProbe + Send + 'static,
     events: Option<broadcast::Sender<RuntimeEvent>>,
 ) -> InstallOutcome {
-    let lock_key = ResourceLock::lock_key(
-        request.app_id.as_str(),
-        match request.scope {
-            SelectedScope::User => "user",
-            SelectedScope::Machine => "machine",
-        },
-    );
-    let machine = if request.scope == SelectedScope::Machine {
-        match crate::machine_authority::MachineRoot::acquire(&request.app_id) {
-            Ok(machine) => Some(machine),
-            Err(error) => return InstallOutcome::Failed(error.to_string()),
-        }
-    } else {
-        None
-    };
-    let state_root = machine
-        .as_ref()
-        .map(|machine| machine.path().to_path_buf())
-        .unwrap_or_else(|| request.state_root.clone());
-    let lock_result = match &machine {
-        Some(machine) => machine
-            .try_lock(&lock_key)
-            .map_err(|error| error.to_string()),
-        None => {
-            ResourceLock::try_acquire(&state_root, &lock_key).map_err(|error| error.to_string())
-        }
-    };
+    if request.scope != SelectedScope::User {
+        return InstallOutcome::Failed(
+            "machine transactions require the authenticated worker".into(),
+        );
+    }
+    let lock_key = ResourceLock::lock_key(request.app_id.as_str(), "user");
+    let state_root = request.state_root.clone();
+    let lock_result =
+        ResourceLock::try_acquire(&state_root, &lock_key).map_err(|error| error.to_string());
     let _lock = match lock_result {
         Ok(Some(lock)) => lock,
         Ok(None) => {
@@ -1409,23 +1277,28 @@ fn execute_local_blocking_with_events_inner(
         Err(error) => return InstallOutcome::Failed(error),
     };
 
-    let store = match &machine {
-        Some(machine) => machine.transaction_store(),
-        None => FilesystemTransactionStore::private_at(&state_root),
-    };
+    let store = FilesystemTransactionStore::private_at(&state_root);
     let coordinator = TransactionCoordinator::new(store.clone());
     if let Some(id) = request.operation.recovery_transaction() {
         let record = match store.load(&id) {
             Ok(record)
                 if record.app_id == request.app_id
                     && record.scope == request.scope
-                    && record.app_version == request.app_version
                     && record.target == request.target =>
             {
                 record
             }
             Ok(_) => return InstallOutcome::Failed("recovery identity mismatch".into()),
             Err(error) => return InstallOutcome::Failed(error.to_string()),
+        };
+        let payload = match crate::recovery::RetainedSource::load(&state_root, &record) {
+            Ok(source) => source,
+            Err(error) => {
+                return InstallOutcome::RecoveryRequired {
+                    transaction: Some(id.as_uuid()),
+                    detail: error,
+                };
+            }
         };
         let mut executor = ProductionExecutor {
             lifecycle: crate::service_control::ScmLifecycle::default(),
@@ -1448,12 +1321,14 @@ fn execute_local_blocking_with_events_inner(
                 })
                 .collect(),
         };
-        return match zup_transaction::recover(
+        let result = zup_transaction::recover(
             record,
             &store,
             &mut executor,
             &InstallationRecordStore::new(&state_root),
-        ) {
+        );
+        drop(executor);
+        return match result {
             Ok((record, TransactionOutcome::Committed)) => {
                 match InstallationRecordStore::new(&state_root)
                     .repair_committed(&request.app_id, request.scope)
@@ -1462,12 +1337,21 @@ fn execute_local_blocking_with_events_inner(
                         crate::notify_committed_path_change(&record);
                         InstallOutcome::Committed
                     }
-                    Err(error) => InstallOutcome::Failed(error.to_string()),
+                    Err(error) => InstallOutcome::CommittedPendingReconciliation {
+                        transaction: Some(record.transaction_id.as_uuid()),
+                        detail: error.to_string(),
+                    },
                 }
             }
-            Ok((_, TransactionOutcome::RolledBack)) => InstallOutcome::RolledBack,
+            Ok((record, TransactionOutcome::RolledBack)) => {
+                let _ = crate::recovery::collect(&state_root, &record);
+                InstallOutcome::RolledBack
+            }
             Ok((record, TransactionOutcome::RecoveryRequired)) => InstallOutcome::recovery(&record),
-            Err(error) => InstallOutcome::Failed(error.to_string()),
+            Err(error) => InstallOutcome::RecoveryRequired {
+                transaction: Some(id.as_uuid()),
+                detail: error.to_string(),
+            },
         };
     }
     if let Err(e) =
@@ -1504,6 +1388,28 @@ fn execute_local_blocking_with_events_inner(
         Ok(open) => open,
         Err(e) => return InstallOutcome::Failed(e.to_string()),
     };
+    let payload =
+        match crate::recovery::RetainedSource::capture(&state_root, open.record(), &payload) {
+            Ok(source) => source,
+            Err(detail) => {
+                let record = open.preserve();
+                return InstallOutcome::RecoveryRequired {
+                    transaction: Some(record.transaction_id.as_uuid()),
+                    detail,
+                };
+            }
+        };
+    if request.scope == SelectedScope::User
+        && let Ok(identity) = PayloadOverlayIdentity::from_transaction(
+            request.app_id.clone(),
+            request.app_version.clone(),
+            request.scope,
+            &open.record().plan,
+        )
+        && let Some(overlay) = identity.path_under(&state_root)
+    {
+        let _ = cleanup_payload_overlay(&state_root, Some(&overlay));
+    }
     let transaction_id = open.record().transaction_id;
     let plan_for_executor = open.record().plan.clone();
     let target_suffix = open.record().target.executable_suffix();
@@ -1561,7 +1467,10 @@ fn execute_local_blocking_with_events_inner(
             .collect(),
     };
 
-    match open.execute(&mut executor, &InstallationRecordStore::new(&state_root)) {
+    let result = open.execute(&mut executor, &InstallationRecordStore::new(&state_root));
+    let was_cancelled = executor.cancel.is_cancelled();
+    drop(executor);
+    match result {
         Ok(zup_transaction::SettledTransaction {
             record,
             outcome: TransactionOutcome::Committed,
@@ -1570,6 +1479,9 @@ fn execute_local_blocking_with_events_inner(
                 .reconcile_installation(&record, request.scope)
             {
                 Ok(_) => {
+                    if let Ok(record) = store.load(&record.transaction_id) {
+                        let _ = crate::recovery::collect(&state_root, &record);
+                    }
                     crate::notify_committed_path_change(&record);
                     InstallOutcome::Committed
                 }
@@ -1581,9 +1493,10 @@ fn execute_local_blocking_with_events_inner(
         }
         Ok(zup_transaction::SettledTransaction {
             outcome: TransactionOutcome::RolledBack,
-            record: _,
+            record,
         }) => {
-            if executor.cancel.is_cancelled() {
+            let _ = crate::recovery::collect(&state_root, &record);
+            if was_cancelled {
                 InstallOutcome::Cancelled
             } else {
                 InstallOutcome::RolledBack

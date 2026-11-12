@@ -607,3 +607,34 @@ async fn apps_features_registration_is_opaque_and_round_trips(#[case] fixed: boo
         "retired generations remain until safe reclamation is established"
     );
 }
+
+#[tokio::test]
+async fn recovery_of_an_untouched_transaction_needs_no_installer_or_payload() {
+    let root = temp_root();
+    let (mut request, _) = request(&root, SelectedScope::User);
+    let store = FilesystemTransactionStore::private_at(&request.state_root);
+    let plan = request.operation.deployment().unwrap().plan.clone();
+    let pending = zup_transaction::TransactionCoordinator::new(store.clone())
+        .begin(
+            request.app_id.clone(),
+            request.scope,
+            request.app_version.clone(),
+            plan,
+        )
+        .unwrap()
+        .preserve();
+    std::fs::remove_dir_all(root.path().join("payload")).unwrap();
+    let backend = WindowsRuntimeBackend::for_recovery();
+    request.app_version = "0.9.0".parse().unwrap();
+    request.operation = zup_runtime::RuntimeOperation::Recovery {
+        transaction: pending.transaction_id,
+    };
+    assert_eq!(
+        run(&backend, request, ExecutionPolicy::Interactive)
+            .await
+            .unwrap(),
+        InstallOutcome::Recovered {
+            settlement: zup_runtime::RecoverySettlement::RolledBack
+        }
+    );
+}

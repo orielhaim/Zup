@@ -658,7 +658,6 @@ impl AuthenticatedSource {
         cache_root: &Path,
         state_root: &Path,
         authority: &EmbeddedBundle,
-        recorded: Option<&zup_core::ReleaseIdentity>,
         peer: &crate::peer_access::PeerAccess,
         machine: Option<&crate::machine_authority::MachineRoot>,
     ) -> Result<Self, HandoffRejection> {
@@ -683,23 +682,13 @@ impl AuthenticatedSource {
             let bundle = EmbeddedBundle::open(&image)?;
             (pin, cache, verified, acquired, manifest, bundle)
         };
-        let release = match recorded {
-            Some(recorded) => {
-                acquired.validate_recorded_source(&verified, recorded)?;
-                recorded.clone()
-            }
-            None => {
-                let config = installer.updates.as_ref().ok_or_else(|| {
-                    HandoffRejection::Unreadable(
-                        "worker has no embedded update trust configuration".into(),
-                    )
-                })?;
-                acquired
-                    .authenticate_with_trust(handoff, state_root, config, Some(peer), machine)
-                    .await?
-                    .identity(&manifest.plan.installer.components)
-            }
-        };
+        let config = installer.updates.as_ref().ok_or_else(|| {
+            HandoffRejection::Unreadable("worker has no embedded update trust configuration".into())
+        })?;
+        let release = acquired
+            .authenticate_with_trust(handoff, state_root, config, Some(peer), machine)
+            .await?
+            .identity(&manifest.plan.installer.components);
         let descriptor = verified
             .release
             .variant(&handoff.variant)

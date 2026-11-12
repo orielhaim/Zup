@@ -15,7 +15,8 @@ use zup_core::TransactionId;
 use zup_plan::DeploymentPlan;
 use zup_plan::OperationId;
 
-pub const JOURNAL_SCHEMA: u32 = 1;
+// Engines predating retained-source recovery must refuse these journals.
+pub const JOURNAL_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

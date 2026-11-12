@@ -102,6 +102,31 @@ pub fn already_reported(error: &miette::Report) -> bool {
         .is_some_and(ExecutionError::was_reported)
 }
 
+struct ResultIdentity {
+    version: String,
+    directory: Option<String>,
+}
+
+impl ResultIdentity {
+    fn from_request(request: &RuntimeRequest) -> Self {
+        Self {
+            version: request.app_version.to_string(),
+            directory: request
+                .operation
+                .deployment()
+                .and_then(|deployment| deployment.plan.install_directory.as_ref())
+                .map(ToString::to_string),
+        }
+    }
+
+    fn observe(&mut self, event: &RuntimeEvent) {
+        if let RuntimeEvent::PlanPrepared { plan } = event {
+            self.version = plan.requirements.app.version.to_string();
+            self.directory = plan.install_directory.as_ref().map(ToString::to_string);
+        }
+    }
+}
+
 pub fn execute(prepared: PreparedRuntime) -> miette::Result<()> {
     execute_with_policy(prepared, ExecutionPolicy::NonInteractive).map_err(Into::into)
 }
@@ -112,22 +137,16 @@ pub fn execute_with_policy(
 ) -> Result<(), ExecutionError> {
     let drifted = drifted_keys(&prepared.request);
     let application = prepared.request.app_id.to_string();
-    let version = prepared.request.app_version.to_string();
     let scope = prepared.request.scope;
-    let directory = prepared
-        .request
-        .operation
-        .deployment()
-        .and_then(|deployment| deployment.plan.install_directory.as_ref())
-        .map(ToString::to_string);
+    let mut identity = ResultIdentity::from_request(&prepared.request);
     let control = OperationControl::new(policy);
-    let outcome = execute_observing(prepared, &control, |_| {});
+    let outcome = execute_observing(prepared, &control, |event| identity.observe(event));
     publish_outcome(
         OutputFormat::Human,
         &application,
-        &version,
+        &identity.version,
         Some(scope),
-        directory,
+        identity.directory,
         None,
         &drifted,
         outcome,
@@ -240,20 +259,14 @@ pub fn execute_frontend(
 ) -> Result<(), ExecutionError> {
     let request = prepared.request.clone();
     let application = request.app_id.to_string();
-    let version = request.app_version.to_string();
+    let mut identity = ResultIdentity::from_request(&request);
     let scope = Some(request.scope);
-    let install_directory = request
-        .operation
-        .deployment()
-        .map(|deployment| &deployment.plan)
-        .and_then(|plan| plan.install_directory.as_ref())
-        .map(ToString::to_string);
     let drifted = drifted_keys(&request);
     let control = OperationControl::new(ExecutionPolicy::NonInteractive);
     if output == OutputFormat::Jsonl {
         let started = InstallerEvent::started(
             &application,
-            &version,
+            &identity.version,
             crate::maintenance::action_name(action),
         );
         emit_line(
@@ -264,14 +277,15 @@ pub fn execute_frontend(
     let observed_log = log_path.clone();
     let jsonl = output == OutputFormat::Jsonl;
     let outcome = execute_observing(prepared, &control, |event| {
+        identity.observe(event);
         note_progress(jsonl, &observed_log, event);
     });
     publish_outcome(
         output,
         &application,
-        &version,
+        &identity.version,
         scope,
-        install_directory,
+        identity.directory,
         log_path.lock().expect("log path state").clone(),
         &drifted,
         outcome,

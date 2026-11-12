@@ -169,6 +169,15 @@ async fn execute_with_test_worker(
     worker: &Worker,
     execution: WorkerExecution,
 ) -> Result<zup_protocol::WorkerOutcome, zup_protocol::WorkerFailure> {
+    let executable = worker_with_bundle(&worker.work_root, &worker.version, &worker.payload_root);
+    execute_with_carrier(worker, execution, &executable).await
+}
+
+async fn execute_with_carrier(
+    worker: &Worker,
+    execution: WorkerExecution,
+    executable: &Path,
+) -> Result<zup_protocol::WorkerOutcome, zup_protocol::WorkerFailure> {
     let Worker {
         plan,
         action,
@@ -182,49 +191,61 @@ async fn execute_with_test_worker(
         release,
         payload_overlay_root,
     } = worker;
-    let zup_bin = worker_with_bundle(work_root, &worker.version, payload_root);
+    let zup_bin = executable.to_path_buf();
     let bundle = zup_windows::EmbeddedBundle::open(&zup_bin).unwrap();
-    let plan = plan.clone().unwrap_or_else(|| {
-        let build = bundle.build_plan().unwrap();
-        let host = zup_windows::WindowsOperationHost {
-            app_id: app_id(work_root),
-            scope: zup_core::SelectedScope::User,
-            frontend: zup_core::Frontend::Console,
-            state_root: state_root.clone(),
-            content: zup_windows::WindowsContent::Embedded(&bundle),
-            acquire_prerequisites: false,
-        };
-        zup_runtime::prepare_operation(
-            &zup_runtime::OperationInput {
-                build: &build.targets[0],
-                installer: &zup_bin,
-                scope: zup_core::SelectedScope::User,
-                operation: (*action).into(),
-                selection: zup_runtime::OperationSelection {
-                    deployment: None,
-                    enable: vec![],
-                    disable: vec![],
-                    install_directory: if matches!(
-                        action,
-                        zup_plan::LifecycleAction::Rollback { .. }
-                    ) {
-                        None
-                    } else {
-                        Some(install_directory.clone())
-                    },
-                },
-                prior: zup_windows::InstallationRecordStore::new(state_root)
-                    .load(&app_id(work_root), zup_core::SelectedScope::User)
+    let plan = plan
+        .clone()
+        .or_else(|| {
+            recovery_id.map(|id| {
+                use zup_transaction::TransactionStore;
+                zup_transaction::FilesystemTransactionStore::private_at(state_root)
+                    .load(&zup_core::TransactionId::from_uuid(id))
                     .unwrap()
-                    .as_ref(),
-                state_root,
-                cancellation: &zup_plan::NeverCancelled,
-            },
-            &host,
-        )
-        .unwrap()
-        .transaction_plan
-    });
+                    .plan
+            })
+        })
+        .unwrap_or_else(|| {
+            let build = bundle.build_plan().unwrap();
+            let host = zup_windows::WindowsOperationHost {
+                app_id: app_id(work_root),
+                scope: zup_core::SelectedScope::User,
+                frontend: zup_core::Frontend::Console,
+                state_root: state_root.clone(),
+                content: zup_windows::WindowsContent::Embedded(&bundle),
+                acquire_prerequisites: false,
+            };
+            zup_runtime::prepare_operation(
+                &zup_runtime::OperationInput {
+                    build: &build.targets[0],
+                    installer: &zup_bin,
+                    scope: zup_core::SelectedScope::User,
+                    operation: (*action).into(),
+                    selection: zup_runtime::OperationSelection {
+                        deployment: None,
+                        enable: vec![],
+                        disable: vec![],
+                        install_directory: if matches!(
+                            action,
+                            zup_plan::LifecycleAction::Rollback { .. }
+                                | zup_plan::LifecycleAction::Cleanup { .. }
+                        ) {
+                            None
+                        } else {
+                            Some(install_directory.clone())
+                        },
+                    },
+                    prior: zup_windows::InstallationRecordStore::new(state_root)
+                        .load(&app_id(work_root), zup_core::SelectedScope::User)
+                        .unwrap()
+                        .as_ref(),
+                    state_root,
+                    cancellation: &zup_plan::NeverCancelled,
+                },
+                &host,
+            )
+            .unwrap()
+            .transaction_plan
+        });
     let supplied_plan = worker.plan.is_some();
     let recovery_id = *recovery_id;
     let payload_root = payload_root.as_path();
@@ -245,7 +266,10 @@ async fn execute_with_test_worker(
         action: *action,
         enable: vec![],
         disable: vec![],
-        install_directory: if matches!(action, zup_plan::LifecycleAction::Rollback { .. }) {
+        install_directory: if matches!(
+            action,
+            zup_plan::LifecycleAction::Rollback { .. } | zup_plan::LifecycleAction::Cleanup { .. }
+        ) {
             None
         } else {
             Some(install_directory.clone())
@@ -265,9 +289,11 @@ async fn execute_with_test_worker(
         operation,
         target: plan.target,
         app_id: app_id(work_root).to_string(),
-        app_version: plan.requirements.app.version.to_string(),
+        app_version: worker.version.clone(),
         scope: "user".into(),
-        payload_root: if supplied_plan {
+        payload_root: if recovery_id.is_some() {
+            Path::new("")
+        } else if supplied_plan {
             payload_root
         } else {
             &zup_bin
@@ -282,7 +308,11 @@ async fn execute_with_test_worker(
                 .to_string()
         }),
         state_root: state_root.display().to_string(),
-        release: release.clone(),
+        release: if recovery_id.is_some() {
+            None
+        } else {
+            release.clone()
+        },
     };
     let plan_hash = prepare.digest().unwrap();
     let session_id = SessionId::new_v7();
@@ -621,10 +651,189 @@ async fn current_worker_rolls_back_owned_fixed_content_without_the_old_package()
         std::fs::read(payload.join("App.exe")).unwrap(),
         b"release-b"
     );
+    worker.action = zup_plan::LifecycleAction::Uninstall;
+    assert_eq!(
+        execute_with_test_worker(&worker, WorkerExecution::Execute).await,
+        Ok(zup_protocol::WorkerOutcome::Committed)
+    );
+    worker.action = zup_plan::LifecycleAction::Cleanup { keep: 0 };
+    for _ in 0..4 {
+        assert_eq!(
+            execute_with_test_worker(&worker, WorkerExecution::Execute).await,
+            Ok(zup_protocol::WorkerOutcome::Committed)
+        );
+    }
+    assert!(!application.join("App.exe").exists());
+}
+
+#[cfg(feature = "test-faults")]
+#[rstest::rstest]
+#[case("apply_returned", "stage-file:")]
+#[case("apply_returned", "generation:materialize:")]
+#[case("apply_returned", "generation:seal:")]
+#[case("installation_publication_requested", "")]
+#[tokio::test]
+async fn original_v1_carrier_recovers_v2_without_original_source(
+    #[case] point: &str,
+    #[case] operation: &str,
+) {
+    const CHILD: &str = "ZUP_SOURCE_FREE_WORKER_ROOT";
+    let child_root = std::env::var_os(CHILD).map(PathBuf::from);
+    let temporary = child_root.is_none().then(|| {
+        tempfile::tempdir_in(directories::BaseDirs::new().unwrap().data_local_dir()).unwrap()
+    });
+    let root = child_root
+        .clone()
+        .unwrap_or_else(|| temporary.as_ref().unwrap().path().to_path_buf());
+    let payload = root.join("payload");
+    let state = root.join("state");
+    let work = root.join("work");
+    let application = root.join("application");
+    let mut request = Worker {
+        plan: None,
+        action: zup_plan::LifecycleAction::Install,
+        authority: zup_core::SelectedScope::User,
+        install_directory: application.clone(),
+        version: "1.0.0".into(),
+        payload_root: payload.clone(),
+        state_root: state.clone(),
+        work_root: work.clone(),
+        recovery_id: None,
+        release: None,
+        payload_overlay_root: None,
+    };
+    if child_root.is_some() {
+        request.version = "2.0.0".into();
+        request.action = zup_plan::LifecycleAction::Upgrade;
+        let _ = execute_with_test_worker(&request, WorkerExecution::Execute).await;
+        panic!("the injected worker interruption must prevent completion");
+    }
+    for path in [&payload, &state, &work, &application] {
+        private_fs::PrivateDir::ensure(path).unwrap();
+    }
+    std::fs::write(payload.join("App.exe"), b"release-a").unwrap();
+    assert_eq!(
+        execute_with_test_worker(&request, WorkerExecution::Execute).await,
+        Ok(zup_protocol::WorkerOutcome::Committed)
+    );
+    let carrier = root.join("v1-maintenance.exe");
+    std::fs::copy(work.join("worker.exe"), &carrier).unwrap();
+    std::fs::write(payload.join("App.exe"), b"release-b").unwrap();
+    let test_name = std::thread::current().name().unwrap().to_owned();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &test_name, "--nocapture"])
+        .env(CHILD, &root)
+        .env("ZUP_TEST_FAULT_POINT", point)
+        .env("ZUP_TEST_FAULT_OPERATION", operation)
+        .env("ZUP_TEST_FAULT_ACTION", "crash")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    use zup_transaction::TransactionStore;
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&state);
+    let pending = store
+        .list_ids()
+        .unwrap()
+        .into_iter()
+        .map(|id| store.load(&id).unwrap())
+        .find(|record| record.app_version.to_string() == "2.0.0")
+        .unwrap_or_else(|| {
+            panic!(
+                "no v2 transaction: {}",
+                String::from_utf8_lossy(&result.stderr)
+            )
+        });
+    assert!(
+        pending
+            .nodes
+            .values()
+            .any(|node| !matches!(node, zup_transaction::NodeState::Pending))
+    );
+    let retained = state
+        .join("transactions")
+        .join(pending.transaction_id.to_string())
+        .join("recovery");
+    assert!(retained.join("source.json").exists());
+    std::fs::remove_dir_all(&payload).unwrap();
+    std::fs::remove_dir_all(&work).unwrap();
+    request.recovery_id = Some(pending.transaction_id.as_uuid());
+    let outcome = execute_with_carrier(&request, WorkerExecution::Execute, &carrier).await;
+    if operation == "stage-file:" {
+        assert_eq!(outcome, Ok(zup_protocol::WorkerOutcome::RecoveryRequired));
+        assert!(retained.join("source.json").exists());
+        assert_eq!(
+            std::fs::read(application.join("App.exe")).unwrap(),
+            b"release-a"
+        );
+    } else {
+        assert_eq!(outcome, Ok(zup_protocol::WorkerOutcome::Committed));
+        assert_eq!(
+            std::fs::read(application.join("App.exe")).unwrap(),
+            b"release-b"
+        );
+        assert!(!retained.exists());
+    }
     windows_registry::CURRENT_USER
         .remove_tree(format!(
             "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
             app_id(&work)
         ))
         .unwrap();
+}
+
+#[tokio::test]
+async fn authenticated_worker_refuses_unverified_release_provenance() {
+    let root =
+        tempfile::tempdir_in(directories::BaseDirs::new().unwrap().data_local_dir()).unwrap();
+    let payload = root.path().join("payload");
+    let state = root.path().join("state");
+    let work = root.path().join("work");
+    let application = root.path().join("application");
+    for path in [&payload, &state, &work, &application] {
+        private_fs::PrivateDir::ensure(path).unwrap();
+    }
+    std::fs::write(payload.join("App.exe"), b"payload").unwrap();
+    let forged = zup_core::ReleaseIdentity {
+        app_id: app_id(&work),
+        release: digest(b"release"),
+        document: digest(b"document"),
+        catalog: digest(b"catalog"),
+        variant: "application".into(),
+        manifest: digest(b"manifest"),
+        runtime: Some(digest(b"runtime")),
+        version: "1.0.0".into(),
+        target: target(),
+        channel: "stable".into(),
+        repository: "https://untrusted.invalid/".into(),
+        pin: zup_core::ReleasePin::Channel {
+            channel: "stable".into(),
+        },
+        trust_anchor: digest(b"untrusted root"),
+        frontend: "console".into(),
+        components: vec![],
+    };
+    let request = Worker {
+        plan: None,
+        action: zup_plan::LifecycleAction::Install,
+        authority: zup_core::SelectedScope::User,
+        install_directory: application.clone(),
+        version: "1.0.0".into(),
+        payload_root: payload,
+        state_root: state.clone(),
+        work_root: work,
+        recovery_id: None,
+        release: Some(forged),
+        payload_overlay_root: None,
+    };
+    assert_eq!(
+        execute_with_test_worker(&request, WorkerExecution::Execute).await,
+        Err(zup_protocol::WorkerFailure::Authentication)
+    );
+    assert!(
+        zup_transaction::FilesystemTransactionStore::private_at(&state)
+            .list_ids()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!application.join("App.exe").exists());
 }

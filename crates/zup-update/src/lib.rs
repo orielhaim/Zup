@@ -521,6 +521,36 @@ impl ReleaseResolver {
         .await?;
         check_digest(&manifest, variant.manifest.digest, "variant manifest")?;
 
+        for (kind, digest, document) in [
+            (
+                ContentKind::Metadata,
+                zup_core::hash_bytes(&bytes),
+                bytes.as_slice(),
+            ),
+            (
+                ContentKind::Catalog,
+                descriptor.catalog.digest,
+                catalog_bytes.as_slice(),
+            ),
+            (
+                ContentKind::Metadata,
+                variant.manifest.digest,
+                manifest.as_slice(),
+            ),
+        ] {
+            let content = ContentDescriptor::stored(kind, digest, document.len() as u64);
+            if self
+                .cache
+                .get(&content, zup_acquire::Verify::Full)
+                .map_err(AcquireError::Cache)?
+                .is_none()
+            {
+                let mut output = self.cache.writer(&content).map_err(AcquireError::Cache)?;
+                output.write(document).map_err(AcquireError::Cache)?;
+                output.commit().map_err(AcquireError::Cache)?;
+            }
+        }
+
         self.progress
             .offer(zup_acquire::AcquisitionEvent::ReleaseResolved {
                 app_id: descriptor.app_id.to_string(),

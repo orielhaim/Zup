@@ -1036,7 +1036,7 @@ impl<P: PayloadSource> WindowsFileExecutor<P> {
         }
     }
 
-    fn retained_reader(
+    pub(crate) fn retained_reader(
         &self,
         node: &DeploymentNode,
         transaction: &zup_transaction::TransactionRecord,

@@ -339,11 +339,7 @@ async fn runtime_handoff_requires_tuf_authorization_under_its_embedded_root() {
     assert!(bundle.validate_recorded_source(&content, &foreign).is_err());
 }
 
-#[tokio::test]
-async fn maintenance_keeps_exact_sources_for_repair_and_follows_the_channel_for_updates() {
-    let fixture = release_fixture(None).await;
-    let state = project::State::new();
-    let _cleanup = project::cleanup(&fixture.app, &state);
+fn install_previous(fixture: &ReleaseFixture, state: &project::State) -> std::path::PathBuf {
     let mut previous = fixture.app.clone();
     previous.version = "0.9.0".into();
     let source = fixture.root.path().join("previous");
@@ -373,8 +369,16 @@ async fn maintenance_keeps_exact_sources_for_repair_and_follows_the_channel_for_
         None,
     )
     .unwrap();
-    project::succeed(&setup, &state, "install", &["--non-interactive", "--yes"]);
-    let old_tool = state.maintenance(&previous);
+    project::succeed(&setup, state, "install", &["--non-interactive", "--yes"]);
+    state.maintenance(&previous)
+}
+
+#[tokio::test]
+async fn maintenance_keeps_exact_sources_for_repair_and_follows_the_channel_for_updates() {
+    let fixture = release_fixture(None).await;
+    let state = project::State::new();
+    let _cleanup = project::cleanup(&fixture.app, &state);
+    let old_tool = install_previous(&fixture, &state);
     let before = std::fs::read(&old_tool).unwrap();
     project::succeed(
         &old_tool,
@@ -487,4 +491,140 @@ async fn maintenance_keeps_exact_sources_for_repair_and_follows_the_channel_for_
         "uninstall",
         &["--non-interactive", "--yes"],
     );
+}
+
+#[cfg(feature = "test-faults")]
+#[tokio::test]
+async fn authenticated_acquired_recovery_survives_process_exit_without_cache_or_repository() {
+    let fixture = release_fixture(None).await;
+    let state = project::State::new();
+    let _cleanup = project::cleanup(&fixture.app, &state);
+    let old_tool = install_previous(&fixture, &state);
+    let interrupted = std::process::Command::new(&old_tool)
+        .args(["update", "--scope", "user", "--state-root"])
+        .arg(state.path())
+        .args(["--non-interactive", "--yes", "--source"])
+        .arg(fixture.root.path())
+        .env("ZUP_TEST_FAULT_POINT", "apply_returned")
+        .env("ZUP_TEST_FAULT_OPERATION", "generation:activate:")
+        .env("ZUP_TEST_FAULT_ACTION", "crash")
+        .output()
+        .unwrap();
+    assert!(!interrupted.status.success());
+    use zup_transaction::TransactionStore;
+    let store = zup_transaction::FilesystemTransactionStore::private_at(state.path());
+    let pending = store
+        .list_ids()
+        .unwrap()
+        .into_iter()
+        .map(|id| store.load(&id).unwrap())
+        .find(|record| record.app_version.to_string() == fixture.app.version)
+        .unwrap_or_else(|| {
+            panic!(
+                "no acquired transaction: {} {}",
+                String::from_utf8_lossy(&interrupted.stdout),
+                String::from_utf8_lossy(&interrupted.stderr)
+            )
+        });
+    let release = pending
+        .release
+        .clone()
+        .expect("authenticated release retained in journal");
+    assert_eq!(release.trust_anchor, hash_bytes(ROOT));
+    assert_eq!(release.document, fixture.published.handoff.document);
+    let retained = state
+        .path()
+        .join("transactions")
+        .join(pending.transaction_id.to_string())
+        .join("recovery");
+    assert!(retained.join("source.json").exists());
+    std::fs::remove_dir_all(state.path().join("content")).unwrap();
+    std::fs::remove_dir_all(fixture.root.path()).unwrap();
+    project::succeed(
+        &old_tool,
+        &state,
+        "recover",
+        &["--transaction", &pending.transaction_id.to_string()],
+    );
+    let installed = zup_windows::InstallationRecordStore::new(state.path())
+        .load(
+            &fixture.build.installer.app.id,
+            zup_core::SelectedScope::User,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(installed.current.version.to_string(), fixture.app.version);
+    assert_eq!(installed.release_identity(), Some(&release));
+    let materialization = installed.current.materialization.unwrap();
+    let directory = materialization.directory();
+    assert_eq!(
+        std::fs::read(Path::new(directory.as_str()).join("payload.bin")).unwrap(),
+        b"payload"
+    );
+    assert!(!retained.exists());
+}
+
+#[tokio::test]
+#[ignore = "exports a signed acquired release for the isolated Windows recovery VM"]
+async fn export_machine_acquired_recovery_fixture() {
+    let output = std::path::PathBuf::from(
+        std::env::var_os("ZUP_ACQUIRED_RECOVERY_FIXTURE_ROOT").expect("fixture output directory"),
+    );
+    std::fs::create_dir_all(&output).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let app = project::AppSpec::unique("machine-acquired").at_version("2.0.0");
+    let folder = format!("ZupF05Acquired-{}", uuid::Uuid::now_v7().simple());
+    let machine_plan = |version: &str, bytes: &[u8], directory: &Path| {
+        std::fs::create_dir_all(directory).unwrap();
+        let mut plan = project::plan(
+            &app.at_version(version),
+            Frontend::Console,
+            &[project::Payload::named("payload.bin", bytes, None)],
+            &[],
+            directory,
+        );
+        plan.installer.install.scope = zup_core::InstallScope::Machine;
+        plan.installer.install.directory = zup_core::InstallDirectory {
+            user: None,
+            machine: Some(
+                zup_core::Template::parse(&format!("${{location.programs}}/{folder}")).unwrap(),
+            ),
+        };
+        plan.installer.updates = Some(zup_core::UpdateConfig {
+            repository: "file:///C:/ZupF05Acquired/repository".into(),
+            channel: "stable".into(),
+            trusted_root: ROOT.to_vec(),
+        });
+        plan.files[0].placement = zup_core::PayloadPlacement::Generation {
+            path: zup_core::RelativePath::new("payload.bin").unwrap(),
+        };
+        plan.installer.files[0].placement = zup_core::PayloadMapping::GenerationFile {
+            path: zup_core::RelativePath::new("payload.bin").unwrap(),
+        };
+        plan
+    };
+    let candidate = machine_plan("2.0.0", b"2.0.0", &source.path().join("next"));
+    let repository = output.join("repository");
+    std::fs::create_dir_all(&repository).unwrap();
+    let published = publish(&repository, &candidate, 1).await;
+    let original = machine_plan("1.0.0", b"1.0.0", &source.path().join("old"));
+    zup_windows::build_self_contained_executable(
+        &project::template(Frontend::Console),
+        &output.join("setup-1.0.0.exe"),
+        &original,
+        &[],
+        None,
+    )
+    .unwrap();
+    std::fs::write(
+        output.join("fixture.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "app": app.id,
+            "install_folder": folder,
+            "trust_anchor": hash_bytes(ROOT),
+            "release": published.handoff.release,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 }

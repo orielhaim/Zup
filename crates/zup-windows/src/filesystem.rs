@@ -911,6 +911,16 @@ impl MachineDir {
         self.sync()
     }
 
+    pub(crate) fn remove_empty_directory(
+        &self,
+        name: &str,
+        expected: (u64, [u8; 16]),
+    ) -> Result<(), FilesystemError> {
+        self.validate()?;
+        remove_empty_directory(&self.handle, name, expected)?;
+        self.sync()
+    }
+
     pub(crate) fn sync(&self) -> Result<(), FilesystemError> {
         #[cfg(test)]
         if std::env::var("ZUP_MACHINE_FAIL_SYNC").is_ok() {
@@ -999,6 +1009,23 @@ fn cleanup_failure(staging: &OwnedHandle, error: FilesystemError) -> PublishErro
             failure
         }
     }
+}
+
+pub(crate) fn remove_empty_directory(
+    parent: &impl AsHandle,
+    name: &str,
+    expected: (u64, [u8; 16]),
+) -> Result<(), FilesystemError> {
+    let parent = parent.as_handle().try_clone_to_owned().map_err(io_std)?;
+    let handle = open_relative(&parent, OsStr::new(name), Open::MovableDirectory, None)?.handle;
+    reject_reparse(&handle)?;
+    if identity(&handle)? != expected || !list_entries(&handle)?.is_empty() {
+        return Err(io_path(
+            Path::new(name),
+            "recovery directory identity or contents changed before removal",
+        ));
+    }
+    discard(&handle)
 }
 
 pub(crate) fn identity(handle: &impl AsHandle) -> Result<(u64, [u8; 16]), FilesystemError> {

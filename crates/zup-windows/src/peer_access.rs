@@ -164,6 +164,23 @@ pub(crate) struct PeerOperationHost<'a> {
 }
 
 impl zup_runtime::OperationHost for PeerOperationHost<'_> {
+    fn collected_deployments(
+        &self,
+        input: &zup_runtime::OperationInput,
+        record: &zup_plan::InstallationRecord,
+    ) -> Result<Vec<zup_plan::RetiredDeploymentSelection>, String> {
+        self.inner.collected_deployments(input, record)
+    }
+
+    fn cleanup_candidates(
+        &self,
+        input: &zup_runtime::OperationInput,
+        record: &zup_plan::InstallationRecord,
+        retiring: Option<&zup_plan::RetentionChange>,
+    ) -> Result<Vec<zup_plan::CleanupOperation>, String> {
+        self.inner.cleanup_candidates(input, record, retiring)
+    }
+
     fn data_bindings(
         &self,
         target: &zup_plan::BoundDeployment,

@@ -382,10 +382,8 @@ async fn resolves_a_channel_release_and_reports_what_it_chose() {
     let options = ReleaseOptions::default();
     let release = release(&options);
     let fixture = publish(&release, &options.content, SigningOptions::default()).await;
-    let resolved = resolver(&fixture)
-        .resolve()
-        .await
-        .expect("a resolved release");
+    let resolver = resolver(&fixture);
+    let resolved = resolver.resolve().await.expect("a resolved release");
 
     assert_eq!(resolved.descriptor.version, "1.1.0");
     assert_eq!(resolved.variant.id, "windows-x64");
@@ -398,6 +396,31 @@ async fn resolves_a_channel_release_and_reports_what_it_chose() {
     assert_eq!(runtime.digest, digest_of(b"runtime-windows-x64"));
     assert!(runtime.kind().is_executable());
     assert_eq!(runtime.size, 4);
+    for (kind, expected) in [
+        (
+            zup_acquire::ContentKind::Metadata,
+            release.encode().unwrap(),
+        ),
+        (
+            zup_acquire::ContentKind::Catalog,
+            options.content.catalog_bytes.clone(),
+        ),
+        (zup_acquire::ContentKind::Metadata, manifest_bytes("1.1.0")),
+    ] {
+        let descriptor = zup_acquire::ContentDescriptor::stored(
+            kind,
+            digest_of(&expected),
+            expected.len() as u64,
+        );
+        let blob = resolver
+            .cache()
+            .get(&descriptor, zup_acquire::Verify::Full)
+            .unwrap()
+            .expect("authenticated handoff document retained");
+        let mut observed = Vec::new();
+        std::io::Read::read_to_end(&mut blob.open().unwrap(), &mut observed).unwrap();
+        assert_eq!(observed, expected);
+    }
 }
 
 #[tokio::test]

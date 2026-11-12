@@ -159,6 +159,15 @@ impl MachineRoot {
         }))
     }
 
+    pub(crate) fn transaction_directory(
+        &self,
+        id: TransactionId,
+    ) -> Result<MachineDir, FilesystemError> {
+        self.root
+            .open_dir("transactions", PolicyKind::Administrators)?
+            .open_dir(&id.to_string(), PolicyKind::Administrators)
+    }
+
     pub fn try_lock(&self, key: &str) -> Result<Option<ResourceLock>, FilesystemError> {
         let locks = self.child("locks", PolicyKind::Administrators)?;
         let file = locks.open_lock(&format!("{key}.lock"))?;

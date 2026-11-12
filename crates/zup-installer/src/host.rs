@@ -501,13 +501,7 @@ impl SessionHost for WindowsSessionHost {
                 scope: context.scope,
                 state_root: context.state_root.clone(),
             };
-            let backend = zup_windows::WindowsRuntimeBackend::for_recovery(
-                self.content_executable(&self.executable),
-                &context.state_root,
-                context.scope,
-                transaction,
-            )
-            .map_err(zup_runtime::SessionError::Transaction)?;
+            let backend = zup_windows::WindowsRuntimeBackend::for_recovery();
             zup_runtime::execute(&backend, request, control).await
         })
     }

@@ -259,3 +259,69 @@ fn an_uninstall_of_an_application_that_was_never_installed_is_a_refusal() {
     );
     assert!(!app.install_directory().exists());
 }
+
+#[test]
+#[ignore = "exports installers for the isolated Windows recovery VM"]
+fn export_machine_generated_recovery_fixture() {
+    let output = std::path::PathBuf::from(
+        std::env::var_os("ZUP_RECOVERY_FIXTURE_ROOT").expect("fixture output directory"),
+    );
+    fs::create_dir_all(&output).unwrap();
+    let token = uuid::Uuid::now_v7().simple().to_string();
+    let app = AppSpec {
+        id: format!("com.zup.f05-{token}"),
+        name: "Zup F05 generated recovery".into(),
+        version: "1.0.0".into(),
+        install_directory: format!("${{location.programs}}/ZupF05-{token}"),
+    };
+    let source = tempfile::tempdir().unwrap();
+    let plugin_path = source.path().join("configure.wasm");
+    fs::write(&plugin_path, zup_plugin_abi::test_fixture::component()).unwrap();
+    let plugin = PluginSpec::new(PLUGIN, &plugin_path);
+    let artifact = artifact();
+    for version in ["1.0.0", "2.0.0"] {
+        let app = app.at_version(version);
+        let payload = [Payload::named(
+            "asset.bin",
+            version.as_bytes(),
+            Some("core"),
+        )];
+        let build_source = source.path().join(version);
+        fs::create_dir(&build_source).unwrap();
+        let mut plan = project::plan(
+            &app,
+            zup_core::Frontend::Headless,
+            &payload,
+            std::slice::from_ref(&plugin),
+            &build_source,
+        );
+        plan.installer.install.scope = zup_core::InstallScope::Machine;
+        plan.installer.install.directory = zup_core::InstallDirectory {
+            user: None,
+            machine: Some(zup_core::Template::parse(&app.install_directory).unwrap()),
+        };
+        plan.files[0].placement = zup_core::PayloadPlacement::Generation {
+            path: zup_core::RelativePath::new("asset.bin").unwrap(),
+        };
+        plan.installer.files[0].placement = zup_core::PayloadMapping::GenerationFile {
+            path: zup_core::RelativePath::new("asset.bin").unwrap(),
+        };
+        zup_windows::build_self_contained_executable(
+            &project::template(zup_core::Frontend::Headless),
+            &output.join(format!("setup-{version}.exe")),
+            &plan,
+            std::slice::from_ref(&artifact),
+            None,
+        )
+        .unwrap();
+    }
+    fs::write(
+        output.join("fixture.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "app": app.id,
+            "install_folder": format!("ZupF05-{token}"),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}

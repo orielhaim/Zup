@@ -169,3 +169,62 @@ not used as a boot-session identity.
 See Microsoft's [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects),
 [job access rights](https://learn.microsoft.com/en-us/windows/win32/procthread/job-object-security-and-access-rights),
 and [process telemetry structure](https://learn.microsoft.com/en-us/windows/win32/devnotes/process_telemetry_id_information_type).
+
+## Windows retained recovery source
+
+Windows deployment has one durable source boundary. After the worker independently
+validates a deployment and records its authenticated release identity, it copies
+all required fixed-file, generation and maintenance content into the protected
+transaction's `recovery` directory. Release resolution caches the exact authenticated
+release, catalog and manifest documents for independent worker verification.
+Previously retained fixed instances are opened
+through their ownership receipts before copying. Generated files use the same
+content inventory as other payloads. Each copy is streamed, size and digest checked,
+flushed, published and reread before any deployment effect starts. The final source
+context binds the transaction ID, plan fingerprint, authenticated release, generated
+payload identity and exact content inventory. Machine content uses SYSTEM-owned,
+Administrators-only directories and handle-relative native publication. User content
+uses owner-private directory capabilities.
+
+A recovery caller identifies the transaction inside its app, scope and target
+boundary. The worker authenticates the parent process and carrier executable, opens
+the machine-selected state root, acquires the installation lock, and independently
+loads the journal and source context. Caller version, release, cache, payload and
+overlay paths cannot select recovery content. The CLI and GUI use this same path;
+Machine operations use the worker even when the caller is already elevated.
+Recovery needs neither the original installer nor the acquired cache or network.
+Missing or changed required content leaves the transaction pending with a diagnostic;
+it never falls back to a package or another release. Untouched preparations can be
+retired without payload bytes.
+
+Carrier app/scope/target authorization remains mandatory, but carrier app version
+is independent of transaction version. A previously installed v1 maintenance carrier
+built with this contract can recover a v2 transaction only while both support the
+same journal, plan, protocol and Windows execution format. Journal schema 2 marks
+adoption of this contract, so workers predating the source-format gate refuse
+these transactions. This engine refuses schema 1 journals; they require a compatible
+trusted carrier for settlement. Execution format 1 is
+explicit in the protected source context. Semantic execution changes must bump it,
+even when existing JSON would still parse. Unknown formats are refused before
+reconciliation. This does not retrofit recovery support into older shipped engines.
+No retained arbitrary executable is launched and no resident service is required.
+
+Recovery retains existing ownership and publication rules. It reobserves uncertain
+effects through the transaction engine; an unreceipted fixed staging object remains
+ambiguous and is preserved rather than adopted from matching bytes. Incompatible
+persistent data or an irreversible external effect is not permission to roll back.
+Requested or ambiguous publication must be reconciled by protected identity and
+readback, without speculative rollback. Publication reconciliation does not prove
+fresh service runtime state after reboot; that separate verification limitation
+remains. A pending recovery is distinct from a committed deployment with remaining
+reconciliation work.
+
+Source content stays rooted until rollback settles, or commit, post-commit work and
+ownership reconciliation all finish. Collection removes only declared members
+through validated handles and verifies the empty directory's object identity before
+removing it. Collection also checks the execution format and removes the context
+after its blobs, so an older carrier cannot collect an incompatible future source.
+Unknown siblings defer collection. Subsequent maintenance retries
+settled-source collection before history cleanup. Input overlays may be removed once
+the protected snapshot is complete. Process interruption tests do not establish
+power-loss durability; native Windows ARM64 requires separate qualification.

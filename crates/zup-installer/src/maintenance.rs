@@ -1,7 +1,6 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use zup_core::TransactionId;
-use zup_plan::NodeKind;
 
 use clap::{Args, Subcommand, ValueHint};
 use zup_acquire::CachePolicy;
@@ -599,8 +598,6 @@ pub struct RecoveryArgs {
 
     #[arg(long, hide = true, value_hint = clap::ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
-    #[arg(long, hide = true, value_hint = clap::ValueHint::DirPath)]
-    pub payload_root: Option<PathBuf>,
 }
 
 pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Result<()> {
@@ -652,13 +649,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             scope,
             state_root,
         };
-        let backend = zup_windows::WindowsRuntimeBackend::for_recovery(
-            args.payload_root.unwrap_or(executable),
-            &request.state_root,
-            scope,
-            id,
-        )
-        .map_err(|error| miette::miette!("payload recovery: {error}"))?;
+        let backend = zup_windows::WindowsRuntimeBackend::for_recovery();
         let prepared = PreparedRuntime {
             request,
             backend: std::sync::Arc::new(backend),
@@ -678,23 +669,6 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     let record = zup_transaction::FilesystemTransactionStore::private_at(&state_root)
         .load(&id)
         .map_err(|error| miette::miette!("transaction: {error}"))?;
-    let stages_files = record
-        .plan
-        .nodes
-        .iter()
-        .any(|node| matches!(node.kind, NodeKind::StageFile { .. }));
-    if stages_files && args.payload_root.is_none() && bundle.is_none() {
-        return Err(miette::miette!(
-            "a file transaction needs the payload it staged; pass --payload-root"
-        ));
-    }
-    let payload_root = args.payload_root.unwrap_or_else(|| {
-        if bundle.is_some() {
-            executable
-        } else {
-            std::env::current_dir().unwrap_or_else(|_| state_root.clone())
-        }
-    });
     let target = embedded
         .as_ref()
         .map(|build| build.installer.target)
@@ -705,13 +679,7 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             record.target
         ));
     }
-    let backend = zup_windows::WindowsRuntimeBackend::for_recovery(
-        payload_root,
-        &state_root,
-        record.scope,
-        id,
-    )
-    .map_err(|error| miette::miette!("payload recovery: {error}"))?;
+    let backend = zup_windows::WindowsRuntimeBackend::for_recovery();
     let request = RuntimeRequest {
         operation: zup_runtime::RuntimeOperation::Recovery { transaction: id },
         target,

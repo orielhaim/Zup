@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use zup_plan::DeploymentPlan;
 #[cfg(test)]
 use zup_plan::{DeploymentEffects, compile_deployment};
-use zup_plan::{DeploymentPlan, NodeKind};
 
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -178,39 +178,15 @@ impl PayloadOverlayIdentity {
         scope: SelectedScope,
         plan: &DeploymentPlan,
     ) -> Result<Self, PayloadOverlayError> {
-        let files = plan
-            .nodes
-            .iter()
-            .filter_map(|node| {
-                if !matches!(
-                    node.kind,
-                    NodeKind::StageFile { .. } | NodeKind::FileMutation { .. }
-                ) {
-                    return None;
-                }
-                let source_relative = node.meta.source_relative.as_ref()?;
-                if !is_plugin_payload_path(source_relative) {
-                    return None;
-                }
-                Some((|| {
-                    let size = node.meta.expected_size.ok_or_else(|| {
-                        PayloadOverlayError::InvalidIdentity(format!(
-                            "generated source `{source_relative}` has no expected size"
-                        ))
-                    })?;
-                    let sha256 = node.meta.expected_sha256.ok_or_else(|| {
-                        PayloadOverlayError::InvalidIdentity(format!(
-                            "generated source `{source_relative}` has no expected digest"
-                        ))
-                    })?;
-                    Ok(PayloadOverlayFileIdentity {
-                        source_relative: source_relative.clone(),
-                        size,
-                        sha256,
-                    })
-                })())
-            })
-            .collect::<Result<Vec<_>, PayloadOverlayError>>()?;
+        let files = crate::recovery::required_files(plan)
+            .map_err(PayloadOverlayError::InvalidIdentity)?
+            .into_iter()
+            .filter(|(path, _)| is_plugin_payload_path(path))
+            .map(|(source_relative, blob)| PayloadOverlayFileIdentity {
+                source_relative,
+                size: blob.size,
+                sha256: blob.sha256,
+            });
         Self::from_parts(
             app_id,
             app_version,
