@@ -4,6 +4,7 @@
 //! publication flushes a writable volume handle; other mutations need recovery observation.
 
 pub(crate) mod authority;
+pub(crate) mod execution;
 pub(crate) mod history;
 
 use std::ffi::{OsStr, OsString};

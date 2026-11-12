@@ -248,51 +248,86 @@ fn satisfy_file_version(file: &FileVersion) -> Result<DetectionResult, Bootstrap
 #[derive(Debug, Default, Clone)]
 pub struct WindowsPrerequisiteProvider;
 
+#[cfg(test)]
+#[path = "prerequisites_tests.rs"]
+mod native_tests;
+
 impl PrerequisiteProvider for WindowsPrerequisiteProvider {
     fn execute(&self, request: &ProviderRequest) -> Result<ProviderOutcome, BootstrapError> {
-        let format = verify_artifact(
-            &request.executable,
-            request.package.digest().ok_or_else(|| {
-                BootstrapError::ProviderPreflight("missing artifact digest".into())
-            })?,
-            request.package.size(),
-        )
-        .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?;
-        let launch = plan_launch(request, format)?;
-        let status = Command::new(&launch.program)
-            .args(&launch.arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(|error| {
-                BootstrapError::ProviderPreflight(format!("start prerequisite: {error}"))
-            })?;
-        let code = status.code().ok_or_else(|| {
-            BootstrapError::Provider("prerequisite terminated without an exit code".into())
-        })?;
-        if request.success_exit_codes.contains(&code) {
-            Ok(ProviderOutcome::Succeeded)
-        } else if code == 1641 || request.reboot_exit_codes.contains(&code) {
-            Ok(ProviderOutcome::RebootRequired { exit_code: code })
-        } else {
-            Err(BootstrapError::Provider(format!(
-                "prerequisite exited with code {code}"
-            )))
-        }
+        execute_held(request, |_| {})
     }
 }
 
-struct Launch {
-    program: PathBuf,
-    arguments: Vec<String>,
+fn execute_held(
+    request: &ProviderRequest,
+    before_launch: impl FnOnce(&VerifiedArtifact),
+) -> Result<ProviderOutcome, BootstrapError> {
+    let artifact = VerifiedArtifact::acquire(request)
+        .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?;
+    before_launch(&artifact);
+    let launched = (|| {
+        let launch = plan_launch(request, &artifact)?;
+        artifact
+            .source
+            .validate()
+            .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?;
+        Command::new(&launch.program)
+            .args(&launch.arguments)
+            .current_dir(
+                artifact
+                    .source
+                    .path()
+                    .parent()
+                    .expect("native installer has a parent"),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                BootstrapError::ProviderPreflight(format!("start prerequisite: {error}"))
+            })
+    })();
+    let mut child = match launched {
+        Ok(child) => child,
+        Err(error) => {
+            if let Err(cleanup) = artifact.source.cleanup() {
+                tracing::warn!(%cleanup, "prerequisite preflight cleanup failed");
+            }
+            return Err(error);
+        }
+    };
+    let status = child
+        .wait()
+        .map_err(|error| BootstrapError::Provider(format!("wait for prerequisite: {error}")))?;
+    let code = status.code().ok_or_else(|| {
+        BootstrapError::Provider("prerequisite terminated without an exit code".into())
+    })?;
+    if request.success_exit_codes.contains(&code) {
+        if let Err(error) = artifact.source.cleanup() {
+            tracing::warn!(%error, "prerequisite execution source retained");
+        }
+        Ok(ProviderOutcome::Succeeded)
+    } else if code == 1641 || request.reboot_exit_codes.contains(&code) {
+        Ok(ProviderOutcome::RebootRequired { exit_code: code })
+    } else {
+        Err(BootstrapError::Provider(format!(
+            "prerequisite exited with code {code}"
+        )))
+    }
 }
 
-fn plan_launch(
+struct Launch<'a> {
+    program: PathBuf,
+    arguments: Vec<String>,
+    _artifact: &'a VerifiedArtifact,
+}
+
+fn plan_launch<'a>(
     request: &ProviderRequest,
-    format: ArtifactFormat,
-) -> Result<Launch, BootstrapError> {
-    let launch = match format {
+    artifact: &'a VerifiedArtifact,
+) -> Result<Launch<'a>, BootstrapError> {
+    let launch = match artifact.format {
         ArtifactFormat::WindowsInstaller => {
             let msiexec = system_directory()
                 .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?
@@ -304,7 +339,7 @@ fn plan_launch(
             }
             let mut arguments = vec![
                 "/i".to_owned(),
-                request.executable.display().to_string(),
+                artifact.source.path().display().to_string(),
                 "/qn".to_owned(),
             ];
             arguments.extend(request.arguments.iter().cloned());
@@ -312,6 +347,7 @@ fn plan_launch(
             Launch {
                 program: msiexec,
                 arguments,
+                _artifact: artifact,
             }
         }
         ArtifactFormat::Executable => {
@@ -324,8 +360,9 @@ fn plan_launch(
                 arguments.push("/norestart".to_owned());
             }
             Launch {
-                program: request.executable.clone(),
+                program: artifact.source.path().to_owned(),
                 arguments,
+                _artifact: artifact,
             }
         }
     };
@@ -353,50 +390,65 @@ fn default_arguments(requirement: &PrerequisiteRequirement) -> Vec<String> {
     }
 }
 
-fn verify_artifact(
-    path: &Path,
-    expected_digest: zup_core::Sha256Digest,
-    expected_size: Option<u64>,
-) -> Result<ArtifactFormat, BootstrapError> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| BootstrapError::Provider(format!("artifact metadata: {error}")))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(BootstrapError::Provider(
-            "artifact is not a regular file".into(),
-        ));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(1);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|error| BootstrapError::Provider(format!("artifact open: {error}")))?;
-    let (size, digest) = zup_core::hash_reader(&file)
-        .map_err(|error| BootstrapError::Provider(format!("artifact hash: {error}")))?;
-    if size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES
-        || digest != expected_digest
-        || expected_size.is_some_and(|expected| expected != size)
-    {
-        return Err(BootstrapError::Provider(
-            "artifact digest or size changed before execution".into(),
-        ));
-    }
-    Ok(classify_artifact(&mut file))
+struct VerifiedArtifact {
+    source: crate::filesystem::execution::ExecutionSource,
+    format: ArtifactFormat,
 }
 
-fn classify_artifact(file: &mut std::fs::File) -> ArtifactFormat {
-    use std::io::Seek;
-    if file.seek(std::io::SeekFrom::Start(0)).is_err() {
-        return ArtifactFormat::Executable;
+impl VerifiedArtifact {
+    fn acquire(request: &ProviderRequest) -> Result<Self, BootstrapError> {
+        let expected_digest = request
+            .package
+            .digest()
+            .ok_or_else(|| BootstrapError::ProviderPreflight("missing artifact digest".into()))?;
+        let expected_size = request.package.size();
+        let filename = request
+            .package
+            .filename()
+            .ok_or_else(|| BootstrapError::ProviderPreflight("missing artifact filename".into()))?;
+        let mut source =
+            crate::filesystem::execution::ExecutionSource::acquire(&request.executable, filename)
+                .map_err(|error| BootstrapError::Provider(format!("artifact open: {error}")))?;
+        let verified = (|| {
+            let (size, digest) = zup_core::hash_reader(
+                source
+                    .file()
+                    .take(zup_core::MAX_PREREQUISITE_PACKAGE_BYTES + 1),
+            )
+            .map_err(|error| BootstrapError::Provider(format!("artifact hash: {error}")))?;
+            if size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES
+                || digest != expected_digest
+                || expected_size.is_some_and(|expected| expected != size)
+            {
+                return Err(BootstrapError::Provider(
+                    "artifact digest or size changed before execution".into(),
+                ));
+            }
+            classify_artifact(source.file())
+        })();
+        match verified {
+            Ok(format) => Ok(Self { source, format }),
+            Err(error) => {
+                if let Err(cleanup) = source.cleanup() {
+                    tracing::warn!(%cleanup, "rejected prerequisite cleanup failed");
+                }
+                Err(error)
+            }
+        }
     }
+}
+
+fn classify_artifact(file: &mut std::fs::File) -> Result<ArtifactFormat, BootstrapError> {
+    use std::io::Seek;
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|error| BootstrapError::ProviderPreflight(error.to_string()))?;
     let mut magic = [0u8; COMPOUND_FILE_MAGIC.len()];
     match file.read_exact(&mut magic) {
-        Ok(()) if magic == COMPOUND_FILE_MAGIC => ArtifactFormat::WindowsInstaller,
-        _ => ArtifactFormat::Executable,
+        Ok(()) if magic == COMPOUND_FILE_MAGIC => Ok(ArtifactFormat::WindowsInstaller),
+        Ok(()) if &magic[..2] == b"MZ" => Ok(ArtifactFormat::Executable),
+        _ => Err(BootstrapError::ProviderPreflight(
+            "unsupported installer format".into(),
+        )),
     }
 }
 
@@ -636,22 +688,46 @@ mod tests {
         }
     }
 
+    fn verified_request(path: PathBuf, bytes: &[u8]) -> ProviderRequest {
+        let filename = path.file_name().unwrap().to_str().unwrap().to_owned();
+        let mut request = provider_request(path, runtime_requirement("fixture.runtime"));
+        request.package = zup_core::PrerequisitePackage::Remote {
+            url: format!("https://example.test/{filename}"),
+            filename,
+            sha256: digest(bytes),
+            size: Some(bytes.len() as u64),
+        };
+        request
+    }
+
+    fn authenticate(request: &ProviderRequest) -> Result<VerifiedArtifact, BootstrapError> {
+        VerifiedArtifact::acquire(request)
+    }
+
     #[test]
     fn artifact_format_comes_from_verified_content() {
         let package = compound_file_bytes();
         let (_root, path) = artifact(&package, "runtime.msi");
         assert_eq!(
-            verify_artifact(&path, digest(&package), Some(package.len() as u64)).unwrap(),
+            authenticate(&verified_request(path.clone(), &package))
+                .unwrap()
+                .format,
             ArtifactFormat::WindowsInstaller
         );
         let (_root, tampered) = artifact(b"not the declared package", "runtime.msi");
-        assert!(verify_artifact(&tampered, digest(&package), None).is_err());
-        assert!(verify_artifact(&path, digest(&package), Some(1)).is_err());
+        assert!(authenticate(&verified_request(tampered, &package)).is_err());
+        let mut request = verified_request(path, &package);
+        if let zup_core::PrerequisitePackage::Remote { size, .. } = &mut request.package {
+            *size = Some(1);
+        }
+        assert!(VerifiedArtifact::acquire(&request).is_err());
 
         let executable = [PE_MAGIC.as_slice(), &[0u8; 64]].concat();
         let (_root, path) = artifact(&executable, "runtime.exe");
         assert_eq!(
-            verify_artifact(&path, digest(&executable), Some(executable.len() as u64)).unwrap(),
+            authenticate(&verified_request(path, &executable))
+                .unwrap()
+                .format,
             ArtifactFormat::Executable
         );
     }
@@ -660,10 +736,10 @@ mod tests {
     fn a_launch_plan_carries_the_silent_contract_of_its_artifact() {
         let package = compound_file_bytes();
         let (_root, installer) = artifact(&package, "runtime.msi");
-        let mut request =
-            provider_request(installer.clone(), runtime_requirement("windows.vc.v14"));
+        let mut request = verified_request(installer.clone(), &package);
         request.arguments = vec!["ALLUSERS=1".to_owned()];
-        let launch = plan_launch(&request, ArtifactFormat::WindowsInstaller).unwrap();
+        let artifact = authenticate(&request).unwrap();
+        let launch = plan_launch(&request, &artifact).unwrap();
         assert_eq!(
             launch.program,
             system_directory().unwrap().join("msiexec.exe")
@@ -672,14 +748,16 @@ mod tests {
             launch.arguments,
             [
                 "/i".to_owned(),
-                installer.display().to_string(),
+                artifact.source.path().display().to_string(),
                 "/qn".to_owned(),
                 "ALLUSERS=1".to_owned(),
                 "/norestart".to_owned(),
             ]
         );
 
-        let (_root, executable) = artifact(&package, "runtime.exe");
+        drop(artifact);
+        let executable_bytes = [b"MZ".as_slice(), &[0u8; 64]].concat();
+        let (_root, executable) = self::artifact(&executable_bytes, "runtime.exe");
         for (requirement, arguments, expected) in [
             (
                 runtime_requirement(runtime_requirements::VISUAL_CPP_V14),
@@ -706,10 +784,16 @@ mod tests {
                 vec!["/norestart"],
             ),
         ] {
-            let mut request = provider_request(executable.clone(), requirement);
+            let mut request = verified_request(executable.clone(), &executable_bytes);
+            request.requirement = requirement;
             request.arguments = arguments;
-            let launch = plan_launch(&request, ArtifactFormat::Executable).unwrap();
-            assert_eq!(launch.program, executable, "an executable runs itself");
+            let artifact = authenticate(&request).unwrap();
+            let launch = plan_launch(&request, &artifact).unwrap();
+            assert_eq!(
+                launch.program,
+                artifact.source.path(),
+                "an executable runs itself"
+            );
             assert_eq!(launch.arguments, expected);
         }
     }

@@ -1081,11 +1081,6 @@ async fn run_bootstrap_worker(
     let quarantine =
         Quarantine::with_file_system(&quarantine_root, crate::windows_bootstrap_file_system())
             .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    for artifact in bound.artifacts.values() {
-        quarantine
-            .verify(artifact)
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    }
     let store = FilesystemBootstrapStateStore::with_file_system(
         &state_root,
         crate::windows_bootstrap_file_system(),
