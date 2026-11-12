@@ -255,3 +255,50 @@ pub fn sample_app_id() -> zup_core::AppId {
 pub fn sample_version() -> semver::Version {
     "1.4.0".parse().unwrap()
 }
+
+// Persist fixture effects through the same intent and receipt transitions as the coordinator.
+pub fn persist_crash_state(
+    store: &impl zup_transaction::TransactionStore,
+    target: zup_transaction::TransactionRecord,
+) -> zup_transaction::TransactionRecord {
+    use zup_transaction::{NodeState, TransactionChange as Change, TransactionPhase as Phase};
+    let mut current = store.load(&target.transaction_id).unwrap();
+    let mut advance = |changes: &[Change]| {
+        current = store
+            .transition(&current.transaction_id, current.revision, changes)
+            .unwrap();
+    };
+    advance(&[Change::Phase(Phase::Applying)]);
+    for id in &target.plan.execution_order {
+        let wanted = &target.nodes[id];
+        let receipt = match wanted {
+            NodeState::Applied { receipt }
+            | NodeState::Verified { receipt }
+            | NodeState::RollingBack { receipt } => receipt.clone(),
+            _ => continue,
+        };
+        let durable = store.load(&target.transaction_id).unwrap();
+        if durable.nodes[id] == *wanted || matches!(durable.nodes[id], NodeState::Applied { .. }) {
+            continue;
+        }
+        advance(&[Change::Node(id.clone(), NodeState::Running)]);
+        advance(&[Change::Node(
+            id.clone(),
+            NodeState::Applied {
+                receipt: receipt.clone(),
+            },
+        )]);
+        if matches!(wanted, NodeState::Verified { .. }) {
+            advance(&[Change::Node(id.clone(), NodeState::Verified { receipt })]);
+        }
+    }
+    if target.phase == Phase::RollingBack {
+        advance(&[Change::Phase(Phase::RollingBack)]);
+        for (id, wanted) in &target.nodes {
+            if matches!(wanted, NodeState::RollingBack { .. }) {
+                advance(&[Change::Node(id.clone(), wanted.clone())]);
+            }
+        }
+    }
+    current
+}

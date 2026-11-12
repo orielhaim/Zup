@@ -207,9 +207,10 @@ retired without payload bytes.
 Carrier app/scope/target authorization remains mandatory, but carrier app version
 is independent of transaction version. A previously installed v1 maintenance carrier
 built with this contract can recover a v2 transaction only while both support the
-same journal, plan, protocol and Windows execution format. Journal schema 3 includes explicit forward-resolution authority in addition to
-retained-source recovery. Older engines must refuse it. This engine refuses
-schema 1 and 2 journals; they require a compatible
+same journal, plan, protocol and Windows execution format. Journal schema 4 uses
+immutable intent and compact durable state transitions, retaining explicit
+forward-resolution authority and retained-source recovery. Older engines must refuse it. This engine refuses
+schema 1 through 3 journals; they require a compatible
 trusted carrier for settlement. Execution format 2 is
 explicit in the protected source context. Semantic execution changes must bump it,
 even when existing JSON would still parse. Unknown formats are refused before
@@ -370,9 +371,11 @@ A transaction becomes discoverable when a fully initialized directory is atomica
 renamed, without replacement, into `transactions/<id>`. Its protected
 `transaction.lock` contains a versioned identity seal binding the transaction ID,
 transaction namespace, directory and lock to their native object identities.
-`transaction.json` carries the existing validated transaction schema, revision and
-phase. Committed, rolled-back and blocked transactions remain discoverable until
-existing history retirement moves their exact namespace out of `transactions`.
+`transaction.json` carries the immutable initial record. A checksummed transition log
+and atomic commit head reconstruct its current revision and state. See
+[Durable transaction journal](durable-journal.md) for the format, commit protocol,
+compaction and measurement contract. Committed, rolled-back and blocked transactions
+remain discoverable until existing history retirement moves their exact namespace out of `transactions`.
 History collection validates the seal and preserves the same lock identity.
 
 Creation uses one bounded `journal-creation/pending` slot under a permanent creation
@@ -394,7 +397,7 @@ or automatic deletion of ambiguous state.
 
 Every discovered ID is independently loaded through a lease retaining its directory
 and existing lock. The lease verifies the seal, protected access, mount/volume,
-record ID, schema and revision invariants. CAS reads and replaces through that same
+record ID, schema and revision invariants. CAS appends and commits through that same
 lease. Missing journals or locks in a published namespace are hard errors, even if
 an interrupted creation reservation still contains the original bytes. Opening a
 missing transaction never recreates its directory or lock. Creator and transaction

@@ -367,24 +367,6 @@ impl zup_transaction::JournalDirectory for MachineDir {
     fn names(&self) -> Result<Vec<String>, StoreError> {
         self.list().map_err(journal_io)
     }
-    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        self.read(name, PolicyKind::Administrators)
-            .map_err(journal_io)
-    }
-    fn publish(&self, name: &str, bytes: &[u8], create: bool) -> Result<(), StoreError> {
-        self.publish(name, bytes, create, PolicyKind::Administrators)
-            .map_err(|source| StoreError::Publication {
-                path: name.into(),
-                source,
-            })
-    }
-    fn lock_file(
-        &self,
-        name: &str,
-        creation: private_fs::FileCreation,
-    ) -> Result<std::fs::File, StoreError> {
-        self.journal_lock_file(name, creation).map_err(journal_io)
-    }
     fn move_to(
         &self,
         name: &str,
@@ -403,9 +385,6 @@ impl zup_transaction::JournalDirectory for MachineDir {
                     detail: e.to_string(),
                 },
             })
-    }
-    fn sync(&self) -> Result<(), StoreError> {
-        self.sync().map_err(journal_io)
     }
     fn retire_reservation(&self, bytes: &[u8]) -> Result<(), StoreError> {
         if self
@@ -428,6 +407,30 @@ fn journal_io(error: FilesystemError) -> StoreError {
     StoreError::Io {
         path: "journals".into(),
         source: std::io::Error::other(error),
+    }
+}
+
+impl zup_transaction::JournalFiles for MachineDir {
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.read(name, PolicyKind::Administrators)
+            .map_err(journal_io)
+    }
+    fn publish(&self, name: &str, bytes: &[u8], create: bool) -> Result<(), StoreError> {
+        self.publish(name, bytes, create, PolicyKind::Administrators)
+            .map_err(|source| StoreError::Publication {
+                path: name.into(),
+                source,
+            })
+    }
+    fn lock_file(
+        &self,
+        name: &str,
+        creation: private_fs::FileCreation,
+    ) -> Result<std::fs::File, StoreError> {
+        self.journal_lock_file(name, creation).map_err(journal_io)
+    }
+    fn sync(&self) -> Result<(), StoreError> {
+        self.sync().map_err(journal_io)
     }
 }
 

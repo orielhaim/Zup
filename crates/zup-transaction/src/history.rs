@@ -1,3 +1,4 @@
+use crate::TransactionStore;
 use std::collections::BTreeSet;
 
 use zup_core::MaterializationId;
@@ -310,6 +311,11 @@ impl<F: HistoryFilesystem> HistoryStorage<F> {
                 let member = match name.as_str() {
                     "transaction.json" => JournalMember::Record,
                     "transaction.lock" => JournalMember::Lock,
+                    "head.json" => JournalMember::Head,
+                    "events-a.log" => JournalMember::EventsA,
+                    "events-b.log" => JournalMember::EventsB,
+                    "checkpoint-a.json" => JournalMember::CheckpointA,
+                    "checkpoint-b.json" => JournalMember::CheckpointB,
                     _ => return Err("history journal contains an undeclared entry".into()),
                 };
                 let (observed, bytes) =
@@ -318,7 +324,10 @@ impl<F: HistoryFilesystem> HistoryStorage<F> {
                     JournalMember::Record => {
                         let record: TransactionRecord = serde_json::from_slice(&bytes)
                             .map_err(|error| format!("history journal is invalid: {error}"))?;
-                        if record != source.record {
+                        record.validate().map_err(|error| error.to_string())?;
+                        if record.transaction_id != source.record.transaction_id
+                            || record.plan != source.record.plan
+                        {
                             return Err("history journal changed during observation".into());
                         }
                     }
@@ -330,10 +339,20 @@ impl<F: HistoryFilesystem> HistoryStorage<F> {
                         F::object(&transactions)?,
                     )
                     .map_err(|e| e.to_string())?,
+                    _ => {}
                 }
                 members.insert(member, observed);
             }
-            if !members.contains_key(&JournalMember::Record) {
+            if store
+                .load(&source.record.transaction_id)
+                .map_err(|error| error.to_string())?
+                != source.record
+            {
+                return Err("history journal changed during observation".into());
+            }
+            if !members.contains_key(&JournalMember::Head)
+                || !members.contains_key(&JournalMember::Record)
+            {
                 return Err("history journal has no protected record".into());
             }
             let mut observed_files = Vec::new();

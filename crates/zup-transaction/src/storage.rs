@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use zup_storage::PublishError;
 
-use crate::JournalDirectory;
+use crate::{JournalDirectory, JournalFiles};
 #[path = "private_journals.rs"]
 mod private_journals;
 use private_journals::PrivateJournalDirectory;
@@ -46,6 +46,35 @@ pub trait TransactionStore {
         updated: &TransactionRecord,
     ) -> Result<(), StoreError>;
 
+    fn commit_changes(
+        &self,
+        id: &TransactionId,
+        expected: u64,
+        changes: &[crate::TransactionChange],
+    ) -> Result<crate::JournalRevision, StoreError> {
+        let mut next = self.load(id)?;
+        check_revision(&next, expected)?;
+        for change in changes {
+            change.apply(&mut next)?;
+        }
+        next.touch();
+        self.compare_and_swap(expected, &next)?;
+        Ok(crate::JournalRevision {
+            revision: next.revision,
+            updated_at: next.updated_at,
+        })
+    }
+
+    fn transition(
+        &self,
+        id: &TransactionId,
+        expected: u64,
+        changes: &[crate::TransactionChange],
+    ) -> Result<TransactionRecord, StoreError> {
+        self.commit_changes(id, expected, changes)?;
+        self.load(id)
+    }
+
     fn update(
         &self,
         id: &TransactionId,
@@ -73,6 +102,8 @@ pub trait TransactionStore {
 #[derive(Clone)]
 pub struct FilesystemTransactionStore {
     volume: Arc<dyn JournalVolume>,
+    io: Arc<crate::journal_io::Counters>,
+    cache: Arc<Mutex<Option<crate::journal_format::Loaded>>>,
 }
 
 impl FilesystemTransactionStore {
@@ -82,11 +113,21 @@ impl FilesystemTransactionStore {
     pub fn private_at(root: impl Into<PathBuf>) -> Self {
         Self {
             volume: Arc::new(PrivateJournals::new(root.into())),
+            io: Arc::default(),
+            cache: Arc::default(),
         }
     }
 
     pub fn from_volume(volume: Arc<dyn JournalVolume>) -> Self {
-        Self { volume }
+        Self {
+            volume,
+            io: Arc::default(),
+            cache: Arc::default(),
+        }
+    }
+
+    pub fn io_stats(&self) -> crate::JournalIo {
+        self.io.snapshot()
     }
 
     pub fn list_ids(&self) -> Result<Vec<TransactionId>, StoreError> {
@@ -210,13 +251,6 @@ fn store_fs(path: PathBuf, error: private_fs::Error) -> StoreError {
     }
 }
 
-fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, StoreError> {
-    let record: TransactionRecord = serde_json::from_slice(bytes)
-        .map_err(|error| CorruptReason::InvalidJson(error.to_string()))?;
-    record.validate()?;
-    Ok(record)
-}
-
 impl TransactionStore for FilesystemTransactionStore {
     fn reserve_installation(
         &self,
@@ -291,6 +325,7 @@ impl TransactionStore for FilesystemTransactionStore {
         record.validate()?;
         let id = record.transaction_id;
         let bytes = serde_json::to_vec_pretty(record).map_err(StoreError::Serialize)?;
+        self.io.write(bytes.len());
         match self.volume.create_journal(&id, &bytes) {
             Ok(()) => Ok(()),
             Err(StoreError::Publication { source, .. })
@@ -303,17 +338,18 @@ impl TransactionStore for FilesystemTransactionStore {
     }
 
     fn load(&self, id: &TransactionId) -> Result<TransactionRecord, StoreError> {
-        match self.volume.open_journal(id)? {
-            Some(journal) => {
-                let bytes = journal.read()?;
-                let record = decode_record(&bytes)?;
-                if record.transaction_id != *id {
-                    return Err(CorruptReason::IdentityMismatch.into());
-                }
-                Ok(record)
-            }
-            None => Err(StoreError::Corrupt(CorruptReason::Missing)),
-        }
+        let journal = self
+            .volume
+            .open_journal(id)?
+            .ok_or(CorruptReason::Missing)?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| CorruptReason::InvalidHistory)?;
+        let current = self.current(journal.as_ref(), *id, cache.take())?;
+        let record = current.record.clone();
+        *cache = Some(current);
+        Ok(record)
     }
 
     fn compare_and_swap(
@@ -321,37 +357,106 @@ impl TransactionStore for FilesystemTransactionStore {
         expected_revision: u64,
         updated: &TransactionRecord,
     ) -> Result<(), StoreError> {
-        updated.validate()?;
-        if updated.revision != expected_revision.saturating_add(1) {
+        let journal = self
+            .volume
+            .open_journal(&updated.transaction_id)?
+            .ok_or(CorruptReason::Missing)?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| CorruptReason::InvalidHistory)?;
+        let mut current = self.current(journal.as_ref(), updated.transaction_id, cache.take())?;
+        check_revision(&current.record, expected_revision)?;
+        if expected_revision.checked_add(1) != Some(updated.revision) {
             return Err(CorruptReason::RevisionMismatch {
                 expected: expected_revision,
                 found: updated.revision,
             }
             .into());
         }
-        let id = updated.transaction_id;
+        let changes = crate::journal_format::changes(&current.record, updated)?;
+        for change in &changes {
+            change.apply(&mut current.record)?;
+        }
+        current.record.revision = updated.revision;
+        current.record.updated_at = updated.updated_at;
+        current.record.validate_state()?;
+        self.persist(journal.as_ref(), &mut current, changes)?;
+        *cache = Some(current);
+        Ok(())
+    }
+
+    fn commit_changes(
+        &self,
+        id: &TransactionId,
+        expected: u64,
+        changes: &[crate::TransactionChange],
+    ) -> Result<crate::JournalRevision, StoreError> {
         let journal = self
             .volume
-            .open_journal(&id)?
+            .open_journal(id)?
             .ok_or(CorruptReason::Missing)?;
-        let current = decode_record(&journal.read()?)?;
-        if current.transaction_id != id {
-            return Err(CorruptReason::IdentityMismatch.into());
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| CorruptReason::InvalidHistory)?;
+        let mut current = self.current(journal.as_ref(), *id, cache.take())?;
+        check_revision(&current.record, expected)?;
+        for change in changes {
+            change.apply(&mut current.record)?;
         }
-        if current.revision != expected_revision {
-            return Err(StoreError::RevisionConflict {
-                expected: expected_revision,
-            });
+        current.record.touch();
+        current.record.validate_state()?;
+        self.persist(journal.as_ref(), &mut current, changes.to_vec())?;
+        let revision = crate::JournalRevision {
+            revision: current.record.revision,
+            updated_at: current.record.updated_at,
+        };
+        *cache = Some(current);
+        Ok(revision)
+    }
+}
+
+fn check_revision(record: &TransactionRecord, expected: u64) -> Result<(), StoreError> {
+    if record.revision != expected {
+        return Err(StoreError::RevisionConflict { expected });
+    }
+    if expected == u64::MAX {
+        return Err(CorruptReason::InvalidHistory.into());
+    }
+    Ok(())
+}
+
+impl FilesystemTransactionStore {
+    fn current(
+        &self,
+        journal: &dyn crate::LockedJournal,
+        id: TransactionId,
+        cached: Option<crate::journal_format::Loaded>,
+    ) -> Result<crate::journal_format::Loaded, StoreError> {
+        let head = crate::journal_format::read_head(journal, &self.io)?;
+        if let Some(cached) = cached
+            && cached.record.transaction_id == id
+            && cached.head_bytes == head
+            && cached.unchanged(journal)?
+        {
+            return Ok(cached);
         }
-        let bytes = serde_json::to_vec_pretty(updated).map_err(StoreError::Serialize)?;
-        crate::fault_injection::boundary(
-            crate::fault_injection::Boundary::JournalCasBefore,
-            &id.to_string(),
-        );
-        journal.publish(&bytes)?;
+        crate::journal_format::load_head(journal, id, head, &self.io)
+    }
+
+    fn persist(
+        &self,
+        journal: &dyn crate::LockedJournal,
+        current: &mut crate::journal_format::Loaded,
+        changes: Vec<crate::TransactionChange>,
+    ) -> Result<(), StoreError> {
+        let id = current.record.transaction_id.to_string();
+        crate::fault_injection::boundary(crate::fault_injection::Boundary::JournalCasBefore, &id);
+        crate::journal_format::commit(journal, current, changes, &self.io)?;
         crate::fault_injection::boundary(
             crate::fault_injection::Boundary::JournalCasPublished,
-            &id.to_string(),
+            &id,
         );
         Ok(())
     }

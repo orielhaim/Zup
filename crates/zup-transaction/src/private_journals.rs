@@ -1,5 +1,5 @@
 use super::{StoreError, store_fs};
-use crate::JournalDirectory;
+use crate::{JournalDirectory, JournalFiles};
 use private_fs::{
     Durability, FileAccess, FileCreation, OpenOptions, PrivateDir, Publication, Verification,
 };
@@ -34,7 +34,6 @@ impl JournalDirectory for PrivateJournalDirectory {
         self.0.create_dir(name).map(Self).map_err(error)
     }
     fn object(&self) -> Result<NativeObjectIdentity, StoreError> {
-        self.0.sync_all().map_err(error)?;
         zup_storage::namespace::identity(&self.0).map_err(io)
     }
     fn same_mount(&self, other: &Self) -> Result<bool, StoreError> {
@@ -53,6 +52,38 @@ impl JournalDirectory for PrivateJournalDirectory {
             })
             .collect()
     }
+    fn move_to(
+        &self,
+        name: &str,
+        destination: &Self,
+        target: &str,
+        object: NativeObjectIdentity,
+    ) -> Result<(), StoreError> {
+        zup_storage::namespace::rename_directory(&self.0, name, &destination.0, target, object)
+            .map_err(|e| StoreError::Publication {
+                path: target.into(),
+                source: zup_storage::PublishError::Indeterminate {
+                    may_have_published: true,
+                    detail: e.to_string(),
+                },
+            })
+    }
+    fn retire_reservation(&self, bytes: &[u8]) -> Result<(), StoreError> {
+        if self.read("pending.json")?.as_deref() != Some(bytes) {
+            return Err(crate::CorruptReason::IdentityMismatch.into());
+        }
+        self.0
+            .remove_file("pending.json", Durability::None)
+            .map_err(error)?;
+        crate::fault_injection::boundary(
+            crate::fault_injection::Boundary::JournalReservationRemoved,
+            "journal-creation",
+        );
+        self.sync()
+    }
+}
+
+impl crate::JournalFiles for PrivateJournalDirectory {
     fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
         let mut file = match self.0.open_file(name) {
             Ok(file) => file,
@@ -102,36 +133,7 @@ impl JournalDirectory for PrivateJournalDirectory {
         }
         zup_storage::duplicate(&file).map_err(error)
     }
-    fn move_to(
-        &self,
-        name: &str,
-        destination: &Self,
-        target: &str,
-        object: NativeObjectIdentity,
-    ) -> Result<(), StoreError> {
-        zup_storage::namespace::rename_directory(&self.0, name, &destination.0, target, object)
-            .map_err(|e| StoreError::Publication {
-                path: target.into(),
-                source: zup_storage::PublishError::Indeterminate {
-                    may_have_published: true,
-                    detail: e.to_string(),
-                },
-            })
-    }
     fn sync(&self) -> Result<(), StoreError> {
         self.0.sync_all().map_err(error)
-    }
-    fn retire_reservation(&self, bytes: &[u8]) -> Result<(), StoreError> {
-        if self.read("pending.json")?.as_deref() != Some(bytes) {
-            return Err(crate::CorruptReason::IdentityMismatch.into());
-        }
-        self.0
-            .remove_file("pending.json", Durability::None)
-            .map_err(error)?;
-        crate::fault_injection::boundary(
-            crate::fault_injection::Boundary::JournalReservationRemoved,
-            "journal-creation",
-        );
-        self.sync()
     }
 }

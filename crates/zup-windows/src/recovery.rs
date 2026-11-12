@@ -570,6 +570,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compacted_journal_reopens_retained_source_after_original_overlay_disappears() {
+        use zup_transaction::TransactionStore;
+        let root =
+            tempfile::tempdir_in(directories::BaseDirs::new().unwrap().data_local_dir()).unwrap();
+        let (state, mut record) = fixture(root.path(), SelectedScope::User);
+        drop(capture(root.path(), &state, &record));
+        let store = FilesystemTransactionStore::private_at(&state);
+        for i in 0..48 {
+            record = store
+                .transition(
+                    &record.transaction_id,
+                    record.revision,
+                    &[zup_transaction::TransactionChange::RecoveryFailure(Some(
+                        zup_transaction::TransactionFailure {
+                            operation: None,
+                            message: format!("attempt {i}: {}", "retained evidence ".repeat(500)),
+                        },
+                    ))],
+                )
+                .unwrap();
+        }
+        let journal = state
+            .join("transactions")
+            .join(record.transaction_id.to_string());
+        assert!(journal.join("checkpoint-b.json").exists());
+        assert!(!root.path().join("original").exists());
+        let cold = FilesystemTransactionStore::private_at(&state);
+        let durable = cold.load(&record.transaction_id).unwrap();
+        assert_eq!(durable, record);
+        check_bytes(&RetainedSource::load_required(&state, &durable).unwrap());
+        collect(&state, &durable).unwrap();
+        check_bytes(&RetainedSource::load_required(&state, &durable).unwrap());
+    }
+
     #[rstest::rstest]
     #[case("missing")]
     #[case("changed")]

@@ -452,10 +452,9 @@ fn cas_with_a_non_successor_revision_is_refused_without_writing() {
     assert_eq!(store.load(&rec.transaction_id).unwrap().revision, 0);
 }
 
-/// Every replacement leaves exactly one complete JSON document and no temp
-/// siblings for a later reader to trip over.
+/// Updates preserve intent bytes and reconstruct the exact current record.
 #[test]
-fn replacement_leaves_complete_json_and_no_temp_files() {
+fn transitions_preserve_intent_and_leave_no_temporary_files() {
     let (dir, store) = store();
     let mut rec = record();
     let id = rec.transaction_id;
@@ -465,12 +464,11 @@ fn replacement_leaves_complete_json_and_no_temp_files() {
         rec,
         "a fresh record reads back intact"
     );
+    let intent = std::fs::read(record_path(&dir, &id)).unwrap();
     for expected in 0..3 {
         rec.touch();
         store.compare_and_swap(expected, &rec).unwrap();
-        let on_disk: TransactionRecord =
-            serde_json::from_slice(&std::fs::read(record_path(&dir, &id)).unwrap()).unwrap();
-        assert_eq!(on_disk, rec);
+        assert_eq!(std::fs::read(record_path(&dir, &id)).unwrap(), intent);
         assert_eq!(
             store.load(&id).unwrap(),
             rec,
@@ -482,7 +480,15 @@ fn replacement_leaves_complete_json_and_no_temp_files() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     entries.sort();
-    assert_eq!(entries, ["transaction.json", "transaction.lock"]);
+    assert_eq!(
+        entries,
+        [
+            "events-a.log",
+            "head.json",
+            "transaction.json",
+            "transaction.lock"
+        ]
+    );
 }
 
 #[test]

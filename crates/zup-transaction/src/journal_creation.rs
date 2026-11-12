@@ -10,16 +10,20 @@ use std::{
 };
 use zup_core::{NativeObjectIdentity, TransactionId};
 
-pub trait JournalDirectory: Sized {
+pub trait JournalFiles {
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError>;
+    fn publish(&self, name: &str, bytes: &[u8], create: bool) -> Result<(), StoreError>;
+    fn lock_file(&self, name: &str, creation: private_fs::FileCreation)
+    -> Result<File, StoreError>;
+    fn sync(&self) -> Result<(), StoreError>;
+}
+
+pub trait JournalDirectory: JournalFiles + Sized {
     fn open(&self, name: &str) -> Result<Option<Self>, StoreError>;
     fn create(&self, name: &str) -> Result<Self, StoreError>;
     fn object(&self) -> Result<NativeObjectIdentity, StoreError>;
     fn same_mount(&self, other: &Self) -> Result<bool, StoreError>;
     fn names(&self) -> Result<Vec<String>, StoreError>;
-    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError>;
-    fn publish(&self, name: &str, bytes: &[u8], create: bool) -> Result<(), StoreError>;
-    fn lock_file(&self, name: &str, creation: private_fs::FileCreation)
-    -> Result<File, StoreError>;
     fn move_to(
         &self,
         name: &str,
@@ -27,7 +31,6 @@ pub trait JournalDirectory: Sized {
         target: &str,
         object: NativeObjectIdentity,
     ) -> Result<(), StoreError>;
-    fn sync(&self) -> Result<(), StoreError>;
     fn retire_reservation(&self, bytes: &[u8]) -> Result<(), StoreError>;
 }
 
@@ -111,10 +114,7 @@ fn verify_held_lock<D: JournalDirectory>(
     Ok(())
 }
 
-pub trait LockedJournal: Send {
-    fn read(&self) -> Result<Vec<u8>, StoreError>;
-    fn publish(&self, bytes: &[u8]) -> Result<(), StoreError>;
-}
+pub trait LockedJournal: JournalFiles + Send {}
 
 pub struct JournalLease<D> {
     namespace: D,
@@ -153,20 +153,29 @@ impl<D: JournalDirectory + Send> JournalLease<D> {
     }
 }
 
-impl<D: JournalDirectory + Send> LockedJournal for JournalLease<D> {
-    fn read(&self) -> Result<Vec<u8>, StoreError> {
+impl<D: JournalDirectory + Send> LockedJournal for JournalLease<D> {}
+
+impl<D: JournalDirectory + Send> JournalFiles for JournalLease<D> {
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
         self.verify()?;
-        let bytes = self
-            .directory
-            .read("transaction.json")?
-            .ok_or(CorruptReason::Missing)?;
-        self.directory.sync()?;
-        self.namespace.sync()?;
-        Ok(bytes)
+        self.directory.read(name)
     }
-    fn publish(&self, bytes: &[u8]) -> Result<(), StoreError> {
+    fn publish(&self, name: &str, bytes: &[u8], create: bool) -> Result<(), StoreError> {
         self.verify()?;
-        self.directory.publish("transaction.json", bytes, false)
+        self.directory.publish(name, bytes, create)
+    }
+    fn lock_file(
+        &self,
+        name: &str,
+        creation: private_fs::FileCreation,
+    ) -> Result<File, StoreError> {
+        self.verify()?;
+        self.directory.lock_file(name, creation)
+    }
+    fn sync(&self) -> Result<(), StoreError> {
+        self.verify()?;
+        self.directory.sync()?;
+        self.namespace.sync()
     }
 }
 
@@ -269,7 +278,10 @@ fn finish_creation<D: JournalDirectory>(creation: &D, transactions: &D) -> Resul
             transactions.object()?,
         )?;
         for name in directory.names()? {
-            if name != "transaction.lock" && name != "transaction.json" {
+            if !matches!(
+                name.as_str(),
+                "transaction.lock" | "transaction.json" | "head.json" | "events-a.log"
+            ) {
                 return Err(deferred(
                     "creation contains an undeclared member; evidence retained",
                 ));
@@ -282,6 +294,7 @@ fn finish_creation<D: JournalDirectory>(creation: &D, transactions: &D) -> Resul
             Some(_) => {}
             None => directory.publish("transaction.json", &expected, true)?,
         }
+        crate::journal_format::initialize(&directory, &expected, &pending.record)?;
         directory.sync()?;
         boundary(Boundary::JournalRecordPublished, &name);
         drop(lock);
@@ -322,7 +335,8 @@ fn finish_creation<D: JournalDirectory>(creation: &D, transactions: &D) -> Resul
     let record: TransactionRecord =
         serde_json::from_slice(&observed).map_err(|e| CorruptReason::InvalidJson(e.to_string()))?;
     record.validate()?;
-    if record.transaction_id != id || record.plan_hash != pending.record.plan_hash {
+    crate::journal_format::load(&directory, id, &crate::journal_io::Counters::default())?;
+    if record != pending.record {
         return Err(CorruptReason::IdentityMismatch.into());
     }
     directory.sync()?;

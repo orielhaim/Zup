@@ -55,7 +55,8 @@ pub use service::{
 mod journal_creation;
 mod storage;
 pub use journal_creation::{
-    JournalDirectory, JournalIdentity, JournalLease, LockedJournal, create_journal, journal_lock,
+    JournalDirectory, JournalFiles, JournalIdentity, JournalLease, LockedJournal, create_journal,
+    journal_lock,
 };
 
 pub use coordinator::{
@@ -90,3 +91,9 @@ pub use resolution::{
     RecoveryAssessment, RecoveryBlocker, RecoveryCause, RecoveryDecision, RecoveryRequest,
     assess_recovery, recover_requested,
 };
+
+mod journal_io;
+pub use journal_io::{JournalIo, JournalRevision};
+
+mod journal_format;
+pub use journal_format::TransactionChange;

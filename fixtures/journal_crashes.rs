@@ -49,6 +49,8 @@ pub fn matrix(
         "journal_namespace_created",
         "journal_lock_published",
         "journal_creation_reserved",
+        "journal_initial_log_published",
+        "journal_initial_head_published",
         "journal_record_published",
         "journal_namespace_published",
         "journal_parent_sync_before",

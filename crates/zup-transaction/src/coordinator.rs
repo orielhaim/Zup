@@ -1461,17 +1461,56 @@ fn commit<S: TransactionStore>(
     store: &S,
     mut change: impl FnMut(&mut TransactionRecord) -> Result<(), String>,
 ) -> Result<(), TransactionError> {
-    let id = record.transaction_id;
-    let committed = store
-        .update(&id, &mut |fresh| {
-            change(fresh).map_err(|reason| StoreError::Rejected {
-                id: id.to_string(),
-                reason,
-            })
-        })
-        .map_err(TransactionError::Store)?;
-    *record = committed;
-    Ok(())
+    for _ in 0..8 {
+        let mut next = record.clone();
+        change(&mut next).map_err(TransactionError::InvalidState)?;
+        let changes = crate::journal_format::changes(record, &next)?;
+        match store.commit_changes(&record.transaction_id, record.revision, &changes) {
+            Ok(stamp) => {
+                next.revision = stamp.revision;
+                next.updated_at = stamp.updated_at;
+                *record = next;
+                return Ok(());
+            }
+            Err(StoreError::RevisionConflict { .. }) => {
+                *record = store.load(&record.transaction_id)?
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(StoreError::UpdateExhausted {
+        id: record.transaction_id.to_string(),
+        attempts: 8,
+    }
+    .into())
+}
+
+fn commit_changes<S: TransactionStore>(
+    record: &mut TransactionRecord,
+    store: &S,
+    changes: &[crate::TransactionChange],
+) -> Result<(), TransactionError> {
+    for _ in 0..8 {
+        match store.commit_changes(&record.transaction_id, record.revision, changes) {
+            Ok(stamp) => {
+                for change in changes {
+                    change.apply(record)?;
+                }
+                record.revision = stamp.revision;
+                record.updated_at = stamp.updated_at;
+                return Ok(());
+            }
+            Err(StoreError::RevisionConflict { .. }) => {
+                *record = store.load(&record.transaction_id)?
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(StoreError::UpdateExhausted {
+        id: record.transaction_id.to_string(),
+        attempts: 8,
+    }
+    .into())
 }
 
 fn commit_node<S: TransactionStore>(
@@ -1506,20 +1545,11 @@ fn commit_node<S: TransactionStore>(
         }
         _ => None,
     };
-    commit(record, store, move |fresh| {
-        let Some(current) = fresh.nodes.get(op_id) else {
-            return Err(format!("missing node {op_id}"));
-        };
-        if *current == state {
-            return Ok(());
-        }
-        let next = current
-            .clone()
-            .transition(state.clone())
-            .map_err(|_| format!("node {op_id} cannot enter {state:?} from {current:?}"))?;
-        fresh.nodes.insert(op_id.clone(), next);
-        Ok(())
-    })?;
+    commit_changes(
+        record,
+        store,
+        &[crate::TransactionChange::Node(op_id.clone(), state)],
+    )?;
     if let Some(point) = point {
         boundary(point, op_id.as_str());
     }
@@ -1534,15 +1564,7 @@ fn commit_phase<S: TransactionStore>(
     if next == TransactionPhase::Committed {
         boundary(Boundary::CommitBefore, &record.transaction_id.to_string());
     }
-    commit(record, store, move |fresh| {
-        if fresh.phase != next {
-            fresh.phase = fresh
-                .phase
-                .transition(next)
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
-    })?;
+    commit_changes(record, store, &[crate::TransactionChange::Phase(next)])?;
     if next == TransactionPhase::Committed {
         boundary(Boundary::Committed, &record.transaction_id.to_string());
     }

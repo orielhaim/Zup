@@ -65,6 +65,16 @@ impl TransactionContext {
         );
         store.create(&record).unwrap();
         let reservation = OperationId::new(OperationId::RESERVE);
+        record = store
+            .transition(
+                &record.transaction_id,
+                record.revision,
+                &[zup_transaction::TransactionChange::Node(
+                    OperationId::new(OperationId::BEGIN),
+                    NodeState::Running,
+                )],
+            )
+            .unwrap();
         record.nodes.insert(
             OperationId::new(OperationId::BEGIN),
             NodeState::Applied {

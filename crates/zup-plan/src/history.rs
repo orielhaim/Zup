@@ -19,6 +19,11 @@ pub struct MetadataFile {
 pub enum JournalMember {
     Record,
     Lock,
+    Head,
+    EventsA,
+    EventsB,
+    CheckpointA,
+    CheckpointB,
 }
 
 impl JournalMember {
@@ -26,6 +31,11 @@ impl JournalMember {
         match self {
             Self::Record => "transaction.json",
             Self::Lock => "transaction.lock",
+            Self::Head => "head.json",
+            Self::EventsA => "events-a.log",
+            Self::EventsB => "events-b.log",
+            Self::CheckpointA => "checkpoint-a.json",
+            Self::CheckpointB => "checkpoint-b.json",
         }
     }
 }

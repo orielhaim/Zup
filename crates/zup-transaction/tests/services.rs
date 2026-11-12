@@ -874,9 +874,7 @@ fn recovery_verifies_a_receipted_stop_before_resuming_file_mutation(#[case] veri
         },
     );
     record.validate().unwrap();
-    let revision = record.revision;
-    record.touch();
-    store.compare_and_swap(revision, &record).unwrap();
+    let record = common::persist_crash_state(&store, record);
     let mut executor = common::fake::FakeExecutor::new().fail_on_verify(0);
     let (_, outcome) =
         zup_transaction::recover(record, &store, &mut executor, &common::Publisher::default())

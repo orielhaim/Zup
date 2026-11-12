@@ -1765,6 +1765,16 @@ mod tests {
             .find(|node| matches!(node.kind, NodeKind::FileMutation { .. }))
             .unwrap()
             .clone();
+        transaction = store
+            .transition(
+                &transaction.transaction_id,
+                transaction.revision,
+                &[zup_transaction::TransactionChange::Node(
+                    stage.id.clone(),
+                    NodeState::Running,
+                )],
+            )
+            .unwrap();
         let receipt = apply_node(&mut executor, &stage, &transaction).unwrap();
         let OperationReceipt::StageFile {
             object,

@@ -15,8 +15,7 @@ use zup_core::TransactionId;
 use zup_plan::DeploymentPlan;
 use zup_plan::OperationId;
 
-// Older engines cannot resume an authorized forward resolution.
-pub const JOURNAL_SCHEMA: u32 = 3;
+pub const JOURNAL_SCHEMA: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -292,6 +291,16 @@ impl TransactionRecord {
     }
 
     pub fn validate(&self) -> Result<(), CorruptReason> {
+        if self.plan_hash != self.plan.fingerprint() {
+            return Err(CorruptReason::PlanHashMismatch);
+        }
+        self.plan
+            .validate()
+            .map_err(|_| CorruptReason::InvalidPlan)?;
+        self.validate_state()
+    }
+
+    pub(crate) fn validate_state(&self) -> Result<(), CorruptReason> {
         if self.resolution.as_ref().is_some_and(|decision| {
             !decision.matches(self)
                 || !matches!(
@@ -431,9 +440,6 @@ impl TransactionRecord {
         if self.schema != JOURNAL_SCHEMA {
             return Err(CorruptReason::UnsupportedSchema { found: self.schema });
         }
-        if self.plan_hash != self.plan.fingerprint() {
-            return Err(CorruptReason::PlanHashMismatch);
-        }
         if let Some(release) = &self.release
             && (release.app_id != self.app_id
                 || release.target != self.target
@@ -444,9 +450,6 @@ impl TransactionRecord {
         if self.target != self.plan.target {
             return Err(CorruptReason::TargetMismatch);
         }
-        self.plan
-            .validate()
-            .map_err(|_| CorruptReason::InvalidPlan)?;
         for node in &self.plan.nodes {
             if node
                 .meta
@@ -817,6 +820,8 @@ fn receipt_matches_node(
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum CorruptReason {
+    #[error("invalid committed journal history")]
+    InvalidHistory,
     #[error("missing journal")]
     Missing,
     #[error("invalid JSON: {0}")]

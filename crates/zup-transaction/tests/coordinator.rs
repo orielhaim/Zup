@@ -544,9 +544,7 @@ fn recovery_rechecks_payload_without_replaying_completed_work(#[case] resume_fro
             .nodes
             .insert(node.id.clone(), NodeState::Verified { receipt });
     }
-    let revision = crashed.revision;
-    crashed.touch();
-    store.compare_and_swap(revision, &crashed).unwrap();
+    let crashed = common::persist_crash_state(&store, crashed);
 
     let mut exec = FakeExecutor::new();
     let (final_record, outcome) =
@@ -626,9 +624,7 @@ fn interrupted_rollback_never_rolls_forward() {
             },
         );
     }
-    let revision = crashed.revision;
-    crashed.touch();
-    store.compare_and_swap(revision, &crashed).unwrap();
+    let crashed = common::persist_crash_state(&store, crashed);
 
     let mut exec = FakeExecutor::new().reconcile_with(ReconcileResult::Applied);
     let (final_record, outcome) =

@@ -390,6 +390,18 @@ fn recovery_replays_a_journal_without_the_original_executor() {
             .iter()
             .filter(|node| matches!(node.kind, zup_plan::NodeKind::StageFile { .. }))
         {
+            let store = FilesystemTransactionStore::private_at(&state);
+            let fresh = store.load(&transaction_id).unwrap();
+            let record = store
+                .transition(
+                    &transaction_id,
+                    fresh.revision,
+                    &[zup_transaction::TransactionChange::Node(
+                        node.id.clone(),
+                        NodeState::Running,
+                    )],
+                )
+                .unwrap();
             let receipt = executor.apply(node, &record).expect("a stage applies");
             staged.push((node.id.clone(), receipt));
         }
@@ -689,44 +701,60 @@ fn recovery_commits_an_interrupted_removal() {
 }
 
 fn reserve(store: &impl zup_transaction::TransactionStore, transaction: zup_core::TransactionId) {
-    use zup_transaction::NodeState;
+    use zup_transaction::{NodeState, TransactionChange as Change};
     let id = OperationId::new(OperationId::RESERVE);
+    let record = store.load(&transaction).unwrap();
     let record = store
-        .update(&transaction, &mut |record| {
-            record.nodes.insert(id.clone(), NodeState::Running);
-            Ok(())
-        })
+        .transition(
+            &transaction,
+            record.revision,
+            &[Change::Node(id.clone(), NodeState::Running)],
+        )
         .unwrap();
     let reservation = store.reserve_installation(&record).unwrap();
-    store
-        .update(&transaction, &mut |record| {
-            record.reservation = Some(reservation.clone());
-            for node in &record.plan.nodes {
-                if node.kind.is_barrier()
-                    && matches!(
-                        node.phase,
-                        zup_plan::Phase::Begin
-                            | zup_plan::Phase::Preflight
-                            | zup_plan::Phase::CommitIntent
-                    )
-                {
-                    record.nodes.insert(
-                        node.id.clone(),
+    let mut record = store
+        .transition(
+            &transaction,
+            record.revision,
+            &[
+                Change::Reservation(Some(reservation)),
+                Change::Node(
+                    id,
+                    NodeState::Applied {
+                        receipt: Box::new(OperationReceipt::Control),
+                    },
+                ),
+            ],
+        )
+        .unwrap();
+    for node in record.plan.nodes.clone() {
+        if node.kind.is_barrier()
+            && matches!(
+                node.phase,
+                zup_plan::Phase::Begin | zup_plan::Phase::Preflight | zup_plan::Phase::CommitIntent
+            )
+        {
+            record = store
+                .transition(
+                    &transaction,
+                    record.revision,
+                    &[Change::Node(node.id.clone(), NodeState::Running)],
+                )
+                .unwrap();
+            record = store
+                .transition(
+                    &transaction,
+                    record.revision,
+                    &[Change::Node(
+                        node.id,
                         NodeState::Applied {
                             receipt: Box::new(OperationReceipt::Control),
                         },
-                    );
-                }
-            }
-            record.nodes.insert(
-                id.clone(),
-                NodeState::Applied {
-                    receipt: Box::new(OperationReceipt::Control),
-                },
-            );
-            Ok(())
-        })
-        .unwrap();
+                    )],
+                )
+                .unwrap();
+        }
+    }
 }
 
 #[rstest::rstest]
