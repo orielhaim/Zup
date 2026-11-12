@@ -140,8 +140,12 @@ globset = "0.4"
 sha2 = { version = "0.11", default-features = false }
 wasmtime = { version = "=50.0.1", default-features = false, features = [
   "component-model",
+  "component-model-async",
   "runtime",
   "std",
+] }
+wasmtime-wasi = { version = "=50.0.1", default-features = false, features = [
+  "p3",
 ] }
 wit-component = { version = "0.263", features = ["dummy-module"] }
 wit-parser = "0.263"

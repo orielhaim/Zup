@@ -7,9 +7,7 @@ use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, Linker};
 
 use crate::bindings::PluginPre;
-use crate::runtime::{
-    InvocationError, SandboxLimits, run_with_watchdog, sandbox_store, sanitize_error,
-};
+use crate::runtime::{InvocationError, Sandbox, run_with_watchdog, sandbox_store, sanitize_error};
 use crate::{Context, InstallationPlan, PluginError, ResourceItem};
 use crate::{
     MAX_AOT_BYTES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES, MAX_PLAN_RESOURCES,
@@ -19,7 +17,7 @@ use zup_plugin_abi::{PLAN_FUNCTION_NAME, PLANNER_EXPORT_NAME};
 
 #[derive(Clone)]
 pub struct ValidatedComponent {
-    pre: PluginPre<SandboxLimits>,
+    pre: PluginPre<Sandbox>,
     fingerprint: crate::EngineFingerprint,
 }
 
@@ -38,7 +36,7 @@ pub enum ContractError {
     CoreModule,
     #[error("component compilation failed: {message}")]
     Compilation { message: String },
-    #[error("component imports are forbidden; found {name:?}")]
+    #[error("component import is not permitted; found {name:?}")]
     UnexpectedImport { name: String },
     #[error("component must export {expected:?}")]
     MissingExport { expected: &'static str },
@@ -85,15 +83,19 @@ impl ValidatedComponent {
     ) -> Result<Result<InstallationPlan, PluginError>, InvocationError> {
         let mut store = sandbox_store(self.pre.engine()).map_err(InvocationError::setup)?;
         let pre = &self.pre;
-        let mut call_was_trap = None;
-        let result = run_with_watchdog(self.pre.engine(), cancellation, || {
-            let plugin = pre.instantiate(&mut store)?;
+        let mut lifting_failed = false;
+        let result = run_with_watchdog(self.pre.engine(), cancellation, async {
+            let plugin = pre.instantiate_async(&mut store).await?;
             store.set_hostcall_fuel(MAX_PLAN_OUTPUT_BYTES);
             plugin
                 .zup_plugin_planner()
                 .call_plan(&mut store, context)
+                .await
                 .inspect_err(|error| {
-                    call_was_trap = Some(error.root_cause().is::<Trap>());
+                    lifting_failed = !(error.root_cause().is::<Trap>()
+                        || error.is::<crate::wasi::ClockDenied>()
+                        || error.is::<wasmtime_wasi::I32Exit>()
+                        || error.is::<wasmtime::component::ResourceTableError>());
                 })
         });
         let result = match result {
@@ -102,7 +104,7 @@ impl ValidatedComponent {
                 if store.data().growth_rejected {
                     return Err(InvocationError::MemoryLimit);
                 }
-                if matches!(error, InvocationError::Trap { .. }) && call_was_trap == Some(false) {
+                if matches!(error, InvocationError::Trap { .. }) && lifting_failed {
                     return Err(InvocationError::OutputLimit {
                         actual: MAX_PLAN_OUTPUT_BYTES as u64,
                         limit: MAX_PLAN_OUTPUT_BYTES as u64,
@@ -216,7 +218,10 @@ impl PluginEngine {
     fn validate(&self, component: Component) -> Result<ValidatedComponent, ContractError> {
         {
             let component_type = component.component_type();
-            if let Some((name, _)) = component_type.imports(&self.engine).next() {
+            if let Some((name, _)) = component_type
+                .imports(&self.engine)
+                .find(|(name, _)| !crate::wasi::allows_import(name))
+            {
                 return Err(ContractError::UnexpectedImport {
                     name: sanitize_error(name.to_owned()),
                 });
@@ -287,7 +292,10 @@ impl PluginEngine {
             check_resource_limit("table elements", elements, MAX_TABLE_ELEMENTS)?;
         }
 
-        let linker = Linker::<SandboxLimits>::new(&self.engine);
+        let mut linker = Linker::<Sandbox>::new(&self.engine);
+        crate::wasi::add_to_linker(&mut linker).map_err(|error| ContractError::Signature {
+            message: sanitize_error(error.to_string()),
+        })?;
         let instance_pre =
             linker
                 .instantiate_pre(&component)
@@ -300,8 +308,8 @@ impl PluginEngine {
         let mut store = sandbox_store(&self.engine).map_err(|error| ContractError::Signature {
             message: sanitize_error(error.to_string()),
         })?;
-        run_with_watchdog(&self.engine, &|| false, || {
-            let instance = pre.instance_pre().instantiate(&mut store)?;
+        run_with_watchdog(&self.engine, &|| false, async {
+            let instance = pre.instance_pre().instantiate_async(&mut store).await?;
             let (_, planner) = instance
                 .get_export(&mut store, None, PLANNER_EXPORT_NAME)
                 .ok_or_else(|| wasmtime::Error::msg("missing planner export"))?;

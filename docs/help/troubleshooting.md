@@ -80,7 +80,7 @@ zup plugin build
 
 Run it from inside the plugin project, or pass `--project <dir>`. The project
 needs `zup-sdk` with the `plugin` feature and `crate-type = ["cdylib"]`; `zup
-plugin build` compiles for `wasm32-unknown-unknown` and componentises the result,
+plugin build` compiles for `wasm32-wasip3` and emits a native WASI Preview 3 component,
 so there is nothing else to install and nothing to configure.
 
 Then run `zup check`. If the plugin loads but returns the wrong resources, reduce

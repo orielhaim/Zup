@@ -3,7 +3,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 cargo fmt --all --check
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32-wasip3
 cargo xtask fixtures build
 cargo clippy -p zup-linux -p zup-bootstrap -p zup-plan -p zup-binary --all-features --all-targets -- -D warnings
 cargo xtask toolchain build --profile dev

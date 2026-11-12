@@ -206,7 +206,7 @@ fn valid_empty_component_loads_and_runs() {
 }
 
 #[test]
-fn configure_fixture_is_one_deterministic_generated_file_without_imports() {
+fn native_configure_fixture_produces_one_deterministic_generated_file() {
     let bundle = build_package(&fixture("configure"), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();

@@ -9,7 +9,7 @@ esac
 cargo build -p zup
 cargo run -p zup-xtask -- toolchain build --profile dev
 cargo test -p zup-binary -p zup-bootstrap -p zup-plan -p zup-plugin-contract --lib
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32-wasip3
 cargo run -p zup -- plugin build --project examples/plugins/configure --output target/configure.wasm
 profile="${CARGO_TARGET_DIR:-target}/debug"
 fixture="$(pwd)/target/musl-lifecycle"

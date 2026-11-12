@@ -599,12 +599,10 @@ pub fn template(frontend: Frontend) -> PathBuf {
 
 /// The `target/<profile>` directory the test binary was built into.
 fn profile_directory() -> PathBuf {
-    let executable = std::env::current_exe().expect("a test executable");
-    let mut directory = executable.parent().unwrap_or(&executable).to_path_buf();
-    if directory.ends_with("deps") {
-        directory.pop();
-    }
-    directory
+    Path::new(env!("CARGO_BIN_EXE_zup-setup-headless"))
+        .parent()
+        .expect("Cargo executable directory")
+        .to_owned()
 }
 
 /// The peer preset the end-to-end tests install.

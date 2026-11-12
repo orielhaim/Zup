@@ -8,10 +8,6 @@ description = "Component and ahead-of-time compilation for zup plugins"
 publish = false
 
 [dependencies]
-anyhow = "1"
-# Componentization belongs to the build host, independent of author tooling.
-wit-component.workspace = true
-wit-parser.workspace = true
 zup-plugin-abi.workspace = true
 zup-plugin-contract = { workspace = true, features = ["compiler"] }
 sha2.workspace = true
@@ -22,6 +18,8 @@ zup-plan.workspace = true
 zup-plugin-runtime.workspace = true
 
 [dev-dependencies]
+wit-component.workspace = true
+wit-parser.workspace = true
 zup-build.workspace = true
 tempfile.workspace = true
 wat = "1"

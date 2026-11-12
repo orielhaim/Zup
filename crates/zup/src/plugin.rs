@@ -2,11 +2,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::{Args, Subcommand, ValueHint};
-use zup_plugin_build::componentize;
 
 use crate::failure;
 
-const GUEST_TARGET: &str = "wasm32-unknown-unknown";
+const GUEST_TARGET: &str = "wasm32-wasip3";
 
 #[derive(Debug, thiserror::Error)]
 pub enum GuestTargetError {
@@ -153,7 +152,7 @@ description = "A zup installation plugin"
 publish = false
 
 # A plugin is Wasm, so it is a library that becomes a component rather than an
-# executable. `zup plugin build` compiles it and componentises the result.
+# executable. Rust emits a native WASI Preview 3 component.
 [lib]
 crate-type = ["cdylib"]
 
@@ -197,12 +196,13 @@ pub fn build(args: &PluginBuildCommand) -> miette::Result<()> {
     ensure_guest_target(&root)
         .map_err(|error| failure::error("zup.plugin.build_target", error.to_string()))?;
 
-    let module = build_module(&cargo, &root, &project, &args.profile)?;
-
-    let component = componentize(&module)
-        .map_err(|error| failure::error("zup.plugin.componentize", error.to_string()))?;
+    let component = build_component(&cargo, &root, &project, &args.profile)?;
+    zup_plugin_contract::PluginEngine::host()
+        .map_err(|error| failure::error("zup.plugin.engine", error.to_string()))?
+        .compile_component(&component)
+        .map_err(|error| failure::error("zup.plugin.contract", error.to_string()))?;
     println!(
-        "componentised {} -> {} bytes",
+        "built {}: {} component bytes",
         project.name,
         component.len()
     );
@@ -245,7 +245,7 @@ impl Project {
     }
 }
 
-fn build_module(
+fn build_component(
     cargo: &Path,
     root: &Path,
     project: &Project,
@@ -307,15 +307,9 @@ mod tests {
     use super::*;
 
     #[rstest]
-    #[case::path("/toolchain/lib/rustlib/wasm32-unknown-unknown/lib\n", true)]
-    #[case::path_with_a_carriage_return(
-        "/toolchain/lib/rustlib/wasm32-unknown-unknown/lib\r\n",
-        true
-    )]
-    #[case::last_of_several(
-        "warning: something\n/toolchain/lib/rustlib/wasm32-unknown-unknown/lib\n",
-        true
-    )]
+    #[case::path("/toolchain/lib/rustlib/wasm32-wasip3/lib\n", true)]
+    #[case::path_with_a_carriage_return("/toolchain/lib/rustlib/wasm32-wasip3/lib\r\n", true)]
+    #[case::last_of_several("warning: something\n/toolchain/lib/rustlib/wasm32-wasip3/lib\n", true)]
     #[case::empty("", false)]
     #[case::only_newlines("\n\n", false)]
     fn the_library_directory_is_the_last_thing_the_compiler_printed(

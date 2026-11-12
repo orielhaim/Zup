@@ -94,7 +94,7 @@ jobs:
 
       - name: Build version-matched plugin test fixtures
         run: |
-          rustup target add wasm32-unknown-unknown
+          rustup target add wasm32-wasip3
           cargo xtask fixtures build
 
       - name: Windows tests

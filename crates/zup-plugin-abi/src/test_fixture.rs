@@ -12,6 +12,8 @@ pub fn repository() -> PathBuf {
 pub fn input_digest(root: &Path) -> Result<String, String> {
     let mut inputs = Vec::new();
     inputs.push(root.join("Cargo.toml"));
+    inputs.push(root.join("rust-toolchain.toml"));
+    inputs.push(root.join("crates/zup-xtask/src/fixtures.rs"));
     for name in [
         "examples/plugins/configure",
         "crates/zup-sdk",

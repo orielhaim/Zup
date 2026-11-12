@@ -7580,6 +7580,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix-linux-procfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
+dependencies = [
+ "once_cell",
+ "rustix",
+]
+
+[[package]]
 name = "rustls"
 version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9803,6 +9813,7 @@ dependencies = [
  "async-trait",
  "bitflags 2.13.2",
  "bumpalo",
+ "bytes",
  "cc",
  "encoding_rs",
  "futures",
@@ -10010,6 +10021,41 @@ dependencies = [
  "indexmap",
  "wit-component 0.261.0",
  "wit-parser 0.261.0",
+]
+
+[[package]]
+name = "wasmtime-wasi"
+version = "50.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdc6ef7dfa261eda94e66b547cb93cced2d25eb7ea19f6621a5dfc42cb39fcae"
+dependencies = [
+ "async-trait",
+ "bitflags 2.13.2",
+ "bytes",
+ "futures",
+ "rand 0.10.3",
+ "rustix",
+ "rustix-linux-procfs",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
+ "wasmtime",
+ "wasmtime-wasi-io",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "wasmtime-wasi-io"
+version = "50.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9828eddc4b35d0d91a2f7ea3ff7c72b67808ece7bb2663eed0b17e480285897e"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "tracing",
+ "wasmtime",
 ]
 
 [[package]]
@@ -12324,7 +12370,6 @@ dependencies = [
 name = "zup-plugin-build"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
@@ -12348,8 +12393,10 @@ dependencies = [
  "rstest",
  "sha2 0.11.1",
  "thiserror 2.0.21",
+ "tokio",
  "toml 1.2.1+spec-1.1.0",
  "wasmtime",
+ "wasmtime-wasi",
  "wat",
  "wit-component 0.263.0",
  "wit-parser 0.263.0",
@@ -12781,6 +12828,7 @@ dependencies = [
 name = "zup-xtask"
 version = "0.0.1"
 dependencies = [
+ "cargo_metadata",
  "rstest",
  "serde_json",
  "tempfile",
@@ -12792,7 +12840,7 @@ dependencies = [
  "zup-core",
  "zup-plan",
  "zup-plugin-abi",
- "zup-plugin-build",
+ "zup-plugin-contract",
  "zup-preset-protocol",
  "zup-publish-github",
  "zup-toolchain",

@@ -10,7 +10,7 @@ use crate::{
     MAX_TABLE_ELEMENTS, MAX_WASM_STACK_BYTES, WASMTIME_VERSION,
 };
 
-const FINGERPRINT_DOMAIN: &[u8] = b"zup.plugin.engine-configuration.v1";
+const FINGERPRINT_DOMAIN: &[u8] = b"zup.plugin.engine-configuration.v2.wasip3";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EngineFingerprint([u8; 32]);
@@ -59,6 +59,7 @@ pub fn engine_fingerprint(target: &str) -> EngineFingerprint {
     update_number(&mut hasher, EPOCH_DEADLINE_TICKS);
     update_number(&mut hasher, INVOCATION_DEADLINE_MILLIS);
     update_number(&mut hasher, 1);
+    update_number(&mut hasher, crate::MAX_WASI_RESOURCES as u64);
     update_number(&mut hasher, MAX_MEMORY_PAGES);
     update_number(
         &mut hasher,

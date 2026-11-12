@@ -4,6 +4,8 @@ pub const WASMTIME_VERSION: &str = "50.0.1";
 
 pub const AOT_FORMAT_VERSION: u32 = 1;
 
+pub const MAX_WASI_RESOURCES: usize = 32;
+
 pub const MAX_FUEL_PER_CALL: u64 = 100_000_000;
 
 pub const EPOCH_DEADLINE_TICKS: u64 = 1;

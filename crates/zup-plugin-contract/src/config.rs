@@ -73,6 +73,8 @@ pub(crate) fn engine_features() -> WasmFeatures {
         WasmFeatures::MULTI_VALUE,
         WasmFeatures::BULK_MEMORY,
         WasmFeatures::COMPONENT_MODEL,
+        WasmFeatures::CM_ASYNC,
+        WasmFeatures::CM_ASYNC_STACKFUL,
     ] {
         features.insert(feature);
     }
@@ -90,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn disables_non_deterministic_and_concurrent_features() {
+    fn enables_native_async_without_threads_or_floating_point() {
         let features = engine_features();
         assert!(!features.floats());
         assert!(!features.simd());
@@ -98,8 +100,8 @@ mod tests {
         assert!(!features.threads());
         assert!(!features.shared_everything_threads());
         assert!(!features.cm_threading());
-        assert!(!features.cm_async());
-        assert!(!features.cm_async_stackful());
+        assert!(features.cm_async());
+        assert!(features.cm_async_stackful());
         assert!(!features.stack_switching());
     }
 }

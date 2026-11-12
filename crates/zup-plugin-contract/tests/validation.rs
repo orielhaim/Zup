@@ -137,3 +137,17 @@ fn artifact_engine_version_matches_the_exact_dependency() {
         format!("={}", zup_plugin_contract::WASMTIME_VERSION)
     );
 }
+
+#[rstest]
+#[case("wasi:filesystem/types@0.3.0")]
+#[case("wasi:sockets/types@0.3.0")]
+#[case("wasi:random/random@0.3.0")]
+#[case("wasi:cli/environment@0.2.0")]
+fn imports_outside_the_native_planner_capabilities_are_rejected(#[case] name: &str) {
+    let engine = PluginEngine::host().unwrap();
+    let component = component_wat(&format!(r#"(component (import "{name}" (instance)))"#));
+    assert_eq!(
+        engine.compile_component(&component).unwrap_err(),
+        ContractError::UnexpectedImport { name: name.into() }
+    );
+}

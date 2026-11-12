@@ -6,29 +6,55 @@ pub fn build(root: &Path) -> Result<(), String> {
     let before = input_digest(root)?;
     let output = root.join("target/test-fixtures");
     let cargo_target = output.join("cargo");
-    let status = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+    let build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .current_dir(root)
         .args([
             "build",
             "--locked",
+            "--message-format=json",
             "--release",
+            "--features",
+            "sandbox-probes",
             "--target",
-            "wasm32-unknown-unknown",
+            "wasm32-wasip3",
             "--manifest-path",
         ])
         .arg(root.join("examples/plugins/configure/Cargo.toml"))
         .arg("--target-dir")
         .arg(&cargo_target)
-        .status()
+        .output()
         .map_err(|e| format!("building the SDK plugin fixture: {e}"))?;
-    if !status.success() {
-        return Err(
-            "plugin fixture build failed; install the wasm32-unknown-unknown Rust target".into(),
-        );
+    let mut artifact = None;
+    for message in cargo_metadata::Message::parse_stream(build.stdout.as_slice()) {
+        match message.map_err(|e| e.to_string())? {
+            cargo_metadata::Message::CompilerArtifact(compiled)
+                if compiled.target.is_cdylib() && compiled.target.name == "configure" =>
+            {
+                artifact = compiled
+                    .filenames
+                    .into_iter()
+                    .find(|path| path.extension() == Some("wasm"));
+            }
+            cargo_metadata::Message::CompilerMessage(message) => {
+                if let Some(rendered) = message.message.rendered {
+                    eprint!("{rendered}");
+                }
+            }
+            _ => {}
+        }
     }
-    let module = std::fs::read(cargo_target.join("wasm32-unknown-unknown/release/configure.wasm"))
+    if !build.status.success() {
+        return Err(format!(
+            "plugin fixture build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        ));
+    }
+    let artifact = artifact.ok_or("Cargo did not emit the configure component")?;
+    let component = std::fs::read(artifact).map_err(|e| e.to_string())?;
+    zup_plugin_contract::PluginEngine::host()
+        .map_err(|e| e.to_string())?
+        .compile_component(&component)
         .map_err(|e| e.to_string())?;
-    let component = zup_plugin_build::componentize(&module).map_err(|e| e.to_string())?;
     if input_digest(root)? != before {
         return Err("plugin fixture inputs changed during compilation".into());
     }

@@ -1,13 +1,11 @@
 #![forbid(unsafe_code)]
 
 use zup_core::PluginArtifact;
-mod component;
 
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
-pub use component::{ComponentError, componentize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 pub use zup_bundle::MAX_PLUGIN_SOURCE_BYTES;

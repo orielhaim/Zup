@@ -26,13 +26,11 @@ const ZUP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The suffix this machine writes executables with.
 const EXECUTABLE_SUFFIX: &str = std::env::consts::EXE_SUFFIX;
 
-/// The staged toolchain component a test needs, beside `executable`.
-///
-/// `executable` is the running test binary. Cargo puts it in `<profile>/deps`, and
-/// the stager writes to `<profile>/toolchain/<version>`, so the profile directory
-/// is one level up.
-pub fn component(executable: &Path, wanted: &ToolchainComponent) -> PathBuf {
-    let profile = profile_directory(executable);
+/// The staged toolchain component beside Cargo's CLI executable.
+pub fn component(wanted: &ToolchainComponent) -> PathBuf {
+    let profile = Path::new(env!("CARGO_BIN_EXE_zup"))
+        .parent()
+        .expect("Cargo executable directory");
     let name = zup_toolchain::file_name(wanted, EXECUTABLE_SUFFIX);
     for root in [
         profile.join("toolchain").join(ZUP_VERSION),
@@ -56,31 +54,16 @@ pub fn component(executable: &Path, wanted: &ToolchainComponent) -> PathBuf {
 /// A thin artifact's launcher has to be the one that can resolve a release over
 /// the network; an offline launcher composed into one would refuse to install
 /// itself on a user's machine.
-pub fn dispatcher(executable: &Path, subsystem: zup_toolchain::Subsystem, online: bool) -> PathBuf {
-    component(
-        executable,
-        &ToolchainComponent::Dispatcher { subsystem, online },
-    )
+pub fn dispatcher(subsystem: zup_toolchain::Subsystem, online: bool) -> PathBuf {
+    component(&ToolchainComponent::Dispatcher { subsystem, online })
 }
 
 /// The runtime template for the build host, for one frontend.
-pub fn host_runtime(executable: &Path, frontend: zup_core::Frontend) -> PathBuf {
-    component(
-        executable,
-        &ToolchainComponent::Runtime {
-            online: false,
-            target: zup_core::Target::parse(zup_plugin_contract::HOST_TARGET)
-                .expect("the host target is valid"),
-            frontend,
-        },
-    )
-}
-
-/// The `target/<profile>` directory a test executable was built into.
-fn profile_directory(executable: &Path) -> PathBuf {
-    let mut directory = executable.parent().unwrap_or(executable).to_path_buf();
-    if directory.ends_with("deps") {
-        directory.pop();
-    }
-    directory
+pub fn host_runtime(frontend: zup_core::Frontend) -> PathBuf {
+    component(&ToolchainComponent::Runtime {
+        online: false,
+        target: zup_core::Target::parse(zup_plugin_contract::HOST_TARGET)
+            .expect("the host target is valid"),
+        frontend,
+    })
 }

@@ -146,3 +146,54 @@ fn sdk_service_policies_survive_component_linking_and_execution(
         }
     );
 }
+
+fn probe_context(name: &str) -> Context {
+    Context {
+        plugin_id: "sandbox-probe".into(),
+        app_id: "com.example.probe".into(),
+        app_name: name.into(),
+        app_version: "1.0.0".into(),
+        install_directory: "${install}".into(),
+        install_scope: InstallScope::User,
+        target: "windows-x64".into(),
+        selected_components: Vec::new(),
+    }
+}
+
+#[test]
+fn native_wasi_streams_and_guest_failures_are_isolated_per_invocation() {
+    use zup_plugin_contract::InvocationError;
+    let engine = PluginEngine::host().unwrap();
+    let aot = engine.precompile_component(&component()).unwrap();
+    let validated = unsafe { engine.validate_trusted_aot(&aot) }.unwrap();
+    for name in ["clock", "wait", "exit", "panic"] {
+        let error = validated.plan(&probe_context(name)).unwrap_err();
+        assert!(
+            matches!(error, InvocationError::Trap { .. }),
+            "{name}: {error:?}"
+        );
+        let output = validated
+            .plan(&probe_context("stdio"))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(output.code, "isolated");
+        assert_eq!(
+            output.message,
+            "empty environment, closed input, sink output"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn synchronous_planning_can_run_inside_a_desktop_async_runtime() {
+    let engine = PluginEngine::host().unwrap();
+    let validated = engine.compile_component(&component()).unwrap();
+    assert_eq!(
+        validated
+            .plan(&probe_context("stdio"))
+            .unwrap()
+            .unwrap_err()
+            .code,
+        "isolated"
+    );
+}

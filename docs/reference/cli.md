@@ -46,13 +46,13 @@ is found. An installer operation selects one concrete scope and never accepts
 
 ## Plugin authoring
 
-| Command                  | Purpose                                                     |
-| ------------------------ | ----------------------------------------------------------- |
-| `zup plugin init <name>` | create a plugin project                                     |
-| `zup plugin build`       | compile for wasm and componentise into the plugin Zup loads |
+| Command                  | Purpose                                          |
+| ------------------------ | ------------------------------------------------ |
+| `zup plugin init <name>` | create a plugin project                          |
+| `zup plugin build`       | compile a native WASI Preview 3 plugin component |
 
 Both generate a project whose only dependency is `zup-sdk`. `zup plugin build`
-runs Cargo for `wasm32-unknown-unknown` and componentises the result; the author
+runs Cargo for `wasm32-wasip3` and emits a native WASI Preview 3 component; the author
 installs no Wasm tooling and vendors no WIT.
 
 ## Release

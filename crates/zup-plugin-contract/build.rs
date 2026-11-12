@@ -19,7 +19,7 @@ fn main() {
         out.join("bindings.rs"),
         format!(
             "wasmtime::component::bindgen!({{\n    path: {directory:?},\n    \
-             world: \"plugin\",\n}});\n"
+             world: \"plugin\",\n    exports: {{ default: async }},\n}});\n"
         ),
     )
     .expect("write the generated bindings");

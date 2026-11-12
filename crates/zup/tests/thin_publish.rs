@@ -180,12 +180,7 @@ fn stdout(result: &std::process::Output) -> String {
 /// is what a thin installer is made of. It has to start on the narrowest machine
 /// any variant serves.
 fn dispatcher() -> std::path::PathBuf {
-    staged::dispatcher(&test_executable(), zup_toolchain::Subsystem::Gui, true)
-}
-
-/// This test binary, which is where the staged toolchain was built beside.
-fn test_executable() -> std::path::PathBuf {
-    std::env::current_exe().expect("a test executable")
+    staged::dispatcher(zup_toolchain::Subsystem::Gui, true)
 }
 
 #[test]
@@ -414,5 +409,5 @@ fn a_thin_release_names_the_launcher_it_resolved() {
 /// The console launcher, which is not the one a GUI frontend's installer is made
 /// of.
 fn console_dispatcher() -> std::path::PathBuf {
-    staged::dispatcher(&test_executable(), zup_toolchain::Subsystem::Console, true)
+    staged::dispatcher(zup_toolchain::Subsystem::Console, true)
 }

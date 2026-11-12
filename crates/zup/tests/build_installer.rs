@@ -120,11 +120,6 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// This test binary, which is where the staged toolchain was built beside.
-fn test_executable() -> PathBuf {
-    std::env::current_exe().expect("a test executable")
-}
-
 #[test]
 fn a_build_composes_an_installer_from_the_staged_toolchain() {
     let project = Project::new();
@@ -149,7 +144,7 @@ fn a_build_composes_an_installer_from_the_staged_toolchain() {
 #[test]
 fn a_frontend_flag_selects_the_matching_template() {
     let project = Project::new();
-    let console = staged::host_runtime(&test_executable(), Frontend::Console);
+    let console = staged::host_runtime(Frontend::Console);
     let result = project.build(&[
         "--runtime",
         console.to_str().expect("a path"),

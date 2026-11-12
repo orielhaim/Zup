@@ -34,7 +34,7 @@ crate-type = ["cdylib"]
 zup-sdk = { version = "0.1.0", features = ["plugin"] }
 ```
 
-The generated project is the whole scaffolding: bindings come from the WIT Zup owns, and `zup plugin build` owns compiling and componentising.
+The generated project is the whole scaffolding: bindings come from the WIT Zup owns, and `zup plugin build` owns compiling the native WASI Preview 3 component.
 
 ## Write the plugin
 
@@ -73,7 +73,7 @@ if context.target.ends_with("-windows-msvc") {
 zup plugin build
 ```
 
-It runs Cargo for `wasm32-unknown-unknown`, turns the module into a component implementing the plugin world, and writes `dist/configure.wasm`.
+It runs Cargo for `wasm32-wasip3`, emits a native WASI 0.3 component implementing the plugin world, and writes `dist/configure.wasm`.
 
 | Flag              | Meaning                                                           |
 | ----------------- | ----------------------------------------------------------------- |

@@ -54,6 +54,6 @@ Use `Error::new(code, message)`, `Error::unsupported(message)`, or `Error::inval
 zup plugin build
 ```
 
-This builds `wasm32-unknown-unknown` and writes `dist/<name>.wasm`. Options include `--project`, `--profile`, and `--output`.
+This builds `wasm32-wasip3` and writes `dist/<name>.wasm`. Options include `--project`, `--profile`, and `--output`.
 
 Repository tests require `cargo xtask fixtures build` first. Tests reject missing or stale fixtures; no prebuilt Wasm fixture is checked in.

@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 zup-plan.workspace = true
 serde_json.workspace = true
+cargo_metadata = "0.23"
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
@@ -25,7 +26,7 @@ zup-preset-protocol.workspace = true
 zup-publish-github.workspace = true
 zup-toolchain.workspace = true
 zup-plugin-abi = { workspace = true, features = ["test-fixture"] }
-zup-plugin-build.workspace = true
+zup-plugin-contract = { workspace = true, features = ["compiler"] }
 
 [dev-dependencies]
 rstest.workspace = true
