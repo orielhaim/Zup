@@ -1,6 +1,19 @@
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Boundary {
+    PreparationReserved,
+    PreparationRetirementBefore,
+    PreparationRetired,
+    PreparationDeleteIntentBefore,
+    PreparationDeleteIntent,
+    PreparationRemoveBefore,
+    PreparationRemoveAfter,
+    PreparationParentSyncBefore,
+    PreparationParentSynced,
+    PreparationReadbackBefore,
+    PreparationAbsenceObserved,
+    PreparationCompactionBefore,
+    PreparationCompacted,
     ResolutionIntentPersisted,
     HistoryArchived,
     HistoryMemberRemoved,

@@ -17,9 +17,9 @@ pub use history::{HistoryFilesystem, HistoryStorage, StateNamespace};
 mod materialization;
 pub use generation::{
     GenerationAccess, GenerationReceipt, MaterializationObservation, MaterializationRecord,
-    MaterializationState, RetiredPreparation,
+    MaterializationState, PreparationCollection, PreparationTree, RetiredPreparation,
 };
-pub use materialization::{GenerationFilesystem, GenerationStorage};
+pub use materialization::{GenerationFilesystem, GenerationStorage, PreparationEntry};
 pub mod fault_injection;
 mod ledger;
 mod lock;

@@ -8,8 +8,32 @@ use crate::{
 
 pub trait GenerationFilesystem {
     type Directory;
+    type Lock;
     type Payload: ?Sized;
     type Error;
+
+    /// Serializes all materialization mutations and both collection lifecycles per installation.
+    fn lock(&self, intent: &GenerationIntent) -> Result<Self::Lock, Self::Error>;
+    fn preparation_names(directory: &Self::Directory) -> Result<Vec<String>, Self::Error>;
+    /// Rejects links, aliases, mount crossings and unsafe authority before returning a capability.
+    fn preparation_entry(
+        &self,
+        directory: &Self::Directory,
+        name: &str,
+    ) -> Result<PreparationEntry<Self::Directory>, Self::Error>;
+    /// Removes only this exact private object, refusing native readers and changed evidence.
+    fn remove_preparation_file(
+        &self,
+        directory: &Self::Directory,
+        name: &str,
+        expected: &zup_plan::MetadataFile,
+    ) -> Result<(), Self::Error>;
+    fn remove_preparation_directory(
+        &self,
+        parent: &Self::Directory,
+        name: &str,
+        expected: NativeObjectIdentity,
+    ) -> Result<(), Self::Error>;
 
     fn refused(intent: &GenerationIntent, reason: &str) -> Self::Error;
     fn namespace(
@@ -70,6 +94,11 @@ pub trait GenerationFilesystem {
     fn origin(&self, transaction: TransactionId) -> Result<TransactionRecord, Self::Error>;
 }
 
+pub enum PreparationEntry<D> {
+    Directory(D),
+    File(zup_plan::MetadataFile),
+}
+
 pub struct GenerationStorage<F> {
     filesystem: F,
 }
@@ -80,6 +109,17 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
     }
 
     pub fn apply(
+        &self,
+        operation: GenerationOperation,
+        intent: &GenerationIntent,
+        transaction: TransactionId,
+        payload: Option<&F::Payload>,
+    ) -> Result<OperationReceipt, F::Error> {
+        let _lock = self.filesystem.lock(intent)?;
+        self.apply_locked(operation, intent, transaction, payload)
+    }
+
+    fn apply_locked(
         &self,
         operation: GenerationOperation,
         intent: &GenerationIntent,
@@ -119,24 +159,24 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
                     zup_core::MaterializationId::new_v7()
                 ))
                 .map_err(|error| F::refused(intent, &error.to_string()))?;
-                let directory = self
-                    .filesystem
-                    .create_private_child(&parent, staging.as_str())?;
-                boundary(
-                    crate::fault_injection::Boundary::MaterializationDirectoryCreated,
-                    intent,
-                );
                 let record = MaterializationRecord {
-                    schema: 1,
+                    schema: 2,
                     transaction,
                     specification: intent.materialization.clone(),
-                    object: F::object(&directory)?,
-                    state: MaterializationState::Preparing { directory: staging },
+                    namespace: F::object(&parent)?,
+                    object: F::object(&parent)?,
+                    state: MaterializationState::Reserved { directory: staging },
                     retired_preparations: Vec::new(),
                 };
                 self.filesystem.write_record(intent, &record, true)?;
+                if self.load(intent)?.as_ref() != Some(&record) {
+                    return Err(F::refused(
+                        intent,
+                        "preparation reservation readback differs",
+                    ));
+                }
                 boundary(
-                    crate::fault_injection::Boundary::MaterializationPreparationRecorded,
+                    crate::fault_injection::Boundary::PreparationReserved,
                     intent,
                 );
                 record
@@ -148,6 +188,8 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
                 ));
             }
         };
+        self.finish_reservation(&mut record, intent)?;
+        self.collect_preparations(&mut record, intent)?;
         let directory = self.open(&record, intent)?;
         let receipt = match operation {
             GenerationOperation::Materialize => {
@@ -289,7 +331,9 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         intent: &GenerationIntent,
         receipt: &GenerationReceipt,
     ) -> Result<(), F::Error> {
-        let record = self.observed(intent, receipt)?;
+        let _lock = self.filesystem.lock(intent)?;
+        let mut record = self.observed(intent, receipt)?;
+        self.collect_preparations(&mut record, intent)?;
         let tree = self.filesystem.verify_tree(
             &self.open(&record, intent)?,
             intent,
@@ -331,7 +375,10 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         intent: &GenerationIntent,
         receipt: &GenerationReceipt,
     ) -> Result<(), F::Error> {
-        self.open(&self.observed(intent, receipt)?, intent)?;
+        let _lock = self.filesystem.lock(intent)?;
+        let mut record = self.observed(intent, receipt)?;
+        self.collect_preparations(&mut record, intent)?;
+        self.open(&record, intent)?;
         Ok(())
     }
 
@@ -341,7 +388,8 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         intent: &GenerationIntent,
         transaction: TransactionId,
     ) -> Result<ReconcileResult, F::Error> {
-        let Some(record) = self.load(intent)? else {
+        let _lock = self.filesystem.lock(intent)?;
+        let Some(mut record) = self.load(intent)? else {
             let Some(parent) = self.filesystem.namespace(intent, false)? else {
                 return Ok(ReconcileResult::NotApplied);
             };
@@ -361,6 +409,15 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
                 },
             );
         };
+        if matches!(record.state, MaterializationState::Reserved { .. }) {
+            if operation != GenerationOperation::Materialize || record.transaction != transaction {
+                return Ok(ReconcileResult::Ambiguous);
+            }
+            self.finish_reservation(&mut record, intent)?;
+            self.collect_preparations(&mut record, intent)?;
+            return Ok(ReconcileResult::Incomplete);
+        }
+        self.collect_preparations(&mut record, intent)?;
         self.open(&record, intent)?;
         if matches!(
             operation,
@@ -370,11 +427,12 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
             return Ok(ReconcileResult::Ambiguous);
         }
         if operation == GenerationOperation::Materialize {
-            let tree = match self.filesystem.verify_tree(
-                &self.open(&record, intent)?,
-                intent,
-                record.state.access(),
-            ) {
+            let verified = {
+                let directory = self.open(&record, intent)?;
+                self.filesystem
+                    .verify_tree(&directory, intent, record.state.access())
+            };
+            let tree = match verified {
                 Ok(tree) => tree,
                 Err(_) if matches!(record.state, MaterializationState::Preparing { .. }) => {
                     self.restart_preparation(record, intent)?;
@@ -406,7 +464,7 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         if operation == GenerationOperation::Seal
             && !matches!(record.state, MaterializationState::Preparing { .. })
         {
-            return Ok(ReconcileResult::AppliedWithReceipt(self.apply(
+            return Ok(ReconcileResult::AppliedWithReceipt(self.apply_locked(
                 operation,
                 intent,
                 transaction,
@@ -416,7 +474,7 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         if !matches!(&record.state, MaterializationState::Sealed { .. }) {
             return Ok(ReconcileResult::NotApplied);
         }
-        Ok(ReconcileResult::AppliedWithReceipt(self.apply(
+        Ok(ReconcileResult::AppliedWithReceipt(self.apply_locked(
             operation,
             intent,
             transaction,
@@ -439,6 +497,12 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
             ));
         };
         let parent = self.namespace(intent, false)?;
+        if F::object(&parent)? != record.namespace {
+            return Err(F::refused(
+                intent,
+                "preparation namespace was replaced before retirement",
+            ));
+        }
         let previous_directory = self
             .filesystem
             .open_child(&parent, previous.as_str(), GenerationAccess::Private)?
@@ -451,22 +515,310 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         if F::object(&previous_directory)? != record.object {
             return Err(F::refused(intent, "interrupted preparation was replaced"));
         }
+        drop(previous_directory);
         let name = ResourceId::new(format!(
             ".preparing-{}",
             zup_core::MaterializationId::new_v7()
         ))
         .map_err(|error| F::refused(intent, &error.to_string()))?;
-        let directory = self
-            .filesystem
-            .create_private_child(&parent, name.as_str())?;
-        F::sync(&parent)?;
         record.retired_preparations.push(crate::RetiredPreparation {
             directory: previous.clone(),
             object: record.object,
+            collection: crate::PreparationCollection::Retired,
         });
+        record.object = F::object(&parent)?;
+        record.state = MaterializationState::Reserved { directory: name };
+        boundary(
+            crate::fault_injection::Boundary::PreparationRetirementBefore,
+            intent,
+        );
+        self.write_verified(&record, intent)?;
+        boundary(crate::fault_injection::Boundary::PreparationRetired, intent);
+        self.finish_reservation(&mut record, intent)?;
+        self.collect_preparations(&mut record, intent)
+    }
+
+    fn finish_reservation(
+        &self,
+        record: &mut MaterializationRecord,
+        intent: &GenerationIntent,
+    ) -> Result<(), F::Error> {
+        let MaterializationState::Reserved { directory: name } = &record.state else {
+            return Ok(());
+        };
+        let name = name.clone();
+        let parent = self.namespace(intent, false)?;
+        if F::object(&parent)? != record.namespace {
+            return Err(F::refused(
+                intent,
+                "reserved preparation namespace was replaced",
+            ));
+        }
+        let directory =
+            match self
+                .filesystem
+                .open_child(&parent, name.as_str(), GenerationAccess::Private)?
+            {
+                Some(directory) => {
+                    if !F::preparation_names(&directory)?.is_empty() {
+                        return Err(F::refused(intent, "unreceipted preparation is not empty"));
+                    }
+                    directory
+                }
+                None => self
+                    .filesystem
+                    .create_private_child(&parent, name.as_str())?,
+            };
+        boundary(
+            crate::fault_injection::Boundary::MaterializationDirectoryCreated,
+            intent,
+        );
+        F::sync(&directory)?;
+        F::sync(&parent)?;
         record.object = F::object(&directory)?;
         record.state = MaterializationState::Preparing { directory: name };
-        self.write_verified(&record, intent)
+        self.write_verified(record, intent)?;
+        boundary(
+            crate::fault_injection::Boundary::MaterializationPreparationRecorded,
+            intent,
+        );
+        Ok(())
+    }
+
+    fn collect_preparations(
+        &self,
+        record: &mut MaterializationRecord,
+        intent: &GenerationIntent,
+    ) -> Result<(), F::Error> {
+        use crate::PreparationCollection;
+        if record.retired_preparations.is_empty() {
+            return Ok(());
+        }
+        let parent = self.namespace(intent, false)?;
+        if F::object(&parent)? != record.namespace {
+            return Err(F::refused(
+                intent,
+                "retired preparation namespace was replaced",
+            ));
+        }
+        while let Some(retired) = record.retired_preparations.first().cloned() {
+            let root = self.filesystem.open_child(
+                &parent,
+                retired.directory.as_str(),
+                GenerationAccess::Private,
+            )?;
+            if let Some(root) = root {
+                if F::object(&root)? != retired.object {
+                    return Err(F::refused(intent, "retired preparation was replaced"));
+                }
+                let current = self.inventory(&root, intent)?;
+                let expected = match retired.collection {
+                    PreparationCollection::Retired => {
+                        record.retired_preparations[0].collection =
+                            PreparationCollection::Deleting {
+                                tree: current.clone(),
+                            };
+                        boundary(
+                            crate::fault_injection::Boundary::PreparationDeleteIntentBefore,
+                            intent,
+                        );
+                        self.write_verified(record, intent)?;
+                        boundary(
+                            crate::fault_injection::Boundary::PreparationDeleteIntent,
+                            intent,
+                        );
+                        current.clone()
+                    }
+                    PreparationCollection::Deleting { tree } => tree,
+                };
+                if !current
+                    .directories
+                    .iter()
+                    .all(|(p, o)| expected.directories.get(p) == Some(o))
+                    || !current
+                        .files
+                        .iter()
+                        .all(|(p, f)| expected.files.get(p) == Some(f))
+                {
+                    return Err(F::refused(
+                        intent,
+                        "retired preparation contains changed or foreign members",
+                    ));
+                }
+                self.remove_inventory(&root, "", &expected, intent)?;
+                drop(root);
+                boundary(
+                    crate::fault_injection::Boundary::PreparationRemoveBefore,
+                    intent,
+                );
+                self.filesystem.remove_preparation_directory(
+                    &parent,
+                    retired.directory.as_str(),
+                    retired.object,
+                )?;
+                boundary(
+                    crate::fault_injection::Boundary::PreparationRemoveAfter,
+                    intent,
+                );
+            } else if matches!(retired.collection, PreparationCollection::Retired) {
+                return Err(F::refused(
+                    intent,
+                    "retired preparation disappeared before deletion intent",
+                ));
+            }
+            boundary(
+                crate::fault_injection::Boundary::PreparationParentSyncBefore,
+                intent,
+            );
+            F::sync(&parent)?;
+            boundary(
+                crate::fault_injection::Boundary::PreparationParentSynced,
+                intent,
+            );
+            boundary(
+                crate::fault_injection::Boundary::PreparationReadbackBefore,
+                intent,
+            );
+            if self
+                .filesystem
+                .open_child(
+                    &parent,
+                    retired.directory.as_str(),
+                    GenerationAccess::Private,
+                )?
+                .is_some()
+            {
+                return Err(F::refused(
+                    intent,
+                    "retired preparation name remains occupied",
+                ));
+            }
+            boundary(
+                crate::fault_injection::Boundary::PreparationAbsenceObserved,
+                intent,
+            );
+            boundary(
+                crate::fault_injection::Boundary::PreparationCompactionBefore,
+                intent,
+            );
+            record.retired_preparations.remove(0);
+            self.write_verified(record, intent)?;
+            boundary(
+                crate::fault_injection::Boundary::PreparationCompacted,
+                intent,
+            );
+        }
+        Ok(())
+    }
+
+    fn inventory(
+        &self,
+        root: &F::Directory,
+        intent: &GenerationIntent,
+    ) -> Result<crate::PreparationTree, F::Error> {
+        let mut tree = crate::PreparationTree {
+            directories: Default::default(),
+            files: Default::default(),
+        };
+        self.inventory_directory(root, "", &mut tree, intent)?;
+        tree.validate(F::object(root)?)
+            .map_err(|e| F::refused(intent, &e))?;
+        Ok(tree)
+    }
+
+    fn inventory_directory(
+        &self,
+        directory: &F::Directory,
+        prefix: &str,
+        tree: &mut crate::PreparationTree,
+        intent: &GenerationIntent,
+    ) -> Result<(), F::Error> {
+        if prefix.matches('/').count() > 128 || tree.files.len() + tree.directories.len() > 100_000
+        {
+            return Err(F::refused(
+                intent,
+                "preparation inventory exceeds collection bounds",
+            ));
+        }
+        for name in F::preparation_names(directory)? {
+            if tree.files.len() + tree.directories.len() >= 100_000 {
+                return Err(F::refused(
+                    intent,
+                    "preparation inventory exceeds collection bounds",
+                ));
+            }
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let path = zup_core::RelativePath::new(path)
+                .map_err(|e| F::refused(intent, &e.to_string()))?;
+            match self.filesystem.preparation_entry(directory, &name)? {
+                PreparationEntry::Directory(child) => {
+                    tree.directories.insert(path.clone(), F::object(&child)?);
+                    self.inventory_directory(&child, path.as_str(), tree, intent)?;
+                }
+                PreparationEntry::File(file) => {
+                    tree.files.insert(path, file);
+                }
+            }
+        }
+        F::sync(directory)
+    }
+
+    fn remove_inventory(
+        &self,
+        directory: &F::Directory,
+        prefix: &str,
+        tree: &crate::PreparationTree,
+        intent: &GenerationIntent,
+    ) -> Result<(), F::Error> {
+        for name in F::preparation_names(directory)? {
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let path = zup_core::RelativePath::new(path)
+                .map_err(|e| F::refused(intent, &e.to_string()))?;
+            match self.filesystem.preparation_entry(directory, &name)? {
+                PreparationEntry::Directory(child) => {
+                    let expected = tree
+                        .directories
+                        .get(&path)
+                        .ok_or_else(|| F::refused(intent, "foreign preparation directory"))?;
+                    if F::object(&child)? != *expected {
+                        return Err(F::refused(intent, "preparation directory was replaced"));
+                    }
+                    self.remove_inventory(&child, path.as_str(), tree, intent)?;
+                    drop(child);
+                    boundary(
+                        crate::fault_injection::Boundary::PreparationRemoveBefore,
+                        intent,
+                    );
+                    self.filesystem
+                        .remove_preparation_directory(directory, &name, *expected)?;
+                }
+                PreparationEntry::File(file) => {
+                    if tree.files.get(&path) != Some(&file) {
+                        return Err(F::refused(intent, "foreign preparation file"));
+                    }
+                    boundary(
+                        crate::fault_injection::Boundary::PreparationRemoveBefore,
+                        intent,
+                    );
+                    self.filesystem
+                        .remove_preparation_file(directory, &name, &file)?;
+                }
+            }
+            boundary(
+                crate::fault_injection::Boundary::PreparationRemoveAfter,
+                intent,
+            );
+            F::sync(directory)?;
+        }
+        Ok(())
     }
 
     fn observed(
@@ -498,6 +850,9 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         intent: &GenerationIntent,
     ) -> Result<F::Directory, F::Error> {
         let parent = self.namespace(intent, false)?;
+        if F::object(&parent)? != record.namespace {
+            return Err(F::refused(intent, "materialization namespace was replaced"));
+        }
         let staging = match record.state.directory() {
             Some(name) => {
                 self.filesystem
@@ -564,6 +919,12 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         };
         let tree = tree.clone();
         let parent = self.namespace(intent, false)?;
+        if F::object(&parent)? != record.namespace {
+            return Err(F::refused(
+                intent,
+                "materialization namespace was replaced before publication",
+            ));
+        }
         let target = intent.materialization.id().to_string();
         let source =
             self.filesystem
@@ -636,7 +997,8 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
         journal
             .validate()
             .map_err(|error| F::refused(intent, &error.to_string()))?;
-        if journal.plan.installation != record.specification.installation()
+        if journal.scope.authorization() != intent.privilege
+            || journal.plan.installation != record.specification.installation()
             || !journal.plan.nodes.iter().any(|node| matches!(&node.kind, NodeKind::Generation { operation: GenerationOperation::Materialize, intent: original } if original.materialization == record.specification)) {
             return Err(F::refused(intent, "materialization has no authenticated preparation intent"));
         }
@@ -647,6 +1009,12 @@ impl<F: GenerationFilesystem> GenerationStorage<F> {
                 continue;
             }
             if let Some(OperationReceipt::Generation(receipt)) = journal.receipt(&node.id) {
+                if matches!(record.state, MaterializationState::Reserved { .. }) {
+                    return Err(F::refused(
+                        intent,
+                        "reserved preparation conflicts with a native receipt",
+                    ));
+                }
                 if receipt.observed() != &record.observation() {
                     return Err(F::refused(
                         intent,

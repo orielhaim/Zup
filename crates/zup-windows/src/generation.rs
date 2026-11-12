@@ -20,6 +20,15 @@ pub(crate) enum GenerationDirectory {
     Machine(MachineDir),
 }
 
+impl std::os::windows::io::AsHandle for GenerationDirectory {
+    fn as_handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        match self {
+            Self::User(directory) => directory.as_handle(),
+            Self::Machine(directory) => directory.as_handle(),
+        }
+    }
+}
+
 impl GenerationDirectory {
     pub(crate) fn child(
         &self,
@@ -209,10 +218,14 @@ impl<P> WindowsGenerationFilesystem<P> {
             Privilege::User => {
                 let root = PrivateDir::open(&self.state.root).map_err(display)?;
                 let directory = if create {
-                    root.ensure_dir_all(format!(
-                        "materializations/{}",
-                        intent.materialization.installation()
-                    ))
+                    (|| {
+                        let materializations = root.ensure_dir("materializations")?;
+                        root.sync_all()?;
+                        let installation = materializations
+                            .ensure_dir(intent.materialization.installation().to_string())?;
+                        materializations.sync_all()?;
+                        Ok::<_, private_fs::Error>(installation)
+                    })()
                 } else {
                     root.open_dir(format!(
                         "materializations/{}",
@@ -253,8 +266,92 @@ impl<P> WindowsGenerationFilesystem<P> {
 
 impl<P: PayloadSource> GenerationFilesystem for WindowsGenerationFilesystem<P> {
     type Directory = GenerationDirectory;
+    type Lock = std::fs::File;
     type Payload = P;
     type Error = String;
+
+    fn lock(&self, intent: &GenerationIntent) -> Result<Self::Lock, String> {
+        let directory = self
+            .metadata(intent, true)
+            .map_err(|e| format!("open preparation lock namespace: {e}"))?
+            .ok_or("materialization metadata namespace missing")?;
+        let file = match directory {
+            GenerationDirectory::User(directory) => {
+                zup_storage::open_lock(&directory, "preparations.lock")
+                    .map_err(|e| format!("open preparation lock: {e}"))?
+            }
+            GenerationDirectory::Machine(directory) => {
+                directory.open_lock("preparations.lock").map_err(display)?
+            }
+        };
+        file.try_lock()
+            .map_err(|e| format!("materialization coordinator busy: {e}"))?;
+        Ok(file)
+    }
+
+    fn preparation_names(directory: &GenerationDirectory) -> Result<Vec<String>, String> {
+        directory.names()
+    }
+
+    fn preparation_entry(
+        &self,
+        directory: &GenerationDirectory,
+        name: &str,
+    ) -> Result<zup_transaction::PreparationEntry<GenerationDirectory>, String> {
+        if crate::filesystem::preparation_is_directory(directory, name)
+            .map_err(|e| format!("classify preparation {name}: {e}"))?
+        {
+            Ok(zup_transaction::PreparationEntry::Directory(
+                directory
+                    .child(name, false, GenerationAccess::Private)
+                    .map_err(|e| format!("open preparation child {name}: {e}"))?,
+            ))
+        } else {
+            crate::filesystem::preparation_file(
+                directory,
+                name,
+                matches!(directory, GenerationDirectory::Machine(_)),
+                None,
+            )
+            .map(zup_transaction::PreparationEntry::File)
+            .map_err(|e| format!("inspect preparation file {name}: {e}"))
+        }
+    }
+
+    fn remove_preparation_file(
+        &self,
+        directory: &GenerationDirectory,
+        name: &str,
+        expected: &zup_plan::MetadataFile,
+    ) -> Result<(), String> {
+        crate::filesystem::preparation_file(
+            directory,
+            name,
+            matches!(directory, GenerationDirectory::Machine(_)),
+            Some(expected),
+        )
+        .map_err(|e| format!("remove preparation file {name}: {e}"))?;
+        directory.sync()
+    }
+
+    fn remove_preparation_directory(
+        &self,
+        parent: &GenerationDirectory,
+        name: &str,
+        expected: NativeObjectIdentity,
+    ) -> Result<(), String> {
+        let NativeObjectIdentity::Windows { volume, file } = expected else {
+            return Err("non-Windows preparation identity".into());
+        };
+        let directory = parent.child(name, false, GenerationAccess::Private)?;
+        if directory.identity()? != expected {
+            return Err("preparation directory was replaced".into());
+        }
+        drop(directory);
+        crate::filesystem::remove_empty_directory(parent, name, (volume, file))
+            .map_err(|e| format!("remove preparation directory {name}: {e}"))?;
+        parent.sync()
+    }
 
     fn refused(intent: &GenerationIntent, reason: &str) -> String {
         format!(
@@ -356,7 +453,10 @@ impl<P: PayloadSource> GenerationFilesystem for WindowsGenerationFilesystem<P> {
         if !parent.names()?.iter().any(|entry| entry == name) {
             return Ok(None);
         }
-        parent.child(name, false, access).map(Some)
+        parent
+            .child(name, false, access)
+            .map(Some)
+            .map_err(|e| format!("open generation child {name}: {e}"))
     }
 
     fn create_private_child(
@@ -364,7 +464,9 @@ impl<P: PayloadSource> GenerationFilesystem for WindowsGenerationFilesystem<P> {
         parent: &GenerationDirectory,
         name: &str,
     ) -> Result<GenerationDirectory, String> {
-        let directory = parent.child(name, true, GenerationAccess::Private)?;
+        let directory = parent
+            .child(name, true, GenerationAccess::Private)
+            .map_err(|e| format!("create preparation {name}: {e}"))?;
         parent.sync()?;
         Ok(directory)
     }

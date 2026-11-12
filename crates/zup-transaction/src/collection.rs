@@ -27,7 +27,9 @@ pub enum CollectionFence<F> {
 }
 
 pub trait GenerationCollector {
+    type Coordinator;
     type Fence;
+    fn coordinate(&self, generation: &GenerationCleanup) -> Result<Self::Coordinator, String>;
     fn load(
         &self,
         transaction: TransactionId,
@@ -58,6 +60,7 @@ pub fn collect_generation(
     generation: &GenerationCleanup,
     transaction: TransactionId,
 ) -> Result<CleanupCompletion, String> {
+    let _coordinator = filesystem.coordinate(generation)?;
     if generation.readers == zup_core::GenerationReaders::Untracked {
         return Ok(CleanupCompletion::Deferred {
             reason: CleanupDeferral::UntrackedReaders,
@@ -146,6 +149,7 @@ pub fn verify_generation_collection(
     transaction: TransactionId,
     completion: CleanupCompletion,
 ) -> Result<(), String> {
+    let _coordinator = filesystem.coordinate(generation)?;
     let record = filesystem.load(transaction, operation.fingerprint())?;
     match completion {
         CleanupCompletion::Removed | CleanupCompletion::AlreadyAbsent => {

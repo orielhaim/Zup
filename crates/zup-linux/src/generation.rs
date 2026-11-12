@@ -44,10 +44,188 @@ impl LinuxGenerationFilesystem {
     }
 }
 
+fn same_mount(parent: &OwnedDirectory, child: &OwnedDirectory) -> Result<(), ExecError> {
+    let mount = |directory: &OwnedDirectory| {
+        let stat = rustix::fs::statx(
+            directory.as_fd(),
+            ".",
+            rustix::fs::AtFlags::NO_AUTOMOUNT,
+            rustix::fs::StatxFlags::MNT_ID,
+        )
+        .map_err(|e| ExecError::Executor(e.to_string()))?;
+        if stat.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() == 0 {
+            return Err(ExecError::Executor(
+                "filesystem cannot prove preparation mount identity".into(),
+            ));
+        }
+        Ok(stat.stx_mnt_id)
+    };
+    if mount(parent)? != mount(child)? {
+        return Err(ExecError::Executor(
+            "preparation crosses a mount boundary".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn preparation_file(
+    directory: &OwnedDirectory,
+    name: &str,
+    fence: bool,
+) -> Result<(zup_plan::MetadataFile, std::fs::File), ExecError> {
+    use rustix::fs::{AtFlags, OFlags};
+    let before = rustix::fs::statat(directory.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|e| ExecError::Executor(e.to_string()))?;
+    if EntryKind::from_raw_mode(before.st_mode) != EntryKind::Regular
+        || before.st_nlink != 1
+        || before.st_uid != rustix::process::geteuid().as_raw()
+        || before.st_mode & 0o022 != 0
+        || before.st_dev != directory.stat_self()?.dev
+    {
+        return Err(ExecError::Executor(
+            "unsafe preparation file authority or aliases".into(),
+        ));
+    }
+    let file = directory.open_regular_read(name)?;
+    let opened = rustix::fs::fstat(&file).map_err(|e| ExecError::Executor(e.to_string()))?;
+    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino) {
+        return Err(ExecError::Executor(
+            "preparation file changed while opening".into(),
+        ));
+    }
+    let writer = if fence {
+        // A write open fences native executable images with ETXTBSY, without writing bytes.
+        let mode = Mode::from_bits_truncate(before.st_mode & 0o7777);
+        rustix::fs::fchmod(&file, mode | Mode::WUSR)
+            .map_err(|e| ExecError::Executor(e.to_string()))?;
+        let result = rustix::fs::openat(
+            directory.as_fd(),
+            name,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::empty(),
+        );
+        rustix::fs::fchmod(&file, mode).map_err(|e| ExecError::Executor(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| ExecError::Executor(e.to_string()))?;
+        let writer = std::fs::File::from(result.map_err(|e| ExecError::Executor(e.to_string()))?);
+        let stat = rustix::fs::fstat(&writer).map_err(|e| ExecError::Executor(e.to_string()))?;
+        if (stat.st_dev, stat.st_ino) != (before.st_dev, before.st_ino) {
+            return Err(ExecError::Executor(
+                "preparation changed while fencing".into(),
+            ));
+        }
+        writer
+    } else {
+        file
+    };
+    writer
+        .sync_all()
+        .map_err(|e| ExecError::Executor(e.to_string()))?;
+    let (size, sha256) =
+        zup_core::hash_reader(&writer).map_err(|e| ExecError::Executor(e.to_string()))?;
+    let after = rustix::fs::statat(directory.as_fd(), name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|e| ExecError::Executor(e.to_string()))?;
+    if (
+        after.st_dev,
+        after.st_ino,
+        after.st_nlink,
+        after.st_mode,
+        after.st_uid,
+    ) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_nlink,
+        before.st_mode,
+        before.st_uid,
+    ) {
+        return Err(ExecError::Executor(
+            "preparation authority changed during observation".into(),
+        ));
+    }
+    Ok((
+        zup_plan::MetadataFile {
+            object: NativeObjectIdentity::Linux {
+                device: before.st_dev,
+                inode: before.st_ino,
+            },
+            size,
+            sha256,
+        },
+        writer,
+    ))
+}
+
 impl GenerationFilesystem for LinuxGenerationFilesystem {
     type Directory = OwnedDirectory;
+    type Lock = zup_transaction::ResourceLock;
     type Payload = dyn PayloadSource;
     type Error = ExecError;
+
+    fn lock(&self, intent: &GenerationIntent) -> Result<Self::Lock, ExecError> {
+        zup_transaction::ResourceLock::try_acquire(
+            &self.state.root,
+            &format!("preparations-{}", intent.materialization.installation()),
+        )
+        .map_err(|e| refused(intent, e))?
+        .ok_or_else(|| refused(intent, "materialization coordinator busy"))
+    }
+
+    fn preparation_names(directory: &OwnedDirectory) -> Result<Vec<String>, ExecError> {
+        Ok(directory.child_names()?)
+    }
+
+    fn preparation_entry(
+        &self,
+        directory: &OwnedDirectory,
+        name: &str,
+    ) -> Result<zup_transaction::PreparationEntry<OwnedDirectory>, ExecError> {
+        match directory.entry_kind(name)? {
+            EntryKind::Directory => {
+                let child = self
+                    .open_child(directory, name, GenerationAccess::Private)?
+                    .ok_or_else(|| ExecError::Executor("preparation disappeared".into()))?;
+                Ok(zup_transaction::PreparationEntry::Directory(child))
+            }
+            EntryKind::Regular => Ok(zup_transaction::PreparationEntry::File(
+                preparation_file(directory, name, false)?.0,
+            )),
+            _ => Err(ExecError::Executor(
+                "preparation contains a link or special entry".into(),
+            )),
+        }
+    }
+
+    fn remove_preparation_file(
+        &self,
+        directory: &OwnedDirectory,
+        name: &str,
+        expected: &zup_plan::MetadataFile,
+    ) -> Result<(), ExecError> {
+        let (observed, _fence) = preparation_file(directory, name, true)?;
+        if observed != *expected {
+            return Err(ExecError::Executor("preparation file changed".into()));
+        }
+        directory.remove_file(name)?;
+        Ok(directory.sync()?)
+    }
+
+    fn remove_preparation_directory(
+        &self,
+        parent: &OwnedDirectory,
+        name: &str,
+        expected: NativeObjectIdentity,
+    ) -> Result<(), ExecError> {
+        let child = self
+            .open_child(parent, name, GenerationAccess::Private)?
+            .ok_or_else(|| ExecError::Executor("preparation disappeared before removal".into()))?;
+        if object(&child)? != expected {
+            return Err(ExecError::Executor(
+                "preparation directory was replaced".into(),
+            ));
+        }
+        parent.remove_empty_directory(name)?;
+        Ok(parent.sync()?)
+    }
 
     fn refused(intent: &GenerationIntent, reason: &str) -> ExecError {
         refused(intent, reason)
@@ -91,6 +269,9 @@ impl GenerationFilesystem for LinuxGenerationFilesystem {
             ));
         }
         directory.verify_descendants(Path::new("."), rustix::process::geteuid().as_raw())?;
+        if access == GenerationAccess::Private {
+            same_mount(parent, &directory)?;
+        }
         Ok(Some(directory))
     }
 

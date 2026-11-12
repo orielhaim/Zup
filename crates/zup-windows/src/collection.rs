@@ -101,6 +101,9 @@ impl WindowsCollector {
         let parent = fs
             .namespace(&intent, false)?
             .ok_or("generation namespace is missing")?;
+        if parent.identity()? != record.namespace {
+            return Err("generation namespace identity changed".into());
+        }
         let root = fs.open_child(
             &parent,
             &generation.materialization.id().to_string(),
@@ -129,7 +132,13 @@ impl WindowsCollector {
     }
 }
 impl GenerationCollector for WindowsCollector {
+    type Coordinator = std::fs::File;
     type Fence = Fences;
+    fn coordinate(&self, generation: &GenerationCleanup) -> Result<Self::Coordinator, String> {
+        let intent = self.origin(generation)?;
+        WindowsGenerationFilesystem::<zup_bundle::DirectoryPayloadSource>::new(self.state.clone())
+            .lock(&intent)
+    }
     fn load(
         &self,
         transaction: TransactionId,

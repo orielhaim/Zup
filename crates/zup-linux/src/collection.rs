@@ -109,11 +109,17 @@ impl LinuxCollector {
                 _ => None,
             })
             .ok_or("generation creation intent is missing")?;
-        let record = crate::generation::LinuxGenerationFilesystem::new(self.0.clone())
+        let filesystem = crate::generation::LinuxGenerationFilesystem::new(self.0.clone());
+        let parent = filesystem
+            .namespace(intent, false)
+            .map_err(display)?
+            .ok_or("generation namespace missing")?;
+        let record = filesystem
             .read_record(intent)
             .map_err(display)?
             .ok_or("generation metadata is missing")?;
-        if record.transaction != generation.creator
+        if identity(&parent)? != record.namespace
+            || record.transaction != generation.creator
             || record.object != generation.tree.root
             || record.specification != generation.materialization
             || !matches!(&record.state, zup_transaction::MaterializationState::Sealed { tree } if tree == &generation.tree)
@@ -125,7 +131,16 @@ impl LinuxCollector {
     }
 }
 impl GenerationCollector for LinuxCollector {
+    type Coordinator = zup_transaction::ResourceLock;
     type Fence = Fences;
+    fn coordinate(&self, generation: &GenerationCleanup) -> Result<Self::Coordinator, String> {
+        zup_transaction::ResourceLock::try_acquire(
+            &self.0.root,
+            &format!("preparations-{}", generation.materialization.installation()),
+        )
+        .map_err(display)?
+        .ok_or_else(|| "materialization coordinator busy".into())
+    }
     fn load(
         &self,
         transaction: TransactionId,

@@ -22,6 +22,14 @@ mod publication_recovery {
         "/../../fixtures/publication_recovery.rs"
     ));
 }
+#[cfg(feature = "test-faults")]
+mod preparation_retirement {
+    use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/preparation_retirement.rs"
+    ));
+}
 mod persistent_lifecycle {
     use super::*;
     include!(concat!(
@@ -635,18 +643,15 @@ fn native_generation_crash_recovers_without_a_completion_receipt(
             .join(format!("{}.json", selected.id()));
         let metadata: zup_transaction::MaterializationRecord =
             serde_json::from_slice(&std::fs::read(record_path).unwrap()).unwrap();
-        assert_eq!(metadata.retired_preparations.len(), 1);
-        let interrupted = Path::new(selected.directory().as_str())
-            .parent()
-            .unwrap()
-            .join(metadata.retired_preparations[0].directory.as_str())
-            .join("lib");
-        let entries: Vec<_> = std::fs::read_dir(interrupted)
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(std::fs::read(entries[0].path()).unwrap(), b"reco");
+        assert!(metadata.retired_preparations.is_empty());
+        let namespace = Path::new(selected.directory().as_str()).parent().unwrap();
+        assert!(std::fs::read_dir(namespace).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".preparing-")
+        }));
     }
 }
 

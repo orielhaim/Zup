@@ -405,6 +405,12 @@ pub struct MachineDir {
     kind: PolicyKind,
 }
 
+impl AsHandle for MachineDir {
+    fn as_handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        self.handle.as_handle()
+    }
+}
+
 impl MachineDir {
     pub fn payload_root(path: &Path, create: bool) -> Result<Self, FilesystemError> {
         if !crate::transport::is_process_elevated()
@@ -1029,6 +1035,60 @@ pub(crate) fn remove_empty_directory(
     discard(&handle)
 }
 
+pub(crate) fn preparation_is_directory(
+    parent: &impl AsHandle,
+    name: &str,
+) -> Result<bool, FilesystemError> {
+    validate_name(OsStr::new(name))?;
+    let handle = parent.as_handle().try_clone_to_owned().map_err(io_std)?;
+    list_entries(&handle)?
+        .into_iter()
+        .find(|e| e.name == name)
+        .map(|e| e.directory)
+        .ok_or_else(|| io_path(Path::new(name), "preparation entry disappeared"))
+}
+
+pub(crate) fn preparation_file(
+    parent: &impl AsHandle,
+    name: &str,
+    machine: bool,
+    remove: Option<&zup_plan::MetadataFile>,
+) -> Result<zup_plan::MetadataFile, FilesystemError> {
+    validate_name(OsStr::new(name))?;
+    let parent = parent.as_handle().try_clone_to_owned().map_err(io_std)?;
+    let opened = open_relative(&parent, OsStr::new(name), Open::FenceFile, None)?;
+    reject_reparse(&opened.handle)?;
+    let mut file = File::from(opened.handle);
+    if machine {
+        generation_policy(
+            &file.as_handle().try_clone_to_owned().map_err(io_std)?,
+            zup_transaction::GenerationAccess::Private,
+            false,
+        )?;
+    } else {
+        private_fs::verify(&file).map_err(|e| io_std(std::io::Error::other(e)))?;
+    }
+    verify_payload_file(&file)?;
+    let (volume, id) = identity(&file)?;
+    if identity(&parent)?.0 != volume {
+        return Err(io_path(Path::new(name), "preparation crosses a volume"));
+    }
+    file.sync_all().map_err(io_std)?;
+    let (size, sha256) = zup_core::hash_reader(&mut file).map_err(io_std)?;
+    let observed = zup_plan::MetadataFile {
+        object: zup_core::NativeObjectIdentity::Windows { volume, file: id },
+        size,
+        sha256,
+    };
+    if let Some(expected) = remove {
+        if expected != &observed {
+            return Err(io_path(Path::new(name), "preparation file changed"));
+        }
+        discard(&file)?;
+    }
+    Ok(observed)
+}
+
 pub(crate) fn identity(handle: &impl AsHandle) -> Result<(u64, [u8; 16]), FilesystemError> {
     let mut info = FILE_ID_INFO::default();
     unsafe {
@@ -1285,7 +1345,6 @@ fn flush_handle(handle: &OwnedHandle) -> Result<(), FilesystemError> {
 
 struct DirectoryEntry {
     name: String,
-    #[cfg(test)]
     directory: bool,
 }
 
@@ -1338,7 +1397,6 @@ fn list_entries(handle: &OwnedHandle) -> Result<Vec<DirectoryEntry>, FilesystemE
                     name: name
                         .into_string()
                         .map_err(|_| io_path(Path::new("journal"), "non-Unicode entry"))?,
-                    #[cfg(test)]
                     directory: info.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
                 });
             }
