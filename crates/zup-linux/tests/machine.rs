@@ -230,6 +230,125 @@ fn machine_full_lifecycle() {
 }
 
 #[test]
+fn machine_install_accepts_a_satisfied_detect_only_prerequisite() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let prerequisite = zup_core::Prerequisite {
+        id: zup_core::PrerequisiteId::new("shell").unwrap(),
+        name: zup_core::NonEmptyString::new("Shell").unwrap(),
+        description: None,
+        component: None,
+        when: None,
+        target: zup_core::PrerequisiteArchitecture::Current,
+        requirement: zup_core::PrerequisiteRequirement::NativePackage {
+            id: zup_core::InstalledPackageId::new("bash").unwrap(),
+            minimum_version: None,
+        },
+        package: zup_core::PrerequisitePackage::DetectOnly,
+        installer: zup_core::PrerequisiteInstaller::default(),
+    };
+    let package = zup_linux::test_support::machine_package_bytes_with_prerequisites(
+        scratch.path(),
+        "1.0.0",
+        &machine_v1_files(),
+        false,
+        &[],
+        &[prerequisite],
+    );
+    let installer = scratch.path().join("detect-only-installer");
+    compose_installer(Path::new(inert_template()), &installer, &package);
+
+    let outcome = run_machine_isolated(&installer, &roots, Operation::Apply, None);
+
+    assert!(
+        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn machine_install_accepts_a_satisfied_repository_prerequisite() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let prerequisite = zup_core::Prerequisite {
+        id: zup_core::PrerequisiteId::new("shell").unwrap(),
+        name: zup_core::NonEmptyString::new("Shell").unwrap(),
+        description: None,
+        component: None,
+        when: None,
+        target: zup_core::PrerequisiteArchitecture::Current,
+        requirement: zup_core::PrerequisiteRequirement::NativePackage {
+            id: zup_core::InstalledPackageId::new("bash").unwrap(),
+            minimum_version: None,
+        },
+        package: zup_core::PrerequisitePackage::Repository,
+        installer: zup_core::PrerequisiteInstaller::default(),
+    };
+    let package = zup_linux::test_support::machine_package_bytes_with_prerequisites(
+        scratch.path(),
+        "1.0.0",
+        &machine_v1_files(),
+        false,
+        &[],
+        &[prerequisite],
+    );
+    let installer = scratch.path().join("repository-installer");
+    compose_installer(Path::new(inert_template()), &installer, &package);
+
+    let outcome = run_machine_isolated(&installer, &roots, Operation::Apply, None);
+
+    assert!(
+        matches!(outcome, Ok(LinuxOutcome::Committed { .. })),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn machine_install_rejects_a_missing_detect_only_prerequisite_before_effects() {
+    let (_base, roots) = isolated();
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let prerequisite = zup_core::Prerequisite {
+        id: zup_core::PrerequisiteId::new("absent").unwrap(),
+        name: zup_core::NonEmptyString::new("Absent package").unwrap(),
+        description: None,
+        component: None,
+        when: None,
+        target: zup_core::PrerequisiteArchitecture::Current,
+        requirement: zup_core::PrerequisiteRequirement::NativePackage {
+            id: zup_core::InstalledPackageId::new("zup-f04-package-must-not-exist").unwrap(),
+            minimum_version: None,
+        },
+        package: zup_core::PrerequisitePackage::DetectOnly,
+        installer: zup_core::PrerequisiteInstaller::default(),
+    };
+    let package = zup_linux::test_support::machine_package_bytes_with_prerequisites(
+        scratch.path(),
+        "1.0.0",
+        &machine_v1_files(),
+        false,
+        &[],
+        &[prerequisite],
+    );
+    let installer = scratch.path().join("missing-prerequisite-installer");
+    compose_installer(Path::new(inert_template()), &installer, &package);
+
+    let outcome = run_machine_isolated(&installer, &roots, Operation::Apply, None);
+
+    assert!(
+        outcome.is_err(),
+        "an absent DetectOnly package must refuse deployment"
+    );
+    assert!(
+        !roots.state.exists(),
+        "prerequisite refusal precedes machine state creation"
+    );
+    assert!(
+        !machine_install_dir(&roots.roots).exists(),
+        "prerequisite refusal precedes application installation"
+    );
+}
+
+#[test]
 fn machine_install_dir_override_stays_in_the_program_tree() {
     let (_base, roots) = isolated();
     let scratch = tempfile::tempdir().expect("a scratch directory");

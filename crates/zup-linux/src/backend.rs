@@ -97,6 +97,8 @@ impl LinuxRuntimeBackend {
             .deployment()
             .and_then(|deployment| deployment.bootstrap.as_ref())
         {
+            validate_bootstrap_binding(&self.installer, request, bootstrap)
+                .map_err(SessionError::Protocol)?;
             crate::prerequisites::execute(bootstrap, control)
                 .map_err(SessionError::Prerequisite)?;
             if control.cancellation.is_cancelled() {
@@ -565,6 +567,105 @@ impl LinuxRuntimeBackend {
         };
         Ok(outcome.into())
     }
+}
+
+fn validate_bootstrap_binding(
+    installer: &std::path::Path,
+    request: &RuntimeRequest,
+    bootstrap: &zup_runtime::BootstrapRequest,
+) -> Result<(), String> {
+    let deployment = request
+        .operation
+        .deployment()
+        .ok_or_else(|| "bootstrap requires a deployment operation".to_owned())?;
+    let carrier = Carrier::open(installer).map_err(|error| error.to_string())?;
+    let app = &carrier.package().plan().installer.app;
+    if app.id != request.app_id
+        || app.version != request.app_version
+        || *carrier.target() != request.target
+    {
+        return Err("bootstrap identity differs from the authenticated installer".into());
+    }
+    let build = carrier
+        .package()
+        .build_plan()
+        .map_err(|error| error.to_string())?
+        .by_target(&request.target)
+        .cloned()
+        .ok_or_else(|| "installer does not contain the requested target".to_owned())?;
+    build
+        .installer
+        .install
+        .scope
+        .select(Some(request.scope))
+        .map_err(|error| error.to_string())?;
+    if !matches!(
+        deployment.intent.action,
+        zup_plan::LifecycleAction::Install
+            | zup_plan::LifecycleAction::Upgrade
+            | zup_plan::LifecycleAction::Downgrade
+            | zup_plan::LifecycleAction::Modify
+            | zup_plan::LifecycleAction::Repair { .. }
+    ) {
+        return Err("this operation does not authorize prerequisite bootstrap".into());
+    }
+    let previous = crate::ledger::LinuxInstallationStore::new(&request.state_root)
+        .load(&request.app_id, request.scope)
+        .map_err(|error| error.to_string())?;
+    let operations = crate::prerequisites::active_for_operation(
+        &build.installer,
+        deployment.intent.action,
+        &deployment.intent.enable,
+        &deployment.intent.disable,
+        previous
+            .as_ref()
+            .map(|ledger| ledger.current.selected_components.as_slice()),
+    )?
+    .into_iter()
+    .map(|prerequisite| zup_bootstrap::BootstrapOperation {
+        id: prerequisite.id,
+        name: prerequisite.name.to_string(),
+        target: prerequisite.target,
+        requirement: prerequisite.requirement,
+        package: prerequisite.package,
+        installer: prerequisite.installer,
+    })
+    .collect::<Vec<_>>();
+    let plan = zup_bootstrap::BootstrapPlan::new(
+        zup_bootstrap::BootstrapKey {
+            app_id: request.app_id.clone(),
+            app_version: request.app_version.clone(),
+            target: request.target,
+            scope: request.scope,
+        },
+        operations,
+    )
+    .map_err(|error| error.to_string())?;
+    let expected = zup_bootstrap::BoundBootstrapPlan::new(plan, BTreeMap::new())
+        .map_err(|error| error.to_string())?;
+    if expected.plan.operations.is_empty() {
+        return Err("a bootstrap request has no active prerequisites".into());
+    }
+    for operation in &expected.plan.operations {
+        crate::prerequisites::validate(&operation.requirement, &operation.package)
+            .map_err(|error| error.to_string())?;
+        if operation.installer != zup_core::PrerequisiteInstaller::default() {
+            return Err(
+                "native package prerequisites do not accept artifact installer options".into(),
+            );
+        }
+    }
+    if bootstrap.plan != expected {
+        return Err("bootstrap plan differs from authenticated deployment requirements".into());
+    }
+    let expected_state =
+        crate::paths::user_state_root(&request.app_id).map_err(|error| error.to_string())?;
+    if bootstrap.state_root != expected_state
+        || bootstrap.quarantine_root != expected_state.join("bootstrap")
+    {
+        return Err("bootstrap storage paths differ from the application state root".into());
+    }
+    Ok(())
 }
 
 fn scope_token(scope: SelectedScope) -> &'static str {

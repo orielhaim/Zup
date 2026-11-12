@@ -196,6 +196,120 @@ impl Manager {
     }
 }
 
+trait NativePackageQuery {
+    fn installed(&self, id: &str, minimum: Option<&str>) -> Result<bool>;
+}
+
+impl NativePackageQuery for Manager {
+    fn installed(&self, id: &str, minimum: Option<&str>) -> Result<bool> {
+        Manager::installed(*self, id, minimum)
+    }
+}
+
+fn require_satisfied_with(
+    prerequisites: &[zup_plan::PlannedPrerequisite],
+    manager: &impl NativePackageQuery,
+) -> Result<()> {
+    for prerequisite in prerequisites {
+        validate(&prerequisite.requirement, &prerequisite.package)?;
+        if prerequisite.installer != zup_core::PrerequisiteInstaller::default() {
+            return Err(BootstrapError::ProviderPreflight(
+                "native package prerequisites do not accept artifact installer options".into(),
+            ));
+        }
+        if !matches!(
+            prerequisite.target,
+            zup_core::PrerequisiteArchitecture::Current | zup_core::PrerequisiteArchitecture::Any
+        ) {
+            return Err(BootstrapError::Requirement(
+                "Linux native packages use the package manager's native architecture".into(),
+            ));
+        }
+        let PrerequisiteRequirement::NativePackage {
+            id,
+            minimum_version,
+        } = &prerequisite.requirement
+        else {
+            unreachable!()
+        };
+        if !manager.installed(id.as_str(), minimum_version.as_deref())? {
+            return Err(BootstrapError::ProviderPreflight(format!(
+                "machine prerequisite `{}` is not satisfied",
+                prerequisite.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn require_satisfied(
+    prerequisites: &[zup_plan::PlannedPrerequisite],
+) -> std::result::Result<(), String> {
+    if prerequisites.is_empty() {
+        return Ok(());
+    }
+    let manager = Manager::discover().map_err(|error| error.to_string())?;
+    require_satisfied_with(prerequisites, &manager).map_err(|error| error.to_string())
+}
+
+pub(crate) fn active_for_operation(
+    installer: &zup_core::Installer,
+    action: zup_plan::LifecycleAction,
+    enable: &[String],
+    disable: &[String],
+    previous: Option<&[zup_core::ComponentId]>,
+) -> std::result::Result<Vec<zup_plan::PlannedPrerequisite>, String> {
+    let mut overrides = zup_plan::ComponentOverrides::default();
+    if matches!(
+        action,
+        zup_plan::LifecycleAction::Upgrade
+            | zup_plan::LifecycleAction::Downgrade
+            | zup_plan::LifecycleAction::Modify
+            | zup_plan::LifecycleAction::Repair { .. }
+    ) {
+        let previous = previous.ok_or_else(|| {
+            "the operation needs a committed component selection before prerequisite planning"
+                .to_owned()
+        })?;
+        for component in &installer.components {
+            if previous.contains(&component.id) {
+                overrides.enable.insert(component.id.clone());
+            } else if !component.required {
+                overrides.disable.insert(component.id.clone());
+            }
+        }
+    }
+    for id in enable {
+        let id = zup_core::ComponentId::new(id).map_err(|error| error.to_string())?;
+        overrides.disable.remove(&id);
+        overrides.enable.insert(id);
+    }
+    for id in disable {
+        let id = zup_core::ComponentId::new(id).map_err(|error| error.to_string())?;
+        overrides.enable.remove(&id);
+        overrides.disable.insert(id);
+    }
+    let selected = zup_plan::select_components(&installer.components, &overrides)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    Ok(installer
+        .prerequisites
+        .iter()
+        .filter(|prerequisite| {
+            prerequisite
+                .component
+                .as_ref()
+                .is_none_or(|component| selected.contains(component))
+                && prerequisite
+                    .when
+                    .as_ref()
+                    .is_none_or(|condition| condition.evaluate(&selected))
+        })
+        .map(zup_plan::PlannedPrerequisite::from_prerequisite)
+        .collect())
+}
+
 fn dependency(id: &str, minimum: Option<&str>) -> String {
     minimum.map_or_else(|| id.to_owned(), |version| format!("{id}>={version}"))
 }
@@ -510,10 +624,67 @@ pub(crate) fn execute(
 }
 
 fn execute_inner(request: &BootstrapRequest, control: &RuntimeControl) -> Result<()> {
+    validate_bootstrap_plan(&request.plan)?;
+    let plan = &request.plan.plan;
+    let manager = Manager::discover()?;
     let _ = control.events.send(RuntimeEvent::StateChanged {
         state: zup_runtime::RuntimeState::CheckingPrerequisites,
     });
-    let plan = &request.plan.plan;
+    let detect_only = plan
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation.package, PrerequisitePackage::DetectOnly))
+        .collect::<Vec<_>>();
+    for operation in detect_only {
+        let PrerequisiteRequirement::NativePackage {
+            id,
+            minimum_version,
+        } = &operation.requirement
+        else {
+            unreachable!()
+        };
+        let satisfied = manager.installed(id.as_str(), minimum_version.as_deref())?;
+        let _ = control.events.send(RuntimeEvent::PrerequisiteCheck {
+            id: operation.id.to_string(),
+            name: operation.name.clone(),
+            satisfied,
+            version: None,
+        });
+        if !satisfied {
+            return Err(BootstrapError::ProviderPreflight(format!(
+                "prerequisite `{}` is not satisfied",
+                operation.id
+            )));
+        }
+    }
+    let repository_operations = plan
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation.package, PrerequisitePackage::Repository))
+        .cloned()
+        .collect::<Vec<_>>();
+    if repository_operations.is_empty() {
+        return Ok(());
+    }
+    for operation in &repository_operations {
+        let PrerequisiteRequirement::NativePackage {
+            id,
+            minimum_version,
+        } = &operation.requirement
+        else {
+            unreachable!()
+        };
+        let satisfied = manager.installed(id.as_str(), minimum_version.as_deref())?;
+        let _ = control.events.send(RuntimeEvent::PrerequisiteCheck {
+            id: operation.id.to_string(),
+            name: operation.name.clone(),
+            satisfied,
+            version: None,
+        });
+    }
+    let repository_plan = BootstrapPlan::new(plan.key.clone(), repository_operations)?;
+    let repository_plan = zup_bootstrap::BoundBootstrapPlan::new(repository_plan, BTreeMap::new())?;
+    let plan = &repository_plan.plan;
     let lock_key = format!("bootstrap-{}", request.plan.id);
     let _lock = zup_transaction::ResourceLock::try_acquire(&request.state_root, &lock_key)
         .map_err(|error| BootstrapError::Provider(error.to_string()))?
@@ -543,7 +714,7 @@ fn execute_inner(request: &BootstrapRequest, control: &RuntimeControl) -> Result
     };
     state.validate(plan)?;
     let provider = NativeProvider {
-        manager: Manager::discover()?,
+        manager,
         control,
         directory: &directory,
         interrupted: state
@@ -593,9 +764,134 @@ fn execute_inner(request: &BootstrapRequest, control: &RuntimeControl) -> Result
     Ok(())
 }
 
+fn validate_bootstrap_plan(plan: &zup_bootstrap::BoundBootstrapPlan) -> Result<()> {
+    let validated =
+        zup_bootstrap::BoundBootstrapPlan::new(plan.plan.clone(), plan.artifacts.clone())?;
+    if validated != *plan {
+        return Err(BootstrapError::InvalidState(
+            "bootstrap plan identity or binding is invalid",
+        ));
+    }
+    if !plan.artifacts.is_empty() {
+        return Err(BootstrapError::ProviderPreflight(
+            "Linux prerequisite artifacts are unsupported".into(),
+        ));
+    }
+    for operation in &plan.plan.operations {
+        validate(&operation.requirement, &operation.package)?;
+        if operation.installer != zup_core::PrerequisiteInstaller::default() {
+            return Err(BootstrapError::ProviderPreflight(
+                "native package prerequisites do not accept artifact installer options".into(),
+            ));
+        }
+        if !matches!(
+            operation.target,
+            zup_core::PrerequisiteArchitecture::Current | zup_core::PrerequisiteArchitecture::Any
+        ) {
+            return Err(BootstrapError::Requirement(
+                "Linux native packages use the package manager's native architecture".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FixedPackageStatus(bool);
+
+    impl NativePackageQuery for FixedPackageStatus {
+        fn installed(&self, _: &str, _: Option<&str>) -> Result<bool> {
+            Ok(self.0)
+        }
+    }
+
+    fn detect_only_prerequisite() -> zup_plan::PlannedPrerequisite {
+        zup_plan::PlannedPrerequisite {
+            id: zup_core::PrerequisiteId::new("native-runtime").unwrap(),
+            name: zup_core::NonEmptyString::new("Native runtime").unwrap(),
+            target: zup_core::PrerequisiteArchitecture::Current,
+            requirement: PrerequisiteRequirement::NativePackage {
+                id: zup_core::InstalledPackageId::new("libc6").unwrap(),
+                minimum_version: None,
+            },
+            package: PrerequisitePackage::DetectOnly,
+            installer: zup_core::PrerequisiteInstaller::default(),
+        }
+    }
+
+    #[test]
+    fn machine_prerequisite_gate_accepts_satisfied_detect_only_packages() {
+        assert!(
+            require_satisfied_with(&[detect_only_prerequisite()], &FixedPackageStatus(true))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn machine_prerequisite_gate_rejects_missing_packages_without_installing() {
+        assert!(matches!(
+            require_satisfied_with(&[detect_only_prerequisite()], &FixedPackageStatus(false)),
+            Err(BootstrapError::ProviderPreflight(_))
+        ));
+    }
+
+    #[test]
+    fn detect_only_bootstrap_is_read_only_and_reports_the_check() {
+        let base = tempfile::tempdir().unwrap();
+        let state_root = base.path().join("state");
+        let prerequisite = detect_only_prerequisite();
+        let plan = BootstrapPlan::new(
+            zup_bootstrap::BootstrapKey {
+                app_id: zup_core::AppId::new("com.example.detect").unwrap(),
+                app_version: semver::Version::new(1, 0, 0),
+                target: zup_core::Target::parse("linux-x64").unwrap(),
+                scope: zup_core::SelectedScope::Machine,
+            },
+            vec![BootstrapOperation {
+                id: prerequisite.id,
+                name: prerequisite.name.to_string(),
+                target: prerequisite.target,
+                requirement: prerequisite.requirement,
+                package: prerequisite.package,
+                installer: prerequisite.installer,
+            }],
+        )
+        .unwrap();
+        let request = BootstrapRequest {
+            plan: zup_bootstrap::BoundBootstrapPlan::new(plan, BTreeMap::new()).unwrap(),
+            quarantine_root: state_root.join("bootstrap"),
+            state_root: state_root.clone(),
+        };
+        let (events, mut receiver) = tokio::sync::broadcast::channel(8);
+        let control = RuntimeControl::new(
+            zup_runtime::CancellationHandle::new(),
+            events,
+            zup_runtime::ExecutionPolicy::Interactive,
+        );
+
+        execute(&request, &control).expect("the installed package satisfies DetectOnly");
+
+        assert!(
+            !state_root.exists(),
+            "DetectOnly must not create bootstrap state"
+        );
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            RuntimeEvent::StateChanged {
+                state: zup_runtime::RuntimeState::CheckingPrerequisites
+            }
+        ));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            RuntimeEvent::PrerequisiteCheck {
+                satisfied: true,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn native_debian_versions_use_dpkg_ordering() {

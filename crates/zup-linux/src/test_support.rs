@@ -830,6 +830,24 @@ pub fn machine_package_bytes(
     allow_directory_override: bool,
     path: &[zup_core::PathEntry],
 ) -> Vec<u8> {
+    machine_package_bytes_with_prerequisites(
+        scratch,
+        version,
+        files,
+        allow_directory_override,
+        path,
+        &[],
+    )
+}
+
+pub fn machine_package_bytes_with_prerequisites(
+    scratch: &Path,
+    version: &str,
+    files: &[FixtureFile],
+    allow_directory_override: bool,
+    path: &[zup_core::PathEntry],
+    prerequisites: &[zup_core::Prerequisite],
+) -> Vec<u8> {
     let target = Target::host().expect("a supported Linux host");
     let payload_dir = scratch.join("payload");
     std::fs::create_dir_all(&payload_dir).expect("a payload directory");
@@ -888,7 +906,7 @@ pub fn machine_package_bytes(
                 },
                 allow_directory_override,
             },
-            prerequisites: Vec::new(),
+            prerequisites: prerequisites.to_vec(),
             components: Vec::new(),
             component_groups: Vec::new(),
             plugins: Vec::new(),

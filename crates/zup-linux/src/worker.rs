@@ -390,6 +390,10 @@ fn serve_recovery(
     {
         return Err(IpcError::WorkerAuth("recovery identity mismatch".into()));
     }
+    if recovery_replays_forward(&record) {
+        crate::prerequisites::require_satisfied(&record.plan.requirements.prerequisites)
+            .map_err(IpcError::Policy)?;
+    }
     let digest = record.plan_hash.to_hex();
     channel.send(Message::Prepared(PreparedOperation {
         plan: Box::new(record.plan.clone()),
@@ -415,6 +419,10 @@ fn serve_recovery(
     }
     if let Some(pin) = &prepared.carrier_pin {
         pin.verify(&prepared.carrier_path)?;
+    }
+    if recovery_replays_forward(&record) {
+        crate::prerequisites::require_satisfied(&record.plan.requirements.prerequisites)
+            .map_err(IpcError::Policy)?;
     }
     let result = if record.phase == zup_transaction::TransactionPhase::Committed
         && record.cleanup_complete()
@@ -494,6 +502,7 @@ struct PreparedPlan {
     carrier_path: PathBuf,
     carrier_pin: Option<FilePin>,
     plan: zup_plan::DeploymentPlan,
+    prerequisite_gate: Option<Vec<zup_plan::PlannedPrerequisite>>,
     state_root: PathBuf,
     roots: MachineRoots,
     systemd: crate::machine::SystemdRoots,
@@ -514,6 +523,7 @@ struct PreparedCarrier {
     carrier_path: PathBuf,
     carrier_pin: Option<FilePin>,
     carrier: crate::carrier::Carrier,
+    prerequisites: Vec<zup_plan::PlannedPrerequisite>,
 }
 
 fn prepare_carrier(
@@ -583,15 +593,58 @@ fn prepare_carrier(
         .map_err(|error| IpcError::WorkerAuth(format!("trusted carrier: {error}")))?;
     verify_carrier_declares(&carrier, &app_id, &authority_version, &target)?;
 
-    match &intent.operation {
-        zup_protocol::PrivilegedRequest::Deployment { .. } => {
-            crate::machine::ensure_machine_state_root(
-                &context.roots,
-                &app_id,
-                rustix::process::geteuid().as_raw(),
-            )
-            .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    let mut prerequisites = Vec::new();
+    if let zup_protocol::PrivilegedRequest::Deployment {
+        intent: deployment, ..
+    } = &intent.operation
+    {
+        let mut targets = carrier
+            .package()
+            .build_plan()
+            .map_err(|error| IpcError::Policy(format!("package: {error}")))?
+            .targets;
+        if targets.len() != 1 {
+            return Err(IpcError::Policy(format!(
+                "an installer package holds exactly one target; this one holds {}",
+                targets.len()
+            )));
         }
+        let build = targets.remove(0);
+        if !build.installer.install.scope.allows_machine() {
+            return Err(IpcError::Policy(
+                "the package does not declare machine scope".into(),
+            ));
+        }
+        let prior = if matches!(
+            deployment.action,
+            zup_plan::LifecycleAction::Upgrade
+                | zup_plan::LifecycleAction::Downgrade
+                | zup_plan::LifecycleAction::Modify
+                | zup_plan::LifecycleAction::Repair { .. }
+        ) {
+            crate::ledger::LinuxInstallationStore::new(&state_root)
+                .load(&app_id, SelectedScope::Machine)
+                .map_err(|error| IpcError::Transaction(error.to_string()))?
+        } else {
+            None
+        };
+        prerequisites = crate::prerequisites::active_for_operation(
+            &build.installer,
+            deployment.action,
+            &deployment.enable,
+            &deployment.disable,
+            prior
+                .as_ref()
+                .map(|ledger| ledger.current.selected_components.as_slice()),
+        )
+        .map_err(IpcError::Policy)?;
+        if requires_prerequisites(deployment.action) {
+            crate::prerequisites::require_satisfied(&prerequisites).map_err(IpcError::Policy)?;
+        }
+    }
+
+    match &intent.operation {
+        zup_protocol::PrivilegedRequest::Deployment { .. } => {}
         zup_protocol::PrivilegedRequest::Recovery { transaction } => {
             let store = zup_transaction::FilesystemTransactionStore::private_at(&state_root);
             let record = zup_transaction::TransactionStore::load(&store, transaction)
@@ -606,20 +659,26 @@ fn prepare_carrier(
             }
         }
     }
-    crate::machine::verify_machine_hierarchy(&state_root, rustix::process::geteuid().as_raw())
-        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
-    crate::machine::verify_machine_structure(&state_root, rustix::process::geteuid().as_raw())
-        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
-    crate::machine::ensure_transactions_dir(&state_root, rustix::process::geteuid().as_raw())
-        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
-    crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
-        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    if matches!(
+        &intent.operation,
+        zup_protocol::PrivilegedRequest::Recovery { .. }
+    ) {
+        crate::machine::verify_machine_hierarchy(&state_root, rustix::process::geteuid().as_raw())
+            .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+        crate::machine::verify_machine_structure(&state_root, rustix::process::geteuid().as_raw())
+            .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+        crate::machine::ensure_transactions_dir(&state_root, rustix::process::geteuid().as_raw())
+            .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+        crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
+            .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    }
 
     Ok(PreparedCarrier {
         state_root,
         carrier_path,
         carrier_pin,
         carrier,
+        prerequisites,
     })
 }
 
@@ -633,9 +692,19 @@ fn prepare_operation(
         carrier_path,
         carrier_pin,
         carrier,
+        prerequisites,
     } = prepare_carrier(context, &intent)?;
     let app_id = carrier.package().plan().installer.app.id.clone();
     let roots = context.roots.clone();
+    let zup_protocol::PrivilegedRequest::Deployment {
+        intent: deployment,
+        expected_requirements,
+    } = &intent.operation
+    else {
+        return Err(IpcError::WorkerProtocol(
+            "deployment request required".into(),
+        ));
+    };
 
     let mut targets = carrier
         .package()
@@ -650,26 +719,23 @@ fn prepare_operation(
     }
     let build = targets.remove(0);
 
-    if !build.installer.prerequisites.is_empty() {
-        return Err(IpcError::Policy(
-            "machine scope runs no prerequisite installers as root".into(),
-        ));
-    }
+    let prerequisite_gate = requires_prerequisites(deployment.action).then_some(prerequisites);
     if !build.installer.install.scope.allows_machine() {
         return Err(IpcError::Policy(
             "the package does not declare machine scope".into(),
         ));
     }
+    crate::machine::ensure_machine_state_root(&roots, &app_id, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    crate::machine::verify_machine_hierarchy(&state_root, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    crate::machine::verify_machine_structure(&state_root, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    crate::machine::ensure_transactions_dir(&state_root, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
+    crate::machine::normalize_state_modes(&state_root, rustix::process::geteuid().as_raw())
+        .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
 
-    let zup_protocol::PrivilegedRequest::Deployment {
-        intent: deployment,
-        expected_requirements,
-    } = &intent.operation
-    else {
-        return Err(IpcError::WorkerProtocol(
-            "deployment request required".into(),
-        ));
-    };
     let requested = zup_runtime::Operation::from(deployment.action);
 
     let ledger_store = crate::ledger::LinuxInstallationStore::new(&state_root);
@@ -835,6 +901,7 @@ fn prepare_operation(
         carrier_path,
         carrier_pin,
         plan,
+        prerequisite_gate,
         state_root,
         roots: roots.clone(),
         systemd: context.systemd.clone(),
@@ -846,6 +913,31 @@ fn prepare_operation(
         },
         _lock: lock,
     })
+}
+
+fn requires_prerequisites(action: zup_plan::LifecycleAction) -> bool {
+    matches!(
+        action,
+        zup_plan::LifecycleAction::Install
+            | zup_plan::LifecycleAction::Upgrade
+            | zup_plan::LifecycleAction::Downgrade
+            | zup_plan::LifecycleAction::Modify
+            | zup_plan::LifecycleAction::Repair { .. }
+    )
+}
+
+fn recovery_replays_forward(record: &zup_transaction::TransactionRecord) -> bool {
+    matches!(
+        record.phase,
+        zup_transaction::TransactionPhase::Applying
+            | zup_transaction::TransactionPhase::RecoveryRequired {
+                resume: zup_transaction::RecoveryPhase::Applying
+            }
+    ) && record.failure.is_none()
+        && matches!(
+            record.publication,
+            zup_transaction::PublicationState::NotRequested
+        )
 }
 
 struct RecoveryHost<'a> {
@@ -1244,6 +1336,9 @@ fn execute_prepared(
     fault: WorkerFault,
 ) -> Result<ExecutionVerdict, IpcError> {
     let app_id = &prepared.app_id;
+    if let Some(prerequisites) = &prepared.prerequisite_gate {
+        crate::prerequisites::require_satisfied(prerequisites).map_err(IpcError::Policy)?;
+    }
     crate::integration::reap_generated(
         &prepared.state_root,
         app_id,
