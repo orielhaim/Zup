@@ -116,6 +116,14 @@ pub enum NodeState {
 }
 
 impl NodeState {
+    pub(crate) fn collection_complete(&self) -> bool {
+        matches!(self, Self::Verified { receipt } if matches!(receipt.as_ref(),
+        OperationReceipt::Cleanup {
+            completion: crate::CleanupCompletion::Removed | crate::CleanupCompletion::AlreadyAbsent,
+            ..
+        }))
+    }
+
     pub fn is_rolled_back(&self) -> bool {
         matches!(self, Self::RolledBack | Self::Compensated { .. })
     }
@@ -138,14 +146,17 @@ impl NodeState {
                 | (Failed, RolledBack)
                 | (Pending, RollingBack { .. })
                 | (Pending, RolledBack)
-        ) || matches!(
-            (&self, &next),
-            (RollingBack { receipt: before }, RollingBack { receipt: after })
-                if matches!((before.as_ref(), after.as_ref()),
-                    (crate::OperationReceipt::ServiceControl(before), crate::OperationReceipt::ServiceControl(after))
-                        if before.operation == after.operation
-                            && matches!(after.authority, crate::ServiceControlAuthority::ReobservedQuiescent { .. }))
-        );
+        ) || matches!((&self, &next),
+            (Applied { receipt }, Running) if matches!(receipt.as_ref(),
+                OperationReceipt::Cleanup { completion: crate::CleanupCompletion::Deferred { .. }, .. }))
+            || matches!(
+                (&self, &next),
+                (RollingBack { receipt: before }, RollingBack { receipt: after })
+                    if matches!((before.as_ref(), after.as_ref()),
+                        (crate::OperationReceipt::ServiceControl(before), crate::OperationReceipt::ServiceControl(after))
+                            if before.operation == after.operation
+                                && matches!(after.authority, crate::ServiceControlAuthority::ReobservedQuiescent { .. }))
+            );
         let preserves_evidence = match (&self, &next) {
             (
                 Applied { receipt: before } | RollingBack { receipt: before },
@@ -273,7 +284,11 @@ impl TransactionRecord {
             .nodes
             .iter()
             .filter(|node| node.kind.is_post_commit())
-            .all(|node| matches!(self.nodes.get(&node.id), Some(NodeState::Verified { .. })))
+            .all(|node| {
+                self.nodes
+                    .get(&node.id)
+                    .is_some_and(NodeState::collection_complete)
+            })
     }
 
     pub fn validate(&self) -> Result<(), CorruptReason> {
@@ -448,6 +463,12 @@ impl TransactionRecord {
             let Some(state) = self.nodes.get(&node.id) else {
                 return Err(CorruptReason::NodeStateMismatch);
             };
+            if node.kind.is_post_commit()
+                && matches!(state, NodeState::Verified { .. })
+                && !state.collection_complete()
+            {
+                return Err(CorruptReason::InvalidReceipt);
+            }
             if matches!(state, NodeState::Verified { receipt }
             if matches!(receipt.as_ref(), OperationReceipt::NativeServiceCompensation { .. } | OperationReceipt::NativeCache {
                 completion: crate::NativeCacheCompletion::CompensationOnly, ..
@@ -489,6 +510,21 @@ impl TransactionRecord {
         for node in &self.plan.nodes {
             if !self.nodes.contains_key(&node.id) {
                 return Err(CorruptReason::NodeStateMismatch);
+            }
+        }
+        for node in self
+            .plan
+            .nodes
+            .iter()
+            .filter(|node| node.kind.is_post_commit())
+        {
+            if !self.nodes[&node.id].collection_complete()
+                && self.plan.dependencies.iter().any(|dependency| {
+                    dependency.from == node.id
+                        && !matches!(self.nodes.get(&dependency.to), Some(NodeState::Pending))
+                })
+            {
+                return Err(CorruptReason::InvalidPhase);
             }
         }
         Ok(())

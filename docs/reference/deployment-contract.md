@@ -52,6 +52,13 @@ committed and the cleanup recoverable; it does not roll back the active version.
 Busy resources and generations without a sufficient reader contract are retained
 with an explicit deferred result.
 
+Initial collection and recovery follow the plan's validated `execution_order`.
+Only verified removal or verified absence settles a cleanup dependency. A deferred
+receipt stays `Applied` and retryable; recovery verifies it before another attempt.
+Collection stops at the first unsettled node, including independent later nodes,
+and reports `RecoveryRequired` while phase remains `Committed`. Unsettled
+collection keeps its required recovery evidence rooted.
+
 Materialization leaves a verified tree in private preparation storage. Sealing
 first persists publication intent, then publishes access and the final directory
 name. An interrupted access transition can resume only against the recorded

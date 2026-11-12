@@ -462,17 +462,12 @@ where
             "cleanup requires a committed installation record".into(),
         ));
     }
-    let nodes: Vec<_> = record
-        .plan
-        .nodes
-        .iter()
-        .filter(|node| node.kind.is_post_commit())
-        .cloned()
-        .collect();
-    if nodes.is_empty() {
-        return Ok(TransactionOutcome::Committed);
-    }
-    for node in nodes {
+    for position in 0..record.plan.execution_order.len() {
+        let node = find_node(&record.plan, &record.plan.execution_order[position])?;
+        if !node.kind.is_post_commit() {
+            continue;
+        }
+        let node = node.clone();
         if let Err(error) = collect_node(store, record, executor, &node) {
             if matches!(error, TransactionError::Store(_)) {
                 return Err(error);
@@ -515,7 +510,7 @@ where
     let state = record.nodes.get(&node.id).cloned().ok_or_else(|| {
         TransactionError::InvalidState("cleanup node has no journal state".into())
     })?;
-    if matches!(state, NodeState::Verified { .. }) {
+    if state.collection_complete() {
         return Ok(());
     }
     if matches!(state, NodeState::Running) {
@@ -541,7 +536,13 @@ where
             }
         }
     }
-    if matches!(record.nodes.get(&node.id), Some(NodeState::Pending)) {
+    let deferred = matches!(record.nodes.get(&node.id),
+        Some(NodeState::Applied { receipt }) if matches!(receipt.as_ref(),
+            OperationReceipt::Cleanup { completion: crate::CleanupCompletion::Deferred { .. }, .. }));
+    if deferred && let Some(NodeState::Applied { receipt }) = record.nodes.get(&node.id) {
+        executor.verify(node, receipt).map_err(failed)?;
+    }
+    if deferred || matches!(record.nodes.get(&node.id), Some(NodeState::Pending)) {
         executor.prepare(node).map_err(failed)?;
         commit_node(record, store, &node.id, NodeState::Running)?;
         let receipt = executor.apply(node, record).map_err(failed)?;
@@ -563,6 +564,16 @@ where
     boundary(Boundary::VerifyBefore, node.id.as_str());
     executor.verify(node, &receipt).map_err(failed)?;
     boundary(Boundary::VerifyReturned, node.id.as_str());
+    if let OperationReceipt::Cleanup {
+        completion: crate::CleanupCompletion::Deferred { reason },
+        ..
+    } = receipt.as_ref()
+    {
+        return Err(TransactionError::Executor {
+            operation: node.id.to_string(),
+            message: format!("collection deferred: {reason}"),
+        });
+    }
     commit_node(record, store, &node.id, NodeState::Verified { receipt })
 }
 

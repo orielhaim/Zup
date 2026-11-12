@@ -28,6 +28,7 @@ fn maintain(state: &Path, source: &Path, previous: &InstallationRecord, retireme
     if !forget.is_empty() { effects.retention.get_or_insert_with(|| zup_plan::RetentionChange { retire: Vec::new(), forget: Vec::new() }).forget = forget; }
 
     effects.cleanup = zup_transaction::cleanup_candidates(&FilesystemTransactionStore::private_at(state), previous, effects.retention.as_ref()).unwrap();
+    effects.cleanup.reverse();
     assert!(!effects.cleanup.is_empty() || effects.retention.is_some());
     let plan = compile_deployment(&effects).unwrap();
     let publisher = native_publisher(state);
@@ -97,16 +98,19 @@ fn generation_collection_preserves_live_consumers_and_foreign_objects(#[case] ru
             process.wait().unwrap();
         }
     } else {
-        assert_eq!(outcome, TransactionOutcome::Committed, "{:?}", record.recovery_failure);
+        assert_eq!(outcome, if running { TransactionOutcome::RecoveryRequired } else { TransactionOutcome::Committed }, "{:?}", record.recovery_failure);
         let completion = record.plan.nodes.iter().find_map(|node| match record.receipt(&node.id) { Some(zup_transaction::OperationReceipt::Cleanup { completion, .. }) => Some(*completion), _ => None }).unwrap();
         if running {
             assert_eq!(completion, zup_transaction::CleanupCompletion::Deferred { reason: zup_transaction::CleanupDeferral::InUse });
             assert!(old.join("lib/data.txt").exists());
             let process = process.as_mut().unwrap();
             process.kill().unwrap(); process.wait().unwrap();
-            let installation = native_publisher(&state).load(&second.app_id, SelectedScope::User).unwrap().unwrap();
-            let (_, outcome) = maintain(&state, &source, &installation, None);
+            assert!(!record.cleanup_complete());
+            let store = FilesystemTransactionStore::private_at(&state);
+            let mut executor = native_executor(&state, &source, &record);
+            let (record, outcome) = zup_transaction::recover(record, &store, &mut executor, &native_publisher(&state)).unwrap();
             assert_eq!(outcome, TransactionOutcome::Committed);
+            assert!(record.cleanup_complete());
         } else { assert_eq!(completion, zup_transaction::CleanupCompletion::Removed); }
         assert!(!old.exists());
     }
@@ -130,7 +134,15 @@ fn collection_fault_child() {
 #[cfg(feature = "test-faults")]
 #[rstest::rstest]
 #[case("collection_prepared")]
+#[case("collection_deleting")]
 #[case("collection_member_removed")]
+#[case("collection_completed")]
+#[case("intent_persisted")]
+#[case("apply_returned")]
+#[case("receipt_persisted")]
+#[case("verify_before")]
+#[case("verify_returned")]
+#[case("verified_persisted")]
 #[cfg_attr(target_os = "linux", case("collection_image_writable"))]
 fn interrupted_native_collection_resumes_without_reverting_the_activation(#[case] point: &str) {
     #[cfg(windows)]
@@ -153,6 +165,7 @@ fn interrupted_native_collection_resumes_without_reverting_the_activation(#[case
         .args(["--exact", "cleanup_lifecycle::collection_fault_child", "--nocapture"])
         .env("ZUP_COLLECTION_FIXTURE", temporary.path())
         .env("ZUP_TEST_FAULT_POINT", point).env("ZUP_TEST_FAULT_ACTION", "crash")
+        .env("ZUP_TEST_FAULT_OPERATION", "collect:")
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();
     assert!(!result.success());
     let installation = native_publisher(&state).load(&second.app_id, SelectedScope::User).unwrap().unwrap();
@@ -160,7 +173,7 @@ fn interrupted_native_collection_resumes_without_reverting_the_activation(#[case
     use zup_transaction::TransactionStore;
     let record = store.load(&installation.commit.transaction).unwrap();
     assert_eq!(record.phase, zup_transaction::TransactionPhase::Committed);
-    assert!(!record.cleanup_complete());
+    if point != "verified_persisted" { assert!(!record.cleanup_complete()); }
     let mut executor = native_executor(&state, &source, &record);
     let (record, outcome) = zup_transaction::recover(record, &store, &mut executor, &native_publisher(&state)).unwrap();
     assert_eq!(outcome, TransactionOutcome::Committed, "{:?}", record.recovery_failure);
@@ -252,7 +265,9 @@ fn default_reader_contract_retains_retired_generations() {
     std::fs::write(source.join("build/asset.bin"), b"second").unwrap();
     let second = deploy(&state, &application, &source, b"second", Some(&first));
     let (record, outcome) = maintain(&state, &source, &second, zup_plan::RetentionChange::keeping_previous(&second, 0));
-    assert_eq!(outcome, TransactionOutcome::Committed, "{:?}", record.recovery_failure);
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired, "{:?}", record.recovery_failure);
+    assert_eq!(record.phase, zup_transaction::TransactionPhase::Committed);
+    assert!(!record.cleanup_complete());
     for node in &record.plan.nodes {
         if let zup_plan::NodeKind::Cleanup { operation } = &node.kind
             && let zup_plan::CleanupCandidate::Generation(generation) = &operation.candidate

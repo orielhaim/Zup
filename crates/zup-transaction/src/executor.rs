@@ -33,13 +33,18 @@ pub enum NativeCacheCompletion {
     CompensationOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupDeferral {
+    #[error("generation reader lifetimes are untracked; retain the generation")]
     UntrackedReaders,
+    #[error("native consumers still hold the object; retry after they release it")]
     InUse,
+    #[error("the filesystem cannot provide the required collection fence")]
     UnsupportedFilesystem,
+    #[error("the native collection fence is unavailable; retry when it is available")]
     FenceUnavailable,
+    #[error("sidecar metadata is still referenced; retain its journal and retry collection")]
     ReferencedMetadata,
 }
 
