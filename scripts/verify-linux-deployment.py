@@ -221,7 +221,7 @@ lifecycle = {lifecycle}
             report["uninstall"] = invoke(b, "uninstall")
             if options.manager == "openrc":
                 assert guest.run("test", "-e", f"/etc/init.d/{native}", check=False).returncode != 0
-                assert guest.run("test", "-e", f"/etc/conf.d/{native}", check=False).returncode != 0
+                assert guest.run("test", "-e", f"/etc/zup/openrc/{native}", check=False).returncode != 0
             else:
                 assert guest.run("systemctl", "show", native, "--property=LoadState", "--value").stdout.strip() == "not-found"
             assert guest.run("cat", data + "/sentinel").stdout == "user data"

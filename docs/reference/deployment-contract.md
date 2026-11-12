@@ -100,6 +100,38 @@ shells observe updated PATH registration; existing shell environments may retain
 an older generation path. Retention and the declared reader contract govern when
 that generation can be collected.
 
+## OpenRC admission and process scope
+
+OpenRC runlevel membership controls automatic startup. It does not block manual
+starts. Zup stores the separate admission decision in
+`/etc/zup/openrc/<native-name>`, in root-owned private directories and a private
+regular file. The canonical service's `start_pre()` reads that exact file.
+Only `allowed` permits admission. Missing or malformed evidence blocks native
+startup and cannot authorize Zup to declare the service safely inhibited.
+
+Manual and automatic services permit native starts. Automatic services also
+belong to the default runlevel. Disabled services have inhibited admission.
+Runlevel-specific configuration cannot replace the admission decision. Zup owns
+the launch configuration, so service configuration files may contain only blank
+lines and comments. Executable overrides, symbolic links, unsafe permissions and
+foreign runlevel entries are configuration conflicts. Zup does not adopt or
+rewrite those files.
+
+Before stopping a service, Zup durably inhibits admission, removes automatic
+startup, and drains OpenRC's native request lock. The lock covers starts admitted
+before inhibition. Later starts fail in the canonical hook. Inhibition alone does
+not stop an existing supervisor or its respawns. Shutdown retains pidfd identity
+checks and requires the authenticated cgroup v2 scope to become empty before
+replacement. Recovery settles interrupted native requests before observing their
+terminal state. Restoring admission follows runlevel publication; uncertain
+activation is inhibited and drained again before compensation.
+
+`scripts/verify-stock-openrc.py` runs the native policy, override, concurrent-start
+and process-crash regressions in a disposable Alpine VM. It also reboots the guest
+to verify automatic startup and persistent inhibition without a Zup process.
+The verification host needs `musl-gcc` for a test-only fixture that pauses OpenRC
+while it holds its native request lock. Installed services need no extra helper.
+
 ## Windows service process scope
 
 SCM reports the service's main process. It does not establish that child processes

@@ -31,6 +31,7 @@ pub enum Boundary {
     NativeRequestBefore,
     NativeRequestSubmitted,
     NativeConfigurationChanged,
+    NativeAdmissionInhibited,
     ApplyReturned,
     ReceiptPersisted,
     VerifyBefore,

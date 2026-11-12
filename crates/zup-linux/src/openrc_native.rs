@@ -1,3 +1,4 @@
+use crate::openrc::Admission;
 use crate::{error::ExecError, fs::OwnedDirectory};
 use std::{
     collections::BTreeMap,
@@ -69,6 +70,12 @@ pub fn active() -> bool {
 pub struct Openrc {
     pub roots: crate::locations::MachineRoots,
     controller_binary: (u64, u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunlevelPolicy {
+    Manual,
+    Automatic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -153,8 +160,6 @@ impl Openrc {
                     ..
                 }
             )
-            || self.policy(&operation.native_name)? != "disabled"
-            || !self.inhibited(&operation.native_name)?
         {
             return Err("OpenRC stop requires the authenticated disabled registration".into());
         }
@@ -201,7 +206,7 @@ impl Openrc {
                 Err(error) => return Err(error.to_string()),
             }
         }
-        // Native OpenRC unlinks this lease; the disabled native configuration is the persistent gate.
+        // OpenRC unlinks its lease after the request. The protected admission record gates later starts.
         drop(lease);
         self.check_inhibited(operation)
     }
@@ -469,7 +474,9 @@ impl Openrc {
             let bytes = crate::openrc::render(&name, &state)?;
             let previous_source = self.definition(&name)?;
             if service.kind == zup_plan::IntegrationChangeKind::Create
-                && (previous_source.is_some() || self.policy(&name)? != "disabled")
+                && (previous_source.is_some()
+                    || self.runlevel_policy(&name)? != RunlevelPolicy::Manual
+                    || self.admission(&name)?.is_some())
             {
                 return Err("foreign OpenRC service or runlevel entry already exists".into());
             }
@@ -661,91 +668,177 @@ impl Openrc {
                 ));
             }
         }
-        self.inhibited(name)?;
-        let source =
-            crate::service_ops::read_canonical_source(&path).map_err(|error| error.to_string())?;
-        if source.is_some() {
-            let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-            if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 || metadata.mode() & 0o111 == 0 {
-                return Err(
-                    "OpenRC definition requires root ownership and safe executable permissions"
-                        .into(),
-                );
-            }
+        self.check_configuration_files(name)?;
+        let directory =
+            OwnedDirectory::open(path.parent().unwrap()).map_err(|error| error.to_string())?;
+        let source = read_native_file(&directory, name, crate::service_ops::MAX_UNIT_BYTES)?;
+        if let Some((_, mode)) = &source
+            && mode & 0o111 == 0
+        {
+            return Err(
+                "OpenRC definition requires root ownership and safe executable permissions".into(),
+            );
         }
-        Ok(source)
+        Ok(source.map(|(bytes, _)| bytes))
     }
 
-    fn inhibited(&self, name: &str) -> Result<bool, String> {
+    fn check_configuration_files(&self, name: &str) -> Result<(), String> {
         trusted_directory(Path::new("/etc/conf.d"))?;
-        let path = Path::new("/etc/conf.d").join(name);
-        match std::fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(error) => Err(error.to_string()),
-            Ok(_) => {
-                if trusted_value(&path)? != "zup_disabled=yes\n" {
-                    return Err("foreign OpenRC configuration override".into());
+        let directory =
+            OwnedDirectory::open(Path::new("/etc/conf.d")).map_err(|error| error.to_string())?;
+        let base = name.split('.').next().expect("service name");
+        let levels = OwnedDirectory::open(Path::new("/etc/runlevels"))
+            .map_err(|error| error.to_string())?
+            .child_names()
+            .map_err(|error| error.to_string())?;
+        for candidate in directory.child_names().map_err(|error| error.to_string())? {
+            if candidate == name
+                || candidate.starts_with(&format!("{name}."))
+                || base != name
+                    && (candidate == base
+                        || levels
+                            .iter()
+                            .any(|level| candidate == format!("{base}.{level}")))
+            {
+                let Some((bytes, _)) =
+                    read_native_file(&directory, &candidate, crate::service_ops::MAX_UNIT_BYTES)?
+                else {
+                    return Err("OpenRC configuration disappeared during inspection".into());
+                };
+                let text = std::str::from_utf8(&bytes).map_err(|error| error.to_string())?;
+                if text
+                    .lines()
+                    .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+                {
+                    return Err(format!(
+                        "OpenRC configuration {candidate} overrides the owned service definition"
+                    ));
                 }
-                Ok(true)
             }
         }
+        Ok(())
+    }
+
+    fn admission_directory(&self, create: bool) -> Result<Option<OwnedDirectory>, String> {
+        trusted_directory(Path::new("/etc"))?;
+        let mut directory =
+            OwnedDirectory::open(Path::new("/etc")).map_err(|error| error.to_string())?;
+        for name in Path::new(crate::openrc::ADMISSION_DIRECTORY)
+            .strip_prefix("/etc")
+            .expect("admission state belongs under /etc")
+            .iter()
+            .map(|name| name.to_str().expect("constant admission path"))
+        {
+            directory = match directory
+                .kind_or_absent(name)
+                .map_err(|error| error.to_string())?
+            {
+                None if !create => return Ok(None),
+                None => directory
+                    .create_exclusive_directory(name, crate::fs::STATE_DIRECTORY_MODE)
+                    .map_err(|error| error.to_string())?,
+                Some(_) => directory
+                    .open_child(name)
+                    .map_err(|error| error.to_string())?,
+            };
+            let state = directory.stat_self().map_err(|error| error.to_string())?;
+            if state.uid != 0 || state.mode != 0o700 {
+                return Err("OpenRC admission directory is not private installer authority".into());
+            }
+        }
+        Ok(Some(directory))
+    }
+
+    fn admission(&self, name: &str) -> Result<Option<Admission>, String> {
+        Self::source(name)?;
+        let Some(directory) = self.admission_directory(false)? else {
+            return Ok(None);
+        };
+        let Some((bytes, mode)) = read_native_file(&directory, name, 32)? else {
+            return Ok(None);
+        };
+        if mode != 0o600 {
+            return Err("OpenRC admission record is not private".into());
+        }
+        match bytes.as_slice() {
+            b"allowed\n" => Ok(Some(Admission::Allowed)),
+            b"inhibited\n" => Ok(Some(Admission::Inhibited)),
+            _ => Err("OpenRC admission record is not recognized".into()),
+        }
+    }
+
+    fn set_admission(&self, name: &str, admission: Admission) -> Result<(), String> {
+        let previous = self.admission(name)?;
+        let directory = self
+            .admission_directory(true)?
+            .ok_or("OpenRC admission directory disappeared")?;
+        match previous {
+            Some(before) if before == admission => return Ok(()),
+            Some(_) => directory.write_durable(name, admission.bytes(), crate::fs::STATE_FILE_MODE),
+            None => directory.create_durable_exclusive(
+                name,
+                admission.bytes(),
+                crate::fs::STATE_FILE_MODE,
+            ),
+        }
+        .map_err(|error| error.to_string())
     }
 
     fn configuration(&self, name: &str, source: &[u8]) -> Result<ServiceState, String> {
         let mut state = crate::openrc::parse(name, source)?;
         if let ServiceState::Registration { start, .. } = &mut state {
-            *start = if self.inhibited(name)? {
-                if self.policy(name)? != "disabled" {
-                    return Err("inhibited OpenRC service remains enabled".into());
+            let policy = self.runlevel_policy(name)?;
+            *start = match self
+                .admission(name)?
+                .ok_or("OpenRC registration lacks protected admission evidence")?
+            {
+                Admission::Inhibited => ServiceStart::Disabled,
+                Admission::Allowed if policy == RunlevelPolicy::Automatic => {
+                    ServiceStart::Automatic
                 }
-                ServiceStart::Disabled
-            } else if self.policy(name)? == "enabled" {
-                ServiceStart::Automatic
-            } else {
-                ServiceStart::Manual
+                Admission::Allowed => ServiceStart::Manual,
             };
         }
         Ok(state)
     }
 
-    fn set_activation(&self, name: &str, configuration: &ServiceState) -> Result<(), String> {
+    fn set_startup(&self, name: &str, configuration: &ServiceState) -> Result<(), String> {
         let start = match configuration {
             ServiceState::Registration { start, .. } => *start,
             ServiceState::Absent => ServiceStart::Manual,
         };
-        let inhibited = self.inhibited(name)?;
-        let directory =
-            OwnedDirectory::open(Path::new("/etc/conf.d")).map_err(|error| error.to_string())?;
-        if start == ServiceStart::Disabled && !inhibited {
-            directory
-                .create_durable_exclusive(
-                    name,
-                    b"zup_disabled=yes\n",
-                    rustix::fs::Mode::from_bits_truncate(0o644),
-                )
-                .map_err(|error| error.to_string())?;
+        self.admission(name)?;
+        if start == ServiceStart::Disabled {
+            self.set_admission(name, Admission::Inhibited)?;
+            zup_transaction::fault_injection::boundary(
+                zup_transaction::fault_injection::Boundary::NativeAdmissionInhibited,
+                name,
+            );
         }
-        self.set_policy(
+        self.set_runlevel_policy(
             name,
             if start == ServiceStart::Automatic {
-                "enabled"
+                RunlevelPolicy::Automatic
             } else {
-                "disabled"
+                RunlevelPolicy::Manual
             },
         )?;
-        if start != ServiceStart::Disabled && inhibited {
-            if !self.inhibited(name)? {
-                return Err("OpenRC inhibition changed before removal".into());
+        if configuration == &ServiceState::Absent {
+            if self.admission(name)?.is_some()
+                && let Some(directory) = self.admission_directory(false)?
+            {
+                directory
+                    .remove_file(name)
+                    .map_err(|error| error.to_string())?;
+                directory.sync().map_err(|error| error.to_string())?;
             }
-            directory
-                .remove_file(name)
-                .map_err(|error| error.to_string())?;
-            directory.sync().map_err(|error| error.to_string())?;
+        } else if start != ServiceStart::Disabled {
+            self.set_admission(name, Admission::Allowed)?;
         }
         Ok(())
     }
 
-    fn policy(&self, name: &str) -> Result<&'static str, String> {
+    fn runlevel_policy(&self, name: &str) -> Result<RunlevelPolicy, String> {
         let mut automatic = false;
         for entry in std::fs::read_dir("/etc/runlevels").map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
@@ -773,12 +866,18 @@ impl Openrc {
                 }
             }
         }
-        Ok(if automatic { "enabled" } else { "disabled" })
+        Ok(if automatic {
+            RunlevelPolicy::Automatic
+        } else {
+            RunlevelPolicy::Manual
+        })
     }
 
     pub fn observe_registration(&self, name: &str) -> Result<ObservedServiceState, String> {
         let Some(bytes) = self.definition(name)? else {
-            if self.policy(name)? != "disabled" || self.inhibited(name)? {
+            if self.runlevel_policy(name)? != RunlevelPolicy::Manual
+                || self.admission(name)?.is_some()
+            {
                 return Err("orphaned OpenRC activation resource".into());
             }
             ensure_absent_runtime(name)?;
@@ -802,14 +901,6 @@ impl Openrc {
         else {
             unreachable!()
         };
-        let expected = if start == ServiceStart::Automatic {
-            "enabled"
-        } else {
-            "disabled"
-        };
-        if self.policy(name)? != expected {
-            return Ok(ObservedServiceState::InvalidService);
-        }
         let runtime_state = Some(self.runtime(name, &command)?.0);
         Ok(ObservedServiceState::Service {
             state_directories,
@@ -1041,13 +1132,15 @@ impl Openrc {
         Ok(diagnostic)
     }
 
-    fn set_policy(&self, name: &str, desired: &str) -> Result<(), String> {
-        let previous = self.policy(name)?;
+    fn set_runlevel_policy(&self, name: &str, desired: RunlevelPolicy) -> Result<(), String> {
+        let path = Path::new("/etc/runlevels/default");
+        trusted_directory(path)?;
+        let directory = OwnedDirectory::open(path).map_err(|error| error.to_string())?;
+        let previous = self.runlevel_policy(name)?;
         if previous != desired {
             let action = match desired {
-                "enabled" => "add",
-                "disabled" => "del",
-                _ => return Err("unsupported OpenRC startup policy".into()),
+                RunlevelPolicy::Automatic => "add",
+                RunlevelPolicy::Manual => "del",
             };
             self.command(
                 "/sbin/rc-update",
@@ -1055,9 +1148,21 @@ impl Openrc {
                 Duration::from_secs(30),
             )?;
         }
-        if self.policy(name)? != desired {
+        if self.runlevel_policy(name)? != desired {
             return Err("OpenRC runlevel update failed verification".into());
         }
+        if OwnedDirectory::open(path)
+            .and_then(|current| current.stat_self())
+            .map_err(|error| error.to_string())?
+            .object()
+            != directory
+                .stat_self()
+                .map_err(|error| error.to_string())?
+                .object()
+        {
+            return Err("OpenRC runlevel directory changed during publication".into());
+        }
+        directory.sync().map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -1145,7 +1250,7 @@ impl Openrc {
             ensure_absent_runtime(&name)?;
             None
         };
-        self.set_activation(&name, desired)?;
+        self.set_startup(&name, desired)?;
         if self.generation()? != generation
             || self.observe_registration(&name)?.configuration().as_ref() != Some(desired)
         {
@@ -1258,17 +1363,22 @@ impl Openrc {
 }
 
 impl NativeServiceManager for Openrc {
-    fn reconcile_control_request(
+    fn prepare_recovery(
         &mut self,
         operation: &ServiceControlOperation,
         deadline: std::time::Instant,
     ) -> Result<(), String> {
+        operation.validate()?;
+        if operation.intent != zup_plan::ServiceControlIntent::Transition {
+            return Ok(());
+        }
+        if self.generation()? != operation.manager_generation {
+            return Ok(());
+        }
         let source = self
             .definition(&operation.native_name)?
             .ok_or("OpenRC definition disappeared")?;
-        if self.generation()? != operation.manager_generation
-            || source != crate::openrc::render(&operation.native_name, &operation.configuration)?
-        {
+        if source != crate::openrc::render(&operation.native_name, &operation.configuration)? {
             return Err("OpenRC recovery registration or manager changed".into());
         }
         if operation.stage == zup_plan::ServiceControlStage::Restore {
@@ -1282,7 +1392,7 @@ impl NativeServiceManager for Openrc {
                     "OpenRC activation recovery lacks its closed admission boundary".into(),
                 );
             }
-            self.set_activation(&operation.native_name, &inhibited)?;
+            self.set_startup(&operation.native_name, &inhibited)?;
             let mut stop = operation.clone();
             stop.stage = zup_plan::ServiceControlStage::Quiesce;
             stop.before_configuration = inhibited.clone();
@@ -1307,14 +1417,14 @@ impl NativeServiceManager for Openrc {
                 }
             }
         }
-        if !self.inhibited(&operation.native_name)? {
+        if self.admission(&operation.native_name)? != Some(Admission::Inhibited) {
             let actual = self.configuration(&operation.native_name, &source)?;
             if actual == operation.before_configuration && actual != operation.configuration {
                 return Ok(());
             }
             return Err("OpenRC recovery lacks its persisted activation inhibition".into());
         }
-        self.set_policy(&operation.native_name, "disabled")?;
+        self.set_runlevel_policy(&operation.native_name, RunlevelPolicy::Manual)?;
         self.stop_native(operation, deadline)
     }
 
@@ -1400,7 +1510,7 @@ impl NativeServiceManager for Openrc {
         }
         if operation.before_configuration != operation.configuration {
             remaining()?;
-            self.set_activation(&operation.native_name, &operation.configuration)?;
+            self.set_startup(&operation.native_name, &operation.configuration)?;
             zup_transaction::fault_injection::boundary(
                 zup_transaction::fault_injection::Boundary::NativeConfigurationChanged,
                 &operation.native_name,
@@ -1548,6 +1658,77 @@ impl NativeServiceManager for Openrc {
             interval = (interval * 2).min(Duration::from_millis(200));
         }
     }
+}
+
+fn read_native_file(
+    directory: &OwnedDirectory,
+    name: &str,
+    limit: usize,
+) -> Result<Option<(Vec<u8>, u32)>, String> {
+    match directory
+        .kind_or_absent(name)
+        .map_err(|error| error.to_string())?
+    {
+        None => return Ok(None),
+        Some(crate::fs::EntryKind::Regular) => {}
+        Some(_) => {
+            return Err(format!(
+                "OpenRC native file {name} is not a regular owned file"
+            ));
+        }
+    }
+    let mut file = directory
+        .open_regular_read(name)
+        .map_err(|error| error.to_string())?;
+    let before = file.metadata().map_err(|error| error.to_string())?;
+    if before.uid() != 0
+        || before.mode() & 0o022 != 0
+        || before.nlink() != 1
+        || before.len() > limit as u64
+    {
+        return Err(format!(
+            "OpenRC native file {name} has unsafe ownership, access or size"
+        ));
+    }
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let current = directory
+        .stat_child(name)
+        .map_err(|error| error.to_string())?;
+    let identity = |metadata: &std::fs::Metadata| {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.uid(),
+            metadata.gid(),
+            metadata.mode(),
+            metadata.nlink(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    };
+    if bytes.len() as u64 != before.len()
+        || identity(&before) != identity(&file.metadata().map_err(|error| error.to_string())?)
+        || (current.dev, current.ino, current.uid, current.mode)
+            != (
+                before.dev(),
+                before.ino(),
+                before.uid(),
+                before.mode() & 0o7777,
+            )
+    {
+        return Err(format!(
+            "OpenRC native file {name} changed during inspection"
+        ));
+    }
+    Ok(Some((bytes, before.mode() & 0o7777)))
 }
 
 fn trusted_scope_control(path: &Path) -> Result<(), String> {
@@ -1758,6 +1939,7 @@ fn execution_ids(execution: &zup_core::ServiceExecution) -> Result<(u32, u32), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("openrc_native/admission_tests.rs");
     use std::os::unix::fs::PermissionsExt;
     use zup_core::{
         CommandSpec, ResourceKey, ServiceExecution, ServiceFailurePolicy, ServiceId,
@@ -1887,7 +2069,7 @@ mod tests {
         let tag = uuid::Uuid::now_v7().simple().to_string();
         let id = ServiceId::new(format!("probe-{tag}")).unwrap();
         let key = ResourceKey::Service { id: id.clone() };
-        let name = "zup-openrc-fixture".to_owned();
+        let name = format!("zup-openrc-fixture-{tag}");
         let root = Path::new("/opt").join(format!("zup-openrc-{tag}"));
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1951,9 +2133,18 @@ mod tests {
         let start = control(&manager, &key, &name, &a, &a, false, true);
         zup_transaction::apply_service_control(&mut manager, &start).unwrap();
         let disabled_a = zup_plan::disabled_startup(&a).unwrap();
+        let overrides = OwnedDirectory::open(Path::new("/etc/conf.d")).unwrap();
+        let override_name = format!("{name}.default");
+        overrides
+            .create_durable_exclusive(
+                &override_name,
+                b"",
+                rustix::fs::Mode::from_bits_truncate(0o644),
+            )
+            .unwrap();
         let stop = control(&manager, &key, &name, &a, &disabled_a, true, false);
         if supervised {
-            manager.set_activation(&name, &disabled_a).unwrap();
+            manager.set_startup(&name, &disabled_a).unwrap();
             let evidence: NativeExecution =
                 serde_json::from_str(&stop.before_execution_generation).unwrap();
             let native = evidence.supervisor.unwrap();
@@ -2033,5 +2224,6 @@ mod tests {
             ObservedServiceState::Absent
         );
         std::fs::remove_dir_all(&root).unwrap();
+        overrides.remove_file(&override_name).unwrap();
     }
 }

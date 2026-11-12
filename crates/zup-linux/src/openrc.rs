@@ -2,6 +2,25 @@ use zup_core::TargetPath;
 use zup_core::{ServiceExecution, ServiceFailurePolicy, ServiceReadiness};
 use zup_plan::{DesiredService, ServiceState};
 
+pub const ADMISSION_DIRECTORY: &str = "/etc/zup/openrc";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(target_os = "linux")]
+pub(crate) enum Admission {
+    Allowed,
+    Inhibited,
+}
+
+#[cfg(target_os = "linux")]
+impl Admission {
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::Allowed => b"allowed\n",
+            Self::Inhibited => b"inhibited\n",
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn validate_executable(bytes: &[u8], target: &zup_core::Target) -> Result<(), String> {
     let executable = zup_binary::Executable::from_bytes(bytes)
@@ -116,7 +135,7 @@ pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
         &serde_json::to_vec(&source_contract).map_err(|error| error.to_string())?,
     );
     let supervisor = match failure {
-        ServiceFailurePolicy::None => "command_background=yes\n".to_owned(),
+        ServiceFailurePolicy::None => "supervisor=''\ncommand_background=yes\n".to_owned(),
         ServiceFailurePolicy::Openrc {
             delay_seconds,
             max_respawns,
@@ -139,14 +158,21 @@ pub fn render(name: &str, state: &ServiceState) -> Result<Vec<u8>, String> {
         )
     };
     let activation = r#"start_pre() {
-    local membership
-    [ "${zup_disabled:-no}" != yes ] || return 1
+    local admission remainder membership
+    [ "$RC_SVCNAME" = '@NAME@' ] || return 1
+    {
+        IFS= read -r admission &&
+        ! IFS= read -r remainder && [ -z "$remainder" ]
+    } < '@ADMISSION@/@NAME@' || return 1
+    [ "$admission" = allowed ] || return 1
     mountinfo -q -f '^cgroup2$' /sys/fs/cgroup || return 1
     [ -f "/sys/fs/cgroup/openrc.$RC_SVCNAME/cgroup.kill" ] || return 1
     read -r membership < /proc/self/cgroup || return 1
     [ "$membership" = "0::/openrc.$RC_SVCNAME" ]
 }
-"#;
+"#
+    .replace("@ADMISSION@", ADMISSION_DIRECTORY)
+    .replace("@NAME@", name);
     Ok(format!("#!/sbin/openrc-run\n# zup-registration={metadata}\ndescription={}\ncommand={executable}\ncommand_args={arguments}\ncommand_args_foreground=''\ncommand_user={user}\npidfile='/run/{name}.pid'\nretry='TERM/{stop_grace_seconds}/KILL/{kill_wait_seconds}'\nstopgroup=yes\nrc_cgroup_mode=unified\nrc_cgroup_cleanup=YES\numask=027\nno_new_privs=yes\n{supervisor}{dependency}{activation}", quote(display_name)?).into_bytes())
 }
 

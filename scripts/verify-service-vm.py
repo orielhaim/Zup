@@ -421,9 +421,9 @@ placement = {{ kind = "fixed", directory = "${{install}}" }}
                         assert pending.poll() is None, "upgrade exited before the interference boundary"
                         assert time.monotonic() < deadline, "upgrade did not reach the interference boundary"
                         time.sleep(0.05)
-                    gate = f"/etc/conf.d/{names['api']}"
+                    gate = f"/etc/zup/openrc/{names['api']}"
                     disabled_gate = guest("cat", gate).stdout
-                    guest("rm", gate)
+                    guest("tee", gate, input_text="allowed\n")
                     control("api", "start")
                     unmarked_pid = process("api")
                     assert unmarked_pid, "external dependent did not start"
