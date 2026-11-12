@@ -1288,6 +1288,7 @@ fn spool_source(
     let spool_path = spool_dir.path().join(expected_digest.to_hex());
     let output_file = File::create(&spool_path)?;
     let mut encoder = zstd::stream::write::Encoder::new(output_file, 9)?;
+    encoder.set_pledged_src_size(Some(expected_size))?;
     let mut input = File::open(source)?;
     let mut hasher = Sha256::new();
     let mut size = 0u64;
@@ -1298,13 +1299,16 @@ fn spool_source(
             break;
         }
         size = size.checked_add(read as u64).ok_or(PackageError::Invalid)?;
+        if size > expected_size {
+            return Err(PackageError::Payload(source.display().to_string()));
+        }
         hasher.update(&buffer[..read]);
         encoder.write_all(&buffer[..read])?;
     }
-    let output_file = encoder.finish()?;
     if size != expected_size || Sha256Digest::from_hasher(hasher) != expected_digest {
         return Err(PackageError::Payload(source.display().to_string()));
     }
+    let output_file = encoder.finish()?;
     let compressed_size = output_file.metadata()?.len();
     objects.insert(
         expected_digest,
@@ -1470,7 +1474,10 @@ impl BundleWriter {
         let mut compressed = Vec::new();
         let mut blobs = Vec::with_capacity(contents.len());
         for (digest, bytes) in contents {
-            let encoded = zstd::stream::encode_all(Cursor::new(&bytes), 9)?;
+            let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 9)?;
+            encoder.set_pledged_src_size(Some(bytes.len() as u64))?;
+            encoder.write_all(&bytes)?;
+            let encoded = encoder.finish()?;
             let offset = compressed.len() as u64;
             blobs.push(BlobIndex {
                 digest,
@@ -1805,6 +1812,7 @@ impl BundleWriter {
                 let spool_path = spool_dir.path().join(artifact.metadata.blob.to_hex());
                 let output_file = File::create(&spool_path)?;
                 let mut encoder = zstd::stream::write::Encoder::new(output_file, 9)?;
+                encoder.set_pledged_src_size(Some(artifact.metadata.aot_size))?;
                 encoder.write_all(artifact.bytes.as_slice())?;
                 let output_file = encoder.finish()?;
                 entry.insert(Spool {

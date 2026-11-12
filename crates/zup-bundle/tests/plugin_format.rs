@@ -128,11 +128,14 @@ fn rewrite_metadata(package: &mut Vec<u8>, mutate: impl FnOnce(&mut Value)) {
     package[28..60].copy_from_slice(&Sha256::digest(&metadata));
 }
 
-#[test]
-fn schema_one_deduplicates_plugin_blobs_and_round_trips() {
+#[rstest::rstest]
+#[case::small(8)]
+#[case::multiple_streaming_buffers(256 * 1024 + 17)]
+fn schema_one_deduplicates_plugin_blobs_and_round_trips(#[case] size: usize) {
     let (root, plan) = project();
-    let one = artifact(&plan, "z-plugin", b"same aot");
-    let two = artifact(&plan, "a-plugin", b"same aot");
+    let aot: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+    let one = artifact(&plan, "z-plugin", &aot);
+    let two = artifact(&plan, "a-plugin", &aot);
     let artifacts = vec![one.clone(), two.clone()];
     let package_bytes = BundleWriter::encode(&plan, &[two, one]).unwrap();
     assert_eq!(
@@ -154,7 +157,7 @@ fn schema_one_deduplicates_plugin_blobs_and_round_trips() {
     );
     assert_eq!(fs::read(&written).unwrap(), package_bytes);
     let id = PluginId::new("a-plugin").unwrap();
-    assert_eq!(package.plugin_aot(&id).unwrap(), b"same aot");
+    assert_eq!(package.plugin_aot(&id).unwrap(), aot);
     assert_eq!(package.build_plan().unwrap().targets.len(), 1);
 }
 
