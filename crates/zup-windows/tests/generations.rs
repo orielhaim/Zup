@@ -15,6 +15,13 @@ mod interrupted_payload {
     ));
 }
 
+mod publication_recovery {
+    use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/publication_recovery.rs"
+    ));
+}
 mod persistent_lifecycle {
     use super::*;
     include!(concat!(

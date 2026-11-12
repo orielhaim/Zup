@@ -42,6 +42,13 @@ pub struct Publisher(pub std::sync::Mutex<Option<zup_plan::InstallationRecord>>)
 impl zup_transaction::InstallationPublisher for Publisher {
     type Error = String;
 
+    fn read_current(
+        &self,
+        _: &zup_transaction::TransactionRecord,
+    ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
     fn prepare(
         &self,
         transaction: &zup_transaction::TransactionRecord,
@@ -53,8 +60,10 @@ impl zup_transaction::InstallationPublisher for Publisher {
     fn publish(
         &self,
         transaction: &zup_transaction::TransactionRecord,
+        observed: &zup_transaction::PublicationObservation,
     ) -> Result<zup_plan::InstallationRecord, String> {
         let mut durable = self.0.lock().unwrap();
+        observed.check_current(transaction, durable.clone())?;
         let installation =
             zup_transaction::prepare_installation_record(transaction, durable.as_ref())
                 .map_err(|error| error.to_string())?;

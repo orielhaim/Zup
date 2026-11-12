@@ -318,11 +318,29 @@ impl LinuxInstallationStore {
 impl zup_transaction::InstallationPublisher for LinuxInstallationStore {
     type Error = ExecError;
 
+    fn read_current(
+        &self,
+        transaction: &TransactionRecord,
+    ) -> Result<Option<InstallationRecord>, Self::Error> {
+        self.load_authoritative(
+            &transaction.app_id,
+            transaction.scope,
+            Some(transaction.transaction_id),
+        )
+    }
+
     fn prepare(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, Self::Error> {
         self.prepare_installation(transaction, transaction.scope)
     }
 
-    fn publish(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, Self::Error> {
+    fn publish(
+        &self,
+        transaction: &TransactionRecord,
+        observed: &zup_transaction::PublicationObservation,
+    ) -> Result<InstallationRecord, Self::Error> {
+        observed
+            .check_current(transaction, self.read_current(transaction)?)
+            .map_err(ExecError::Ownership)?;
         self.write_installation(transaction, transaction.scope)
     }
 }

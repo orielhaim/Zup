@@ -31,8 +31,8 @@ mod ownership;
 pub use ownership::{OwnershipError, validate_ownership};
 mod publication;
 pub use publication::{
-    InstallationPublisher, PublicationState, verify_installation_evidence,
-    verify_published_installation,
+    InstallationPublisher, PublicationObservation, PublicationState, observe_publication,
+    verify_installation_evidence, verify_published_installation,
 };
 mod native_service;
 mod reconciliation;

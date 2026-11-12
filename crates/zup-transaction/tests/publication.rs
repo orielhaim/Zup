@@ -59,18 +59,27 @@ struct Publisher {
 impl InstallationPublisher for Publisher {
     type Error = String;
 
+    fn read_current(&self, _: &TransactionRecord) -> Result<Option<InstallationRecord>, String> {
+        Ok(self.installation.lock().unwrap().clone())
+    }
+
     fn prepare(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, String> {
         prepare_installation_record(transaction, self.installation.lock().unwrap().as_ref())
             .map_err(|error| error.to_string())
     }
 
-    fn publish(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, String> {
+    fn publish(
+        &self,
+        transaction: &TransactionRecord,
+        observed: &zup_transaction::PublicationObservation,
+    ) -> Result<InstallationRecord, String> {
         assert!(!matches!(
             transaction.publication,
             PublicationState::NotRequested
         ));
         *self.publication_attempts.lock().unwrap() += 1;
         let mut durable = self.installation.lock().unwrap();
+        observed.check_current(transaction, durable.clone())?;
         let installation = prepare_installation_record(transaction, durable.as_ref())
             .map_err(|error| error.to_string())?;
         *durable = Some(installation.clone());
@@ -189,6 +198,19 @@ struct FilePublisher {
 impl InstallationPublisher for FilePublisher {
     type Error = String;
 
+    fn read_current(&self, _: &TransactionRecord) -> Result<Option<InstallationRecord>, String> {
+        let path = self.directory.join("installation.json");
+        match zup_storage::read_private(&path) {
+            Ok(bytes) => InstallationRecord::decode(&bytes)
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(None)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     fn prepare(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, String> {
         zup_storage::ensure_private_dir(&self.directory).map_err(|error| error.to_string())?;
         let path = self.directory.join("installation.json");
@@ -205,7 +227,12 @@ impl InstallationPublisher for FilePublisher {
             .map_err(|error| error.to_string())
     }
 
-    fn publish(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, String> {
+    fn publish(
+        &self,
+        transaction: &TransactionRecord,
+        observed: &zup_transaction::PublicationObservation,
+    ) -> Result<InstallationRecord, String> {
+        observed.check_current(transaction, self.read_current(transaction)?)?;
         let path = self.directory.join("installation.json");
         let installation = self.prepare(transaction)?;
         let bytes = installation.encode().map_err(|error| error.to_string())?;
@@ -247,53 +274,77 @@ fn publication_process_crash_requires_no_compensation() {
             &mut Executor::default(),
             &FilePublisher {
                 directory: root.join("installations"),
-                terminate_after_write: true,
+                terminate_after_write: std::env::var("ZUP_PUBLICATION_CRASH_POINT").as_deref()
+                    == Ok("after_write"),
             },
         )
         .unwrap();
         panic!("publication must terminate the child process");
     }
-    let root = tempfile::tempdir().unwrap();
-    let child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "publication_process_crash_requires_no_compensation",
-            "--nocapture",
-        ])
-        .env(CHILD_ROOT, root.path())
-        .output()
+    #[cfg(feature = "test-faults")]
+    let points = [
+        "installation_publication_requested",
+        "after_write",
+        "installation_published",
+        "commit_before",
+        "committed",
+    ]
+    .as_slice();
+    #[cfg(not(feature = "test-faults"))]
+    let points = ["after_write"].as_slice();
+    for point in points {
+        let root = tempfile::tempdir().unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "publication_process_crash_requires_no_compensation",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, root.path())
+            .env("ZUP_PUBLICATION_CRASH_POINT", point)
+            .env("ZUP_TEST_FAULT_POINT", point)
+            .env("ZUP_TEST_FAULT_ACTION", "crash")
+            .output()
+            .unwrap();
+        assert!(
+            !child.status.success(),
+            "{point}: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let store = FilesystemTransactionStore::private_at(root.path().join("state"));
+        let transactions = store.list_ids().unwrap();
+        assert_eq!(transactions.len(), 1);
+        let pending = store.load(&transactions[0]).unwrap();
+        assert!(!matches!(
+            pending.publication,
+            PublicationState::NotRequested
+        ));
+        let path = root.path().join("installations").join("installation.json");
+        let published = zup_storage::read_private(&path).ok();
+        let mut executor = Executor::default();
+        let (committed, outcome) = recover(
+            pending,
+            &store,
+            &mut executor,
+            &FilePublisher {
+                directory: root.path().join("installations"),
+                terminate_after_write: false,
+            },
+        )
         .unwrap();
-    assert_eq!(
-        child.status.code(),
-        Some(86),
-        "{}",
-        String::from_utf8_lossy(&child.stderr)
-    );
-    let store = FilesystemTransactionStore::private_at(root.path().join("state"));
-    let transactions = store.list_ids().unwrap();
-    assert_eq!(transactions.len(), 1);
-    let pending = store.load(&transactions[0]).unwrap();
-    assert!(matches!(
-        pending.publication,
-        PublicationState::Requested { .. }
-    ));
-    let path = root.path().join("installations").join("installation.json");
-    let published = zup_storage::read_private(&path).unwrap();
-    let mut executor = Executor::default();
-    let (committed, outcome) = recover(
-        pending,
-        &store,
-        &mut executor,
-        &FilePublisher {
-            directory: root.path().join("installations"),
-            terminate_after_write: false,
-        },
-    )
-    .unwrap();
-    assert_eq!(outcome, TransactionOutcome::Committed);
-    assert_eq!(executor.rollback_calls, 0);
-    assert_eq!(zup_storage::read_private(&path).unwrap(), published);
-    committed.validate().unwrap();
+        assert_eq!(outcome, TransactionOutcome::Committed);
+        assert_eq!(executor.rollback_calls, 0);
+        let readback = zup_storage::read_private(&path).unwrap();
+        if let Some(published) = published {
+            assert_eq!(readback, published);
+        }
+        zup_transaction::verify_installation_evidence(
+            &InstallationRecord::decode(&readback).unwrap(),
+            &committed,
+        )
+        .unwrap();
+        committed.validate().unwrap();
+    }
 }
 
 #[test]

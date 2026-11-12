@@ -324,6 +324,12 @@ fn verify_service_control_before(
     {
         return Err("service process scope is no longer quiescent".into());
     }
+    let confirmed = manager.observe(&receipt.operation)?;
+    if confirmed != current {
+        return Err(
+            "service authority changed during verification; reobserve the native manager".into(),
+        );
+    }
     check_deadline(deadline)
 }
 

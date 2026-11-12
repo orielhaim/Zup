@@ -1754,10 +1754,27 @@ mod tests {
         }
 
         #[derive(Default)]
-        struct MemoryInstallation(std::sync::Mutex<Option<zup_plan::InstallationRecord>>);
+        enum PublicationFault {
+            #[default]
+            None,
+            Before,
+            After,
+        }
+        #[derive(Default)]
+        struct MemoryInstallation(
+            std::sync::Mutex<Option<zup_plan::InstallationRecord>>,
+            std::sync::Mutex<PublicationFault>,
+        );
 
         impl zup_transaction::InstallationPublisher for MemoryInstallation {
             type Error = String;
+            fn read_current(
+                &self,
+                _: &zup_transaction::TransactionRecord,
+            ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+
             fn prepare(
                 &self,
                 transaction: &zup_transaction::TransactionRecord,
@@ -1771,12 +1788,20 @@ mod tests {
             fn publish(
                 &self,
                 transaction: &zup_transaction::TransactionRecord,
+                observed: &zup_transaction::PublicationObservation,
             ) -> Result<zup_plan::InstallationRecord, String> {
+                if matches!(*self.1.lock().unwrap(), PublicationFault::Before) {
+                    return Err("publication deferred".into());
+                }
                 let mut durable = self.0.lock().unwrap();
+                observed.check_current(transaction, durable.clone())?;
                 let installation =
                     zup_transaction::prepare_installation_record(transaction, durable.as_ref())
                         .map_err(|error| error.to_string())?;
                 *durable = Some(installation.clone());
+                if matches!(*self.1.lock().unwrap(), PublicationFault::After) {
+                    return Err("publication acknowledgment lost".into());
+                }
                 Ok(installation)
             }
         }
@@ -1885,6 +1910,8 @@ mod tests {
             ReadinessFailure,
             FailedStartUpgrade,
             CrashAfterReplacement,
+            PublicationDeferred,
+            PublicationAcknowledgmentLost,
         }
 
         #[rstest::rstest]
@@ -1893,6 +1920,8 @@ mod tests {
         #[case(TransactionScenario::ReadinessFailure)]
         #[case(TransactionScenario::FailedStartUpgrade)]
         #[case(TransactionScenario::CrashAfterReplacement)]
+        #[case(TransactionScenario::PublicationDeferred)]
+        #[case(TransactionScenario::PublicationAcknowledgmentLost)]
         #[ignore = "requires elevated isolated SCM; run scripts/verify-windows-services.ps1"]
         fn native_transactions_replace_compensate_and_recover_real_service_executables(
             #[case] scenario: TransactionScenario,
@@ -1994,6 +2023,62 @@ mod tests {
             store.create(&record).unwrap();
             let mut executor = transaction_executor(&record, root.path());
             executor.fail_readiness = scenario == TransactionScenario::ReadinessFailure;
+            if matches!(
+                scenario,
+                TransactionScenario::PublicationDeferred
+                    | TransactionScenario::PublicationAcknowledgmentLost
+            ) {
+                let published = scenario == TransactionScenario::PublicationAcknowledgmentLost;
+                let publisher = MemoryInstallation(
+                    Default::default(),
+                    std::sync::Mutex::new(if published {
+                        PublicationFault::After
+                    } else {
+                        PublicationFault::Before
+                    }),
+                );
+                let (pending, outcome) =
+                    zup_transaction::TransactionCoordinator::new(store.clone())
+                        .execute(record, &mut executor, &publisher)
+                        .unwrap();
+                assert_eq!(
+                    outcome,
+                    zup_transaction::TransactionOutcome::RecoveryRequired
+                );
+                drop(executor);
+                let mut stop = fixture.start(5);
+                let current = ScmLifecycle::default().observe(&stop).unwrap();
+                stop.stage = ServiceControlStage::Quiesce;
+                stop.before = ServiceTerminalState::Running;
+                stop.after = ServiceTerminalState::Stopped;
+                stop.before_execution_generation = current.execution_generation;
+                stop.process_scope = current.process_scope;
+                stop.configuration = zup_plan::disabled_startup(&stop.configuration).unwrap();
+                apply_service_control(&mut ScmLifecycle::default(), &stop).unwrap();
+                *publisher.1.lock().unwrap() = PublicationFault::None;
+                let mut executor = transaction_executor(&pending, root.path());
+                let (recovered, outcome) =
+                    zup_transaction::recover(pending, &store, &mut executor, &publisher).unwrap();
+                assert_eq!(
+                    outcome,
+                    if published {
+                        zup_transaction::TransactionOutcome::Committed
+                    } else {
+                        zup_transaction::TransactionOutcome::RecoveryRequired
+                    },
+                    "{:?}",
+                    recovered.recovery_failure
+                );
+                assert_eq!(
+                    ScmLifecycle::default().observe(&stop).unwrap().runtime,
+                    zup_plan::ServiceRuntimeState::Stopped
+                );
+                assert_eq!(
+                    std::fs::read(fixture.directory.join("service.exe")).unwrap(),
+                    replacement
+                );
+                return;
+            }
             let (settled, outcome) = if scenario == TransactionScenario::CrashAfterReplacement {
                 let status = std::process::Command::new(std::env::current_exe().unwrap())
                     .args([

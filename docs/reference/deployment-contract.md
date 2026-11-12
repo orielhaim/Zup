@@ -301,5 +301,60 @@ back to binary compensation. Failures retain the intent, journal and roots. Exis
 operation intent/receipt and publication/readback establish the commit point; the
 decision itself does not. Publication reconciliation and post-commit ownership repair
 remain the existing shared mechanisms. Process-interruption tests do not establish
-power-loss durability. Publication freshness, orphan collection and storage migration
-remain separate work.
+power-loss durability. Orphan collection and storage migration remain separate work.
+
+
+### Publication recovery boundary
+
+The installation lifecycle lock covers protected readback, native validation and
+publication in both local and privileged worker execution. The worker observes native
+state under its own authority; a serialized parent receipt grants no publication authority.
+
+| Evidence | Meaning at publication |
+| --- | --- |
+| Protected exact transaction, plan and ownership record | Publication is already visible. Complete its durability barrier and journal settlement without reapplying or compensating native effects. |
+| No record for a new reserved installation, or the exact observed predecessor | Publication has not been established. Revalidate the final native effects before writing the requested record. |
+| Missing predecessor, conflicting record, unreadable authority, or missing journaled publication | Preserve the journal and roots. Require ownership reconciliation; never infer overwrite authority from absence or matching payload bytes. |
+
+`NotRequested` becomes `Requested` with the exact projection hash before the freshness
+gate. Every retry reads protected ownership first. `PublicationObservation` distinguishes
+an unpublished predecessor from an exact visible record. Visibility alone does not prove
+a completed durability barrier. The publisher rechecks that observation and durably
+publishes only the same authorized projection, including when settling a lost acknowledgment.
+Linux uses the existing private-directory or owned-directory durable rename protocol;
+Windows machine publication flushes the file and volume and checks handle-relative identity
+and bytes. A successful publisher acknowledgment records `Published`, then `Committed`.
+Failures after the request preserve the applying direction and cannot enter compensation.
+No journal or worker protocol format changed.
+
+For an unpublished request, one coordinator rule selects the final effects from the
+validated graph. Fresh native verification covers fixed and retained object identities,
+removal absence, sealed generation bindings and content, persistent access, final native
+registration, and final service-control authority. Activated or verified generations
+supersede preparation receipts; access supersedes directory preparation; service restore
+supersedes earlier inhibition/configuration. Removed registration supersedes the historical
+quiescence used to remove it. Staging inputs already consumed by placement and completed
+cache commands remain historical proofs. Recovery never reruns them to manufacture evidence.
+
+Service-control verification compares registration/configuration, boot/manager generation,
+execution identity, terminal state and applicable quiescence, then confirms the observation
+did not change during verification. Systemd pending jobs/reload state, OpenRC admission and
+process scope, and SCM boot/job/registration authority remain native-adapter responsibilities.
+A current running state cannot replace a historical startup-policy or process receipt.
+Manager restart, reboot or ambiguous process scope requires native intervention and a
+supported reassessment; publication recovery does not silently start, stop or reconfigure.
+
+This is bounded admission validation under the lifecycle lock, not an atomic snapshot of
+all OS managers and files or a promise of continuing application health. Native handles,
+protected roots and manager/process identities provide their platform-specific guarantees.
+Changes after the final observation remain possible. Immutable authenticated content
+identities do not expire on reboot; their current native bindings still require verification.
+The same gate applies to an accepted F08 forward decision. It requires no source carrier,
+network, launcher or continuously running Zup process.
+
+After exact publication is established, later service stops or external drift cannot revoke
+the commit. Recovery skips prepublication native validation and settles the journal. Cleanup
+still uses its native fences and receipts. Interrupted cleanup keeps phase `Committed`;
+frontends report `CommittedPendingReconciliation`, preserve roots and offer recovery.
+Ownership reconciliation and application health/repair remain separate concerns. Process
+crash tests cover these journal boundaries, not sudden power loss.

@@ -224,16 +224,15 @@ where
         return Ok((record, TransactionOutcome::RolledBack));
     }
 
-    if record.resolution.is_some() {
-        return resume_forward(record, store, executor, publisher);
-    }
-
     if let TransactionPhase::RecoveryRequired { resume } = record.phase {
         commit_phase(&mut record, store, resume.into())?;
     }
     if !matches!(record.publication, crate::PublicationState::NotRequested) {
         let outcome = publish_and_collect(store, &mut record, publisher, executor)?;
         return Ok((record, outcome));
+    }
+    if record.resolution.is_some() {
+        return resume_forward(record, store, executor, publisher);
     }
     let mut recovery_caches: Vec<_> = record
         .plan
@@ -328,21 +327,33 @@ where
     }
 }
 
-fn publish_installation<S: TransactionStore, P: crate::InstallationPublisher>(
+fn publish_installation<
+    S: TransactionStore,
+    P: crate::InstallationPublisher,
+    E: OperationExecutor,
+>(
     store: &S,
     record: &mut TransactionRecord,
     publisher: &P,
-) -> Result<TransactionOutcome, TransactionError> {
+    executor: &mut E,
+) -> Result<TransactionOutcome, TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
     let publication = OperationId::new(OperationId::COMMIT);
-    let prepared = publisher
-        .prepare(record)
+    let observed = publisher
+        .read_current(record)
         .map_err(|error| error.to_string())
-        .and_then(|installation| {
-            crate::verify_published_installation(record, &installation)
-                .map(|record_hash| (installation, record_hash))
-        });
+        .and_then(|current| crate::observe_publication(record, current));
+    let prepared = observed.and_then(|observed| {
+        let installation = publisher
+            .prepare(record)
+            .map_err(|error| error.to_string())?;
+        let record_hash = crate::verify_published_installation(record, &installation)?;
+        Ok((installation, record_hash, observed))
+    });
     let published = match prepared {
-        Ok((expected, record_hash)) => {
+        Ok((expected, record_hash, observed)) => {
             if matches!(record.publication, crate::PublicationState::NotRequested) {
                 commit(record, store, |fresh| {
                     if !matches!(fresh.nodes.get(&publication), Some(NodeState::Pending)) {
@@ -363,18 +374,27 @@ fn publish_installation<S: TransactionStore, P: crate::InstallationPublisher>(
             if record_hash != expected_hash {
                 Err("installation projection differs from the durable publication request".into())
             } else {
-                boundary(
-                    Boundary::InstallationPublicationRequested,
-                    &record.transaction_id.to_string(),
-                );
-                publisher.publish(record)
-                    .map_err(|error| error.to_string())
-                    .and_then(|installation| {
-                        if installation != expected {
-                            return Err("published ownership differs from the requested installation record".into());
-                        }
-                        crate::verify_published_installation(record, &installation)
-                    })
+                (|| {
+                    boundary(
+                        Boundary::InstallationPublicationRequested,
+                        &record.transaction_id.to_string(),
+                    );
+                    if matches!(observed, crate::PublicationObservation::Unpublished { .. }) {
+                        verify_publication_effects(record, executor).map_err(|error| {
+                            format!("not published; reobserve or repair the authorized native effect before retrying: {error}")
+                        })?;
+                    }
+                    let installation = publisher
+                        .publish(record, &observed)
+                        .map_err(|error| error.to_string())?;
+                    if installation != expected {
+                        return Err(
+                            "published ownership differs from the requested installation record"
+                                .into(),
+                        );
+                    }
+                    crate::verify_published_installation(record, &installation)
+                })()
             }
         }
         Err(error) => Err(error),
@@ -421,7 +441,7 @@ fn publish_and_collect<S: TransactionStore, P: crate::InstallationPublisher, E: 
 where
     E::Error: std::fmt::Display,
 {
-    let outcome = publish_installation(store, record, publisher)?;
+    let outcome = publish_installation(store, record, publisher, executor)?;
     if outcome == TransactionOutcome::Committed {
         collect_committed(store, record, executor)
     } else {
@@ -966,6 +986,87 @@ enum VerificationPass {
     Commit,
 }
 
+fn verify_publication_effects<E: OperationExecutor>(
+    record: &TransactionRecord,
+    executor: &mut E,
+) -> Result<(), TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
+    for id in &record.plan.execution_order {
+        let node = find_node(&record.plan, id)?;
+        if !node.kind.requires_verification() || node.kind.is_post_commit() {
+            continue;
+        }
+        // These receipts describe consumed inputs or completed commands, not current state.
+        if matches!(node.kind, NodeKind::NativeCache { .. }) {
+            continue;
+        }
+        let superseded = record
+            .plan
+            .nodes
+            .iter()
+            .any(|later| match (&node.kind, &later.kind) {
+                (
+                    NodeKind::ServiceControl { operation: before },
+                    NodeKind::ServiceControl { operation: after },
+                ) => before.key == after.key && before.stage < after.stage,
+                (
+                    NodeKind::ServiceControl { operation: before },
+                    NodeKind::NativeService { operation: after },
+                ) => {
+                    before.stage == zup_plan::ServiceControlStage::Quiesce
+                        && before.key == *after.key()
+                        && matches!(
+                            after.as_ref(),
+                            zup_plan::NativeServiceOperation::Remove { .. }
+                        )
+                }
+                (
+                    NodeKind::NativeService { operation: before },
+                    NodeKind::ServiceControl { operation: after },
+                ) => {
+                    *before.key() == after.key
+                        && after.stage == zup_plan::ServiceControlStage::Restore
+                }
+                (
+                    NodeKind::Generation {
+                        operation: before,
+                        intent: left,
+                    },
+                    NodeKind::Generation {
+                        operation: after,
+                        intent: right,
+                    },
+                ) => left.materialization == right.materialization && before < after,
+                (
+                    NodeKind::PersistentDirectory { operation: before },
+                    NodeKind::PersistentDirectory { operation: after },
+                ) => {
+                    before.intent.directory.id == after.intent.directory.id
+                        && before.stage == zup_plan::PersistentDirectoryStage::Prepare
+                        && after.stage == zup_plan::PersistentDirectoryStage::Access
+                }
+                _ => false,
+            });
+        if superseded {
+            continue;
+        }
+        let receipt = record.receipt(id).ok_or_else(|| {
+            TransactionError::InvalidState(format!(
+                "publication requires settled native evidence for {id}"
+            ))
+        })?;
+        executor
+            .verify(node, receipt)
+            .map_err(|error| TransactionError::Executor {
+                operation: id.to_string(),
+                message: error.to_string(),
+            })?;
+    }
+    Ok(())
+}
+
 fn verify_applied<S: TransactionStore, E: OperationExecutor>(
     store: &S,
     record: &mut TransactionRecord,
@@ -1473,26 +1574,7 @@ where
             return Ok((record, TransactionOutcome::RecoveryRequired));
         }
     }
-    let verification = record.plan.nodes.iter().try_for_each(|node| {
-        if let Some(receipt) = record.receipt(&node.id)
-            && !matches!(
-                node.kind,
-                NodeKind::Barrier
-                    | NodeKind::ReserveInstallation
-                    | NodeKind::Retention { .. }
-                    | NodeKind::StageFile { .. }
-            )
-            && !node.kind.is_post_commit()
-        {
-            executor
-                .verify(node, receipt)
-                .map_err(|error| TransactionError::Executor {
-                    operation: node.id.to_string(),
-                    message: error.to_string(),
-                })?;
-        }
-        Ok(())
-    });
+    let verification = verify_publication_effects(&record, executor);
     if let Err(error) = verification.and_then(|()| {
         if matches!(record.publication, crate::PublicationState::NotRequested) {
             drive(store, &mut record, executor)

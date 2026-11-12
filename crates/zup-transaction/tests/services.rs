@@ -487,6 +487,7 @@ struct Manager {
     stopped_start_compensatable: bool,
     quiescent: bool,
     concurrent_execution: Option<String>,
+    change_after_observation: bool,
 }
 
 impl NativeServiceManager for Manager {
@@ -520,7 +521,11 @@ impl NativeServiceManager for Manager {
     }
     fn observe(&mut self, _: &ServiceControlOperation) -> Result<ServiceObservation, String> {
         std::thread::sleep(std::mem::take(&mut self.observation_delay));
-        Ok(self.observation.clone())
+        let current = self.observation.clone();
+        if std::mem::take(&mut self.change_after_observation) {
+            self.observation.execution_generation = "concurrent-restart".into();
+        }
+        Ok(current)
     }
     fn transition(
         &mut self,
@@ -583,6 +588,7 @@ fn manager(operation: &ServiceControlOperation) -> Manager {
         stopped_start_compensatable: false,
         quiescent: true,
         concurrent_execution: None,
+        change_after_observation: false,
     }
 }
 
@@ -1044,4 +1050,193 @@ fn interrupted_start_compensation_requires_current_scope_evidence(
         expected
     );
     assert_eq!(manager.requests, 0);
+}
+
+struct PublicationExecutor {
+    manager: Manager,
+    ordinary: common::fake::FakeExecutor,
+    observations: usize,
+}
+impl zup_transaction::OperationExecutor for PublicationExecutor {
+    type Error = String;
+    fn prepare(&mut self, node: &zup_plan::DeploymentNode) -> Result<(), String> {
+        self.ordinary.prepare(node)
+    }
+    fn apply(
+        &mut self,
+        node: &zup_plan::DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<zup_transaction::OperationReceipt, String> {
+        if let NodeKind::ServiceControl { operation } = &node.kind {
+            apply_service_control(&mut self.manager, operation)
+        } else {
+            self.ordinary.apply(node, transaction)
+        }
+    }
+    fn verify(
+        &mut self,
+        node: &zup_plan::DeploymentNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), String> {
+        if let zup_transaction::OperationReceipt::ServiceControl(receipt) = receipt {
+            self.observations += 1;
+            verify_service_control(&mut self.manager, receipt)
+        } else {
+            self.ordinary.verify(node, receipt)
+        }
+    }
+    fn rollback(
+        &mut self,
+        node: &zup_plan::DeploymentNode,
+        receipt: &zup_transaction::OperationReceipt,
+    ) -> Result<(), String> {
+        self.ordinary.rollback(node, receipt)
+    }
+    fn reconcile(
+        &mut self,
+        node: &zup_plan::DeploymentNode,
+        receipt: Option<&zup_transaction::OperationReceipt>,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<ReconcileResult, String> {
+        self.ordinary.reconcile(node, receipt, transaction)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PublicationDrift {
+    Intact,
+    Reboot,
+    ManagerRestart,
+    Registration,
+    PendingJob,
+    Execution,
+    DuringObservation,
+    CommittedStopped,
+}
+
+#[rstest::rstest]
+#[case(PublicationDrift::Intact)]
+#[case(PublicationDrift::Reboot)]
+#[case(PublicationDrift::ManagerRestart)]
+#[case(PublicationDrift::Registration)]
+#[case(PublicationDrift::PendingJob)]
+#[case(PublicationDrift::Execution)]
+#[case(PublicationDrift::DuringObservation)]
+#[case(PublicationDrift::CommittedStopped)]
+fn publication_reobserves_final_service_authority_without_replaying_control(
+    #[case] drift: PublicationDrift,
+) {
+    use zup_transaction::{InstallationPublisher, TransactionOutcome, TransactionStore};
+    struct Interrupted {
+        durable: common::Publisher,
+        already_published: bool,
+    }
+    impl InstallationPublisher for Interrupted {
+        type Error = String;
+        fn read_current(
+            &self,
+            record: &zup_transaction::TransactionRecord,
+        ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+            self.durable.read_current(record)
+        }
+        fn prepare(
+            &self,
+            record: &zup_transaction::TransactionRecord,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            self.durable.prepare(record)
+        }
+        fn publish(
+            &self,
+            record: &zup_transaction::TransactionRecord,
+            observed: &zup_transaction::PublicationObservation,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            if self.already_published {
+                self.durable.publish(record, observed)?;
+            }
+            Err("publication interrupted".into())
+        }
+    }
+    let mut before = control("worker", ServiceControlStage::Quiesce);
+    before.privilege = Privilege::User;
+    before.intent = zup_plan::ServiceControlIntent::Preserve;
+    before.after = before.before;
+    let mut after = before.clone();
+    after.stage = ServiceControlStage::Restore;
+    let mut effects = common::effects();
+    effects.service_controls = vec![before.clone(), after];
+    let root = tempfile::tempdir().unwrap();
+    let store = zup_transaction::FilesystemTransactionStore::private_at(root.path().join("state"));
+    let publisher = Interrupted {
+        durable: Default::default(),
+        already_published: matches!(drift, PublicationDrift::CommittedStopped),
+    };
+    let mut executor = PublicationExecutor {
+        manager: manager(&before),
+        ordinary: Default::default(),
+        observations: 0,
+    };
+    let interrupted = zup_transaction::TransactionCoordinator::new(store.clone())
+        .begin(
+            common::sample_app_id(),
+            zup_core::SelectedScope::User,
+            common::sample_version(),
+            compile_deployment(&effects).unwrap(),
+        )
+        .unwrap()
+        .execute(&mut executor, &publisher)
+        .unwrap();
+    assert_eq!(interrupted.outcome, TransactionOutcome::RecoveryRequired);
+    match drift {
+        PublicationDrift::Intact => {}
+        PublicationDrift::Reboot => {
+            executor.manager.observation.manager_generation = "later-boot:manager".into()
+        }
+        PublicationDrift::ManagerRestart => {
+            executor.manager.observation.manager_generation = "boot:later-manager".into()
+        }
+        PublicationDrift::Registration => {
+            executor.manager.observation.configuration = ServiceState::Absent
+        }
+        PublicationDrift::PendingJob => {
+            executor.manager.observation.runtime = ServiceRuntimeState::StartPending
+        }
+        PublicationDrift::Execution => {
+            executor.manager.observation.execution_generation = "foreign-execution".into()
+        }
+        PublicationDrift::DuringObservation => executor.manager.change_after_observation = true,
+        PublicationDrift::CommittedStopped => {
+            executor.manager.observation.runtime = ServiceRuntimeState::Stopped;
+            executor.manager.observation.execution_generation = "stopped".into();
+        }
+    }
+    executor.observations = 0;
+    executor.ordinary.calls.clear();
+    let (record, outcome) = zup_transaction::recover(
+        store.load(&interrupted.record.transaction_id).unwrap(),
+        &store,
+        &mut executor,
+        &publisher.durable,
+    )
+    .unwrap();
+    let commits = matches!(
+        drift,
+        PublicationDrift::Intact | PublicationDrift::CommittedStopped
+    );
+    assert_eq!(
+        outcome,
+        if commits {
+            TransactionOutcome::Committed
+        } else {
+            TransactionOutcome::RecoveryRequired
+        },
+        "{:?}",
+        record.recovery_failure
+    );
+    assert_eq!(
+        executor.observations,
+        if publisher.already_published { 0 } else { 1 }
+    );
+    assert_eq!(executor.manager.requests, 0);
+    assert!(executor.ordinary.calls.is_empty());
+    assert_eq!(publisher.durable.0.lock().unwrap().is_some(), commits);
 }

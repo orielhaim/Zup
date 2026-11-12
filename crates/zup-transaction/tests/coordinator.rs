@@ -566,15 +566,7 @@ fn recovery_rechecks_payload_without_replaying_completed_work(#[case] resume_fro
     }
     let expected: std::collections::BTreeSet<_> = verified
         .iter()
-        .enumerate()
-        .filter(|(index, node)| {
-            *index >= resume_from
-                || matches!(
-                    node.kind,
-                    NodeKind::FileMutation { .. } | NodeKind::FileRemoval { .. }
-                )
-        })
-        .map(|(_, node)| node.id.as_str().to_owned())
+        .map(|node| node.id.as_str().to_owned())
         .collect();
     assert_eq!(
         exec.verified
@@ -1087,15 +1079,27 @@ fn destructive_or_untyped_recovery_requests_are_not_authority() {
     }
 }
 
-#[test]
-fn accepted_forward_intent_reobserves_native_evidence_after_publication_request() {
+#[rstest]
+#[case::unpublished(false)]
+#[case::acknowledgment_lost(true)]
+fn accepted_forward_intent_reobserves_native_evidence_after_publication_request(
+    #[case] took_effect: bool,
+) {
     use zup_transaction::{InstallationPublisher, RecoveryRequest};
     struct Deferred {
         durable: common::Publisher,
         refuse: std::sync::atomic::AtomicBool,
+        took_effect: bool,
     }
     impl InstallationPublisher for Deferred {
         type Error = String;
+        fn read_current(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+            self.durable.read_current(record)
+        }
+
         fn prepare(
             &self,
             record: &TransactionRecord,
@@ -1105,11 +1109,15 @@ fn accepted_forward_intent_reobserves_native_evidence_after_publication_request(
         fn publish(
             &self,
             record: &TransactionRecord,
+            observed: &zup_transaction::PublicationObservation,
         ) -> Result<zup_plan::InstallationRecord, String> {
             if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                if self.took_effect {
+                    self.durable.publish(record, observed)?;
+                }
                 Err("publication deferred".into())
             } else {
-                self.durable.publish(record)
+                self.durable.publish(record, observed)
             }
         }
     }
@@ -1122,6 +1130,7 @@ fn accepted_forward_intent_reobserves_native_evidence_after_publication_request(
     let publisher = Deferred {
         durable: Default::default(),
         refuse: true.into(),
+        took_effect,
     };
     let (pending, outcome) = zup_transaction::recover_requested(
         record,
@@ -1141,13 +1150,13 @@ fn accepted_forward_intent_reobserves_native_evidence_after_publication_request(
     publisher
         .refuse
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    let (pending, outcome) = recover(
-        pending,
-        &store,
-        &mut FakeExecutor::new().fail_on_verify(0),
-        &publisher,
-    )
-    .unwrap();
+    let mut native = FakeExecutor::new().fail_on_verify(0);
+    let (pending, outcome) = recover(pending, &store, &mut native, &publisher).unwrap();
+    if took_effect {
+        assert_eq!(outcome, TransactionOutcome::Committed);
+        assert!(native.calls.is_empty());
+        return;
+    }
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
     assert!(publisher.durable.0.lock().unwrap().is_none());
     let (record, outcome) = recover(pending, &store, &mut FakeExecutor::new(), &publisher).unwrap();
@@ -1170,4 +1179,259 @@ fn forward_authority_cannot_be_reinterpreted_as_compensation() {
     record.validate().unwrap();
     record.phase = TransactionPhase::RollingBack;
     assert!(record.validate().is_err());
+}
+
+#[test]
+fn unpublished_request_requires_fresh_native_evidence() {
+    use zup_transaction::InstallationPublisher;
+    struct Unavailable;
+    impl InstallationPublisher for Unavailable {
+        type Error = String;
+        fn read_current(
+            &self,
+            _: &TransactionRecord,
+        ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+            Ok(None)
+        }
+
+        fn prepare(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            zup_transaction::prepare_installation_record(record, None).map_err(|e| e.to_string())
+        }
+        fn publish(
+            &self,
+            _: &TransactionRecord,
+            _observed: &zup_transaction::PublicationObservation,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            Err("interrupted before publication".into())
+        }
+    }
+    let (_root, store) = coord_with_store();
+    let pending = TransactionCoordinator::new(store.clone())
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            sample_plan(),
+        )
+        .unwrap()
+        .execute(&mut FakeExecutor::new(), &Unavailable)
+        .unwrap();
+    assert_eq!(pending.outcome, TransactionOutcome::RecoveryRequired);
+    assert!(matches!(
+        pending.record.publication,
+        zup_transaction::PublicationState::Requested { .. }
+    ));
+    let publisher = common::Publisher::default();
+    let mut native = FakeExecutor::new().fail_on_verify(0);
+    let (pending, outcome) = recover(pending.record, &store, &mut native, &publisher).unwrap();
+    assert_eq!(
+        outcome,
+        TransactionOutcome::RecoveryRequired,
+        "calls: {:?}",
+        native.calls
+    );
+    assert!(publisher.0.lock().unwrap().is_none());
+    assert!(native.applied.is_empty());
+    assert!(native.rolled_back.is_empty());
+    let mut intact = FakeExecutor::new();
+    let (_, outcome) = recover(pending, &store, &mut intact, &publisher).unwrap();
+    assert_eq!(outcome, TransactionOutcome::Committed);
+    assert!(!intact.verified.is_empty());
+    assert!(intact.applied.is_empty());
+    assert!(intact.rolled_back.is_empty());
+}
+
+#[test]
+fn protected_publication_commits_without_reinterpreting_later_native_drift() {
+    use zup_transaction::InstallationPublisher;
+    struct LostAcknowledgment(common::Publisher);
+    impl InstallationPublisher for LostAcknowledgment {
+        type Error = String;
+        fn read_current(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+            self.0.read_current(record)
+        }
+        fn prepare(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            self.0.prepare(record)
+        }
+        fn publish(
+            &self,
+            record: &TransactionRecord,
+            observed: &zup_transaction::PublicationObservation,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            self.0.publish(record, observed)?;
+            Err("durable publication acknowledgment lost".into())
+        }
+    }
+    let (_root, store) = coord_with_store();
+    let publisher = LostAcknowledgment(Default::default());
+    let pending = TransactionCoordinator::new(store.clone())
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            sample_plan(),
+        )
+        .unwrap()
+        .execute(&mut FakeExecutor::new(), &publisher)
+        .unwrap();
+    assert_eq!(pending.outcome, TransactionOutcome::RecoveryRequired);
+    let mut native = FakeExecutor::new().fail_on_verify(0);
+    let (committed, outcome) = recover(pending.record, &store, &mut native, &publisher.0).unwrap();
+    assert_eq!(outcome, TransactionOutcome::Committed);
+    assert!(native.calls.is_empty());
+    let (_, outcome) = recover(committed, &store, &mut native, &publisher.0).unwrap();
+    assert_eq!(outcome, TransactionOutcome::Committed);
+    assert!(native.calls.is_empty());
+}
+
+#[test]
+fn concurrent_foreign_publication_is_preserved_after_native_validation() {
+    use zup_transaction::InstallationPublisher;
+    struct RacingPublisher {
+        durable: common::Publisher,
+        gate: std::sync::Barrier,
+    }
+    impl InstallationPublisher for RacingPublisher {
+        type Error = String;
+        fn read_current(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+            self.durable.read_current(record)
+        }
+        fn prepare(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            self.durable.prepare(record)
+        }
+        fn publish(
+            &self,
+            record: &TransactionRecord,
+            observed: &zup_transaction::PublicationObservation,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            self.gate.wait();
+            self.gate.wait();
+            self.durable.publish(record, observed)
+        }
+    }
+    let (_root, store) = coord_with_store();
+    let publisher = RacingPublisher {
+        durable: Default::default(),
+        gate: std::sync::Barrier::new(2),
+    };
+    let foreign = common::installed(zup_core::SelectedScope::User);
+    foreign.validate().unwrap();
+    let mut executor = FakeExecutor::new();
+    let interrupted = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            publisher.gate.wait();
+            *publisher.durable.0.lock().unwrap() = Some(foreign.clone());
+            publisher.gate.wait();
+        });
+        TransactionCoordinator::new(store.clone())
+            .begin(
+                sample_app_id(),
+                zup_core::SelectedScope::User,
+                sample_version(),
+                sample_plan(),
+            )
+            .unwrap()
+            .execute(&mut executor, &publisher)
+            .unwrap()
+    });
+    assert_eq!(interrupted.outcome, TransactionOutcome::RecoveryRequired);
+    assert!(executor.rolled_back.is_empty());
+    assert_eq!(publisher.durable.0.lock().unwrap().as_ref(), Some(&foreign));
+    let mut retry = FakeExecutor::new();
+    let (_, outcome) = recover(interrupted.record, &store, &mut retry, &publisher).unwrap();
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
+    assert!(retry.calls.is_empty());
+    assert_eq!(publisher.durable.0.lock().unwrap().as_ref(), Some(&foreign));
+}
+
+#[test]
+fn publication_requires_the_observed_predecessor_and_never_recreates_a_missing_commit() {
+    use zup_transaction::{InstallationPublisher, PublicationObservation, PublicationState};
+    struct Refuse(common::Publisher);
+    impl InstallationPublisher for Refuse {
+        type Error = String;
+        fn read_current(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+            self.0.read_current(record)
+        }
+        fn prepare(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            self.0.prepare(record)
+        }
+        fn publish(
+            &self,
+            _: &TransactionRecord,
+            _: &PublicationObservation,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            Err("publication unavailable".into())
+        }
+    }
+    let (_root, store) = coord_with_store();
+    let publisher = Refuse(Default::default());
+    TransactionCoordinator::new(store.clone())
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            sample_plan(),
+        )
+        .unwrap()
+        .execute(&mut FakeExecutor::new(), &publisher.0)
+        .unwrap();
+    let previous = publisher.0.0.lock().unwrap().clone().unwrap();
+    let mut effects = common::effects();
+    effects.observed = Some(previous.current.selection());
+    effects.observed_transaction = Some(previous.commit.transaction);
+    let pending = TransactionCoordinator::new(store.clone())
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            compile_deployment(&effects).unwrap(),
+        )
+        .unwrap()
+        .execute(&mut FakeExecutor::new(), &publisher)
+        .unwrap();
+    assert!(matches!(
+        zup_transaction::observe_publication(&pending.record, Some(previous)).unwrap(),
+        PublicationObservation::Unpublished { .. }
+    ));
+    *publisher.0.0.lock().unwrap() = None;
+    let mut native = FakeExecutor::new();
+    let (pending, outcome) = recover(pending.record, &store, &mut native, &publisher.0).unwrap();
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
+    assert!(native.calls.is_empty());
+    assert!(publisher.0.0.lock().unwrap().is_none());
+    let mut published = pending;
+    let PublicationState::Requested { record_hash } = published.publication else {
+        panic!("publication requested");
+    };
+    published.publication = PublicationState::Published { record_hash };
+    published.nodes.insert(
+        OperationId::new(OperationId::COMMIT),
+        NodeState::Applied {
+            receipt: Box::new(zup_transaction::OperationReceipt::Control),
+        },
+    );
+    published.validate().unwrap();
+    assert!(zup_transaction::observe_publication(&published, None).is_err());
 }

@@ -16,6 +16,13 @@ struct Publisher {
 
 impl InstallationPublisher for Publisher {
     type Error = String;
+    fn read_current(
+        &self,
+        record: &zup_transaction::TransactionRecord,
+    ) -> Result<Option<zup_plan::InstallationRecord>, String> {
+        self.durable.read_current(record)
+    }
+
     fn prepare(
         &self,
         record: &zup_transaction::TransactionRecord,
@@ -28,8 +35,9 @@ impl InstallationPublisher for Publisher {
     fn publish(
         &self,
         record: &zup_transaction::TransactionRecord,
+        observed: &zup_transaction::PublicationObservation,
     ) -> Result<zup_plan::InstallationRecord, String> {
-        self.durable.publish(record)
+        self.durable.publish(record, observed)
     }
 }
 

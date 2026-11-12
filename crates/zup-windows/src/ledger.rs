@@ -490,11 +490,29 @@ impl InstallationRecordStore {
 impl zup_transaction::InstallationPublisher for InstallationRecordStore {
     type Error = LedgerError;
 
+    fn read_current(
+        &self,
+        transaction: &TransactionRecord,
+    ) -> Result<Option<InstallationRecord>, Self::Error> {
+        self.load_authoritative(
+            &transaction.app_id,
+            transaction.scope,
+            Some(transaction.transaction_id),
+        )
+    }
+
     fn prepare(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, Self::Error> {
         self.prepare_installation(transaction, transaction.scope)
     }
 
-    fn publish(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, Self::Error> {
+    fn publish(
+        &self,
+        transaction: &TransactionRecord,
+        observed: &zup_transaction::PublicationObservation,
+    ) -> Result<InstallationRecord, Self::Error> {
+        observed
+            .check_current(transaction, self.read_current(transaction)?)
+            .map_err(LedgerError::Ownership)?;
         self.write_installation(transaction, transaction.scope)
     }
 }

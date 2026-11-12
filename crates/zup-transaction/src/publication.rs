@@ -15,11 +15,54 @@ pub enum PublicationState {
 pub trait InstallationPublisher {
     type Error: std::fmt::Display;
 
+    /// Read through protected authority while the caller holds the installation lifecycle lock.
+    /// Absence is evidence only when the plan did not observe an earlier installation.
+    fn read_current(
+        &self,
+        transaction: &TransactionRecord,
+    ) -> Result<Option<InstallationRecord>, Self::Error>;
+
     fn prepare(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, Self::Error>;
 
     /// Publish durably and read back through the protected installation authority.
-    /// Repeating a request must verify and durably republish the same record.
-    fn publish(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, Self::Error>;
+    /// Repeating an exact readback completes its durability barrier without changing ownership.
+    /// Recheck the predecessor under the same lifecycle lock; never overwrite foreign state.
+    fn publish(
+        &self,
+        transaction: &TransactionRecord,
+        observed: &PublicationObservation,
+    ) -> Result<InstallationRecord, Self::Error>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicationObservation {
+    Unpublished {
+        previous: Option<Box<InstallationRecord>>,
+    },
+    Visible(Box<InstallationRecord>),
+}
+
+pub fn observe_publication(
+    transaction: &TransactionRecord,
+    current: Option<InstallationRecord>,
+) -> Result<PublicationObservation, String> {
+    if let Some(current) = current.as_ref()
+        && current.commit.transaction == transaction.transaction_id
+    {
+        verify_installation_evidence(current, transaction)?;
+        return Ok(PublicationObservation::Visible(Box::new(current.clone())));
+    }
+    if matches!(transaction.publication, PublicationState::Published { .. }) {
+        return Err(
+            "published installation is missing or replaced; preserve roots and reconcile ownership"
+                .into(),
+        );
+    }
+    crate::prepare_installation_record(transaction, current.as_ref())
+        .map_err(|_| "publication predecessor is missing or foreign; restore protected ownership evidence before retrying".to_string())?;
+    Ok(PublicationObservation::Unpublished {
+        previous: current.map(Box::new),
+    })
 }
 
 pub fn verify_published_installation(
@@ -150,4 +193,17 @@ pub fn verify_installation_evidence(
         );
     }
     Ok(())
+}
+
+impl PublicationObservation {
+    pub fn check_current(
+        &self,
+        transaction: &TransactionRecord,
+        current: Option<InstallationRecord>,
+    ) -> Result<(), String> {
+        if &observe_publication(transaction, current)? != self {
+            return Err("installation changed during publication validation; preserve evidence and reassess under the lifecycle lock".into());
+        }
+        Ok(())
+    }
 }
