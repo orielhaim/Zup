@@ -1,16 +1,26 @@
-//! Cancellation, as a question rather than a token.
+//! Cancellation queries and wakeable cancellation waits.
 //!
-//! Acquisition is bounded work that a user can interrupt, and the same
-//! question is asked in three places: the scheduler between items, a source
-//! between chunks, and a retry loop between attempts. A trait keeps the
-//! dependency direction right - the engine owns the answer, the callers ask -
-//! and matches the existing `zup-transaction` and `zup-plan` seams rather than
-//! introducing a second cancellation model.
+//! `CancelFlag` wakes waiters directly. Query-only implementations remain valid
+//! and use the default timer-based adapter; override `Cancellation::cancelled`
+//! when the caller already owns a notification mechanism.
+
+use std::future::Future;
+use std::pin::Pin;
 
 /// Whether the caller has asked for the work to stop.
 pub trait Cancellation: Send + Sync {
     /// Whether cancellation has been requested.
     fn is_cancelled(&self) -> bool;
+
+    /// Wait for cancellation. Override for notification-based cancellation.
+    /// Query-only adapters are sampled every 50ms so existing implementers work.
+    fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            while !self.is_cancelled() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+    }
 }
 
 impl<F: Fn() -> bool + Send + Sync> Cancellation for F {
@@ -27,11 +37,15 @@ impl Cancellation for NeverCancelled {
     fn is_cancelled(&self) -> bool {
         false
     }
+
+    fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
 }
 
 /// A cancellation flag any thread or task can raise.
 #[derive(Debug, Default)]
-pub struct CancelFlag(std::sync::atomic::AtomicBool);
+pub struct CancelFlag(tokio_util::sync::CancellationToken);
 
 impl CancelFlag {
     /// A flag that has not been raised.
@@ -39,15 +53,19 @@ impl CancelFlag {
         Self::default()
     }
 
-    /// Raise the flag.
+    /// Raise the flag and wake its waiters.
     pub fn cancel(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0.cancel();
     }
 }
 
 impl Cancellation for CancelFlag {
     fn is_cancelled(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
+        self.0.is_cancelled()
+    }
+
+    fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(self.0.cancelled())
     }
 }
 
@@ -60,20 +78,9 @@ pub async fn cancellable_sleep(
     duration: std::time::Duration,
     cancellation: &dyn Cancellation,
 ) -> bool {
-    if cancellation.is_cancelled() {
-        return false;
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => false,
+        _ = tokio::time::sleep(duration) => !cancellation.is_cancelled(),
     }
-    let step = std::time::Duration::from_millis(50);
-    let mut remaining = duration;
-    while remaining > step {
-        tokio::time::sleep(step).await;
-        if cancellation.is_cancelled() {
-            return false;
-        }
-        remaining -= step;
-    }
-    if remaining > std::time::Duration::ZERO {
-        tokio::time::sleep(remaining).await;
-    }
-    !cancellation.is_cancelled()
 }

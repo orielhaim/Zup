@@ -864,3 +864,78 @@ async fn a_server_that_never_answers_is_abandoned_by_the_header_timeout() {
         "a stalled origin is abandoned, not waited on"
     );
 }
+
+#[tokio::test]
+async fn session_cancellation_wakes_an_http_request_waiting_for_headers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (requested, request_seen) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+            }
+            requested.send(()).unwrap();
+            // No headers or timeout can complete the request before cancellation.
+            released.await.unwrap();
+            let _ = stream.shutdown().await;
+        });
+        let root = tempfile::tempdir().unwrap();
+        let cache = Arc::new(ContentCache::open(root.path(), CachePolicy::Keep).unwrap());
+        let descriptor = ContentDescriptor::stored(ContentKind::Runtime, digest_of(b"runtime"), 7);
+        let plan = AcquisitionPlan::build(vec![AcquisitionItem::new(
+            descriptor,
+            ContentReason::Runtime,
+        )])
+        .unwrap();
+        let source = Arc::new(
+            HttpSource::with_config(
+                "blocked",
+                &HttpClientConfig {
+                    use_platform_proxy: false,
+                    timeouts: TimeoutPolicy {
+                        connect: std::time::Duration::from_secs(60),
+                        headers: std::time::Duration::from_secs(60),
+                        idle: std::time::Duration::from_secs(60),
+                        per_blob: std::time::Duration::from_secs(60),
+                    },
+                },
+                OriginSet::from_urls(&url, Vec::<&str>::new()).unwrap(),
+            )
+            .unwrap(),
+        );
+        let flag = Arc::new(zup_acquire::CancelFlag::new());
+        let handle = tokio::spawn({
+            let flag = flag.clone();
+            let cache = cache.clone();
+            async move {
+                AcquisitionSession::new(plan, cache, SchedulerConfig::default())
+                    .run(
+                        SourceChain::new(vec![source]),
+                        flag,
+                        &ProgressSink::discard(),
+                    )
+                    .await
+            }
+        });
+        request_seen.await.unwrap();
+        flag.cancel();
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(AcquireError::Cancelled)
+        ));
+        assert!(cache.get(&descriptor, Verify::Full).unwrap().is_none());
+        // The source's writer and its exclusive resource lock have settled.
+        assert_eq!(cache.writer(&descriptor).unwrap().wire_offset(), 0);
+        release.send(()).unwrap();
+        server.await.unwrap();
+    })
+    .await
+    .expect("cancellation must not wait for the HTTP timeout or server");
+}

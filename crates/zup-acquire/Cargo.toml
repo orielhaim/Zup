@@ -19,6 +19,7 @@ tokio = { version = "1", features = [
   "sync",
   "time",
 ] }
+tokio-util = { version = "0.7", features = ["rt"] }
 zstd.workspace = true
 zup-core.workspace = true
 

@@ -21,11 +21,23 @@
 //!
 //! # Concurrency
 //!
-//! Bounded, and bounded per origin rather than as one global number, because the
-//! thing that actually limits a transfer is the connection pool of the thing
-//! serving it. Work is taken from a queue in scheduler order - priority first,
-//! then smallest first - so a 2 KiB document the installer is blocked on is not
+//! Transfers are bounded globally, with a separate limit on staging. Work is
+//! taken from a queue in scheduler order, priority first, then smallest first,
+//! so a 2 KiB document the installer is blocked on is not
 //! sitting behind a 4 GiB payload blob.
+//!
+//! # Shutdown
+//!
+//! One owner schedules and joins all tasks. The first observed error or
+//! cancellation stops dispatch and wakes pending transfers and staging permit
+//! waits. Ready task results win ties with cancellation in the owner select.
+//! Active staging is drained to completion, including on peer failure; stagers
+//! must settle their own writes and child work before returning or unwinding.
+//! Synchronous cache writes and publication are never interrupted between steps.
+//! A terminal event follows settlement, and only success yields a barrier.
+//! Callers must await `run` after requesting cancellation, rather than abort it.
+//! Terminal delivery applies backpressure: keep reading the event receiver or
+//! drop it. Intermediate progress samples are lossy.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -33,7 +45,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Semaphore, mpsc};
+use tokio::task::JoinSet;
 use zup_core::Sha256Digest;
 
 use crate::cache::{CacheProbe, ContentCache, VerifiedBlob, Verify};
@@ -91,6 +104,9 @@ impl SchedulerConfig {
         if self.staging == 0 {
             return Err("a scheduler needs at least one staging operation in flight");
         }
+        if self.progress_interval.is_zero() {
+            return Err("progress sampling needs a nonzero interval");
+        }
         Ok(())
     }
 }
@@ -142,9 +158,7 @@ impl ProgressSink {
 
 /// A cancellation question a worker can hold on to.
 ///
-/// The session's workers are spawned tasks, so they need an owned handle rather
-/// than a borrow. `Arc<dyn Cancellation>` is that handle: a flag is a single
-/// atomic, so sharing one is free, and every worker sees the same answer.
+/// The session owns this handle until all work has settled.
 pub type SharedCancellation = Arc<dyn Cancellation>;
 
 /// A boxed future, so the stager trait stays object safe.
@@ -156,6 +170,11 @@ pub type StagerFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Sen
 /// decompression and disk writes overlap with the remaining downloads. It must
 /// not touch anything the application owns: staging writes to a work root, and
 /// publishing is the transaction's job.
+///
+/// Once started, preparation and staging are awaited to completion even during
+/// cancellation. Implementations must settle writes and child work before returning
+/// or unwinding. A failed operation may leave private work files, never deployed
+/// content. Callers must await `run` through cancellation rather than abort it.
 pub trait BlobStager: Send + Sync {
     /// Prepare whatever the stager needs before any blob arrives.
     fn prepare(&self) -> StagerFuture<'_, Result<(), String>>;
@@ -231,40 +250,12 @@ impl Barrier {
 /// Shared counters, so progress is a read of state rather than a message per
 /// chunk.
 ///
-/// Each counter is independently shareable so the progress sampler can be a
-/// detached task that reads the same state the transfers write, without holding
-/// a borrow on the session.
-#[derive(Debug, Default, Clone)]
+/// Workers update counters; the session owner samples them.
+#[derive(Debug, Default)]
 struct Counters {
-    completed_bytes: Arc<AtomicU64>,
-    completed_items: Arc<AtomicU64>,
-    active: Arc<AtomicU64>,
-}
-
-/// One transfer's result, or the reason it failed.
-type TransferResult = Result<VerifiedBlob, TransferFailure>;
-
-/// A transfer failure, tagged with the retry bookkeeping a source performed so
-/// the session can report it without the source and the scheduler sharing
-/// mutable state.
-#[derive(Debug)]
-struct TransferFailure {
-    error: AcquireError,
-    retries: u32,
-    last_delay_ms: u64,
-    last_reason: String,
-}
-
-impl TransferFailure {
-    fn new(error: AcquireError) -> Self {
-        let (retries, last_delay_ms, last_reason) = retry_bookkeeping(&error);
-        Self {
-            error,
-            retries,
-            last_delay_ms,
-            last_reason,
-        }
-    }
+    completed_bytes: AtomicU64,
+    completed_items: AtomicU64,
+    active: AtomicU64,
 }
 
 /// Recover a retry count from a source's report.
@@ -287,7 +278,7 @@ pub struct AcquisitionSession {
     cache: Arc<ContentCache>,
     config: SchedulerConfig,
     stager: Arc<dyn BlobStager>,
-    counters: Counters,
+    counters: Arc<Counters>,
     start: Instant,
 }
 
@@ -299,7 +290,7 @@ impl AcquisitionSession {
             cache,
             config,
             stager: Arc::new(NoStaging),
-            counters: Counters::default(),
+            counters: Arc::default(),
             start: Instant::now(),
         }
     }
@@ -332,7 +323,38 @@ impl AcquisitionSession {
         cancellation: SharedCancellation,
         progress: &ProgressSink,
     ) -> Result<Barrier, AcquireError> {
+        let result = self.run_inner(chain, cancellation, progress).await;
+        let event = match &result {
+            Ok(barrier) => AcquisitionEvent::AcquisitionComplete {
+                items: barrier.outcome.items.len() as u64,
+                bytes: barrier.outcome.total_bytes,
+                elapsed_ms: barrier.outcome.elapsed.as_millis() as u64,
+            },
+            Err(AcquireError::Cancelled) => AcquisitionEvent::Cancelled {
+                completed_items: self.counters.completed_items.load(Ordering::Relaxed),
+                total_items: self.plan.len() as u64,
+            },
+            Err(error) => AcquisitionEvent::Failed {
+                kind: failure_kind(error),
+                digest: failure_digest(error),
+                message: error.to_string(),
+                reasons: failure_reasons(error),
+            },
+        };
+        progress.terminal(event).await;
+        result
+    }
+
+    async fn run_inner(
+        &self,
+        chain: SourceChain,
+        cancellation: SharedCancellation,
+        progress: &ProgressSink,
+    ) -> Result<Barrier, AcquireError> {
         self.config.validate().map_err(AcquireError::Descriptor)?;
+        if cancellation.is_cancelled() {
+            return Err(AcquireError::Cancelled);
+        }
         self.stager
             .prepare()
             .await
@@ -349,13 +371,13 @@ impl AcquisitionSession {
             estimate,
         });
 
-        let (mut items, missing, cache_hits) = self.take_cached(progress, &cancellation).await?;
+        let (mut items, missing, cache_hits) = self.take_cached(progress, &cancellation)?;
         if !missing.is_empty() {
             self.fetch_all(
                 missing,
                 chain,
                 &mut items,
-                cancellation,
+                Arc::clone(&cancellation),
                 progress,
                 &estimate,
             )
@@ -373,18 +395,13 @@ impl AcquisitionSession {
                     kind: item.descriptor.kind().as_str(),
                     digest: item.descriptor.digest.to_hex(),
                 };
-                progress
-                    .terminal(AcquisitionEvent::Failed {
-                        kind: "incomplete_closure",
-                        digest: Some(item.descriptor.digest.to_hex()),
-                        message: error.to_string(),
-                        reasons: Vec::new(),
-                    })
-                    .await;
                 return Err(error);
             }
         }
 
+        if cancellation.is_cancelled() {
+            return Err(AcquireError::Cancelled);
+        }
         let outcome = AcquisitionOutcome {
             items,
             estimate,
@@ -394,18 +411,11 @@ impl AcquisitionSession {
                 .download_bytes
                 .saturating_add(estimate.cached_bytes),
         };
-        progress
-            .terminal(AcquisitionEvent::AcquisitionComplete {
-                items: outcome.items.len() as u64,
-                bytes: outcome.total_bytes,
-                elapsed_ms: outcome.elapsed.as_millis() as u64,
-            })
-            .await;
         Ok(Barrier { outcome })
     }
 
     /// Split the closure into what the cache already holds and what must move.
-    async fn take_cached(
+    fn take_cached(
         &self,
         progress: &ProgressSink,
         cancellation: &SharedCancellation,
@@ -415,12 +425,6 @@ impl AcquisitionSession {
         let mut hits = 0usize;
         for item in self.plan.items() {
             if cancellation.is_cancelled() {
-                progress
-                    .terminal(AcquisitionEvent::Cancelled {
-                        completed_items: hits as u64,
-                        total_items: self.plan.len() as u64,
-                    })
-                    .await;
                 return Err(AcquireError::Cancelled);
             }
             let descriptor = item.descriptor;
@@ -468,178 +472,163 @@ impl AcquisitionSession {
         let total_bytes = estimate
             .download_bytes
             .saturating_add(estimate.cached_bytes);
-        let workers = self.config.total.min(work.len()).max(1);
-        let queue = Arc::new(Mutex::new(work.into_iter().collect::<VecDeque<_>>()));
-        let cache = Arc::clone(&self.cache);
-        let stager = Arc::clone(&self.stager);
-        let counters = self.counters.clone();
-        // The staging bound is on decompression and disk writes only. Applying
-        // it to the transfers would cap concurrency at the staging depth and
-        // make a slow disk throttle the network, which is backwards.
-        let staging = Arc::new(tokio::sync::Semaphore::new(self.config.staging));
+        let workers = self.config.total.min(work.len());
+        let mut queue = VecDeque::from(work);
+        let mut tasks = JoinSet::new();
+        let stop = Arc::new(crate::CancelFlag::new());
+        let staging = Arc::new(Semaphore::new(self.config.staging));
+        let mut failure = None;
+        let mut interval = tokio::time::interval(self.config.progress_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let cancelled = cancellation.cancelled();
+        tokio::pin!(cancelled);
 
-        let (results, mut receiver) = mpsc::channel::<(TransferResult, AcquisitionItem)>(workers);
-        let mut handles = Vec::with_capacity(workers);
-        for _ in 0..workers {
-            let queue = Arc::clone(&queue);
-            let chain = chain.clone();
-            let cache = Arc::clone(&cache);
-            let stager = Arc::clone(&stager);
-            let results = results.clone();
-            let staging = Arc::clone(&staging);
-            let counters = counters.clone();
-            let cancellation = Arc::clone(&cancellation);
-            handles.push(tokio::spawn(async move {
-                loop {
-                    let next = { queue.lock().await.pop_front() };
-                    let Some(item) = next else { break };
-                    if cancellation.is_cancelled() {
-                        let _ = results
-                            .send((Err(TransferFailure::new(AcquireError::Cancelled)), item))
-                            .await;
-                        break;
-                    }
-                    counters.active.fetch_add(1, Ordering::Relaxed);
-                    let acquired = chain
-                        .acquire(&item.descriptor, &cache, cancellation.as_ref())
-                        .await;
-                    counters.active.fetch_sub(1, Ordering::Relaxed);
-                    let outcome = match acquired {
-                        Ok(blob) => {
-                            let _permit = staging.acquire().await;
-                            match stager.stage(blob.clone()).await {
-                                Ok(()) => {
-                                    counters
-                                        .completed_bytes
-                                        .fetch_add(blob.wire_size, Ordering::Relaxed);
-                                    counters.completed_items.fetch_add(1, Ordering::Relaxed);
-                                    Ok(blob)
-                                }
-                                Err(detail) => Err(AcquireError::Staging {
-                                    kind: item.descriptor.kind().as_str(),
-                                    digest: item.descriptor.digest.to_hex(),
-                                    detail,
-                                }),
-                            }
-                        }
-                        Err(error) => Err(error),
-                    };
-                    let outcome = outcome.map_err(TransferFailure::new);
-                    if results.send((outcome, item)).await.is_err() {
-                        break;
-                    }
+        loop {
+            while failure.is_none() && tasks.len() < workers {
+                if cancellation.is_cancelled() {
+                    failure = Some(AcquireError::Cancelled);
+                    stop.cancel();
+                    break;
                 }
-            }));
-        }
-        drop(results);
-
-        let sampler = self.spawn_sampler(progress, total_bytes, total_items, estimate);
-
-        let mut failure: Option<(TransferFailure, AcquisitionItem)> = None;
-        let mut workers_done = 0usize;
-        while let Some((outcome, item)) = receiver.recv().await {
-            match outcome {
-                Ok(blob) => items.push(blob),
-                Err(error) => {
-                    if error.retries > 0 {
-                        progress.sample(AcquisitionEvent::Retrying {
+                let Some(item) = queue.pop_front() else { break };
+                let chain = chain.clone();
+                let cache = Arc::clone(&self.cache);
+                let stager = Arc::clone(&self.stager);
+                let staging = Arc::clone(&staging);
+                let stop = Arc::clone(&stop);
+                let counters = self.counters.clone();
+                let cancellation = Arc::clone(&cancellation);
+                tasks.spawn(async move {
+                    let result = async {
+                        let active = ActiveTransfer::new(&counters.active);
+                        let blob = tokio::select! {
+                            biased;
+                            _ = stop.cancelled() => return Err(AcquireError::Cancelled),
+                            result = chain.acquire(&item.descriptor, &cache, stop.as_ref()) => result?,
+                        };
+                        drop(active);
+                        let _permit = tokio::select! {
+                            biased;
+                            _ = stop.cancelled() => return Err(AcquireError::Cancelled),
+                            permit = staging.acquire() => permit.map_err(|_| AcquireError::Worker("staging semaphore closed".into()))?,
+                        };
+                        if cancellation.is_cancelled() || stop.is_cancelled() {
+                            return Err(AcquireError::Cancelled);
+                        }
+                        // Staging may span filesystem steps or await blocking work.
+                        // Once entered it must settle, rather than be dropped midway.
+                        stager.stage(blob.clone()).await.map_err(|detail| AcquireError::Staging {
                             kind: item.descriptor.kind().as_str(),
                             digest: item.descriptor.digest.to_hex(),
-                            attempt: error.retries,
-                            delay_ms: error.last_delay_ms,
-                            reason: error.last_reason.clone(),
-                        });
-                    }
-                    if failure.is_none() {
-                        failure = Some((error, item));
-                    }
-                }
+                            detail,
+                        })?;
+                        counters.completed_bytes.fetch_add(blob.wire_size, Ordering::Relaxed);
+                        counters.completed_items.fetch_add(1, Ordering::Relaxed);
+                        Ok(blob)
+                    }.await;
+                    (item, result)
+                });
             }
-            workers_done += 1;
-            if failure.is_some() {
+            if tasks.is_empty() {
                 break;
             }
-        }
-        for handle in handles {
-            let _ = handle.await;
-        }
-        let _ = workers_done;
-        sampler.abort();
-
-        if let Some((failure, item)) = failure {
-            let error = failure.error;
-            if matches!(error, AcquireError::Cancelled) {
-                progress
-                    .terminal(AcquisitionEvent::Cancelled {
-                        completed_items: self.counters.completed_items.load(Ordering::Relaxed),
-                        total_items,
-                    })
-                    .await;
-                return Err(error);
+            // A ready result wins a tie with cancellation. The first observed
+            // failure is latched; shutdown outcomes never replace it.
+            let error = tokio::select! {
+                biased;
+                joined = tasks.join_next() => match joined.expect("the task set is nonempty") {
+                    Ok((_, Ok(blob))) => { items.push(blob); None }
+                    Ok((item, Err(error))) => {
+                        let (retries, delay_ms, reason) = retry_bookkeeping(&error);
+                        if retries > 0 {
+                            progress.sample(AcquisitionEvent::Retrying {
+                                kind: item.descriptor.kind().as_str(),
+                                digest: item.descriptor.digest.to_hex(),
+                                attempt: retries,
+                                delay_ms,
+                                reason,
+                            });
+                        }
+                        Some(error)
+                    }
+                    Err(error) => Some(AcquireError::Worker(error.to_string())),
+                },
+                _ = &mut cancelled, if failure.is_none() => Some(AcquireError::Cancelled),
+                _ = interval.tick() => {
+                    self.sample_progress(progress, total_bytes, total_items, estimate);
+                    None
+                }
+            };
+            if failure.is_none()
+                && let Some(error) = error
+            {
+                failure = Some(error);
+                stop.cancel();
             }
-            progress
-                .terminal(AcquisitionEvent::Failed {
-                    kind: failure_kind(&error),
-                    digest: Some(item.descriptor.digest.to_hex()),
-                    message: error.to_string(),
-                    reasons: failure_reasons(&error),
-                })
-                .await;
-            return Err(error);
         }
-        Ok(())
+        self.sample_progress(progress, total_bytes, total_items, estimate);
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
-    /// Sample progress on an interval until the last byte lands.
-    ///
-    /// The sample is a read of shared counters, so sampling costs nothing on the
-    /// transfer path and cannot slow a download down.
-    fn spawn_sampler(
+    fn sample_progress(
         &self,
         progress: &ProgressSink,
         total_bytes: u64,
         total_items: u64,
         estimate: &AcquisitionEstimate,
-    ) -> tokio::task::JoinHandle<()> {
-        let progress = progress.clone();
-        let interval = self.config.progress_interval;
-        let start = self.start;
-        let cached_bytes = estimate.cached_bytes;
-        let cached_items = estimate.cached_items as u64;
-        let counters = self.counters.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                let mut sample = AcquisitionProgress {
-                    phase: AcquisitionPhase::Downloading,
-                    completed_bytes: counters.completed_bytes.load(Ordering::Relaxed),
-                    total_bytes,
-                    cached_bytes,
-                    cached_items,
-                    active_transfers: counters.active.load(Ordering::Relaxed),
-                    completed_items: counters.completed_items.load(Ordering::Relaxed),
-                    total_items,
-                    elapsed: start.elapsed(),
-                    throughput: 0,
-                    eta: None,
-                    retries: 0,
-                };
-                sample.recompute();
-                let complete = sample.is_complete();
-                progress.sample(AcquisitionEvent::DownloadProgress {
-                    progress: Box::new(sample),
-                });
-                if complete {
-                    return;
-                }
-            }
-        })
+    ) {
+        let mut sample = AcquisitionProgress {
+            phase: AcquisitionPhase::Downloading,
+            completed_bytes: self.counters.completed_bytes.load(Ordering::Relaxed),
+            total_bytes,
+            cached_bytes: estimate.cached_bytes,
+            cached_items: estimate.cached_items as u64,
+            active_transfers: self.counters.active.load(Ordering::Relaxed),
+            completed_items: self.counters.completed_items.load(Ordering::Relaxed),
+            total_items,
+            elapsed: self.start.elapsed(),
+            throughput: 0,
+            eta: None,
+            retries: 0,
+        };
+        sample.recompute();
+        progress.sample(AcquisitionEvent::DownloadProgress {
+            progress: Box::new(sample),
+        });
+    }
+}
+
+struct ActiveTransfer<'a>(&'a AtomicU64);
+
+impl<'a> ActiveTransfer<'a> {
+    fn new(active: &'a AtomicU64) -> Self {
+        active.fetch_add(1, Ordering::Relaxed);
+        Self(active)
+    }
+}
+
+impl Drop for ActiveTransfer<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn failure_digest(error: &AcquireError) -> Option<String> {
+    match error {
+        AcquireError::Unavailable { digest, .. }
+        | AcquireError::Missing { digest, .. }
+        | AcquireError::Staging { digest, .. } => Some(digest.clone()),
+        _ => None,
     }
 }
 
 fn failure_kind(error: &AcquireError) -> &'static str {
     match error {
         AcquireError::Cancelled => "cancelled",
+        AcquireError::Worker(_) => "worker",
         AcquireError::Unavailable { .. } => "unavailable",
         AcquireError::Missing { .. } => "incomplete_closure",
         AcquireError::Staging { .. } => "staging",

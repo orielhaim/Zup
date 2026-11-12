@@ -137,6 +137,24 @@ fn chain(sources: Vec<Arc<dyn ArtifactSource>>) -> SourceChain {
     SourceChain::new(sources)
 }
 
+#[tokio::test]
+async fn one_worker_four_missing_blobs_returns_the_first_failure() {
+    let cache = TestCache::new();
+    let plan = AcquisitionPlan::build(items_for(&fixture(4))).unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        AcquisitionSession::new(
+            plan,
+            cache.shared(CachePolicy::Keep),
+            SchedulerConfig::sequential(),
+        )
+        .run(chain(vec![]), never(), &ProgressSink::discard()),
+    )
+    .await
+    .expect("an unavailable closure must settle its workers");
+    assert!(matches!(result, Err(AcquireError::Unavailable { .. })));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closure_is_satisfied_and_the_barrier_opens() {
     let cache = TestCache::new();

@@ -70,6 +70,11 @@ pub trait ArtifactSource: Send + Sync {
     /// Implementations must publish through [`ContentCache::writer`], which is
     /// what keeps partial bytes unobservable and the digest authoritative. A
     /// source that returns without publishing has not acquired anything.
+    ///
+    /// The session may drop this future at any await on cancellation or peer
+    /// failure. Keep writes in synchronous `BlobWriter` operations, whose drop
+    /// preserves resumable partials and releases locks. Do not detach writes or
+    /// leave filesystem mutations running after the future is dropped.
     fn acquire<'a>(
         &'a self,
         request: AcquireRequest<'a>,

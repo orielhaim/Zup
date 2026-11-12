@@ -114,6 +114,9 @@ pub enum AcquireError {
     /// The caller cancelled.
     #[error("acquisition was cancelled")]
     Cancelled,
+    /// An acquisition task panicked or could not be joined.
+    #[error("acquisition worker failed: {0}")]
+    Worker(String),
     /// No source could satisfy the closure.
     #[error("no source could acquire {kind} {digest}")]
     Unavailable {
