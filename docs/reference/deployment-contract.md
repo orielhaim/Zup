@@ -236,7 +236,6 @@ settled-source collection before history cleanup. Input overlays may be removed 
 the protected snapshot is complete. Process interruption tests do not establish
 power-loss durability; native Windows ARM64 requires separate qualification.
 
-
 ### Unsafe-compensation resolution
 
 Rollback policy is checked before compensation starts. A repaired external file,
@@ -245,15 +244,15 @@ leaves the journal and recovery roots intact. Ordinary recovery remains conserva
 Temporary observation or publication failures can still settle through native
 reconciliation. A deterministic policy refusal needs assessment, not repeated retry.
 
-| Boundary | Durable authority | Settlement rule |
-| --- | --- | --- |
-| Failure and compensation | Failure receipt, node state, rollback phase | Check policy before compensation; unknown effects require native reconciliation. |
-| Operator resolution | Exact decision and protected journal revision | Persist intent once; resume the same forward direction after interruption. |
-| Fixed files | New and displaced native identities in the operation receipt | Verify both; publish ownership of the new instance only. |
-| Persistent data | Previous contract, current directory receipt, exposure evidence | Directory identity does not prove schema compatibility or a restored backup. |
-| Installation publication | Protected reservation, observed installation selection, publication request hash | Publisher validates the previous record and reads back the actual new record. |
-| Retained generations and sources | Installation roots, creator receipts, unfinished journals | Keep recovery roots until effects, publication and reconciliation settle. |
-| External repair residue | Repair intent and displaced-instance receipt | Keep the journal as a history root; no cleanup or source-adoption authority. |
+| Boundary                         | Durable authority                                                                | Settlement rule                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| Failure and compensation         | Failure receipt, node state, rollback phase                                      | Check policy before compensation; unknown effects require native reconciliation. |
+| Operator resolution              | Exact decision and protected journal revision                                    | Persist intent once; resume the same forward direction after interruption.       |
+| Fixed files                      | New and displaced native identities in the operation receipt                     | Verify both; publish ownership of the new instance only.                         |
+| Persistent data                  | Previous contract, current directory receipt, exposure evidence                  | Directory identity does not prove schema compatibility or a restored backup.     |
+| Installation publication         | Protected reservation, observed installation selection, publication request hash | Publisher validates the previous record and reads back the actual new record.    |
+| Retained generations and sources | Installation roots, creator receipts, unfinished journals                        | Keep recovery roots until effects, publication and reconciliation settle.        |
+| External repair residue          | Repair intent and displaced-instance receipt                                     | Keep the journal as a history root; no cleanup or source-adoption authority.     |
 
 `RecoveryRequest::{Retry, Assess, CompleteForward}` is shared by the coordinator,
 runtime, session API and authenticated machine-worker protocols. Assessment is a
@@ -310,17 +309,16 @@ decision itself does not. Publication reconciliation and post-commit ownership r
 remain the existing shared mechanisms. Process-interruption tests do not establish
 power-loss durability. Orphan collection and storage migration remain separate work.
 
-
 ### Publication recovery boundary
 
 The installation lifecycle lock covers protected readback, native validation and
 publication in both local and privileged worker execution. The worker observes native
 state under its own authority; a serialized parent receipt grants no publication authority.
 
-| Evidence | Meaning at publication |
-| --- | --- |
-| Protected exact transaction, plan and ownership record | Publication is already visible. Complete its durability barrier and journal settlement without reapplying or compensating native effects. |
-| No record for a new reserved installation, or the exact observed predecessor | Publication has not been established. Revalidate the final native effects before writing the requested record. |
+| Evidence                                                                                        | Meaning at publication                                                                                                                    |
+| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Protected exact transaction, plan and ownership record                                          | Publication is already visible. Complete its durability barrier and journal settlement without reapplying or compensating native effects. |
+| No record for a new reserved installation, or the exact observed predecessor                    | Publication has not been established. Revalidate the final native effects before writing the requested record.                            |
 | Missing predecessor, conflicting record, unreadable authority, or missing journaled publication | Preserve the journal and roots. Require ownership reconciliation; never infer overwrite authority from absence or matching payload bytes. |
 
 `NotRequested` becomes `Requested` with the exact projection hash before the freshness

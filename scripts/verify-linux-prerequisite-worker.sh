@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-image="${ZUP_LINUX_PREREQUISITE_TEST_IMAGE:-rust:1.99-slim}"
+image="${ZUP_LINUX_PREREQUISITE_TEST_IMAGE:-rust:1.100-slim}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required to run the disposable Linux prerequisite check" >&2

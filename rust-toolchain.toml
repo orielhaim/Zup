@@ -1,5 +1,5 @@
 [toolchain]
-channel = "1.99"
+channel = "1.100"
 components = ["rustfmt", "clippy"]
 # The two targets this repository cross-compiles to. Both are declared here
 # rather than in a CI workflow because the requirement belongs to the project,

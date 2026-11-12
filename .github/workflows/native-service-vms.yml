@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           targets: ${{ matrix.triple }}
       - uses: mlugg/setup-zig@v2
         with:
