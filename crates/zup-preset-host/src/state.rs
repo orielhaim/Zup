@@ -627,6 +627,9 @@ impl HostState {
 
     pub fn finish_with(&mut self, outcome: &InstallOutcome) {
         match outcome {
+            InstallOutcome::RecoveryAssessed { assessment } => self.recovery_required(Some(assessment.transaction),
+                format!("Assessment complete; deployment remains blocked. {} Use recover --transaction {} --assess --output json to review evidence and --decision FILE for an admissible forward decision.",
+                    assessment.blockers.iter().map(|blocker| blocker.detail.as_str()).collect::<Vec<_>>().join(" "), assessment.transaction)),
             InstallOutcome::Committed | InstallOutcome::Recovered { .. } => {
                 self.snapshot.recovery_transaction = None;
                 self.retry = None;

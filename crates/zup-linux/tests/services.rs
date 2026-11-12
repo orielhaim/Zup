@@ -525,6 +525,7 @@ impl Fixture {
             .map_err(|error| format!("execute: {error}"))?;
         let (record, outcome) = (settled.record, settled.outcome);
         match outcome {
+            TransactionOutcome::Assessed(_) => panic!("ordinary execution cannot assess"),
             TransactionOutcome::Committed => {
                 let ledger = ledgers
                     .reconcile_installation(&record, SelectedScope::Machine)

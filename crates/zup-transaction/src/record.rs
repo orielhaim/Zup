@@ -15,8 +15,8 @@ use zup_core::TransactionId;
 use zup_plan::DeploymentPlan;
 use zup_plan::OperationId;
 
-// Engines predating retained-source recovery must refuse these journals.
-pub const JOURNAL_SCHEMA: u32 = 2;
+// Older engines cannot resume an authorized forward resolution.
+pub const JOURNAL_SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -173,6 +173,7 @@ pub struct NodeStateError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionRecord {
+    pub resolution: Option<crate::RecoveryDecision>,
     pub reservation: Option<crate::InstallationReservation>,
     pub publication: crate::PublicationState,
     pub failure: Option<TransactionFailure>,
@@ -203,6 +204,17 @@ impl TransactionRecord {
             .or(self.rollback_failure.as_ref())
             .or(self.failure.as_ref())
             .map(|failure| failure.message.as_str());
+        if self.recovery_failure.is_none()
+            && self.rollback_failure.is_some()
+            && self.resolution.is_none()
+            && !crate::resolution::unsafe_compensation(self).is_empty()
+        {
+            return format!(
+                "{} Assessment is available through recover --transaction {} --assess. Review complete_forward and blockers, then pass the exact complete_forward JSON object with --decision FILE. No data restore or forced native rollback is supported.",
+                detail.unwrap_or("Unsafe compensation refused."),
+                self.transaction_id
+            );
+        }
         if self.phase == TransactionPhase::Committed {
             format!(
                 "Deployment committed; {}",
@@ -232,6 +244,7 @@ impl TransactionRecord {
             nodes.insert(node.id.clone(), NodeState::Pending);
         }
         Self {
+            resolution: None,
             reservation: None,
             publication: crate::PublicationState::NotRequested,
             failure: None,
@@ -264,6 +277,27 @@ impl TransactionRecord {
     }
 
     pub fn validate(&self) -> Result<(), CorruptReason> {
+        if self.resolution.as_ref().is_some_and(|decision| {
+            !decision.matches(self)
+                || !matches!(
+                    self.phase,
+                    TransactionPhase::Applying
+                        | TransactionPhase::Committed
+                        | TransactionPhase::RecoveryRequired {
+                            resume: RecoveryPhase::Applying
+                        }
+                )
+                || self.nodes.values().any(|state| {
+                    matches!(
+                        state,
+                        NodeState::RollingBack { .. }
+                            | NodeState::Compensated { .. }
+                            | NodeState::RolledBack
+                    )
+                })
+        }) {
+            return Err(CorruptReason::InvalidPlan);
+        }
         if self.plan.requirements.app.id != self.app_id
             || self.plan.requirements.app.version != self.app_version
             || self.plan.requirements.scope != self.scope

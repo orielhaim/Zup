@@ -315,6 +315,10 @@ async fn run_worker_inner(
     );
     let (execute_tx, execute_rx) = tokio::sync::oneshot::channel();
     let reader_task = split_reader(reader, cancel.clone(), incoming, Some(execute_tx));
+    let recovery_request = match &exec.operation {
+        zup_protocol::PreparedTransactionRequest::Recovery { request, .. } => request.clone(),
+        _ => Default::default(),
+    };
     let preparation = async {
         if exec.target != bootstrap.target {
             return Err(WorkerError::TargetMismatch);
@@ -326,7 +330,7 @@ async fn run_worker_inner(
             return Err(WorkerError::RequestDigestMismatch);
         }
         let recovery_id = match &exec.operation {
-            zup_protocol::PreparedTransactionRequest::Recovery { transaction } => {
+            zup_protocol::PreparedTransactionRequest::Recovery { transaction, .. } => {
                 Some(*transaction)
             }
             _ => None,
@@ -911,7 +915,13 @@ async fn run_worker_inner(
                 .collect(),
         };
         if recovering {
-            zup_transaction::recover(record, &store, &mut executor, &publisher)
+            zup_transaction::recover_requested(
+                record,
+                &store,
+                &mut executor,
+                &publisher,
+                &recovery_request,
+            )
         } else {
             fresh
                 .expect("a fresh transaction")
@@ -931,6 +941,14 @@ async fn run_worker_inner(
     let progress_ended = progress_task.await;
 
     let (transaction_id, outcome, detail) = match result {
+        Ok((r, TransactionOutcome::Assessed(assessment))) => (
+            r.transaction_id.as_uuid(),
+            zup_protocol::WorkerOutcome::RecoveryAssessed,
+            Some(
+                serde_json::to_string(&assessment)
+                    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
+            ),
+        ),
         Ok((r, TransactionOutcome::Committed)) => {
             drop_overlay(
                 &peer,

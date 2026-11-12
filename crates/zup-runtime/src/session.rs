@@ -77,7 +77,10 @@ pub struct RuntimeDeployment {
 #[derive(Clone)]
 pub enum RuntimeOperation {
     Deployment(Box<RuntimeDeployment>),
-    Recovery { transaction: TransactionId },
+    Recovery {
+        transaction: TransactionId,
+        request: zup_transaction::RecoveryRequest,
+    },
 }
 
 impl RuntimeOperation {
@@ -88,9 +91,16 @@ impl RuntimeOperation {
         }
     }
 
+    pub fn recovery_request(&self) -> &zup_transaction::RecoveryRequest {
+        match self {
+            Self::Recovery { request, .. } => request,
+            Self::Deployment(_) => &zup_transaction::RecoveryRequest::Retry {},
+        }
+    }
+
     pub fn recovery_transaction(&self) -> Option<TransactionId> {
         match self {
-            Self::Recovery { transaction } => Some(*transaction),
+            Self::Recovery { transaction, .. } => Some(*transaction),
             Self::Deployment(_) => None,
         }
     }
@@ -117,6 +127,9 @@ impl ExecutionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
+    RecoveryAssessed {
+        assessment: Box<zup_transaction::RecoveryAssessment>,
+    },
     Committed,
     Recovered {
         settlement: RecoverySettlement,
@@ -434,6 +447,7 @@ pub(crate) fn emit_terminal(
     result: &Result<InstallOutcome, SessionError>,
 ) {
     match result {
+        Ok(InstallOutcome::RecoveryAssessed { .. }) => {}
         Ok(InstallOutcome::Committed) => {
             let _ = events.send(RuntimeEvent::Completed {
                 outcome: CompletionOutcome::Committed,

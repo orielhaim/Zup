@@ -179,6 +179,7 @@ fn process_interruption_recovers_real_files() {
             let request = zup_runtime::RuntimeRequest {
                 operation: zup_runtime::RuntimeOperation::Recovery {
                     transaction: record.transaction_id,
+                    request: Default::default(),
                 },
                 target: record.target,
                 app_id: record.app_id.clone(),
@@ -212,9 +213,10 @@ fn process_interruption_recovers_real_files() {
                     "repeated recovery changed the outcome at {index}"
                 );
             }
-            previous = Some(outcome);
+            previous = Some(outcome.clone());
             let installed = root.path().join("installed/tool");
             match outcome {
+                TransactionOutcome::Assessed(_) => panic!("ordinary recovery cannot assess"),
                 TransactionOutcome::Committed => {
                     LinuxInstallationStore::new(root.path().join("state"))
                         .reconcile_installation(&record, SelectedScope::User)

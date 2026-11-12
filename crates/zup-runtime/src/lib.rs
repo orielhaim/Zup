@@ -22,6 +22,8 @@ pub use session::{
 pub use simulate::{SimulatedJob, SimulatedLifecycle, run_simulated};
 pub use telemetry::{EventingExecutor, operation_action, operation_phase, operation_result_action};
 
+pub use zup_transaction::RecoveryAssessment;
+
 #[cfg(test)]
 mod requirements_fixture {
     include!(concat!(

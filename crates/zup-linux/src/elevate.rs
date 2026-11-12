@@ -368,6 +368,14 @@ pub(crate) fn drive_client(
                         }
                         Ok(LinuxOutcome::RolledBack)
                     }
+                    zup_protocol::WorkerOutcome::RecoveryAssessed => {
+                        Ok(LinuxOutcome::Assessed(Box::new(
+                            serde_json::from_str(completed.detail.as_deref().ok_or_else(|| {
+                                ExecError::Worker("worker assessment missing".into())
+                            })?)
+                            .map_err(|error| ExecError::Worker(error.to_string()))?,
+                        )))
+                    }
                     zup_protocol::WorkerOutcome::Cancelled => Err(ExecError::Cancelled),
                     zup_protocol::WorkerOutcome::RecoveryRequired => {
                         let detail = completed.detail.unwrap_or_else(|| "The transaction requires recovery before another operation can proceed".into());
@@ -671,6 +679,7 @@ pub(crate) fn recover_machine(
     installer: &std::path::Path,
     state_root: &std::path::Path,
     id: uuid::Uuid,
+    request: &zup_transaction::RecoveryRequest,
     control: &zup_runtime::RuntimeControl,
 ) -> Result<LinuxOutcome, ExecError> {
     let carrier = crate::carrier::Carrier::open(installer)?;
@@ -678,6 +687,7 @@ pub(crate) fn recover_machine(
     let intent = PrepareOperation {
         operation: zup_protocol::PrivilegedRequest::Recovery {
             transaction: zup_core::TransactionId::from_uuid(id),
+            request: request.clone(),
         },
         app_id: app.id.to_string(),
         app_version: app.version.to_string(),

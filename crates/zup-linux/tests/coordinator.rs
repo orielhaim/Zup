@@ -728,3 +728,139 @@ fn reserve(store: &impl zup_transaction::TransactionStore, transaction: zup_core
         })
         .unwrap();
 }
+
+#[rstest::rstest]
+#[case::complete(false)]
+#[case::swapped_native_object(true)]
+fn explicit_repair_resolution_preserves_the_modified_native_object(#[case] swap: bool) {
+    use std::os::unix::fs::MetadataExt;
+    use zup_transaction::{RecoveryRequest, TransactionStore};
+    let root = tempfile::tempdir().unwrap();
+    let payload = root.path().join("payload");
+    let install = root.path().join("install");
+    let state = root.path().join("state");
+    std::fs::create_dir(&payload).unwrap();
+    std::fs::write(payload.join("program"), b"authenticated").unwrap();
+    let mut input = effects(&install);
+    input.files.push(work(
+        "program",
+        b"authenticated",
+        destination(&install, "program"),
+        FilePrecondition::Absent,
+        false,
+    ));
+    assert_eq!(
+        run(&input, &payload, &state).0,
+        TransactionOutcome::Committed
+    );
+    let publisher = zup_linux::LinuxInstallationStore::new(&state);
+    let app = AppId::new("com.example.tool").unwrap();
+    let previous = publisher.load(&app, SelectedScope::User).unwrap().unwrap();
+    std::fs::write(install.join("program"), b"externally modified").unwrap();
+    let metadata = std::fs::symlink_metadata(install.join("program")).unwrap();
+    let foreign = zup_core::NativeObjectIdentity::Linux {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    input.observed = Some(previous.current.selection());
+    input.observed_transaction = Some(previous.commit.transaction);
+    input.files[0].kind = FileOperationKind::RepairOwned;
+    input.files[0].precondition = FilePrecondition::Exact {
+        object: foreign,
+        size: 19,
+        sha256: digest(b"externally modified"),
+    };
+    let plan = compile_deployment(&input).unwrap();
+    let store = FilesystemTransactionStore::private_at(&state);
+    let open = TransactionCoordinator::new(store.clone())
+        .begin(
+            app.clone(),
+            SelectedScope::User,
+            "1.0.0".parse().unwrap(),
+            plan.clone(),
+        )
+        .unwrap();
+    let mut native = LinuxFileExecutor::new().with_payload(DirectoryPayloadSource::new(&payload));
+    native.register_plan(&plan).unwrap();
+    native.set_transaction_id(open.transaction_id);
+    let mut executor = FailAfter {
+        inner: native,
+        fail: OperationId::new("ctrl:verify"),
+    };
+    let settled = open.execute(&mut executor, &publisher).unwrap();
+    assert_eq!(settled.outcome, TransactionOutcome::RecoveryRequired);
+    let repair = settled
+        .record
+        .plan
+        .nodes
+        .iter()
+        .find(|node| matches!(node.kind, zup_plan::NodeKind::FileMutation { .. }))
+        .unwrap();
+    let OperationReceipt::ReplaceFile {
+        backup_path,
+        previous_object,
+        ..
+    } = settled.record.receipt(&repair.id).unwrap()
+    else {
+        panic!("replacement receipt");
+    };
+    assert_eq!(*previous_object, foreign);
+    let backup = backup_path.clone();
+    let mut native = executor.inner;
+    let assessment = zup_transaction::assess_recovery(&settled.record, &mut native).unwrap();
+    let decision = assessment.complete_forward.unwrap();
+    if swap {
+        std::fs::rename(
+            install.join("program"),
+            root.path().join("original-new-instance"),
+        )
+        .unwrap();
+        std::fs::write(install.join("program"), b"authenticated").unwrap();
+    }
+    let result = zup_transaction::recover_requested(
+        settled.record.clone(),
+        &store,
+        &mut native,
+        &publisher,
+        &RecoveryRequest::CompleteForward {
+            decision: Box::new(decision),
+        },
+    );
+    if swap {
+        assert!(result.is_err());
+        assert!(
+            store
+                .load(&settled.record.transaction_id)
+                .unwrap()
+                .resolution
+                .is_none()
+        );
+    } else {
+        let (record, outcome) = result.unwrap();
+        assert_eq!(
+            outcome,
+            TransactionOutcome::Committed,
+            "{:?}",
+            record.recovery_failure
+        );
+        publisher
+            .reconcile_installation(&record, SelectedScope::User)
+            .unwrap();
+        let installed = publisher.load(&app, SelectedScope::User).unwrap().unwrap();
+        zup_transaction::verify_published_installation(&record, &installed).unwrap();
+        assert!(installed.current.resources.values().all(|resource| !matches!(resource, zup_plan::OwnedResource::File { instance, .. } if instance.object == foreign)));
+    }
+    assert_eq!(std::fs::read(&backup).unwrap(), b"externally modified");
+    let metadata = std::fs::symlink_metadata(backup).unwrap();
+    assert_eq!(
+        zup_core::NativeObjectIdentity::Linux {
+            device: metadata.dev(),
+            inode: metadata.ino()
+        },
+        foreign
+    );
+    assert_eq!(
+        std::fs::read(install.join("program")).unwrap(),
+        b"authenticated"
+    );
+}

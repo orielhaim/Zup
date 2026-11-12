@@ -166,7 +166,7 @@ pub fn prepare_installation_record(
             .map_err(|_| OwnershipProjectionError)?,
         None => zup_core::ActivationRevision::FIRST,
     };
-    if record.failure.is_some()
+    if (record.failure.is_some() && record.resolution.is_none())
         || record.plan.nodes.iter().any(|node| {
             !node.kind.is_post_commit()
                 && node.kind.requires_verification()

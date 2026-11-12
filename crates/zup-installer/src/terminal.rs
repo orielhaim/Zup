@@ -62,6 +62,10 @@ pub(crate) enum Command {
     Recover {
         #[arg(long)]
         transaction: String,
+        #[arg(long, conflicts_with = "decision")]
+        assess: bool,
+        #[arg(long, value_name = "JSON")]
+        decision: Option<PathBuf>,
     },
     #[cfg(target_os = "linux")]
     Update {
@@ -397,7 +401,12 @@ fn drive<H: SessionHost>(
     #[cfg(not(feature = "console"))]
     let command = cli.operation.as_ref();
     #[cfg(target_os = "linux")]
-    if let Some(Command::Recover { transaction }) = command {
+    if let Some(Command::Recover {
+        transaction,
+        assess,
+        decision,
+    }) = command
+    {
         let control = OperationControl::new(if interactive {
             ExecutionPolicy::Interactive
         } else {
@@ -411,6 +420,7 @@ fn drive<H: SessionHost>(
                 transaction
                     .parse()
                     .map_err(|error| miette::miette!("transaction identity: {error}"))?,
+                crate::recovery_request(*assess, decision.as_deref())?,
                 &control,
             ),
         );

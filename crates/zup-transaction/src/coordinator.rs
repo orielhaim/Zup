@@ -12,8 +12,9 @@ use zup_core::TransactionId;
 use zup_plan::OperationId;
 use zup_plan::{DeploymentNode, DeploymentPlan, NodeKind, Phase};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionOutcome {
+    Assessed(Box<crate::RecoveryAssessment>),
     Committed,
     RolledBack,
     RecoveryRequired,
@@ -221,6 +222,10 @@ where
     }
     if record.phase == TransactionPhase::RolledBack {
         return Ok((record, TransactionOutcome::RolledBack));
+    }
+
+    if record.resolution.is_some() {
+        return resume_forward(record, store, executor, publisher);
     }
 
     if let TransactionPhase::RecoveryRequired { resume } = record.phase {
@@ -1125,27 +1130,11 @@ where
         require_recovery(record, store)?;
         return Ok(TransactionOutcome::RecoveryRequired);
     }
-    let exposed = record.plan.nodes.iter().any(|node| {
-        matches!(
-            node.kind,
-            NodeKind::FileMutation { .. }
-                | NodeKind::NativeService { .. }
-                | NodeKind::BackendOperation { .. }
-                | NodeKind::Generation {
-                    operation: zup_plan::GenerationOperation::Activate,
-                    ..
-                }
-        ) && !matches!(record.nodes.get(&node.id), Some(NodeState::Pending))
-    });
-    if exposed && let Some(node) = record.plan.nodes.iter().find(|node| {
-        matches!(&node.kind, NodeKind::PersistentDirectory { operation } if operation.intent.previous.as_ref()
-            .is_some_and(|previous| !previous.directory.compatibility.accepts(&operation.intent.directory.compatibility)))
-    }) {
-        let id = node.id.clone();
-        commit(record, store, |record| {
-            record.rollback_failure = Some(crate::TransactionFailure {
-                operation: Some(id.clone()),
-                message: "application code may have written a data format the previous deployment cannot read; automatic executable rollback is unsafe".into(),
+    if let Some(refusal) = crate::resolution::unsafe_compensation(record).first() {
+        commit(record, store, |fresh| {
+            fresh.rollback_failure = Some(crate::TransactionFailure {
+                operation: refusal.operation.clone(),
+                message: refusal.detail.clone(),
             });
             Ok(())
         })?;
@@ -1238,25 +1227,6 @@ where
             }
             commit_node(record, store, op_id, NodeState::RolledBack)?;
             continue;
-        }
-        let compensation_refusal = match &node.kind {
-            NodeKind::FileMutation { delta: zup_plan::FileOperationKind::RepairOwned, .. } => Some("repair displaced an externally modified file; automatic restoration is unsafe; retained instances require recovery".to_owned()),
-            NodeKind::NativeService { operation } => match operation.as_ref() {
-                zup_plan::NativeServiceOperation::Configure { service, .. } => service.validate_compensation().err().map(|error| error.to_string()),
-                zup_plan::NativeServiceOperation::Remove { .. } => None,
-            },
-            _ => None,
-        };
-        if let Some(message) = compensation_refusal {
-            commit(record, store, |record| {
-                record.rollback_failure = Some(crate::TransactionFailure {
-                    operation: Some(op_id.clone()),
-                    message: message.clone(),
-                });
-                Ok(())
-            })?;
-            require_recovery(record, store)?;
-            return Ok(TransactionOutcome::RecoveryRequired);
         }
         if rollback_failed && node.kind.requires_verification() {
             require_recovery(record, store)?;
@@ -1475,4 +1445,74 @@ fn find_node<'a>(
         .iter()
         .find(|n| &n.id == id)
         .ok_or_else(|| TransactionError::InvalidState(format!("unknown node {id}")))
+}
+
+fn resume_forward<S: TransactionStore, E: OperationExecutor, P: crate::InstallationPublisher>(
+    mut record: TransactionRecord,
+    store: &S,
+    executor: &mut E,
+    publisher: &P,
+) -> Result<(TransactionRecord, TransactionOutcome), TransactionError>
+where
+    E::Error: std::fmt::Display,
+{
+    if let TransactionPhase::RecoveryRequired {
+        resume: RecoveryPhase::Applying,
+    } = record.phase
+    {
+        commit_phase(&mut record, store, TransactionPhase::Applying)?;
+    }
+    if record.phase != TransactionPhase::Applying {
+        return Err(TransactionError::InvalidState(
+            "forward intent requires an uncompensated applying transaction".into(),
+        ));
+    }
+    if matches!(record.publication, crate::PublicationState::NotRequested) {
+        reconcile_running(&mut record, store, executor)?;
+        if matches!(record.phase, TransactionPhase::RecoveryRequired { .. }) {
+            return Ok((record, TransactionOutcome::RecoveryRequired));
+        }
+    }
+    let verification = record.plan.nodes.iter().try_for_each(|node| {
+        if let Some(receipt) = record.receipt(&node.id)
+            && !matches!(
+                node.kind,
+                NodeKind::Barrier
+                    | NodeKind::ReserveInstallation
+                    | NodeKind::Retention { .. }
+                    | NodeKind::StageFile { .. }
+            )
+            && !node.kind.is_post_commit()
+        {
+            executor
+                .verify(node, receipt)
+                .map_err(|error| TransactionError::Executor {
+                    operation: node.id.to_string(),
+                    message: error.to_string(),
+                })?;
+        }
+        Ok(())
+    });
+    if let Err(error) = verification.and_then(|()| {
+        if matches!(record.publication, crate::PublicationState::NotRequested) {
+            drive(store, &mut record, executor)
+        } else {
+            Ok(())
+        }
+    }) {
+        if matches!(error, TransactionError::Store(_)) {
+            return Err(error);
+        }
+        commit(&mut record, store, |fresh| {
+            fresh.recovery_failure = Some(crate::TransactionFailure {
+                operation: None,
+                message: error.to_string().chars().take(4096).collect(),
+            });
+            Ok(())
+        })?;
+        require_recovery(&mut record, store)?;
+        return Ok((record, TransactionOutcome::RecoveryRequired));
+    }
+    let outcome = publish_and_collect(store, &mut record, publisher, executor)?;
+    Ok((record, outcome))
 }

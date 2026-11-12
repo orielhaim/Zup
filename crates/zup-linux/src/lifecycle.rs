@@ -2,6 +2,7 @@ use zup_runtime::InstallOutcome;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxOutcome {
+    Assessed(Box<zup_transaction::RecoveryAssessment>),
     Committed {
         version: semver::Version,
     },
@@ -20,6 +21,9 @@ pub enum LinuxOutcome {
 impl LinuxOutcome {
     pub fn as_install_outcome(&self) -> InstallOutcome {
         match self {
+            Self::Assessed(assessment) => InstallOutcome::RecoveryAssessed {
+                assessment: assessment.clone(),
+            },
             Self::Committed { .. } => InstallOutcome::Committed,
             Self::RolledBack => InstallOutcome::RolledBack,
             Self::RecoveryRequired {

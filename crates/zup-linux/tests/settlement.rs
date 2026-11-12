@@ -151,7 +151,10 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
                 let worker_roots = roots.roots.clone();
                 let worker_exe = installer.clone();
                 let intent = zup_protocol::PrepareOperation {
-                    operation: zup_protocol::PrivilegedRequest::Recovery { transaction: id },
+                    operation: zup_protocol::PrivilegedRequest::Recovery {
+                        transaction: id,
+                        request: Default::default(),
+                    },
                     app_id: app_id().to_string(),
                     app_version: "1.1.0".into(),
                     scope: "machine".into(),

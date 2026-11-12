@@ -1881,9 +1881,120 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case::complete(false)]
+    #[case::swapped_native_object(true)]
+    fn repair_forward_resolution_preserves_external_instance(#[case] swap: bool) {
+        use zup_transaction::{
+            FilesystemTransactionStore, RecoveryRequest, TransactionCoordinator,
+            TransactionOutcome, TransactionStore,
+        };
+        let root = tempfile::tempdir_in(crate::host_dirs::user_data().unwrap()).unwrap();
+        let (mut files, transaction) = replacement_fixture_with_kind(
+            root.path(),
+            zup_core::FixedReplacement::Quiescent,
+            FileOperationKind::RepairOwned,
+        );
+        let state = root.path().join("state");
+        let store = FilesystemTransactionStore::private_at(&state);
+        let pending = TransactionCoordinator::new(store.clone())
+            .begin(
+                transaction.app_id.clone(),
+                transaction.scope,
+                transaction.app_version.clone(),
+                transaction.plan,
+            )
+            .unwrap();
+        files.tx_id = pending.transaction_id;
+        let mut executor = NativeFiles {
+            files,
+            fail_verification: true,
+        };
+        let publisher = crate::InstallationRecordStore::new(&state);
+        let settled = pending.execute(&mut executor, &publisher).unwrap();
+        assert_eq!(
+            settled.outcome,
+            TransactionOutcome::RecoveryRequired,
+            "{:?}",
+            settled.record.failure
+        );
+        let repair = settled
+            .record
+            .plan
+            .nodes
+            .iter()
+            .find(|node| matches!(node.kind, NodeKind::FileMutation { .. }))
+            .unwrap();
+        let OperationReceipt::ReplaceFile {
+            backup_path,
+            previous_object,
+            destination,
+            ..
+        } = settled.record.receipt(&repair.id).unwrap()
+        else {
+            panic!("replacement receipt");
+        };
+        let backup = backup_path.clone();
+        let previous = *previous_object;
+        let destination = destination.clone();
+        executor.fail_verification = false;
+        let assessment = zup_transaction::assess_recovery(&settled.record, &mut executor).unwrap();
+        let decision = assessment.complete_forward.unwrap();
+        if swap {
+            fs::rename(&destination, root.path().join("displaced-new-instance")).unwrap();
+            fs::write(&destination, b"owned payload").unwrap();
+        }
+        let result = zup_transaction::recover_requested(
+            settled.record.clone(),
+            &store,
+            &mut executor,
+            &publisher,
+            &RecoveryRequest::CompleteForward {
+                decision: Box::new(decision),
+            },
+        );
+        if swap {
+            assert!(result.is_err());
+            assert!(
+                store
+                    .load(&settled.record.transaction_id)
+                    .unwrap()
+                    .resolution
+                    .is_none()
+            );
+        } else {
+            let (record, outcome) = result.unwrap();
+            assert_eq!(outcome, TransactionOutcome::Committed);
+            record.validate().unwrap();
+            let installed = publisher
+                .load(&record.app_id, record.scope)
+                .unwrap()
+                .unwrap();
+            zup_transaction::verify_published_installation(&record, &installed).unwrap();
+            assert!(installed.current.resources.values().all(|resource| !matches!(resource, zup_plan::OwnedResource::File { instance, .. } if instance.object == previous)));
+        }
+        assert_eq!(fs::read(&backup).unwrap(), b"previous payload");
+        assert_eq!(
+            file_identity(Path::new(&backup)).unwrap().unwrap().0,
+            previous
+        );
+        assert_eq!(fs::read(destination).unwrap(), b"owned payload");
+    }
+
     fn replacement_fixture(
         root: &Path,
         replacement: zup_core::FixedReplacement,
+    ) -> (
+        WindowsFileExecutor<zup_bundle::DirectoryPayloadSource>,
+        zup_transaction::TransactionRecord,
+    ) {
+        replacement_fixture_with_kind(root, replacement, FileOperationKind::Replace)
+    }
+
+    fn replacement_fixture_with_kind(
+        root: &Path,
+        replacement: zup_core::FixedReplacement,
+        kind: FileOperationKind,
     ) -> (
         WindowsFileExecutor<zup_bundle::DirectoryPayloadSource>,
         zup_transaction::TransactionRecord,
@@ -1920,7 +2031,7 @@ mod tests {
                 },
             },
             replacement,
-            kind: FileOperationKind::Replace,
+            kind,
             destination: destination.clone(),
             source_relative: RelativePath::new("payload.bin").unwrap(),
             precondition: FilePrecondition::Exact {

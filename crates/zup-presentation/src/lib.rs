@@ -1039,6 +1039,8 @@ impl InstallerEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallerResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_assessment: Option<Box<zup_runtime::RecoveryAssessment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction: Option<String>,
     pub protocol_version: u32,
     pub outcome: ProcessOutcome,
@@ -1059,6 +1061,7 @@ impl InstallerResult {
         version: impl Into<String>,
     ) -> Self {
         Self {
+            recovery_assessment: None,
             transaction: None,
             protocol_version: INSTALLER_PROTOCOL_VERSION,
             outcome,
@@ -1078,6 +1081,14 @@ impl InstallerResult {
         self.outcome = ProcessOutcome::from(outcome);
         self.code = self.outcome.code();
         let message = match outcome {
+            InstallOutcome::RecoveryAssessed { assessment } => {
+                self.recovery_assessment = Some(assessment.clone());
+                self.transaction = Some(assessment.transaction.to_string());
+                Some(
+                    serde_json::to_string_pretty(assessment)
+                        .expect("recovery assessment serializes"),
+                )
+            }
             InstallOutcome::Committed => None,
             InstallOutcome::Recovered { settlement } => Some(
                 match settlement {
@@ -1192,6 +1203,7 @@ impl From<&zup_runtime::InstallOutcome> for ProcessOutcome {
     fn from(outcome: &zup_runtime::InstallOutcome) -> Self {
         use zup_runtime::InstallOutcome;
         match outcome {
+            InstallOutcome::RecoveryAssessed { .. } => Self::Success,
             InstallOutcome::RebootRequired { .. } => Self::RebootRequired,
             InstallOutcome::Committed | InstallOutcome::Recovered { .. } => Self::Success,
             InstallOutcome::Cancelled => Self::Cancelled,

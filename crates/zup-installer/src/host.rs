@@ -457,6 +457,7 @@ impl SessionHost for WindowsSessionHost {
         &'a self,
         context: &'a zup_session::OperationContext,
         transaction: zup_core::TransactionId,
+        request: zup_transaction::RecoveryRequest,
         control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<
         'a,
@@ -494,7 +495,10 @@ impl SessionHost for WindowsSessionHost {
                 app.version.clone()
             };
             let request = zup_runtime::RuntimeRequest {
-                operation: zup_runtime::RuntimeOperation::Recovery { transaction },
+                operation: zup_runtime::RuntimeOperation::Recovery {
+                    transaction,
+                    request,
+                },
                 target: build.installer.target,
                 app_id: app.id.clone(),
                 app_version: version,

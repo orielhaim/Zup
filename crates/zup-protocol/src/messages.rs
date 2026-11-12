@@ -120,6 +120,7 @@ pub enum PreparedTransactionRequest {
     },
     Recovery {
         transaction: zup_core::TransactionId,
+        request: zup_transaction::RecoveryRequest,
     },
 }
 
@@ -157,6 +158,7 @@ pub enum PrivilegedRequest {
     },
     Recovery {
         transaction: zup_core::TransactionId,
+        request: zup_transaction::RecoveryRequest,
     },
 }
 impl PrivilegedRequest {
@@ -283,6 +285,7 @@ pub struct TransactionStateChanged {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerOutcome {
+    RecoveryAssessed,
     Committed,
     RolledBack,
     Cancelled,

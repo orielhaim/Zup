@@ -174,6 +174,7 @@ async fn recovery_reports_successful_settlement_without_changing_deployment_fail
     let mut recovery = request();
     recovery.operation = zup_runtime::RuntimeOperation::Recovery {
         transaction: zup_core::TransactionId::new_v7(),
+        request: Default::default(),
     };
     assert_eq!(
         execute(&backend, recovery, &control).await.unwrap(),

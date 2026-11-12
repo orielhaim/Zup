@@ -341,12 +341,14 @@ impl SessionHost for FakeHost {
         &'a self,
         _context: &'a OperationContext,
         transaction: zup_core::TransactionId,
+        request: zup_transaction::RecoveryRequest,
         _control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<
         'a,
         Result<zup_runtime::InstallOutcome, zup_runtime::SessionError>,
     > {
         Box::pin(async move {
+            assert_eq!(request, zup_transaction::RecoveryRequest::Retry {});
             assert!(
                 matches!(self.backend.script, Script::Recovery(expected) if expected == transaction)
             );

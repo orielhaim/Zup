@@ -278,6 +278,7 @@ async fn execute_with_carrier(
     let operation = match recovery_id {
         Some(id) => zup_protocol::PreparedTransactionRequest::Recovery {
             transaction: zup_core::TransactionId::from_uuid(id),
+            request: Default::default(),
         },
         None => zup_protocol::PreparedTransactionRequest::Deployment {
             plan: Box::new(plan.clone()),

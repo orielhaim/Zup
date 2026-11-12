@@ -56,7 +56,7 @@ if ($Phase -eq 'prepare') {
         if ($record.app_version -eq '2.0.0') { $record }
     })
     if ($pending.Count -ne 1) { throw "Expected one newer transaction: $($interrupted.text)" }
-    if ($pending[0].schema -ne 2) { throw 'Fixture runtime predates the retained-source journal compatibility gate.' }
+    if ($pending[0].schema -ne 3) { throw 'Fixture runtime predates the recovery-resolution journal gate.' }
     $transaction = $pending[0].transaction_id
     $journal = Join-Path $state "transactions/$transaction/transaction.json"
     $retained = Join-Path $state "transactions/$transaction/recovery"
@@ -77,7 +77,7 @@ if ($Phase -eq 'prepare') {
     finally { Move-Item -LiteralPath $backup -Destination $blob }
     if ($refused.code -eq 0 -or -not $refused.text.Contains($transaction)) { throw 'Missing exact content did not produce actionable pending recovery.' }
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($journal)) -ne $journalBytes) { throw 'Missing-source refusal changed journal state.' }
-    $manifest.execution_format = 2
+    $manifest.execution_format = [int]$manifest.execution_format + 1
     [IO.File]::WriteAllText($source, ($manifest | ConvertTo-Json -Depth 100), $utf8)
     try { $refused = Invoke-Carrier $carrier @('recover','--scope','machine','--transaction',$transaction,'--output','json') -AllowFailure }
     finally { [IO.File]::WriteAllBytes($source, $bytes) }

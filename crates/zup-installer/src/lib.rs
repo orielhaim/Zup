@@ -161,3 +161,24 @@ fn native_command() -> bool {
             )
     })
 }
+
+#[cfg(any(windows, target_os = "linux"))]
+fn recovery_request(
+    assess: bool,
+    decision: Option<&std::path::Path>,
+) -> miette::Result<zup_transaction::RecoveryRequest> {
+    if assess {
+        return Ok(zup_transaction::RecoveryRequest::Assess {});
+    }
+    match decision {
+        Some(path) => Ok(zup_transaction::RecoveryRequest::CompleteForward {
+            decision: Box::new(
+                serde_json::from_slice(
+                    &std::fs::read(path).map_err(|error| miette::miette!("decision: {error}"))?,
+                )
+                .map_err(|error| miette::miette!("decision: {error}"))?,
+            ),
+        }),
+        None => Ok(zup_transaction::RecoveryRequest::Retry {}),
+    }
+}

@@ -41,7 +41,11 @@ pub fn authenticate_cleanup<'a>(
                 .ok_or("retired file source operation is missing")?;
             let matches = match (&effect.kind, source.receipt(&effect.id)) {
                 (
-                    NodeKind::FileMutation { key, .. },
+                    NodeKind::FileMutation {
+                        key,
+                        delta: zup_plan::FileOperationKind::Replace,
+                        ..
+                    },
                     Some(OperationReceipt::ReplaceFile {
                         previous_object,
                         previous_sha256,
@@ -288,7 +292,11 @@ fn observe_cleanup(
                 for node in &record.plan.nodes {
                     let path = match (&node.kind, record.receipt(&node.id)) {
                         (
-                            NodeKind::FileMutation { key: candidate, .. },
+                            NodeKind::FileMutation {
+                                key: candidate,
+                                delta: zup_plan::FileOperationKind::Replace,
+                                ..
+                            },
                             Some(OperationReceipt::ReplaceFile {
                                 previous_object,
                                 previous_size,

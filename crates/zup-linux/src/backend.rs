@@ -33,6 +33,10 @@ pub struct ExecutionReport {
 impl From<LinuxOutcome> for ExecutionReport {
     fn from(outcome: LinuxOutcome) -> Self {
         match outcome {
+            LinuxOutcome::Assessed(assessment) => Self {
+                outcome: InstallOutcome::RecoveryAssessed { assessment },
+                recovery_transaction: None,
+            },
             LinuxOutcome::Committed { .. } => Self {
                 outcome: InstallOutcome::Committed,
                 recovery_transaction: None,
@@ -136,6 +140,7 @@ impl LinuxRuntimeBackend {
                 &self.installer,
                 &request.state_root,
                 id.as_uuid(),
+                request.operation.recovery_request(),
                 control,
             )
             .map(Into::into)
@@ -235,7 +240,17 @@ impl LinuxRuntimeBackend {
             },
             || ExecError::Cancelled,
         );
-        match zup_transaction::recover(record, &store, &mut executor, &ledger_store) {
+        match zup_transaction::recover_requested(
+            record,
+            &store,
+            &mut executor,
+            &ledger_store,
+            request.operation.recovery_request(),
+        ) {
+            Ok((_, TransactionOutcome::Assessed(assessment))) => Ok(ExecutionReport {
+                outcome: InstallOutcome::RecoveryAssessed { assessment },
+                recovery_transaction: Some(id.to_string()),
+            }),
             Ok((record, TransactionOutcome::Committed)) => {
                 match ledger_store.reconcile_installation(&record, request.scope) {
                     Ok(_) => {
@@ -390,6 +405,13 @@ impl LinuxRuntimeBackend {
             || ExecError::Cancelled,
         );
         match open.execute(&mut executor, &ledger_store) {
+            Ok(zup_transaction::SettledTransaction {
+                outcome: TransactionOutcome::Assessed(assessment),
+                ..
+            }) => Ok(ExecutionReport {
+                outcome: InstallOutcome::RecoveryAssessed { assessment },
+                recovery_transaction: None,
+            }),
             Ok(zup_transaction::SettledTransaction {
                 record,
                 outcome: TransactionOutcome::Committed,
@@ -726,6 +748,13 @@ fn release_cancelled(
 ) -> Result<ExecutionReport, SessionError> {
     match open.release(executor) {
         Ok(zup_transaction::SettledTransaction {
+            outcome: TransactionOutcome::Assessed(assessment),
+            ..
+        }) => Ok(ExecutionReport {
+            outcome: InstallOutcome::RecoveryAssessed { assessment },
+            recovery_transaction: None,
+        }),
+        Ok(zup_transaction::SettledTransaction {
             outcome: TransactionOutcome::RolledBack,
             ..
         }) => Ok(ExecutionReport {
@@ -773,6 +802,7 @@ pub(crate) async fn recover_installation(
     installer: &std::path::Path,
     context: &zup_session::OperationContext,
     transaction: zup_core::TransactionId,
+    recovery_request: zup_transaction::RecoveryRequest,
     control: &zup_runtime::OperationControl,
 ) -> Result<InstallOutcome, SessionError> {
     let id = transaction;
@@ -799,7 +829,10 @@ pub(crate) async fn recover_installation(
             (record.app_id, record.app_version, record.target)
         };
         let request = RuntimeRequest {
-            operation: zup_runtime::RuntimeOperation::Recovery { transaction: id },
+            operation: zup_runtime::RuntimeOperation::Recovery {
+                transaction: id,
+                request: recovery_request,
+            },
             target,
             app_id,
             app_version,

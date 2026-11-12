@@ -233,6 +233,7 @@ pub trait SessionHost {
         &'a self,
         _context: &'a OperationContext,
         _transaction: zup_core::TransactionId,
+        _request: zup_transaction::RecoveryRequest,
         _control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<'a, Result<InstallOutcome, zup_runtime::SessionError>> {
         Box::pin(async {

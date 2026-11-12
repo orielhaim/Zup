@@ -868,3 +868,306 @@ fn failed_repair_never_compensates_with_the_modified_file() {
     assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
     assert_eq!(executor.position("rollback", &repair), None);
 }
+
+fn blocked_repair(store: &FilesystemTransactionStore) -> TransactionRecord {
+    let mut input = common::effects();
+    let mut file = common::file("app.exe", b"authenticated");
+    file.kind = zup_plan::FileOperationKind::RepairOwned;
+    file.precondition = zup_plan::FilePrecondition::Exact {
+        object: common::owned_instance().object,
+        size: 8,
+        sha256: common::digest(b"modified"),
+    };
+    input.files.push(file);
+    TransactionCoordinator::new(store.clone())
+        .begin(
+            sample_app_id(),
+            zup_core::SelectedScope::User,
+            sample_version(),
+            compile_deployment(&input).unwrap(),
+        )
+        .unwrap()
+        .execute(
+            &mut FakeExecutor::new().fail_on_verify(0),
+            &common::Publisher::default(),
+        )
+        .unwrap()
+        .record
+}
+
+#[rstest]
+#[case::transaction(0)]
+#[case::app(1)]
+#[case::scope(2)]
+#[case::plan(3)]
+#[case::revision(4)]
+#[case::evidence(5)]
+#[case::native_readback(6)]
+fn forward_resolution_rejects_unbound_or_unverified_authority(#[case] mismatch: u8) {
+    use zup_transaction::{RecoveryRequest, assess_recovery, recover_requested};
+    let (_root, store) = coord_with_store();
+    let record = blocked_repair(&store);
+    let mut executor = FakeExecutor::new();
+    let mut decision = assess_recovery(&record, &mut executor)
+        .unwrap()
+        .complete_forward
+        .unwrap();
+    match mismatch {
+        0 => decision.transaction = TransactionId::new_v7(),
+        1 => decision.app = zup_core::AppId::new("com.other.app").unwrap(),
+        2 => decision.scope = zup_core::SelectedScope::Machine,
+        3 => decision.plan = common::digest(b"wrong plan"),
+        4 => decision.revision += 1,
+        5 => decision.evidence = common::digest(b"wrong evidence"),
+        _ => executor.fail_verify_at = Some(executor.verified.len()),
+    }
+    assert!(
+        recover_requested(
+            record.clone(),
+            &store,
+            &mut executor,
+            &common::Publisher::default(),
+            &RecoveryRequest::CompleteForward {
+                decision: Box::new(decision)
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(store.load(&record.transaction_id).unwrap(), record);
+    assert!(executor.rolled_back.is_empty());
+}
+
+#[test]
+fn explicit_forward_resolution_publishes_and_remains_replayable() {
+    use zup_transaction::{RecoveryRequest, assess_recovery, recover_requested};
+    let (_root, store) = coord_with_store();
+    let record = blocked_repair(&store);
+    assert!(!record.nodes.values().any(NodeState::is_rolled_back));
+    let mut executor = FakeExecutor::new();
+    let decision = assess_recovery(&record, &mut executor)
+        .unwrap()
+        .complete_forward
+        .unwrap();
+    let request = RecoveryRequest::CompleteForward {
+        decision: Box::new(decision),
+    };
+    let publisher = common::Publisher::default();
+    let (record, outcome) =
+        recover_requested(record, &store, &mut executor, &publisher, &request).unwrap();
+    assert_eq!(
+        outcome,
+        TransactionOutcome::Committed,
+        "{:?} {:?}",
+        record.recovery_failure,
+        record.nodes
+    );
+    record.validate().unwrap();
+    let published = publisher.0.lock().unwrap().clone().unwrap();
+    zup_transaction::verify_published_installation(&record, &published).unwrap();
+    assert_eq!(published.commit.transaction, record.transaction_id);
+    assert!(executor.rolled_back.is_empty());
+    let (_, outcome) =
+        recover_requested(record, &store, &mut executor, &publisher, &request).unwrap();
+    assert_eq!(outcome, TransactionOutcome::Committed);
+}
+
+#[test]
+fn assessment_does_not_mutate_the_journal_or_grant_authority() {
+    use zup_transaction::{RecoveryRequest, recover_requested};
+    let (_root, store) = coord_with_store();
+    let record = blocked_repair(&store);
+    let mut executor = FakeExecutor::new();
+    let (preview, outcome) = recover_requested(
+        record.clone(),
+        &store,
+        &mut executor,
+        &common::Publisher::default(),
+        &RecoveryRequest::Assess {},
+    )
+    .unwrap();
+    let TransactionOutcome::Assessed(assessment) = outcome else {
+        panic!("assessment expected");
+    };
+    assert_eq!(preview, record);
+    assert!(assessment.complete_forward.is_some());
+    assert_eq!(store.load(&record.transaction_id).unwrap(), record);
+    assert!(executor.applied.is_empty());
+}
+
+#[rstest]
+#[case::intent(0)]
+#[case::resume(1)]
+#[case::receipt(3)]
+#[case::publication_requested(5)]
+#[case::publication_received(6)]
+#[case::committed(7)]
+fn durable_forward_intent_survives_interruption_without_reauthorization(
+    #[case] crash_write: usize,
+) {
+    use zup_transaction::{RecoveryRequest, StoreError};
+    struct Interrupt {
+        store: FilesystemTransactionStore,
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+    impl TransactionStore for Interrupt {
+        fn reserve_installation(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<zup_transaction::InstallationReservation, StoreError> {
+            self.store.reserve_installation(record)
+        }
+        fn create(&self, record: &TransactionRecord) -> Result<(), StoreError> {
+            self.store.create(record)
+        }
+        fn load(&self, id: &TransactionId) -> Result<TransactionRecord, StoreError> {
+            self.store.load(id)
+        }
+        fn compare_and_swap(
+            &self,
+            revision: u64,
+            record: &TransactionRecord,
+        ) -> Result<(), StoreError> {
+            self.store.compare_and_swap(revision, record)?;
+            if record.resolution.is_some()
+                && self
+                    .remaining
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst)
+                    == 0
+            {
+                panic!("injected interruption after durable write");
+            }
+            Ok(())
+        }
+    }
+    let (_root, store) = coord_with_store();
+    let record = blocked_repair(&store);
+    let id = record.transaction_id;
+    let decision = zup_transaction::assess_recovery(&record, &mut FakeExecutor::new())
+        .unwrap()
+        .complete_forward
+        .unwrap();
+    let publisher = common::Publisher::default();
+    let interrupted = Interrupt {
+        store: store.clone(),
+        remaining: crash_write.into(),
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        zup_transaction::recover_requested(
+            record,
+            &interrupted,
+            &mut FakeExecutor::new(),
+            &publisher,
+            &RecoveryRequest::CompleteForward {
+                decision: Box::new(decision),
+            },
+        )
+    }));
+    assert!(result.is_err());
+    let durable = store.load(&id).unwrap();
+    assert!(durable.resolution.is_some());
+    let (record, outcome) = recover(durable, &store, &mut FakeExecutor::new(), &publisher).unwrap();
+    assert_eq!(
+        outcome,
+        TransactionOutcome::Committed,
+        "{:?}",
+        record.recovery_failure
+    );
+    record.validate().unwrap();
+}
+
+#[test]
+fn destructive_or_untyped_recovery_requests_are_not_authority() {
+    for request in [
+        r#"{"action":"discard"}"#,
+        r#"{"action":"force_rollback"}"#,
+        r#"{"action":"restore_data","backup":"C:\\backup"}"#,
+        r#"{"action":"retry","force":true}"#,
+    ] {
+        assert!(serde_json::from_str::<zup_transaction::RecoveryRequest>(request).is_err());
+    }
+}
+
+#[test]
+fn accepted_forward_intent_reobserves_native_evidence_after_publication_request() {
+    use zup_transaction::{InstallationPublisher, RecoveryRequest};
+    struct Deferred {
+        durable: common::Publisher,
+        refuse: std::sync::atomic::AtomicBool,
+    }
+    impl InstallationPublisher for Deferred {
+        type Error = String;
+        fn prepare(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            self.durable.prepare(record)
+        }
+        fn publish(
+            &self,
+            record: &TransactionRecord,
+        ) -> Result<zup_plan::InstallationRecord, String> {
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                Err("publication deferred".into())
+            } else {
+                self.durable.publish(record)
+            }
+        }
+    }
+    let (_root, store) = coord_with_store();
+    let record = blocked_repair(&store);
+    let decision = zup_transaction::assess_recovery(&record, &mut FakeExecutor::new())
+        .unwrap()
+        .complete_forward
+        .unwrap();
+    let publisher = Deferred {
+        durable: Default::default(),
+        refuse: true.into(),
+    };
+    let (pending, outcome) = zup_transaction::recover_requested(
+        record,
+        &store,
+        &mut FakeExecutor::new(),
+        &publisher,
+        &RecoveryRequest::CompleteForward {
+            decision: Box::new(decision),
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
+    assert!(matches!(
+        pending.publication,
+        zup_transaction::PublicationState::Requested { .. }
+    ));
+    publisher
+        .refuse
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (pending, outcome) = recover(
+        pending,
+        &store,
+        &mut FakeExecutor::new().fail_on_verify(0),
+        &publisher,
+    )
+    .unwrap();
+    assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
+    assert!(publisher.durable.0.lock().unwrap().is_none());
+    let (record, outcome) = recover(pending, &store, &mut FakeExecutor::new(), &publisher).unwrap();
+    assert_eq!(
+        outcome,
+        TransactionOutcome::Committed,
+        "{:?}",
+        record.recovery_failure
+    );
+}
+
+#[test]
+fn forward_authority_cannot_be_reinterpreted_as_compensation() {
+    let (_root, store) = coord_with_store();
+    let mut record = blocked_repair(&store);
+    record.resolution = zup_transaction::assess_recovery(&record, &mut FakeExecutor::new())
+        .unwrap()
+        .complete_forward;
+    record.touch();
+    record.validate().unwrap();
+    record.phase = TransactionPhase::RollingBack;
+    assert!(record.validate().is_err());
+}

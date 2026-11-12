@@ -589,6 +589,10 @@ fn update_available(
 
 #[derive(Debug, Args)]
 pub struct RecoveryArgs {
+    #[arg(long, conflicts_with = "decision")]
+    pub assess: bool,
+    #[arg(long, value_name = "JSON")]
+    pub decision: Option<PathBuf>,
     #[arg(long = "transaction")]
     pub transaction_id: uuid::Uuid,
     #[arg(long, value_enum)]
@@ -602,6 +606,7 @@ pub struct RecoveryArgs {
 
 pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Result<()> {
     let _ = context;
+    let recovery_request = crate::recovery_request(args.assess, args.decision.as_deref())?;
     let executable = package::current_executable()?;
     let bundle = package::open_bundle_if_present(&executable)?;
     let embedded = bundle.as_ref().map(package::target_plan).transpose()?;
@@ -642,7 +647,10 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             miette::miette!("machine recovery uses the package embedded in this installer")
         })?;
         let request = RuntimeRequest {
-            operation: zup_runtime::RuntimeOperation::Recovery { transaction: id },
+            operation: zup_runtime::RuntimeOperation::Recovery {
+                transaction: id,
+                request: recovery_request,
+            },
             target: build.installer.target,
             app_id: build.installer.app.id.clone(),
             app_version: build.installer.app.version.clone(),
@@ -681,7 +689,10 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     }
     let backend = zup_windows::WindowsRuntimeBackend::for_recovery();
     let request = RuntimeRequest {
-        operation: zup_runtime::RuntimeOperation::Recovery { transaction: id },
+        operation: zup_runtime::RuntimeOperation::Recovery {
+            transaction: id,
+            request: recovery_request,
+        },
         target,
         app_id: record.app_id.clone(),
         app_version: record.app_version,

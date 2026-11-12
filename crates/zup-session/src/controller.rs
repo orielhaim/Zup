@@ -479,8 +479,10 @@ where
             let id = uuid::Uuid::now_v7();
             let host = control.host.clone();
             let work = async move {
-                let outcome =
-                    zup_runtime::outcome_of(host.recover(&context, transaction, &operation).await);
+                let outcome = zup_runtime::outcome_of(
+                    host.recover(&context, transaction, Default::default(), &operation)
+                        .await,
+                );
                 crate::runner::OperationCompletion {
                     id,
                     outcome: crate::SessionOutcome::Deployment(outcome),

@@ -109,6 +109,7 @@ impl OperationExecutor for CrashingExecutor {
 /// The properties each settled outcome has to have.
 fn assert_settled(record: &TransactionRecord, outcome: TransactionOutcome) {
     match outcome {
+        TransactionOutcome::Assessed(_) => panic!("ordinary recovery cannot produce an assessment"),
         TransactionOutcome::Committed => {
             assert_eq!(
                 record.phase,
@@ -238,7 +239,7 @@ fn sweep(label: &str, input: zup_plan::DeploymentEffects) {
         let settled = store.load(&id).unwrap_or_else(|error| {
             panic!("{label}: the store is unreadable after {die_at}: {error}")
         });
-        assert_settled(&settled, outcome);
+        assert_settled(&settled, outcome.clone());
 
         // The one implication worth stating precisely, because it is the whole
         // meaning of commit intent: recovery may roll a transaction *forward*, and

@@ -301,6 +301,7 @@ impl SessionHost for LinuxSessionHost {
         &'a self,
         context: &'a zup_session::OperationContext,
         transaction: zup_core::TransactionId,
+        request: zup_transaction::RecoveryRequest,
         control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<
         'a,
@@ -310,6 +311,7 @@ impl SessionHost for LinuxSessionHost {
             &self.installer,
             context,
             transaction,
+            request,
             control,
         ))
     }

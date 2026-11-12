@@ -80,3 +80,9 @@ pub use persistent::{
 };
 
 pub use executor::{CleanupCompletion, CleanupDeferral};
+
+mod resolution;
+pub use resolution::{
+    RecoveryAssessment, RecoveryBlocker, RecoveryCause, RecoveryDecision, RecoveryRequest,
+    assess_recovery, recover_requested,
+};

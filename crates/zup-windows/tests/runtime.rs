@@ -188,6 +188,7 @@ async fn recovery_uses_the_protected_journal_without_a_frontend_plan() {
         .preserve();
     request.operation = zup_runtime::RuntimeOperation::Recovery {
         transaction: pending.transaction_id,
+        request: Default::default(),
     };
     let mut foreign = request.clone();
     foreign.app_id = AppId::new("com.zup.different-application").unwrap();
@@ -628,6 +629,7 @@ async fn recovery_of_an_untouched_transaction_needs_no_installer_or_payload() {
     request.app_version = "0.9.0".parse().unwrap();
     request.operation = zup_runtime::RuntimeOperation::Recovery {
         transaction: pending.transaction_id,
+        request: Default::default(),
     };
     assert_eq!(
         run(&backend, request, ExecutionPolicy::Interactive)

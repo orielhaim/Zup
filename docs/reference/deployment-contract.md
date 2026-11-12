@@ -200,10 +200,10 @@ retired without payload bytes.
 Carrier app/scope/target authorization remains mandatory, but carrier app version
 is independent of transaction version. A previously installed v1 maintenance carrier
 built with this contract can recover a v2 transaction only while both support the
-same journal, plan, protocol and Windows execution format. Journal schema 2 marks
-adoption of this contract, so workers predating the source-format gate refuse
-these transactions. This engine refuses schema 1 journals; they require a compatible
-trusted carrier for settlement. Execution format 1 is
+same journal, plan, protocol and Windows execution format. Journal schema 3 includes explicit forward-resolution authority in addition to
+retained-source recovery. Older engines must refuse it. This engine refuses
+schema 1 and 2 journals; they require a compatible
+trusted carrier for settlement. Execution format 2 is
 explicit in the protected source context. Semantic execution changes must bump it,
 even when existing JSON would still parse. Unknown formats are refused before
 reconciliation. This does not retrofit recovery support into older shipped engines.
@@ -228,3 +228,78 @@ Unknown siblings defer collection. Subsequent maintenance retries
 settled-source collection before history cleanup. Input overlays may be removed once
 the protected snapshot is complete. Process interruption tests do not establish
 power-loss durability; native Windows ARM64 requires separate qualification.
+
+
+### Unsafe-compensation resolution
+
+Rollback policy is checked before compensation starts. A repaired external file,
+possible incompatible data exposure, or a native service compensation refusal
+leaves the journal and recovery roots intact. Ordinary recovery remains conservative.
+Temporary observation or publication failures can still settle through native
+reconciliation. A deterministic policy refusal needs assessment, not repeated retry.
+
+| Boundary | Durable authority | Settlement rule |
+| --- | --- | --- |
+| Failure and compensation | Failure receipt, node state, rollback phase | Check policy before compensation; unknown effects require native reconciliation. |
+| Operator resolution | Exact decision and protected journal revision | Persist intent once; resume the same forward direction after interruption. |
+| Fixed files | New and displaced native identities in the operation receipt | Verify both; publish ownership of the new instance only. |
+| Persistent data | Previous contract, current directory receipt, exposure evidence | Directory identity does not prove schema compatibility or a restored backup. |
+| Installation publication | Protected reservation, observed installation selection, publication request hash | Publisher validates the previous record and reads back the actual new record. |
+| Retained generations and sources | Installation roots, creator receipts, unfinished journals | Keep recovery roots until effects, publication and reconciliation settle. |
+| External repair residue | Repair intent and displaced-instance receipt | Keep the journal as a history root; no cleanup or source-adoption authority. |
+
+`RecoveryRequest::{Retry, Assess, CompleteForward}` is shared by the coordinator,
+runtime, session API and authenticated machine-worker protocols. Assessment is a
+typed outcome distinct from settlement and does not write the journal. It contains
+causes, expected effect receipts, concrete blockers and an optional forward decision.
+The GUI retains its blocked state and presents the CLI/API path; it does not guess
+which decision is admissible.
+
+The supported forward decision finalizes already placed, authenticated fixed files.
+All non-control effects must have settled receipts, native identity/content/access
+readback must succeed, and compensation must not have started. No native service,
+generation, native cache or opaque backend effect is admissible in this action.
+Missing source or incomplete placement requires separate intervention. This is a
+small finalization capability, not a general graph replay or native service takeover.
+
+For `RepairOwned`, the replacement receipt proves the new owned instance and the
+separate displaced external instance. Finalization verifies both. It never restores,
+deletes or adopts the displaced instance. Its receipt journal remains a history root;
+cleanup and retained-source lookup cannot use a repaired external backup as owned
+content, including when bytes happen to match. Disposal/export of that external
+instance is a separate operator task outside this API.
+
+Possible incompatible data exposure remains blocked. The engine observes directory
+identity and protection, not the application's live schema. It cannot authenticate a
+data backup or prove transactional restore guarantees. Neither forward compatibility
+nor safe binary rollback is inferred from a directory or manifest schema declaration.
+Use an application-specific schema assessment and independently authenticated backup
+restore procedure. There is no data-restore, force, discard or mark-committed decision.
+
+Run the matching trusted maintenance carrier:
+
+```text
+maintenance recover --scope user --transaction ID --assess --output json
+maintenance recover --scope user --transaction ID --decision decision.json --output json
+```
+
+Use `--scope machine` for the authenticated privileged path. The assessment command
+succeeds without settling the deployment. JSON output exposes `recovery_assessment`;
+copy its `complete_forward` object to `decision.json` only after reviewing its expected
+effects and preservation semantics. A null decision means no supported autonomous
+action. CLI paths are local decision input, never privileged filesystem authority.
+
+Decisions bind transaction, application, scope, version, plan, journal revision and a
+digest of the full protected receipt state. Under the installation lock the worker
+reloads its authoritative journal and redoes the assessment. Stale or altered decisions
+are rejected. Native identity checks are repeated on resume and before publication;
+matching paths or hashes never substitute for native instance identity.
+
+Acceptance persists the exact decision before any forward progress. Recovery resumes
+that intent after interruption without requesting new authorization and never switches
+back to binary compensation. Failures retain the intent, journal and roots. Existing
+operation intent/receipt and publication/readback establish the commit point; the
+decision itself does not. Publication reconciliation and post-commit ownership repair
+remain the existing shared mechanisms. Process-interruption tests do not establish
+power-loss durability. Publication freshness, orphan collection and storage migration
+remain separate work.

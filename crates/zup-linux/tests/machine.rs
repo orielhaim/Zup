@@ -1200,6 +1200,7 @@ fn machine_interrupted_transaction_requires_explicit_recovery() {
 
     intent.operation = zup_protocol::PrivilegedRequest::Recovery {
         transaction: interrupted.transaction_id,
+        request: Default::default(),
     };
     let uid = rustix::process::getuid().as_raw();
     let session = SessionId::new_v7();

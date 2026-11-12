@@ -12519,6 +12519,7 @@ dependencies = [
  "zup-acquire",
  "zup-core",
  "zup-plan",
+ "zup-transaction",
 ]
 
 [[package]]

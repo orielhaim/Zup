@@ -13,7 +13,7 @@ use crate::filesystem::{MachineDir, PolicyKind};
 use crate::machine_authority::MachineRoot;
 
 // Bump whenever an execution semantic changes, even if the JSON still parses.
-const EXECUTION_FORMAT: u32 = 1;
+const EXECUTION_FORMAT: u32 = 2;
 const DIRECTORY: &str = "recovery";
 const CONTEXT: &str = "source.json";
 
@@ -595,7 +595,7 @@ mod tests {
                 let mut context: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
                 match change {
-                    "format" => context["execution_format"] = 2.into(),
+                    "format" => context["execution_format"] = (EXECUTION_FORMAT + 1).into(),
                     "plan" => {
                         context["plan"] =
                             serde_json::to_value(zup_core::hash_bytes(b"foreign plan")).unwrap()

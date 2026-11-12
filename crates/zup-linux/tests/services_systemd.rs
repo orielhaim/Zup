@@ -1726,6 +1726,7 @@ impl RealWorld {
             .map_err(|error| format!("execute: {error}"))?;
         let (record, outcome) = (settled.record, settled.outcome);
         match outcome {
+            TransactionOutcome::Assessed(_) => panic!("ordinary recovery cannot assess"),
             TransactionOutcome::Committed => {
                 ledgers
                     .reconcile_installation(&record, SelectedScope::Machine)

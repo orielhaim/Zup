@@ -64,7 +64,15 @@ fn reclaimable_history(
     };
     let mut result = Vec::new();
     for source in &records {
-        if source.plan.installation != installation.id
+        if source.plan.nodes.iter().any(|node| {
+            matches!(
+                node.kind,
+                NodeKind::FileMutation {
+                    delta: zup_plan::FileOperationKind::RepairOwned,
+                    ..
+                }
+            ) && source.receipt(&node.id).is_some()
+        }) || source.plan.installation != installation.id
             || source.target != installation.target
             || !matches!(
                 source.phase,

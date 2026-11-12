@@ -73,7 +73,7 @@ pub fn retained_file_sources(
             continue;
         }
         for effect in &record.plan.nodes {
-            if !matches!(&effect.kind, NodeKind::FileMutation { key: candidate, .. } | NodeKind::FileRemoval { key: candidate } if candidate == key)
+            if !matches!(&effect.kind, NodeKind::FileMutation { key: candidate, delta: zup_plan::FileOperationKind::Replace, .. } | NodeKind::FileRemoval { key: candidate } if candidate == key)
             {
                 continue;
             }

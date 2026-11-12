@@ -688,6 +688,7 @@ impl WindowsRuntimeBackend {
         }
         match &result {
             Ok(InstallOutcome::RecoveryRequired { .. })
+            | Ok(InstallOutcome::RecoveryAssessed { .. })
             | Ok(InstallOutcome::CommittedPendingReconciliation { .. }) => cleanup.retain(),
             Ok(InstallOutcome::Failed(message))
                 if self.retain_on_blocked
@@ -933,11 +934,13 @@ async fn run_elevated_worker(
                 intent: Box::new(deployment.intent.clone()),
             }
         }
-        RuntimeOperation::Recovery { transaction } => {
-            zup_protocol::PreparedTransactionRequest::Recovery {
-                transaction: *transaction,
-            }
-        }
+        RuntimeOperation::Recovery {
+            transaction,
+            request: recovery_request,
+        } => zup_protocol::PreparedTransactionRequest::Recovery {
+            transaction: *transaction,
+            request: recovery_request.clone(),
+        },
     };
     let prepare = zup_protocol::PrepareTransaction {
         content,
@@ -1111,6 +1114,9 @@ async fn run_elevated_worker(
                                zup_protocol::WorkerOutcome::Committed => InstallOutcome::Committed,
                                zup_protocol::WorkerOutcome::RolledBack => InstallOutcome::RolledBack,
                                zup_protocol::WorkerOutcome::Cancelled => InstallOutcome::Cancelled,
+                               zup_protocol::WorkerOutcome::RecoveryAssessed => InstallOutcome::RecoveryAssessed {
+                                   assessment: Box::new(serde_json::from_str(completed.detail.as_deref().ok_or_else(|| SessionError::Protocol("worker assessment missing".into()))?).map_err(|error| SessionError::Protocol(format!("worker assessment: {error}")))?),
+                               },
                                zup_protocol::WorkerOutcome::RecoveryRequired => InstallOutcome::RecoveryRequired {
                                    transaction: Some(completed.transaction_id),
                                    detail: completed.detail.unwrap_or_else(|| "The transaction requires recovery before another operation can proceed".into()),
@@ -1321,14 +1327,18 @@ fn execute_local_blocking_with_events(
                 })
                 .collect(),
         };
-        let result = zup_transaction::recover(
+        let result = zup_transaction::recover_requested(
             record,
             &store,
             &mut executor,
             &InstallationRecordStore::new(&state_root),
+            request.operation.recovery_request(),
         );
         drop(executor);
         return match result {
+            Ok((_, TransactionOutcome::Assessed(assessment))) => {
+                InstallOutcome::RecoveryAssessed { assessment }
+            }
             Ok((record, TransactionOutcome::Committed)) => {
                 match InstallationRecordStore::new(&state_root)
                     .repair_committed(&request.app_id, request.scope)
@@ -1428,6 +1438,10 @@ fn execute_local_blocking_with_events(
         };
         return match open.release(&mut executor) {
             Ok(zup_transaction::SettledTransaction {
+                outcome: TransactionOutcome::Assessed(assessment),
+                ..
+            }) => InstallOutcome::RecoveryAssessed { assessment },
+            Ok(zup_transaction::SettledTransaction {
                 outcome: TransactionOutcome::RolledBack,
                 ..
             }) => InstallOutcome::Cancelled,
@@ -1471,6 +1485,10 @@ fn execute_local_blocking_with_events(
     let was_cancelled = executor.cancel.is_cancelled();
     drop(executor);
     match result {
+        Ok(zup_transaction::SettledTransaction {
+            outcome: TransactionOutcome::Assessed(assessment),
+            ..
+        }) => InstallOutcome::RecoveryAssessed { assessment },
         Ok(zup_transaction::SettledTransaction {
             record,
             outcome: TransactionOutcome::Committed,

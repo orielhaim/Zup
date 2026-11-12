@@ -116,6 +116,9 @@ fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> 
 fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
     let ExecutedRun { outcome, version } = executed;
     match outcome {
+        zup_runtime::InstallOutcome::RecoveryAssessed { assessment } => {
+            Ok(LinuxOutcome::Assessed(assessment.clone()))
+        }
         zup_runtime::InstallOutcome::Committed => Ok(LinuxOutcome::Committed {
             version: version.clone(),
         }),

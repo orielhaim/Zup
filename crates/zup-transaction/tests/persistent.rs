@@ -98,6 +98,12 @@ fn data_schema_controls_downgrade_and_failure_compensation(#[case] fail_after_ex
         assert_eq!(settled.outcome, TransactionOutcome::RecoveryRequired);
         assert!(executor.rolled_back.is_empty());
         assert!(settled.record.rollback_failure.is_some());
+        let assessment =
+            zup_transaction::assess_recovery(&settled.record, &mut FakeExecutor::new()).unwrap();
+        assert!(assessment.complete_forward.is_none());
+        assert!(assessment.blockers.iter().any(
+            |blocker| blocker.cause == zup_transaction::RecoveryCause::IncompatibleDataExposure
+        ));
     } else {
         assert_eq!(settled.outcome, TransactionOutcome::Committed);
         let current = publisher.0.lock().unwrap().clone().unwrap();

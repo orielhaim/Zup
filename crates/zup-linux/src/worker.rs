@@ -373,7 +373,11 @@ fn serve_recovery(
     intent: PrepareOperation,
 ) -> Result<zup_protocol::WorkerOutcome, IpcError> {
     let prepared = prepare_carrier(context, &intent)?;
-    let zup_protocol::PrivilegedRequest::Recovery { transaction: id } = intent.operation else {
+    let zup_protocol::PrivilegedRequest::Recovery {
+        transaction: id,
+        request,
+    } = intent.operation
+    else {
         return Err(IpcError::Policy("recovery transaction is required".into()));
     };
     let app = &prepared.carrier.package().plan().installer.app;
@@ -390,7 +394,12 @@ fn serve_recovery(
     {
         return Err(IpcError::WorkerAuth("recovery identity mismatch".into()));
     }
-    if recovery_replays_forward(&record) {
+    if recovery_replays_forward(&record)
+        || matches!(
+            request,
+            zup_transaction::RecoveryRequest::CompleteForward { .. }
+        )
+    {
         crate::prerequisites::require_satisfied(&record.plan.requirements.prerequisites)
             .map_err(IpcError::Policy)?;
     }
@@ -420,7 +429,12 @@ fn serve_recovery(
     if let Some(pin) = &prepared.carrier_pin {
         pin.verify(&prepared.carrier_path)?;
     }
-    if recovery_replays_forward(&record) {
+    if recovery_replays_forward(&record)
+        || matches!(
+            request,
+            zup_transaction::RecoveryRequest::CompleteForward { .. }
+        )
+    {
         crate::prerequisites::require_satisfied(&record.plan.requirements.prerequisites)
             .map_err(IpcError::Policy)?;
     }
@@ -429,7 +443,7 @@ fn serve_recovery(
     {
         crate::ledger::LinuxInstallationStore::new(&prepared.state_root)
             .reconcile_installation(&record, record.scope)
-            .map(|_| ())
+            .map(|_| None)
             .map_err(|error| IpcError::Transaction(error.to_string()))
     } else {
         recover_one(
@@ -438,6 +452,7 @@ fn serve_recovery(
             &prepared.carrier,
             &prepared.carrier_path,
             &id.to_string(),
+            &request,
             &RecoveryHost {
                 roots: &context.roots,
                 systemd: &context.systemd,
@@ -448,10 +463,17 @@ fn serve_recovery(
     let fresh = zup_transaction::TransactionStore::load(&store, &id)
         .map_err(|error| IpcError::Transaction(error.to_string()))?;
     let (outcome, detail) = match (result, fresh.phase) {
-        (Ok(()), zup_transaction::TransactionPhase::Committed) => {
+        (Ok(Some(assessment)), _) => (
+            zup_protocol::WorkerOutcome::RecoveryAssessed,
+            Some(
+                serde_json::to_string(&assessment)
+                    .map_err(|error| IpcError::Transaction(error.to_string()))?,
+            ),
+        ),
+        (Ok(None), zup_transaction::TransactionPhase::Committed) => {
             (zup_protocol::WorkerOutcome::Committed, None)
         }
-        (Ok(()), zup_transaction::TransactionPhase::RolledBack) => {
+        (Ok(None), zup_transaction::TransactionPhase::RolledBack) => {
             (zup_protocol::WorkerOutcome::RolledBack, None)
         }
         (Err(error), zup_transaction::TransactionPhase::Committed) => (
@@ -645,7 +667,7 @@ fn prepare_carrier(
 
     match &intent.operation {
         zup_protocol::PrivilegedRequest::Deployment { .. } => {}
-        zup_protocol::PrivilegedRequest::Recovery { transaction } => {
+        zup_protocol::PrivilegedRequest::Recovery { transaction, .. } => {
             let store = zup_transaction::FilesystemTransactionStore::private_at(&state_root);
             let record = zup_transaction::TransactionStore::load(&store, transaction)
                 .map_err(|error| IpcError::WorkerAuth(error.to_string()))?;
@@ -933,7 +955,7 @@ fn recovery_replays_forward(record: &zup_transaction::TransactionRecord) -> bool
             | zup_transaction::TransactionPhase::RecoveryRequired {
                 resume: zup_transaction::RecoveryPhase::Applying
             }
-    ) && record.failure.is_none()
+    ) && (record.failure.is_none() || record.resolution.is_some())
         && matches!(
             record.publication,
             zup_transaction::PublicationState::NotRequested
@@ -952,8 +974,9 @@ fn recover_one(
     carrier: &crate::carrier::Carrier,
     carrier_path: &Path,
     transaction: &str,
+    request: &zup_transaction::RecoveryRequest,
     host: &RecoveryHost<'_>,
-) -> Result<(), IpcError> {
+) -> Result<Option<Box<zup_transaction::RecoveryAssessment>>, IpcError> {
     let id = transaction
         .parse::<uuid::Uuid>()
         .map_err(|_| IpcError::Transaction("unparsable transaction identity".into()))?;
@@ -1017,19 +1040,21 @@ fn recover_one(
         record.scope,
     );
     executor.set_transaction_id(record.transaction_id);
-    let (record, outcome) = zup_transaction::recover(
+    let (record, outcome) = zup_transaction::recover_requested(
         record,
         &store,
         &mut executor,
         &crate::ledger::LinuxInstallationStore::new(state_root),
+        request,
     )
     .map_err(|error| IpcError::Transaction(error.to_string()))?;
     match outcome {
+        zup_transaction::TransactionOutcome::Assessed(assessment) => Ok(Some(assessment)),
         zup_transaction::TransactionOutcome::Committed => {
             crate::integration::reap_generated(state_root, app_id, record.scope, host.lock)
                 .map_err(|error| IpcError::Transaction(error.to_string()))?;
             ledger_store_publish(state_root, &record)?;
-            Ok(())
+            Ok(None)
         }
         zup_transaction::TransactionOutcome::RolledBack => {
             crate::integration::reap_generated(
@@ -1039,11 +1064,11 @@ fn recover_one(
                 host.lock,
             )
             .map_err(|error| IpcError::Transaction(error.to_string()))?;
-            Ok(())
+            Ok(None)
         }
-        zup_transaction::TransactionOutcome::RecoveryRequired => Err(IpcError::Transaction(
-            format!("transaction {transaction} requires recovery"),
-        )),
+        zup_transaction::TransactionOutcome::RecoveryRequired => {
+            Err(IpcError::Transaction(record.recovery_detail()))
+        }
     }
 }
 
@@ -1298,7 +1323,10 @@ fn settled_name(
     cancelled: bool,
 ) -> ExecutionVerdict {
     let transaction_id = settled.record.transaction_id.as_uuid();
-    let outcome = match settled.outcome {
+    let outcome = match &settled.outcome {
+        zup_transaction::TransactionOutcome::Assessed(_) => {
+            zup_protocol::WorkerOutcome::RecoveryAssessed
+        }
         zup_transaction::TransactionOutcome::Committed => zup_protocol::WorkerOutcome::Committed,
         zup_transaction::TransactionOutcome::RolledBack if cancelled => {
             zup_protocol::WorkerOutcome::Cancelled
@@ -1316,7 +1344,10 @@ fn settled_name(
     ExecutionVerdict {
         transaction_id,
         outcome,
-        detail: match settled.outcome {
+        detail: match &settled.outcome {
+            zup_transaction::TransactionOutcome::Assessed(assessment) => {
+                Some(serde_json::to_string(assessment).expect("recovery assessment serializes"))
+            }
             zup_transaction::TransactionOutcome::RecoveryRequired => {
                 Some(settled.record.recovery_detail())
             }
