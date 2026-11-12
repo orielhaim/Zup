@@ -167,6 +167,8 @@ enum Open {
     CreateDataDirectory,
     Stage,
     Lock,
+    ExistingLock,
+    NewLock,
     RemoveFile,
     #[cfg(test)]
     RemoveDirectory,
@@ -188,7 +190,9 @@ impl Open {
             Self::Read | Self::ObserveFile => 1 | 0x80 | READ_CONTROL | SYNCHRONIZE,
             Self::MutateFile => 1 | DELETE | 0x80 | READ_CONTROL | SYNCHRONIZE,
             Self::Stage | Self::FenceFile => FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | DELETE,
-            Self::Lock => 1 | 2 | 0x80 | READ_CONTROL | SYNCHRONIZE,
+            Self::Lock | Self::ExistingLock | Self::NewLock => {
+                1 | 2 | 0x80 | READ_CONTROL | SYNCHRONIZE
+            }
             Self::RemoveFile => DELETE | 0x80 | READ_CONTROL | SYNCHRONIZE,
             #[cfg(test)]
             Self::RemoveDirectory => DIRECTORY_READ | DELETE,
@@ -197,7 +201,10 @@ impl Open {
 
     fn disposition(self) -> u32 {
         match self {
-            Self::Stage | Self::CreateExclusiveDirectory | Self::CreateDataDirectory => FILE_CREATE,
+            Self::Stage
+            | Self::CreateExclusiveDirectory
+            | Self::CreateDataDirectory
+            | Self::NewLock => FILE_CREATE,
             Self::CreateDirectory | Self::PrepareDirectory | Self::Lock => FILE_OPEN_IF,
             _ => FILE_OPEN,
         }
@@ -567,6 +574,28 @@ impl MachineDir {
         target: &str,
         expected: (u64, [u8; 16]),
     ) -> Result<(), FilesystemError> {
+        self.rename_directory_unflushed(source, destination, target, expected)?;
+        self.sync()?;
+        destination.sync()?;
+        if destination
+            .child(target, self.kind, Open::MovableDirectory)?
+            .object_identity()?
+            != expected
+        {
+            return Err(io_path(
+                Path::new(target),
+                "published directory identity changed",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn rename_directory_unflushed(
+        &self,
+        source: &str,
+        destination: &Self,
+        target: &str,
+        expected: (u64, [u8; 16]),
+    ) -> Result<(), FilesystemError> {
         self.validate()?;
         destination.validate()?;
         if self.kind != destination.kind {
@@ -585,18 +614,6 @@ impl MachineDir {
         }
         rename_handle(&source.handle, &destination.handle, target, false)
             .map_err(|error| io_std(std::io::Error::other(error)))?;
-        self.sync()?;
-        destination.sync()?;
-        if destination
-            .child(target, self.kind, Open::MovableDirectory)?
-            .object_identity()?
-            != expected
-        {
-            return Err(io_path(
-                Path::new(target),
-                "published directory identity changed",
-            ));
-        }
         Ok(())
     }
 
@@ -743,6 +760,14 @@ impl MachineDir {
         self.child(name, kind, Open::CreateDirectory)
     }
 
+    pub(crate) fn create_journal_directory(&self, name: &str) -> Result<Self, FilesystemError> {
+        self.child(
+            name,
+            PolicyKind::Administrators,
+            Open::CreateExclusiveDirectory,
+        )
+    }
+
     fn child(
         &self,
         name: &str,
@@ -862,11 +887,23 @@ impl MachineDir {
     }
 
     pub fn open_lock(&self, name: &str) -> Result<File, FilesystemError> {
+        self.journal_lock_file(name, private_fs::FileCreation::OpenOrCreate)
+    }
+
+    pub(crate) fn journal_lock_file(
+        &self,
+        name: &str,
+        creation: private_fs::FileCreation,
+    ) -> Result<File, FilesystemError> {
         self.validate()?;
         let opened = open_relative(
             &self.handle,
             OsStr::new(name),
-            Open::Lock,
+            match creation {
+                private_fs::FileCreation::Existing => Open::ExistingLock,
+                private_fs::FileCreation::OpenOrCreate => Open::Lock,
+                private_fs::FileCreation::CreateNew => Open::NewLock,
+            },
             Some(PolicyKind::Administrators),
         )?;
         verify_file(&opened.handle, PolicyKind::Administrators)?;
@@ -877,20 +914,25 @@ impl MachineDir {
     }
 
     pub fn remove(&self, name: &str) -> Result<(), FilesystemError> {
+        self.remove_unflushed(name)?;
+        self.sync()
+    }
+
+    pub(crate) fn remove_unflushed(&self, name: &str) -> Result<(), FilesystemError> {
         self.validate()?;
         let opened = match open_relative(&self.handle, OsStr::new(name), Open::RemoveFile, None) {
             Ok(opened) => opened,
             Err(FilesystemError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
-                return self.sync();
+                return Ok(());
             }
             Err(error) => return Err(error),
         };
         verify_file(&opened.handle, self.kind)?;
         discard(&opened.handle)?;
         drop(opened);
-        self.sync()
+        Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<String>, FilesystemError> {
@@ -1174,46 +1216,21 @@ pub(crate) fn rename_private_directory(
     target: &str,
     expected: (u64, [u8; 16]),
 ) -> Result<(), FilesystemError> {
-    validate_name(OsStr::new(target))?;
-    let directory = parent
-        .open_dir(source)
-        .map_err(|error| io_std(std::io::Error::other(error)))?;
-    if private_directory_identity(&directory)? != expected {
-        return Err(io_path(
-            Path::new(source),
-            "staging directory identity changed",
-        ));
-    }
-    let parent_handle = parent.as_handle().try_clone_to_owned().map_err(io_std)?;
-    let source_handle = open_relative(
-        &parent_handle,
-        OsStr::new(source),
-        Open::MovableDirectory,
-        None,
-    )?
-    .handle;
-    reject_reparse(&source_handle)?;
-    if identity(&source_handle)? != expected {
-        return Err(io_path(
-            Path::new(source),
-            "staging directory identity changed",
-        ));
-    }
-    let destination_handle = destination
-        .as_handle()
-        .try_clone_to_owned()
+    let object = zup_core::NativeObjectIdentity::Windows {
+        volume: expected.0,
+        file: expected.1,
+    };
+    zup_storage::namespace::rename_directory(parent, source, destination, target, object)
         .map_err(io_std)?;
-    rename_handle(&source_handle, &destination_handle, target, false)
-        .map_err(|error| io_std(std::io::Error::other(error)))?;
     parent
         .sync_all()
-        .map_err(|error| io_std(std::io::Error::other(error)))?;
+        .map_err(|e| io_std(std::io::Error::other(e)))?;
     destination
         .sync_all()
-        .map_err(|error| io_std(std::io::Error::other(error)))?;
+        .map_err(|e| io_std(std::io::Error::other(e)))?;
     let observed = destination
         .open_dir(target)
-        .map_err(|error| io_std(std::io::Error::other(error)))?;
+        .map_err(|e| io_std(std::io::Error::other(e)))?;
     if private_directory_identity(&observed)? != expected {
         return Err(io_path(
             Path::new(target),

@@ -807,6 +807,9 @@ pub enum CorruptReason {
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum StoreError {
+    #[error("journal creation deferred: {reason}")]
+    #[diagnostic(code(zup_transaction::creation_deferred))]
+    CreationDeferred { reason: String },
     #[error(
         "installation {installation} is reserved for a different application, scope, target, or directory"
     )]

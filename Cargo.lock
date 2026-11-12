@@ -12646,8 +12646,11 @@ name = "zup-storage"
 version = "0.0.1"
 dependencies = [
  "private-fs",
+ "rustix",
  "tempfile",
  "thiserror 2.0.21",
+ "windows 0.62.2",
+ "zup-core",
 ]
 
 [[package]]

@@ -577,3 +577,200 @@ fn receipts_must_describe_the_planned_file(#[case] mutation: ReceiptMutation) {
     }
     assert_eq!(record.validate(), Err(CorruptReason::InvalidReceipt));
 }
+#[rstest]
+#[case::missing_record(remove_published_record)]
+#[case::substituted_lock(replace_published_lock)]
+#[case::substituted_directory(replace_published_directory)]
+#[case::tampered_provenance(tamper_provenance)]
+fn published_identity_damage_is_never_creation_residue(#[case] damage: fn(&std::path::Path)) {
+    let (root, store) = store();
+    let real = record();
+    let intact = record();
+    store.create(&real).unwrap();
+    store.create(&intact).unwrap();
+    let directory = record_path(&root, &real.transaction_id)
+        .parent()
+        .unwrap()
+        .to_owned();
+    damage(&directory);
+    assert!(store.list_ids().is_err());
+    assert!(store.load(&real.transaction_id).is_err());
+    assert!(store.create(&real).is_err());
+    assert!(directory.exists());
+    assert_eq!(store.load(&intact.transaction_id).unwrap(), intact);
+}
+fn remove_published_record(directory: &std::path::Path) {
+    std::fs::remove_file(directory.join("transaction.json")).unwrap();
+}
+fn replace_published_lock(directory: &std::path::Path) {
+    let lock = directory.join("transaction.lock");
+    std::fs::rename(&lock, directory.join("original.lock")).unwrap();
+    std::fs::copy(directory.join("original.lock"), lock).unwrap();
+}
+fn replace_published_directory(directory: &std::path::Path) {
+    let displaced = directory.with_extension("displaced");
+    std::fs::rename(directory, &displaced).unwrap();
+    zup_storage::ensure_private_dir(directory).unwrap();
+    for name in ["transaction.lock", "transaction.json"] {
+        std::fs::copy(displaced.join(name), directory.join(name)).unwrap();
+    }
+}
+fn tamper_provenance(directory: &std::path::Path) {
+    std::fs::write(directory.join("transaction.lock"), b"{}").unwrap();
+}
+
+#[test]
+fn foreign_files_are_preserved_and_refused() {
+    let (temp, store) = store();
+    let real = record();
+    store.create(&real).unwrap();
+    let foreign = temp
+        .path()
+        .join("state/transactions")
+        .join(TransactionId::new_v7().to_string());
+    std::fs::write(&foreign, b"foreign evidence").unwrap();
+    assert!(store.list_ids().is_err());
+    assert_eq!(std::fs::read(foreign).unwrap(), b"foreign evidence");
+    assert_eq!(store.load(&real.transaction_id).unwrap(), real);
+}
+
+#[cfg(windows)]
+#[test]
+fn weakened_journal_acl_is_refused() {
+    let (root, store) = store();
+    let real = record();
+    store.create(&real).unwrap();
+    let lock = record_path(&root, &real.transaction_id).with_file_name("transaction.lock");
+    let result = std::process::Command::new("icacls.exe")
+        .arg(&lock)
+        .args(["/grant", "*S-1-1-0:(F)"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(store.list_ids().is_err());
+    assert!(lock.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn nonprivate_journal_mode_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, store) = store();
+    let real = record();
+    store.create(&real).unwrap();
+    let path = record_path(&root, &real.transaction_id);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(store.list_ids().is_err());
+    assert!(path.exists());
+}
+
+#[cfg(any(windows, unix))]
+#[test]
+fn redirected_journal_namespace_is_refused() {
+    let (temp, store) = store();
+    let real = record();
+    store.create(&real).unwrap();
+    let root = temp.path().join("state/transactions");
+    let link = root.join(TransactionId::new_v7().to_string());
+    let target = root.join(real.transaction_id.to_string());
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(link.to_str().unwrap().replace('/', "\\"))
+            .arg(target.to_str().unwrap().replace('/', "\\"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(store.list_ids().is_err());
+    assert_eq!(store.load(&real.transaction_id).unwrap(), real);
+    assert!(link.exists());
+}
+
+#[test]
+fn replaced_transaction_parent_cannot_adopt_a_genuine_journal() {
+    let (root, store) = store();
+    let real = record();
+    store.create(&real).unwrap();
+    let parent = root.path().join("state/transactions");
+    let displaced = root.path().join("state/displaced-transactions");
+    std::fs::rename(&parent, &displaced).unwrap();
+    zup_storage::ensure_private_dir(&parent).unwrap();
+    std::fs::rename(
+        displaced.join(real.transaction_id.to_string()),
+        parent.join(real.transaction_id.to_string()),
+    )
+    .unwrap();
+    assert!(store.list_ids().is_err());
+    assert!(store.load(&real.transaction_id).is_err());
+    assert!(record_path(&root, &real.transaction_id).exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires CAP_CHOWN in a disposable native Linux test environment"]
+fn changed_journal_owner_is_refused() {
+    use std::os::unix::fs::{MetadataExt, chown};
+    let (root, store) = store();
+    let real = record();
+    store.create(&real).unwrap();
+    let path = record_path(&root, &real.transaction_id);
+    let owner = std::fs::metadata(&path).unwrap().uid();
+    chown(&path, Some(owner + 1), None).unwrap();
+    assert!(store.list_ids().is_err());
+    chown(&path, Some(owner), None).unwrap();
+    assert_eq!(store.load(&real.transaction_id).unwrap(), real);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires unshare and mount in a disposable native Linux test environment"]
+fn bind_mounted_genuine_journal_is_refused() {
+    if let Some(path) = std::env::var_os("ZUP_JOURNAL_BIND_ROOT") {
+        let path = std::path::PathBuf::from(path);
+        let store = FilesystemTransactionStore::private_at(path.join("state"));
+        let id = store.list_ids().unwrap()[0];
+        let journal = path.join("state/transactions").join(id.to_string());
+        assert!(
+            std::process::Command::new("mount")
+                .arg("--bind")
+                .arg(&journal)
+                .arg(&journal)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(store.list_ids().is_err());
+        return;
+    }
+    let (root, store) = store();
+    let real = record();
+    store.create(&real).unwrap();
+    let status = std::process::Command::new("unshare")
+        .args([
+            "--user",
+            "--map-root-user",
+            "--mount",
+            "--propagation",
+            "private",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "bind_mounted_genuine_journal_is_refused",
+            "--ignored",
+        ])
+        .env("ZUP_JOURNAL_BIND_ROOT", root.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(store.load(&real.transaction_id).unwrap(), real);
+}

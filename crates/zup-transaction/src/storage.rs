@@ -1,9 +1,11 @@
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zup_storage::PublishError;
 
-use private_fs::Publication;
+use crate::JournalDirectory;
+#[path = "private_journals.rs"]
+mod private_journals;
+use private_journals::PrivateJournalDirectory;
 
 use crate::record::{CorruptReason, StoreError, TransactionRecord};
 use zup_core::TransactionId;
@@ -21,14 +23,11 @@ pub trait JournalVolume: Send + Sync {
         id: zup_core::InstallationId,
         bytes: &[u8],
     ) -> Result<(), StoreError>;
-    fn read_journal(&self, id: &TransactionId) -> Result<Option<Vec<u8>>, StoreError>;
-    fn publish_journal(
+    fn open_journal(
         &self,
         id: &TransactionId,
-        bytes: &[u8],
-        create_new: bool,
-    ) -> Result<(), StoreError>;
-    fn lock_journal(&self, id: &TransactionId) -> Result<File, StoreError>;
+    ) -> Result<Option<Box<dyn crate::LockedJournal>>, StoreError>;
+    fn create_journal(&self, id: &TransactionId, bytes: &[u8]) -> Result<(), StoreError>;
     fn list_journals(&self) -> Result<Vec<TransactionId>, StoreError>;
 }
 
@@ -91,7 +90,11 @@ impl FilesystemTransactionStore {
     }
 
     pub fn list_ids(&self) -> Result<Vec<TransactionId>, StoreError> {
-        self.volume.list_journals()
+        let ids = self.volume.list_journals()?;
+        for id in &ids {
+            self.load(id)?;
+        }
+        Ok(ids)
     }
 }
 
@@ -104,20 +107,36 @@ impl PrivateJournals {
         Self { root }
     }
 
-    fn transactions(&self) -> Result<private_fs::PrivateDir, StoreError> {
-        let path = self.root.join("transactions");
-        zup_storage::ensure_private_dir(&path).map_err(|error| store_fs(path, error))
-    }
-
-    fn journal(&self, id: &TransactionId) -> Result<private_fs::PrivateDir, StoreError> {
-        let name = id.to_string();
-        let path = self.root.join("transactions").join(&name);
-        let root = self.transactions()?;
-        root.ensure_dir(&name)
-            .map_err(|error| store_fs(path.clone(), error))?;
-        root.sync_all()
-            .map_err(|error| store_fs(path.clone(), error))?;
-        private_fs::PrivateDir::open(&path).map_err(|error| store_fs(path, error))
+    fn namespace(
+        &self,
+        name: &str,
+        create: bool,
+    ) -> Result<Option<PrivateJournalDirectory>, StoreError> {
+        let root = match private_fs::PrivateDir::open(&self.root) {
+            Ok(root) => root,
+            Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !create {
+                    return Ok(None);
+                }
+                zup_storage::ensure_private_dir(&self.root)
+                    .map_err(|error| store_fs(self.root.clone(), error))?
+            }
+            Err(error) => return Err(store_fs(self.root.clone(), error)),
+        };
+        let root = PrivateJournalDirectory(root);
+        if !create {
+            return root.open(name);
+        }
+        let directory = PrivateJournalDirectory(
+            root.0
+                .ensure_dir(name)
+                .map_err(|error| store_fs(self.root.join(name), error))?,
+        );
+        if !root.same_mount(&directory)? {
+            return Err(CorruptReason::IdentityMismatch.into());
+        }
+        root.sync()?;
+        Ok(Some(directory))
     }
 }
 
@@ -126,123 +145,55 @@ impl JournalVolume for PrivateJournals {
         &self,
         id: zup_core::InstallationId,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let path = self.root.join("identities");
-        let directory = match private_fs::PrivateDir::open(&path) {
-            Ok(directory) => directory,
-            Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(error) => return Err(store_fs(path, error)),
+        let Some(directory) = self.namespace("identities", false)? else {
+            return Ok(None);
         };
-        match zup_storage::read_file(&directory, format!("{id}.json")) {
-            Ok(bytes) => {
-                directory
-                    .sync_all()
-                    .map_err(|error| store_fs(path, error))?;
-                Ok(Some(bytes))
-            }
-            Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(None)
-            }
-            Err(error) => Err(store_fs(path, error)),
+        let bytes = directory.read(&format!("{id}.json"))?;
+        if bytes.is_some() {
+            directory.sync()?;
         }
+        Ok(bytes)
     }
-
     fn create_reservation(
         &self,
         id: zup_core::InstallationId,
         bytes: &[u8],
     ) -> Result<(), StoreError> {
-        let path = self.root.join("identities");
-        let directory = zup_storage::ensure_private_dir(&path)
-            .map_err(|error| store_fs(path.clone(), error))?;
-        zup_storage::publish_full(
-            &directory,
-            format!("{id}.json"),
-            bytes,
-            Publication::CreateNew,
-        )
-        .map_err(|source| StoreError::Publication {
-            path: path.join(format!("{id}.json")),
-            source,
-        })
+        self.namespace("identities", true)?
+            .ok_or(CorruptReason::Missing)?
+            .publish(&format!("{id}.json"), bytes, true)
     }
-    fn read_journal(&self, id: &TransactionId) -> Result<Option<Vec<u8>>, StoreError> {
-        let path = self.root.join("transactions").join(id.to_string());
-        let directory = match private_fs::PrivateDir::open(&path) {
-            Ok(directory) => directory,
-            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(error) => return Err(store_fs(path, error)),
-        };
-        match zup_storage::read_file(&directory, "transaction.json") {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                Ok(None)
-            }
-            Err(error) => Err(store_fs(path.join("transaction.json"), error)),
-        }
-    }
-
-    fn publish_journal(
+    fn open_journal(
         &self,
         id: &TransactionId,
-        bytes: &[u8],
-        create_new: bool,
-    ) -> Result<(), StoreError> {
-        let directory = self.journal(id)?;
-        let path = self
-            .root
-            .join("transactions")
-            .join(id.to_string())
-            .join("transaction.json");
-        let policy = if create_new {
-            Publication::CreateNew
-        } else {
-            Publication::Replace
+    ) -> Result<Option<Box<dyn crate::LockedJournal>>, StoreError> {
+        let Some(namespace) = self.namespace("transactions", false)? else {
+            return Ok(None);
         };
-        zup_storage::publish_full(&directory, "transaction.json", bytes, policy)
-            .map_err(|source| StoreError::Publication { path, source })
+        crate::JournalLease::open(namespace, *id)
+            .map(|journal| journal.map(|lease| Box::new(lease) as Box<dyn crate::LockedJournal>))
     }
-
-    fn lock_journal(&self, id: &TransactionId) -> Result<File, StoreError> {
-        let directory = self.journal(id)?;
-        let path = self
-            .root
-            .join("transactions")
-            .join(id.to_string())
-            .join("transaction.lock");
-        let file = zup_storage::open_lock(&directory, "transaction.lock")
-            .map_err(|source| store_fs(path.clone(), source))?;
-        file.lock()
-            .map_err(|source| StoreError::Io { path, source })?;
-        Ok(file)
+    fn create_journal(&self, id: &TransactionId, bytes: &[u8]) -> Result<(), StoreError> {
+        let creation = self
+            .namespace("journal-creation", true)?
+            .ok_or(CorruptReason::Missing)?;
+        let transactions = self
+            .namespace("transactions", true)?
+            .ok_or(CorruptReason::Missing)?;
+        crate::create_journal(&creation, &transactions, *id, bytes)
     }
-
     fn list_journals(&self) -> Result<Vec<TransactionId>, StoreError> {
-        let path = self.root.join("transactions");
-        let directory = match private_fs::PrivateDir::open(&path) {
-            Ok(directory) => directory,
-            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(error) => return Err(store_fs(path, error)),
+        let Some(directory) = self.namespace("transactions", false)? else {
+            return Ok(Vec::new());
         };
-        let mut ids = Vec::new();
-        for name in directory
-            .entries()
-            .map_err(|error| store_fs(self.root.join("transactions"), error))?
-        {
-            let id = name
-                .to_str()
-                .and_then(|name| name.parse::<TransactionId>().ok())
-                .ok_or_else(|| StoreError::InvalidDirectory {
-                    name: name.to_string_lossy().into_owned(),
-                })?;
-            ids.push(id);
-        }
-        Ok(ids)
+        directory
+            .names()?
+            .into_iter()
+            .map(|name| {
+                name.parse::<TransactionId>()
+                    .map_err(|_| StoreError::InvalidDirectory { name })
+            })
+            .collect()
     }
 }
 
@@ -339,12 +290,8 @@ impl TransactionStore for FilesystemTransactionStore {
     fn create(&self, record: &TransactionRecord) -> Result<(), StoreError> {
         record.validate()?;
         let id = record.transaction_id;
-        let _lock = self.volume.lock_journal(&id)?;
-        if self.volume.read_journal(&id)?.is_some() {
-            return Err(StoreError::AlreadyExists { id: id.to_string() });
-        }
         let bytes = serde_json::to_vec_pretty(record).map_err(StoreError::Serialize)?;
-        match self.volume.publish_journal(&id, &bytes, true) {
+        match self.volume.create_journal(&id, &bytes) {
             Ok(()) => Ok(()),
             Err(StoreError::Publication { source, .. })
                 if zup_storage::absent_collision(&source) =>
@@ -356,8 +303,9 @@ impl TransactionStore for FilesystemTransactionStore {
     }
 
     fn load(&self, id: &TransactionId) -> Result<TransactionRecord, StoreError> {
-        match self.volume.read_journal(id)? {
-            Some(bytes) => {
+        match self.volume.open_journal(id)? {
+            Some(journal) => {
+                let bytes = journal.read()?;
                 let record = decode_record(&bytes)?;
                 if record.transaction_id != *id {
                     return Err(CorruptReason::IdentityMismatch.into());
@@ -382,15 +330,30 @@ impl TransactionStore for FilesystemTransactionStore {
             .into());
         }
         let id = updated.transaction_id;
-        let _lock = self.volume.lock_journal(&id)?;
-        let current = self.load(&id)?;
+        let journal = self
+            .volume
+            .open_journal(&id)?
+            .ok_or(CorruptReason::Missing)?;
+        let current = decode_record(&journal.read()?)?;
+        if current.transaction_id != id {
+            return Err(CorruptReason::IdentityMismatch.into());
+        }
         if current.revision != expected_revision {
             return Err(StoreError::RevisionConflict {
                 expected: expected_revision,
             });
         }
         let bytes = serde_json::to_vec_pretty(updated).map_err(StoreError::Serialize)?;
-        self.volume.publish_journal(&id, &bytes, false)
+        crate::fault_injection::boundary(
+            crate::fault_injection::Boundary::JournalCasBefore,
+            &id.to_string(),
+        );
+        journal.publish(&bytes)?;
+        crate::fault_injection::boundary(
+            crate::fault_injection::Boundary::JournalCasPublished,
+            &id.to_string(),
+        );
+        Ok(())
     }
 }
 

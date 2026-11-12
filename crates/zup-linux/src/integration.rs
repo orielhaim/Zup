@@ -606,47 +606,13 @@ fn retained_objects(
     let installation = crate::ledger::LinuxInstallationStore::new(state_root)
         .load(app_id, scope)
         .map_err(|error| PlanError::IntegrationUnsupported(error.to_string()))?;
-    let transactions = state_root.join("transactions");
-    let root = match private_fs::PrivateDir::open(&transactions) {
-        Ok(root) => root,
-        Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(retained);
-        }
-        Err(error) => return Err(io_path(&transactions, error)),
-    };
-    for name in root
-        .entries()
-        .map_err(|error| io_path(&transactions, error))?
+    let store = zup_transaction::FilesystemTransactionStore::private_at(state_root);
+    for id in store
+        .list_ids()
+        .map_err(|error| PlanError::IntegrationUnsupported(error.to_string()))?
     {
-        let journal = match root.open_dir(&name) {
-            Ok(journal) => journal,
-            Err(private_fs::Error::WrongObjectKind) => continue,
-            Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                continue;
-            }
-            Err(error) => return Err(io_path(&transactions.join(&name), error)),
-        };
-        let bytes = match read_object(&journal, "transaction.json") {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => continue,
-            Err(error) => {
-                return Err(io_path(
-                    &transactions.join(&name).join("transaction.json"),
-                    error,
-                ));
-            }
-        };
-        let record: zup_transaction::TransactionRecord =
-            serde_json::from_slice(&bytes).map_err(|error| PlanError::InvalidTargetPath {
-                path: transactions.join(&name).display().to_string(),
-                reason: error.to_string(),
-            })?;
-        record
-            .validate()
-            .map_err(|error| PlanError::InvalidTargetPath {
-                path: transactions.join(&name).display().to_string(),
-                reason: error.to_string(),
-            })?;
+        let record = zup_transaction::TransactionStore::load(&store, &id)
+            .map_err(|error| PlanError::IntegrationUnsupported(error.to_string()))?;
         if record.app_id != *app_id
             || record.scope != scope
             || !(phase_keeps_generated(record.phase)

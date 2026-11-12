@@ -358,3 +358,48 @@ still uses its native fences and receipts. Interrupted cleanup keeps phase `Comm
 frontends report `CommittedPendingReconciliation`, preserve roots and offer recovery.
 Ownership reconciliation and application health/repair remain separate concerns. Process
 crash tests cover these journal boundaries, not sudden power loss.
+
+## Transaction journal identity
+
+A transaction becomes discoverable when a fully initialized directory is atomically
+renamed, without replacement, into `transactions/<id>`. Its protected
+`transaction.lock` contains a versioned identity seal binding the transaction ID,
+transaction namespace, directory and lock to their native object identities.
+`transaction.json` carries the existing validated transaction schema, revision and
+phase. Committed, rolled-back and blocked transactions remain discoverable until
+existing history retirement moves their exact namespace out of `transactions`.
+History collection validates the seal and preserves the same lock identity.
+
+Creation uses one bounded `journal-creation/pending` slot under a permanent creation
+lock, outside discovery. A durable `pending.json` reservation binds the exact native
+identities and initial record. Before publication, no transaction effects are allowed.
+After a process crash, the next create finishes a valid reserved initialization,
+flushes both parents, verifies the published journal and retires the reservation.
+A visible journal may already have advanced through CAS; recovery never overwrites it
+with the reservation's initial revision. Publication acknowledgement requires the
+native sync barriers and verified readback, including after an uncertain rename.
+
+A crash before the reservation is durable can leave an unproven slot. It is neither
+a transaction nor deletion authority. Further creation returns `CreationDeferred`;
+existing transactions, discovery, reconciliation and unrelated cleanup can continue.
+Unknown staging members, substituted identities and partial atomic-write residues
+are preserved and refused. The bounded slot prevents repeated failed attempts from
+accumulating journals or duplicated metadata. There is no name-based orphan adoption
+or automatic deletion of ambiguous state.
+
+Every discovered ID is independently loaded through a lease retaining its directory
+and existing lock. The lease verifies the seal, protected access, mount/volume,
+record ID, schema and revision invariants. CAS reads and replaces through that same
+lease. Missing journals or locks in a published namespace are hard errors, even if
+an interrupted creation reservation still contains the original bytes. Opening a
+missing transaction never recreates its directory or lock. Creator and transaction
+locks are never unlinked by journal initialization or CAS; lifecycle authorization
+continues to serialize installation and history collection.
+
+Linux requires native mount identities to reject bind-mount crossings as well as
+symlinks, changed ownership and nonprivate modes. Windows private volumes use
+private-fs policy and handle-relative NT directory rename; machine volumes retain
+MachineRoot policy and writable-volume flushes. Process-crash tests do not establish
+sudden-power-loss durability. This prototype rejects old empty journal locks rather
+than migrating them. Installation reservations, recovery payloads, decision journaling,
+publication readback and generation-retirement ownership retain their existing contracts.

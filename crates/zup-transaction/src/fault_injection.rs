@@ -1,6 +1,18 @@
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Boundary {
+    JournalNamespaceCreated,
+    JournalLockPublished,
+    JournalCreationReserved,
+    JournalRecordPublished,
+    JournalNamespacePublished,
+    JournalParentSyncBefore,
+    JournalParentSynced,
+    JournalCasBefore,
+    JournalCasPublished,
+    JournalReservationRemoveBefore,
+    JournalReservationRemoved,
+    JournalCreationRetired,
     PreparationReserved,
     PreparationRetirementBefore,
     PreparationRetired,

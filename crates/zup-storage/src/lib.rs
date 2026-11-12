@@ -4,6 +4,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 use thiserror::Error;
 
+pub mod namespace;
+
 use private_fs::{
     Durability, Error, FileAccess, FileCreation, OpenOptions, PrivateDir, PrivateFile, Publication,
 };
@@ -244,7 +246,7 @@ fn parent_file(path: &Path) -> Result<(&Path, &std::ffi::OsStr), Error> {
     }
 }
 
-fn duplicate(file: &PrivateFile) -> Result<std::fs::File, Error> {
+pub fn duplicate(file: &PrivateFile) -> Result<std::fs::File, Error> {
     #[cfg(unix)]
     {
         use std::os::fd::AsFd;

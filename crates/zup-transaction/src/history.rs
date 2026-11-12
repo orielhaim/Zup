@@ -322,10 +322,14 @@ impl<F: HistoryFilesystem> HistoryStorage<F> {
                             return Err("history journal changed during observation".into());
                         }
                     }
-                    JournalMember::Lock if !bytes.is_empty() => {
-                        return Err("history lock contains unexpected data".into());
-                    }
-                    JournalMember::Lock => {}
+                    JournalMember::Lock => crate::JournalIdentity::validate(
+                        &bytes,
+                        source.record.transaction_id,
+                        F::object(&directory)?,
+                        observed.object,
+                        F::object(&transactions)?,
+                    )
+                    .map_err(|e| e.to_string())?,
                 }
                 members.insert(member, observed);
             }

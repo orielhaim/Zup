@@ -505,7 +505,8 @@ async fn authenticated_worker_rejects_an_overlay_not_declared_by_its_content() {
     let state_root = root.path().join("state");
     let work_root = root.path().join("work");
     let target_root = root.path().join("target");
-    for path in [&payload_root, &state_root, &work_root, &target_root] {
+    zup_storage::ensure_private_dir(&state_root).unwrap();
+    for path in [&payload_root, &work_root, &target_root] {
         std::fs::create_dir_all(path).unwrap();
     }
     let source = RelativePath::new("__zup_plugins__/generated.bin").unwrap();

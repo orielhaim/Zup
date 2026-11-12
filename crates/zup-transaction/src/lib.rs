@@ -52,7 +52,11 @@ pub use service::{
     reconcile_service_control, reconcile_service_rollback, rollback_service_control,
     verify_service_control,
 };
+mod journal_creation;
 mod storage;
+pub use journal_creation::{
+    JournalDirectory, JournalIdentity, JournalLease, LockedJournal, create_journal, journal_lock,
+};
 
 pub use coordinator::{
     OpenTransaction, SettledTransaction, TransactionCoordinator, TransactionError,

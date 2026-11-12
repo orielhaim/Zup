@@ -196,12 +196,6 @@ impl MachineRoot {
         directory.remove(name)
     }
 
-    #[cfg(test)]
-    pub fn remove_journal(&self, id: &TransactionId) -> Result<(), FilesystemError> {
-        self.child("transactions", PolicyKind::Administrators)?
-            .remove_directory(&id.to_string())
-    }
-
     fn child(&self, name: &str, kind: PolicyKind) -> Result<MachineDir, FilesystemError> {
         self.root.open_dir(name, kind)
     }
@@ -260,54 +254,21 @@ impl JournalVolume for MachineJournals {
                 source,
             })
     }
-    fn read_journal(&self, id: &TransactionId) -> Result<Option<Vec<u8>>, StoreError> {
-        let transactions = self.transactions()?;
-        let Some(directory) = open_optional(&transactions, &id.to_string())? else {
-            return Ok(None);
-        };
-        directory
-            .read("transaction.json", PolicyKind::Administrators)
-            .map_err(|error| store_io(id, error))
-    }
-
-    fn publish_journal(
+    fn open_journal(
         &self,
         id: &TransactionId,
-        bytes: &[u8],
-        create_new: bool,
-    ) -> Result<(), StoreError> {
-        let transactions = self.transactions()?;
-        let directory = transactions
-            .ensure_dir(&id.to_string(), PolicyKind::Administrators)
-            .map_err(|error| store_io(id, error))?;
-        directory
-            .publish(
-                "transaction.json",
-                bytes,
-                create_new,
-                PolicyKind::Administrators,
-            )
-            .map_err(|source| StoreError::Publication {
-                path: std::path::PathBuf::from(id.to_string()).join("transaction.json"),
-                source,
-            })
+    ) -> Result<Option<Box<dyn zup_transaction::LockedJournal>>, StoreError> {
+        zup_transaction::JournalLease::open(self.transactions()?, *id).map(|journal| {
+            journal.map(|lease| Box::new(lease) as Box<dyn zup_transaction::LockedJournal>)
+        })
     }
 
-    fn lock_journal(&self, id: &TransactionId) -> Result<std::fs::File, StoreError> {
-        let transactions = self.transactions()?;
-        let directory = transactions
-            .ensure_dir(&id.to_string(), PolicyKind::Administrators)
-            .map_err(|error| store_io(id, error))?;
-        directory
-            .open_lock("transaction.lock")
-            .map_err(|error| store_io(id, error))
-            .and_then(|file| {
-                file.lock().map_err(|source| StoreError::Io {
-                    path: std::path::PathBuf::from(id.to_string()).join("transaction.lock"),
-                    source,
-                })?;
-                Ok(file)
-            })
+    fn create_journal(&self, id: &TransactionId, bytes: &[u8]) -> Result<(), StoreError> {
+        let creation = self
+            .root
+            .ensure_dir("journal-creation", PolicyKind::Administrators)
+            .map_err(|e| store_io(id, e))?;
+        zup_transaction::create_journal(&creation, &self.transactions()?, *id, bytes)
     }
 
     fn list_journals(&self) -> Result<Vec<TransactionId>, StoreError> {
@@ -385,6 +346,88 @@ impl zup_update::repository_state::RepositoryStateFile for MachineRepositoryFile
                 PolicyKind::Administrators,
             )
             .map_err(std::io::Error::other)
+    }
+}
+
+impl zup_transaction::JournalDirectory for MachineDir {
+    fn open(&self, name: &str) -> Result<Option<Self>, StoreError> {
+        open_optional(self, name)
+    }
+    fn create(&self, name: &str) -> Result<Self, StoreError> {
+        self.create_journal_directory(name).map_err(journal_io)
+    }
+    fn object(&self) -> Result<zup_core::NativeObjectIdentity, StoreError> {
+        let (volume, file) = self.object_identity().map_err(journal_io)?;
+        Ok(zup_core::NativeObjectIdentity::Windows { volume, file })
+    }
+    fn same_mount(&self, other: &Self) -> Result<bool, StoreError> {
+        Ok(self.object_identity().map_err(journal_io)?.0
+            == other.object_identity().map_err(journal_io)?.0)
+    }
+    fn names(&self) -> Result<Vec<String>, StoreError> {
+        self.list().map_err(journal_io)
+    }
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        self.read(name, PolicyKind::Administrators)
+            .map_err(journal_io)
+    }
+    fn publish(&self, name: &str, bytes: &[u8], create: bool) -> Result<(), StoreError> {
+        self.publish(name, bytes, create, PolicyKind::Administrators)
+            .map_err(|source| StoreError::Publication {
+                path: name.into(),
+                source,
+            })
+    }
+    fn lock_file(
+        &self,
+        name: &str,
+        creation: private_fs::FileCreation,
+    ) -> Result<std::fs::File, StoreError> {
+        self.journal_lock_file(name, creation).map_err(journal_io)
+    }
+    fn move_to(
+        &self,
+        name: &str,
+        destination: &Self,
+        target: &str,
+        object: zup_core::NativeObjectIdentity,
+    ) -> Result<(), StoreError> {
+        let zup_core::NativeObjectIdentity::Windows { volume, file } = object else {
+            return Err(zup_transaction::CorruptReason::IdentityMismatch.into());
+        };
+        self.rename_directory_unflushed(name, destination, target, (volume, file))
+            .map_err(|e| StoreError::Publication {
+                path: target.into(),
+                source: zup_storage::PublishError::Indeterminate {
+                    may_have_published: true,
+                    detail: e.to_string(),
+                },
+            })
+    }
+    fn sync(&self) -> Result<(), StoreError> {
+        self.sync().map_err(journal_io)
+    }
+    fn retire_reservation(&self, bytes: &[u8]) -> Result<(), StoreError> {
+        if self
+            .read("pending.json", PolicyKind::Administrators)
+            .map_err(journal_io)?
+            .as_deref()
+            != Some(bytes)
+        {
+            return Err(zup_transaction::CorruptReason::IdentityMismatch.into());
+        }
+        self.remove_unflushed("pending.json").map_err(journal_io)?;
+        zup_transaction::fault_injection::boundary(
+            zup_transaction::fault_injection::Boundary::JournalReservationRemoved,
+            "journal-creation",
+        );
+        self.sync().map_err(journal_io)
+    }
+}
+fn journal_io(error: FilesystemError) -> StoreError {
+    StoreError::Io {
+        path: "journals".into(),
+        source: std::io::Error::other(error),
     }
 }
 
@@ -548,23 +591,12 @@ pub(crate) mod tests {
         let path = temp.path().join("state");
         let machine = MachineRoot::establish_at(&path).expect("machine");
         let store = machine.transaction_store();
-        let orphan = TransactionId::new_v7();
+        let unpublished = TransactionId::new_v7();
         let volume = MachineJournals {
             root: Arc::clone(&machine.root),
         };
-        drop(
-            volume
-                .lock_journal(&orphan)
-                .expect("initial unpublished journal"),
-        );
-        assert_eq!(store.list_ids().expect("journal directories"), vec![orphan]);
-        assert!(matches!(
-            store.load(&orphan),
-            Err(StoreError::Corrupt(zup_transaction::CorruptReason::Missing))
-        ));
-        machine
-            .remove_journal(&orphan)
-            .expect("validated orphan cleanup");
+        assert!(volume.open_journal(&unpublished).unwrap().is_none());
+        assert!(store.list_ids().unwrap().is_empty());
         let target = zup_core::Target::host().unwrap();
         let mut effects = DeploymentEffects::new(
             zup_core::InstallationId::new_v7(),
@@ -627,15 +659,68 @@ pub(crate) mod tests {
                 .expect("absent ledger")
                 .is_none()
         );
-        machine
-            .remove_journal(&record.transaction_id)
-            .expect("remove journal");
-        assert!(
-            reopened
-                .transaction_store()
-                .list_ids()
-                .expect("list")
-                .is_empty()
+    }
+
+    #[cfg(feature = "test-faults")]
+    mod journal_crashes {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/journal_crashes.rs"
+        ));
+    }
+
+    #[cfg(feature = "test-faults")]
+    fn crash_store(path: &Path) -> FilesystemTransactionStore {
+        MachineRoot::establish_at(path)
+            .expect("elevated machine authority")
+            .transaction_store()
+    }
+
+    #[cfg(feature = "test-faults")]
+    fn crash_record() -> zup_transaction::TransactionRecord {
+        let target = zup_core::Target::host().unwrap();
+        let mut effects = DeploymentEffects::new(
+            zup_core::InstallationId::new_v7(),
+            crate::requirements_fixture::requirements(
+                target,
+                zup_core::SelectedScope::Machine,
+                "probe",
+                "1.0.0",
+            ),
+        );
+        effects.install_directory =
+            Some(zup_core::TargetPath::new(target, r"C:\journal-probe").unwrap());
+        zup_transaction::TransactionRecord::new(
+            TransactionId::new_v7(),
+            zup_core::AppId::new("probe").unwrap(),
+            zup_core::SelectedScope::Machine,
+            "1.0.0".parse().unwrap(),
+            compile_deployment(&effects).unwrap(),
+        )
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    #[ignore = "requires elevated administrator"]
+    fn machine_journal_creation_process() {
+        journal_crashes::child(crash_store);
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    #[ignore = "requires elevated administrator"]
+    fn machine_journal_creation_crash_matrix() {
+        journal_crashes::matrix(
+            crash_store,
+            crash_record(),
+            "machine_authority::tests::machine_journal_creation_process",
+            true,
+        );
+        journal_crashes::races(
+            crash_store,
+            crash_record(),
+            "machine_authority::tests::machine_journal_creation_process",
+            true,
         );
     }
 
