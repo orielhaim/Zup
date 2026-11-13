@@ -113,12 +113,11 @@ async fn write_verified(
     max_size: u64,
 ) -> Result<u64, PinnedError> {
     use tokio::io::AsyncWriteExt;
-    let mut stream = response.into_body().bytes_stream();
+    let mut stream = response.bytes_stream();
     let mut hasher = Sha256::new();
     let mut size = 0u64;
     while let Some(chunk) = futures_util::StreamExt::next(&mut stream).await {
-        let chunk =
-            chunk.map_err(|error| PinnedError::Transport(error.without_url().to_string()))?;
+        let chunk = chunk.map_err(|error| PinnedError::Transport(error.to_string()))?;
         size = size
             .checked_add(chunk.len() as u64)
             .ok_or(PinnedError::TooLarge { limit: max_size })?;

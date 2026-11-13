@@ -189,6 +189,7 @@ impl SourceChain {
                     self.failures[index].store(0, Ordering::Relaxed);
                     return Ok(blob);
                 }
+                Err(SourceError::Cancelled) => return Err(crate::AcquireError::Cancelled),
                 Err(error) => {
                     if matches!(error, SourceError::Absent { .. }) {
                         reports.push(error);

@@ -183,3 +183,34 @@ async fn recovery_reports_successful_settlement_without_changing_deployment_fail
         },
     );
 }
+
+struct BurstBackend;
+impl RuntimeBackend for BurstBackend {
+    fn execute<'a>(
+        &'a self,
+        _request: RuntimeRequest,
+        control: RuntimeControl,
+    ) -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>> {
+        Box::pin(async move {
+            for completed in 1..=1000 {
+                let _ = control.events.send(RuntimeEvent::Progress {
+                    phase: zup_core::OperationPhase::Files,
+                    completed,
+                    total: 1000,
+                    action: String::new(),
+                });
+            }
+            Ok(InstallOutcome::Committed)
+        })
+    }
+}
+#[tokio::test]
+async fn terminal_drain_recovers_the_latest_snapshot_after_broadcast_lag() {
+    let control = OperationControl::new(ExecutionPolicy::Interactive);
+    assert_eq!(
+        execute(&BurstBackend, request(), &control).await.unwrap(),
+        InstallOutcome::Committed
+    );
+    assert_eq!(control.progress().completed, 1000);
+    assert_eq!(control.progress().total, 1000);
+}

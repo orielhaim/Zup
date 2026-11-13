@@ -63,7 +63,7 @@ impl Acquired {
         })
     }
     pub fn summary(&self) -> SessionSummary {
-        let estimate = self.estimate();
+        let estimate = self.outcome.estimate;
         SessionSummary {
             total_bytes: estimate
                 .download_bytes

@@ -194,6 +194,8 @@ mod tests {
 
     fn progress(completed: u64, total: u64) -> Box<AcquisitionProgress> {
         let mut progress = AcquisitionProgress {
+            acquired_bytes: 0,
+            acquired_items: 0,
             phase: AcquisitionPhase::Downloading,
             completed_bytes: completed,
             total_bytes: total,

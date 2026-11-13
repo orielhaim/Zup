@@ -116,6 +116,9 @@ async fn drive_operation<H: SessionHost>(
                     Vec::new(),
                 );
             }
+            Err(zup_runtime::OperationError::Cancelled) => {
+                return (InstallOutcome::Cancelled, Vec::new());
+            }
             Err(error) => return (InstallOutcome::Failed(error.to_string()), Vec::new()),
         }
     };

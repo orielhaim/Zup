@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use zup_core::Sha256Digest;
 
@@ -59,12 +59,6 @@ use crate::source::SourceChain;
 /// How many transfers one session runs at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerConfig {
-    /// Transfers in flight against a single origin.
-    ///
-    /// HTTP/2 multiplexes many requests over one connection, so this is a
-    /// useful number rather than a formality; it is also the number a
-    /// conventional CDN's edge will serve happily.
-    pub per_origin: usize,
     /// Transfers in flight across every origin.
     pub total: usize,
     /// How many verified blobs may be decompressed and staged at once.
@@ -76,7 +70,6 @@ pub struct SchedulerConfig {
 impl Default for SchedulerConfig {
     fn default() -> Self {
         Self {
-            per_origin: 6,
             total: 12,
             staging: 2,
             progress_interval: Duration::from_millis(100),
@@ -89,7 +82,6 @@ impl SchedulerConfig {
     /// benchmark compares against.
     pub const fn sequential() -> Self {
         Self {
-            per_origin: 1,
             total: 1,
             staging: 1,
             progress_interval: Duration::from_millis(100),
@@ -98,7 +90,7 @@ impl SchedulerConfig {
 
     /// Refuse a configuration that could not make progress.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.per_origin == 0 || self.total == 0 {
+        if self.total == 0 {
             return Err("a scheduler needs at least one transfer in flight");
         }
         if self.staging == 0 {
@@ -253,23 +245,16 @@ impl Barrier {
 /// Workers update counters; the session owner samples them.
 #[derive(Debug, Default)]
 struct Counters {
+    acquired_bytes: AtomicU64,
+    acquired_items: AtomicU64,
     completed_bytes: AtomicU64,
     completed_items: AtomicU64,
     active: AtomicU64,
 }
 
-/// Recover a retry count from a source's report.
-///
-/// A source records its attempts in the detail of an unavailable report, so the
-/// session can surface them without every source growing a side channel. The
-/// format is fixed and owned by this crate: `<n> attempts, last delay <ms>ms, <reason>`.
-fn retry_bookkeeping(error: &AcquireError) -> (u32, u64, String) {
-    if let AcquireError::Unavailable { reports, .. } = error
-        && let Some(retry) = reports.iter().find_map(retry_marker)
-    {
-        return retry;
-    }
-    (0, 0, String::new())
+enum WorkCompletion {
+    Acquired(Result<VerifiedBlob, AcquireError>),
+    Staged(Result<VerifiedBlob, AcquireError>),
 }
 
 /// Runs one closure to a verified barrier.
@@ -371,33 +356,17 @@ impl AcquisitionSession {
             estimate,
         });
 
-        let (mut items, missing, cache_hits) = self.take_cached(progress, &cancellation)?;
-        if !missing.is_empty() {
-            self.fetch_all(
-                missing,
-                chain,
-                &mut items,
-                Arc::clone(&cancellation),
-                progress,
-                &estimate,
-            )
-            .await?;
-        }
-
-        // The barrier check. Every item the closure named must be present and
-        // verified; anything else is a refusal, not a partial success.
-        for item in self.plan.items() {
-            if !items
-                .iter()
-                .any(|blob| blob.descriptor.digest == item.descriptor.digest)
-            {
-                let error = AcquireError::Missing {
-                    kind: item.descriptor.kind().as_str(),
-                    digest: item.descriptor.digest.to_hex(),
-                };
-                return Err(error);
-            }
-        }
+        let mut items = Vec::new();
+        let cache_hits = estimate.cached_items;
+        self.fetch_all(
+            self.plan.items().to_vec(),
+            chain,
+            &mut items,
+            Arc::clone(&cancellation),
+            progress,
+            &estimate,
+        )
+        .await?;
 
         if cancellation.is_cancelled() {
             return Err(AcquireError::Cancelled);
@@ -412,49 +381,6 @@ impl AcquisitionSession {
                 .saturating_add(estimate.cached_bytes),
         };
         Ok(Barrier { outcome })
-    }
-
-    /// Split the closure into what the cache already holds and what must move.
-    fn take_cached(
-        &self,
-        progress: &ProgressSink,
-        cancellation: &SharedCancellation,
-    ) -> Result<(Vec<VerifiedBlob>, Vec<AcquisitionItem>, usize), AcquireError> {
-        let mut present = Vec::new();
-        let mut missing = Vec::new();
-        let mut hits = 0usize;
-        for item in self.plan.items() {
-            if cancellation.is_cancelled() {
-                return Err(AcquireError::Cancelled);
-            }
-            let descriptor = item.descriptor;
-            let verify = Verify::for_kind(descriptor.kind());
-            match self.cache.probe(&descriptor, verify)? {
-                CacheProbe::Present { wire_size } => {
-                    let Some(blob) = self.cache.get(&descriptor, verify)? else {
-                        missing.push(item.clone());
-                        continue;
-                    };
-                    hits += 1;
-                    self.counters
-                        .completed_bytes
-                        .fetch_add(wire_size, Ordering::Relaxed);
-                    self.counters
-                        .completed_items
-                        .fetch_add(1, Ordering::Relaxed);
-                    if hits <= MAX_REPORTED_CACHE_HITS {
-                        progress.sample(AcquisitionEvent::CacheHit {
-                            kind: descriptor.kind().as_str(),
-                            digest: descriptor.digest.to_hex(),
-                            wire_bytes: wire_size,
-                        });
-                    }
-                    present.push(blob);
-                }
-                CacheProbe::Absent | CacheProbe::Resumable { .. } => missing.push(item.clone()),
-            }
-        }
-        Ok((present, missing, hits))
     }
 
     /// Dispatch the missing work across a bounded pool and keep the progress
@@ -472,96 +398,116 @@ impl AcquisitionSession {
         let total_bytes = estimate
             .download_bytes
             .saturating_add(estimate.cached_bytes);
-        let workers = self.config.total.min(work.len());
         let mut queue = VecDeque::from(work);
+        let mut ready = VecDeque::new();
         let mut tasks = JoinSet::new();
         let stop = Arc::new(crate::CancelFlag::new());
-        let staging = Arc::new(Semaphore::new(self.config.staging));
+        let mut acquiring = 0;
+        let mut staging = 0;
         let mut failure = None;
         let mut interval = tokio::time::interval(self.config.progress_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let cancelled = cancellation.cancelled();
         tokio::pin!(cancelled);
-
         loop {
-            while failure.is_none() && tasks.len() < workers {
-                if cancellation.is_cancelled() {
-                    failure = Some(AcquireError::Cancelled);
-                    stop.cancel();
+            while failure.is_none()
+                && !cancellation.is_cancelled()
+                && !stop.is_cancelled()
+                && staging < self.config.staging
+            {
+                let Some(blob): Option<VerifiedBlob> = ready.pop_front() else {
                     break;
-                }
+                };
+                let stager = self.stager.clone();
+                let stop = stop.clone();
+                staging += 1;
+                tasks.spawn(async move {
+                    let result = stager
+                        .stage(blob.clone())
+                        .await
+                        .map_err(|detail| AcquireError::Staging {
+                            kind: blob.descriptor.kind().as_str(),
+                            digest: blob.descriptor.digest.to_hex(),
+                            detail,
+                        })
+                        .map(|()| blob);
+                    if result.is_err() {
+                        stop.cancel();
+                    }
+                    WorkCompletion::Staged(result)
+                });
+            }
+            while failure.is_none()
+                && !cancellation.is_cancelled()
+                && !stop.is_cancelled()
+                && acquiring < self.config.total
+                && ready.len() < self.config.total
+            {
                 let Some(item) = queue.pop_front() else { break };
                 let chain = chain.clone();
-                let cache = Arc::clone(&self.cache);
-                let stager = Arc::clone(&self.stager);
-                let staging = Arc::clone(&staging);
-                let stop = Arc::clone(&stop);
+                let cache = self.cache.clone();
+                let stop = stop.clone();
                 let counters = self.counters.clone();
-                let cancellation = Arc::clone(&cancellation);
+                acquiring += 1;
                 tasks.spawn(async move {
                     let result = async {
-                        let active = ActiveTransfer::new(&counters.active);
-                        let blob = tokio::select! {
-                            biased;
-                            _ = stop.cancelled() => return Err(AcquireError::Cancelled),
-                            result = chain.acquire(&item.descriptor, &cache, stop.as_ref()) => result?,
-                        };
-                        drop(active);
-                        let _permit = tokio::select! {
-                            biased;
-                            _ = stop.cancelled() => return Err(AcquireError::Cancelled),
-                            permit = staging.acquire() => permit.map_err(|_| AcquireError::Worker("staging semaphore closed".into()))?,
-                        };
-                        if cancellation.is_cancelled() || stop.is_cancelled() {
-                            return Err(AcquireError::Cancelled);
+                        if stop.is_cancelled() { return Err(AcquireError::Cancelled); }
+                        if let Some(blob) = cache.get(&item.descriptor, Verify::for_kind(item.descriptor.kind()))? {
+                            return Ok(blob);
                         }
-                        // Staging may span filesystem steps or await blocking work.
-                        // Once entered it must settle, rather than be dropped midway.
-                        stager.stage(blob.clone()).await.map_err(|detail| AcquireError::Staging {
-                            kind: item.descriptor.kind().as_str(),
-                            digest: item.descriptor.digest.to_hex(),
-                            detail,
-                        })?;
-                        counters.completed_bytes.fetch_add(blob.wire_size, Ordering::Relaxed);
-                        counters.completed_items.fetch_add(1, Ordering::Relaxed);
-                        Ok(blob)
+                        let _active = ActiveTransfer::new(&counters.active);
+                        tokio::select! {
+                            biased;
+                            _ = stop.cancelled() => Err(AcquireError::Cancelled),
+                            result = chain.acquire(&item.descriptor, &cache, stop.as_ref()) => result,
+                        }
                     }.await;
-                    (item, result)
+                    WorkCompletion::Acquired(result)
                 });
             }
             if tasks.is_empty() {
                 break;
             }
-            // A ready result wins a tie with cancellation. The first observed
-            // failure is latched; shutdown outcomes never replace it.
             let error = tokio::select! {
                 biased;
-                joined = tasks.join_next() => match joined.expect("the task set is nonempty") {
-                    Ok((_, Ok(blob))) => { items.push(blob); None }
-                    Ok((item, Err(error))) => {
-                        let (retries, delay_ms, reason) = retry_bookkeeping(&error);
-                        if retries > 0 {
-                            progress.sample(AcquisitionEvent::Retrying {
-                                kind: item.descriptor.kind().as_str(),
-                                digest: item.descriptor.digest.to_hex(),
-                                attempt: retries,
-                                delay_ms,
-                                reason,
-                            });
+                joined = tasks.join_next() => match joined.expect("task set nonempty") {
+                    Ok(WorkCompletion::Acquired(result)) => {
+                        acquiring -= 1;
+                        match result { Ok(blob) => { self.counters.acquired_bytes.fetch_add(blob.wire_size, Ordering::Relaxed); self.counters.acquired_items.fetch_add(1, Ordering::Relaxed); ready.push_back(blob); None }, Err(error) => Some(error) }
+                    }
+                    Ok(WorkCompletion::Staged(result)) => {
+                        staging -= 1;
+                        match result {
+                            Ok(blob) => {
+                                self.counters.completed_bytes.fetch_add(blob.wire_size, Ordering::Relaxed);
+                                self.counters.completed_items.fetch_add(1, Ordering::Relaxed);
+                                items.push(blob);
+                                None
+                            }
+                            Err(error) => Some(error),
                         }
-                        Some(error)
                     }
                     Err(error) => Some(AcquireError::Worker(error.to_string())),
                 },
                 _ = &mut cancelled, if failure.is_none() => Some(AcquireError::Cancelled),
-                _ = interval.tick() => {
-                    self.sample_progress(progress, total_bytes, total_items, estimate);
-                    None
-                }
+                _ = interval.tick() => { self.sample_progress(progress, total_bytes, total_items, estimate); None }
             };
             if failure.is_none()
                 && let Some(error) = error
+                && !(matches!(error, AcquireError::Cancelled)
+                    && stop.is_cancelled()
+                    && !cancellation.is_cancelled())
             {
+                let (retries, delay_ms, reason) = retry_bookkeeping(&error);
+                if retries > 0 {
+                    progress.sample(AcquisitionEvent::Retrying {
+                        kind: "blob",
+                        digest: failure_digest(&error).unwrap_or_default(),
+                        attempt: retries,
+                        delay_ms,
+                        reason,
+                    });
+                }
                 failure = Some(error);
                 stop.cancel();
             }
@@ -581,7 +527,13 @@ impl AcquisitionSession {
         estimate: &AcquisitionEstimate,
     ) {
         let mut sample = AcquisitionProgress {
-            phase: AcquisitionPhase::Downloading,
+            phase: if self.counters.active.load(Ordering::Relaxed) == 0 {
+                AcquisitionPhase::Staging
+            } else {
+                AcquisitionPhase::Downloading
+            },
+            acquired_bytes: self.counters.acquired_bytes.load(Ordering::Relaxed),
+            acquired_items: self.counters.acquired_items.load(Ordering::Relaxed),
             completed_bytes: self.counters.completed_bytes.load(Ordering::Relaxed),
             total_bytes,
             cached_bytes: estimate.cached_bytes,
@@ -595,6 +547,8 @@ impl AcquisitionSession {
             retries: 0,
         };
         sample.recompute();
+        sample.throughput = 0;
+        sample.eta = None;
         progress.sample(AcquisitionEvent::DownloadProgress {
             progress: Box::new(sample),
         });
@@ -656,13 +610,6 @@ fn failure_reasons(error: &AcquireError) -> Vec<String> {
     }
 }
 
-/// How many cache hits are reported individually before the rest are counted.
-///
-/// A closure can be tens of thousands of blobs and nobody wants a stream of one
-/// line per blob. The total is on the progress sample and in the outcome, so
-/// nothing is lost; only the per-blob narration is capped.
-const MAX_REPORTED_CACHE_HITS: usize = 16;
-
 /// Where a source's retry bookkeeping is read back out of.
 ///
 /// A source records its attempts in the detail of an unavailable report, so the
@@ -691,4 +638,13 @@ fn retry_marker(report: &SourceError) -> Option<(u32, u64, String)> {
         delay.trim().parse().ok()?,
         reason.trim().to_owned(),
     ))
+}
+
+fn retry_bookkeeping(error: &AcquireError) -> (u32, u64, String) {
+    if let AcquireError::Unavailable { reports, .. } = error
+        && let Some(retry) = reports.iter().find_map(retry_marker)
+    {
+        return retry;
+    }
+    (0, 0, String::new())
 }

@@ -690,12 +690,11 @@ pub async fn open(
         });
     }
     let prefix = response
-        .into_body()
         .bytes()
         .await
         .map_err(|error| DistributeError::Fetch {
             name: descriptor.shards[0].name.clone(),
-            reason: crate::safe_reason(&error),
+            reason: error.to_string(),
         })?;
     let index = Index::read(&prefix).map_err(|error| match error {
         PackageError::Short { .. } => DistributeError::Fetch {
@@ -756,12 +755,11 @@ pub async fn load_descriptor(
         });
     }
     let bytes = response
-        .into_body()
         .bytes()
         .await
         .map_err(|error| DistributeError::Fetch {
             name: name.clone(),
-            reason: crate::safe_reason(&error),
+            reason: error.to_string(),
         })?;
     PackageDescriptor::parse(&bytes, expected)
 }

@@ -334,7 +334,6 @@ async fn transfers_run_concurrently_and_the_pool_is_bounded() {
         (
             "bounded",
             SchedulerConfig {
-                per_origin: workers,
                 total: workers,
                 staging: 2,
                 ..SchedulerConfig::default()
@@ -919,4 +918,63 @@ async fn a_partially_satisfied_closure_is_a_refusal_and_not_a_partial_barrier() 
             .is_none(),
         "the missing blob is not published"
     );
+}
+
+#[tokio::test]
+async fn warm_cache_requires_successful_staging() {
+    let cache = TestCache::new().shared(CachePolicy::Keep);
+    let blobs = fixture(3);
+    for (descriptor, wire) in &blobs {
+        let mut writer = cache.writer(descriptor).unwrap();
+        writer.write(wire).unwrap();
+        writer.commit().unwrap();
+    }
+    let plan = AcquisitionPlan::build(items_for(&blobs)).unwrap();
+    let stager = RecordingStager::new();
+    AcquisitionSession::new(plan.clone(), cache.clone(), SchedulerConfig::default())
+        .with_stager(stager.clone())
+        .run(chain(vec![]), never(), &ProgressSink::discard())
+        .await
+        .unwrap();
+    assert_eq!(stager.seen().len(), blobs.len());
+    let result = AcquisitionSession::new(plan, cache, SchedulerConfig::default())
+        .with_stager(RecordingStager::failing(blobs[0].0.digest))
+        .run(chain(vec![]), never(), &ProgressSink::discard())
+        .await;
+    assert!(matches!(result, Err(AcquireError::Staging { .. })));
+}
+
+#[tokio::test]
+#[ignore = "filesystem performance measurement"]
+async fn acquisition_thousand_blob_measurement() {
+    let cache = TestCache::new().shared(CachePolicy::Keep);
+    let blobs: Vec<_> = (0u64..1000)
+        .map(|index| {
+            let bytes = index.to_le_bytes();
+            (payload_descriptor(&bytes, LEVEL), wire_of(&bytes, LEVEL))
+        })
+        .collect();
+    let plan = AcquisitionPlan::build(items_for(&blobs)).unwrap();
+    for warm in [false, true] {
+        let stager = RecordingStager::new();
+        let start = std::time::Instant::now();
+        let outcome =
+            AcquisitionSession::new(plan.clone(), cache.clone(), SchedulerConfig::default())
+                .with_stager(stager.clone())
+                .run(
+                    chain(vec![memory_source("memory", &blobs)]),
+                    never(),
+                    &ProgressSink::discard(),
+                )
+                .await
+                .unwrap()
+                .enter();
+        println!(
+            "warm={warm} elapsed_ms={} staging_operations={} cache_hits={}",
+            start.elapsed().as_millis(),
+            stager.seen().len(),
+            outcome.cache_hits
+        );
+        assert_eq!(stager.seen().len(), 1000);
+    }
 }

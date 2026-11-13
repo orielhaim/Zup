@@ -715,7 +715,6 @@ pub fn check_digest(bytes: &[u8], expected: Sha256Digest, what: &str) -> Result<
 /// measurement it did not make.
 pub const fn default_scheduler() -> zup_acquire::SchedulerConfig {
     zup_acquire::SchedulerConfig {
-        per_origin: 6,
         total: 12,
         staging: 2,
         progress_interval: std::time::Duration::from_millis(100),

@@ -905,6 +905,7 @@ async fn session_cancellation_wakes_an_http_request_waiting_for_headers() {
                         idle: std::time::Duration::from_secs(60),
                         per_blob: std::time::Duration::from_secs(60),
                     },
+                    ..HttpClientConfig::default()
                 },
                 OriginSet::from_urls(&url, Vec::<&str>::new()).unwrap(),
             )

@@ -11,6 +11,8 @@ use std::time::Duration;
 /// A failure while acquiring content over HTTP.
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
+    #[error("HTTP {phase} timeout")]
+    Timeout { phase: &'static str },
     /// A URL could not be built from an origin and a relative path.
     #[error("origin {origin} cannot address {path}: {reason}")]
     Address {
@@ -96,7 +98,7 @@ impl HttpError {
             | Self::Redirect { origin, .. }
             | Self::Disconnected { origin, .. }
             | Self::Body { origin, .. } => Some(origin),
-            Self::Cancelled | Self::Cache(_) => None,
+            Self::Timeout { .. } | Self::Cancelled | Self::Cache(_) => None,
         }
     }
 
@@ -113,6 +115,7 @@ impl HttpError {
             Self::RangeMismatch { .. } => "range mismatch".to_owned(),
             Self::Address { reason, .. } => reason.clone(),
             Self::Redirect { reason, .. } => reason.clone(),
+            Self::Timeout { phase } => format!("{phase} timeout"),
             Self::Cancelled => "cancelled".to_owned(),
             Self::Cache(error) => error.to_string(),
         }

@@ -12008,6 +12008,7 @@ name = "zup-acquire-http"
 version = "0.0.1"
 dependencies = [
  "backon",
+ "bytes",
  "futures-util",
  "reqwest",
  "serde_json",

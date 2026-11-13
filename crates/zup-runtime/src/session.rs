@@ -401,8 +401,14 @@ pub async fn execute(
         }),
         (_, result) => result,
     };
-    while let Ok(event) = incoming.try_recv() {
-        progress.send_modify(|current| current.observe(&event));
+    loop {
+        match incoming.try_recv() {
+            Ok(event) => progress.send_modify(|current| current.observe(&event)),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+                break;
+            }
+        }
     }
     match &result {
         Ok(outcome) => {
