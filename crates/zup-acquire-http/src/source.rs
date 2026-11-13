@@ -136,6 +136,7 @@ impl HttpSource {
         descriptor: &ContentDescriptor,
         cache: &zup_acquire::ContentCache,
         cancellation: &dyn Cancellation,
+        deadline: tokio::time::Instant,
     ) -> Result<VerifiedBlob, HttpError> {
         let path = zup_acquire::blob_path(&descriptor.digest);
         let mut last: Option<HttpError> = None;
@@ -175,6 +176,7 @@ impl HttpSource {
                     writer: Some(writer),
                     offset,
                     cancellation,
+                    deadline,
                 };
                 match self.transfer(&mut attempt).await {
                     Ok(blob) => {
@@ -210,13 +212,11 @@ impl HttpSource {
         request: &mut BlobRequest<'_>,
     ) -> Result<VerifiedBlob, (HttpError, Option<String>)> {
         let (origin, url, offset) = (request.origin, request.url, request.offset);
-        let response = if offset > 0 {
-            self.client
-                .get_range(origin, url, offset, self.max_redirects)
-                .await
-        } else {
-            self.client.get(origin, url, self.max_redirects).await
-        };
+        let mut http = crate::client::Request::get(url).deadline(request.deadline);
+        if offset > 0 {
+            http = http.range(crate::client::Range::from(offset));
+        }
+        let response = self.client.send(origin, http, self.max_redirects).await;
         let response = match response {
             Ok(response) => response,
             Err(error) => {
@@ -302,6 +302,7 @@ impl HttpSource {
 /// `Option` because finishing a transfer consumes it, and every path out of
 /// `transfer` finishes it one way or another.
 struct BlobRequest<'a> {
+    deadline: tokio::time::Instant,
     origin: &'a Origin,
     url: &'a url::Url,
     descriptor: &'a ContentDescriptor,
@@ -426,6 +427,10 @@ impl ArtifactSource for HttpSource {
         &self.name
     }
 
+    fn acquisition_timeout(&self) -> Option<std::time::Duration> {
+        Some(self.client.timeouts().per_blob)
+    }
+
     fn contains(&self, _descriptor: &ContentDescriptor) -> bool {
         // An HTTP source is always willing. "Does this origin have it" is
         // answered by a request, and a HEAD per blob would double the round
@@ -470,11 +475,14 @@ impl ArtifactSource for HttpSource {
                     ));
                 }
             }
-            let deadline = tokio::time::Instant::now() + self.client.timeouts().per_blob;
+            let deadline = request
+                .deadline
+                .map(|deadline| deadline.0)
+                .unwrap_or_else(|| tokio::time::Instant::now() + self.client.timeouts().per_blob);
             tokio::select! {
                 biased;
                 _ = request.cancellation.cancelled() => Err(HttpError::Cancelled),
-                result = tokio::time::timeout_at(deadline, self.fetch_blob(&descriptor, request.cache, request.cancellation)) =>
+                result = tokio::time::timeout_at(deadline, self.fetch_blob(&descriptor, request.cache, request.cancellation, deadline)) =>
                     result.unwrap_or(Err(HttpError::Timeout { phase: "blob" })),
             }
                 .map_err(|error| {

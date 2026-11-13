@@ -224,7 +224,9 @@ impl HttpClient {
         request: Request<'_>,
         max_redirects: usize,
     ) -> Result<Response, HttpError> {
-        let deadline = tokio::time::Instant::now() + self.timeouts.per_blob;
+        let deadline = request
+            .deadline
+            .unwrap_or_else(|| tokio::time::Instant::now() + self.timeouts.per_blob);
         let mut current = request.url.clone();
         let mut hops = 0usize;
         loop {
@@ -262,11 +264,7 @@ impl HttpClient {
                 .request(request.method.clone(), current.clone())
                 .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()));
             for (name, value) in &request.headers {
-                if current.origin() != request.url.origin()
-                    && ["authorization", "proxy-authorization", "cookie"]
-                        .iter()
-                        .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
-                {
+                if current.origin() != request.url.origin() {
                     continue;
                 }
                 builder = builder.header(*name, value.clone());
@@ -411,6 +409,7 @@ impl From<Vec<u8>> for Body {
 /// One request, in the parts the policy does not decide.
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
+    deadline: Option<tokio::time::Instant>,
     method: reqwest::Method,
     url: &'a Url,
     headers: Vec<(&'a str, String)>,
@@ -422,6 +421,7 @@ impl<'a> Request<'a> {
     /// A request with no headers, no body, and no range.
     pub fn new(method: reqwest::Method, url: &'a Url) -> Self {
         Self {
+            deadline: None,
             method,
             url,
             headers: Vec::new(),
@@ -443,6 +443,12 @@ impl<'a> Request<'a> {
     /// A `DELETE`.
     pub fn delete(url: &'a Url) -> Self {
         Self::new(reqwest::Method::DELETE, url)
+    }
+
+    /// Bound all redirects, capacity waits, headers and body by the blob budget.
+    pub fn deadline(mut self, deadline: tokio::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 
     /// Attach a body.

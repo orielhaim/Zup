@@ -189,7 +189,7 @@ fn plan(blobs: &[(ContentDescriptor, Vec<u8>)]) -> AcquisitionPlan {
     .unwrap()
 }
 
-fn events(receiver: &mut mpsc::Receiver<AcquisitionEvent>) -> Vec<AcquisitionEvent> {
+fn events(receiver: &mut zup_acquire::ProgressReceiver) -> Vec<AcquisitionEvent> {
     let mut events = Vec::new();
     while let Ok(event) = receiver.try_recv() {
         events.push(event);
@@ -532,10 +532,6 @@ async fn ready_failures_and_a_full_observer_channel_do_not_strand_workers() {
                 )
                 .await
         });
-        assert!(matches!(
-            receiver.recv().await,
-            Some(AcquisitionEvent::AcquisitionStarted { .. })
-        ));
         let mut terminals = 0;
         while let Some(event) = receiver.recv().await {
             match event {
@@ -655,4 +651,126 @@ async fn cancellation_waits_for_started_blocking_staging_writes() {
         ));
     })
     .await;
+}
+
+#[tokio::test]
+async fn unread_live_observer_cannot_block_settlement() {
+    let root = TestCache::new();
+    let (sink, mut receiver) = ProgressSink::channel(1);
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        AcquisitionSession::new(
+            AcquisitionPlan::empty(),
+            root.shared(CachePolicy::Keep),
+            SchedulerConfig::default(),
+        )
+        .run(SourceChain::new(vec![]), never(), &sink),
+    )
+    .await;
+    assert!(result.is_ok(), "unread progress blocked session return");
+    assert!(result.unwrap().is_ok());
+    let mut retained = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        retained.push(event);
+    }
+    assert!(matches!(
+        retained.last(),
+        Some(AcquisitionEvent::AcquisitionComplete { items: 0, .. })
+    ));
+}
+
+#[tokio::test]
+async fn terminal_is_retained_for_independent_and_late_observers() {
+    let root = TestCache::new();
+    let (sink, mut paused) = ProgressSink::channel(1);
+    let mut other = sink.subscribe();
+    AcquisitionSession::new(
+        AcquisitionPlan::empty(),
+        root.shared(CachePolicy::Keep),
+        SchedulerConfig::default(),
+    )
+    .run(SourceChain::new(vec![]), never(), &sink)
+    .await
+    .unwrap();
+    sink.offer(AcquisitionEvent::StagingComplete {
+        staged: 99,
+        bytes: 99,
+    });
+    let mut late = sink.subscribe();
+    for observer in [&mut paused, &mut other, &mut late] {
+        assert!(matches!(
+            observer.recv().await,
+            Some(AcquisitionEvent::AcquisitionComplete { items: 0, .. })
+        ));
+        assert!(observer.recv().await.is_none());
+        assert!(observer.try_recv().is_err());
+    }
+}
+
+#[test]
+fn synchronous_observer_reads_terminal_once_without_a_runtime() {
+    let (sink, mut observer) = ProgressSink::channel(1);
+    let thread = std::thread::spawn(move || {
+        assert!(matches!(
+            observer.blocking_recv(),
+            Some(AcquisitionEvent::Cancelled { .. })
+        ));
+        assert!(observer.blocking_recv().is_none());
+    });
+    sink.offer(AcquisitionEvent::Cancelled {
+        completed_items: 0,
+        total_items: 1,
+    });
+    thread.join().unwrap();
+    let mut late = sink.subscribe();
+    assert!(matches!(
+        late.blocking_recv(),
+        Some(AcquisitionEvent::Cancelled { .. })
+    ));
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn warm_staging_filesystem_failure_preserves_existing_objects(
+    #[case] permission_denied: bool,
+) {
+    struct DiskStager(std::path::PathBuf);
+    impl BlobStager for DiskStager {
+        fn prepare(&self) -> StagerFuture<'_, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn stage(&self, _: VerifiedBlob) -> StagerFuture<'_, Result<(), String>> {
+            Box::pin(async {
+                std::fs::write(&self.0, b"staged").map_err(|error| error.to_string())
+            })
+        }
+    }
+    let root = TestCache::new();
+    let cache = root.shared(CachePolicy::Keep);
+    let content = blobs(1);
+    let mut writer = cache.writer(&content[0].0).unwrap();
+    writer.write(&content[0].1).unwrap();
+    writer.commit().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let blocked = work.path().join("occupied");
+    std::fs::write(&blocked, b"unrelated").unwrap();
+    let original = std::fs::metadata(&blocked).unwrap().permissions();
+    let target = if permission_denied {
+        let mut permissions = original.clone();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&blocked, permissions).unwrap();
+        blocked.clone()
+    } else {
+        blocked.join("payload")
+    };
+    let result = AcquisitionSession::new(plan(&content), cache.clone(), SchedulerConfig::default())
+        .with_stager(Arc::new(DiskStager(target)))
+        .run(SourceChain::new(vec![]), never(), &ProgressSink::discard())
+        .await;
+    assert!(matches!(result, Err(AcquireError::Staging { .. })));
+    std::fs::set_permissions(&blocked, original).unwrap();
+    assert_eq!(std::fs::read(blocked).unwrap(), b"unrelated");
+    assert!(cache.get(&content[0].0, Verify::Full).unwrap().is_some());
 }

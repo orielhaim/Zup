@@ -23,12 +23,13 @@ use crate::error::SourceError;
 /// A boxed future, so the trait stays object safe.
 pub type SourceFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// What a source is asked to do with one blob.
-///
-/// The source is handed the cache rather than a byte sink, so every source
-/// gets the same resume, bounds, hashing, and atomic publication for free. A
-/// source that wants to write somewhere else is not implementing this trait.
+/// Absolute budget shared by every source and attempt for one logical blob.
+#[derive(Debug, Clone, Copy)]
+pub struct AcquisitionDeadline(pub tokio::time::Instant);
+
+/// One blob's descriptor, verified cache, cancellation and shared time budget.
 pub struct AcquireRequest<'a> {
+    pub deadline: Option<AcquisitionDeadline>,
     pub descriptor: &'a ContentDescriptor,
     pub cache: &'a ContentCache,
     pub cancellation: &'a dyn crate::Cancellation,
@@ -42,6 +43,7 @@ impl<'a> AcquireRequest<'a> {
         cancellation: &'a dyn crate::Cancellation,
     ) -> Self {
         Self {
+            deadline: None,
             descriptor,
             cache,
             cancellation,
@@ -56,6 +58,13 @@ pub trait ArtifactSource: Send + Sync {
     /// This is never logged with a URL, so a source that fronts an authenticated
     /// endpoint cannot leak a credential through a diagnostic.
     fn name(&self) -> &str;
+
+    /// Optional whole-blob cap. The chain uses the strictest configured cap,
+    /// starting before any source, including local sources. Local-only chains
+    /// have no network timeout or rate limit.
+    fn acquisition_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
 
     /// Whether this source could serve the blob at all.
     ///
@@ -171,6 +180,12 @@ impl SourceChain {
         cache: &ContentCache,
         cancellation: &dyn Cancellation,
     ) -> Result<crate::VerifiedBlob, crate::AcquireError> {
+        let deadline = self
+            .sources
+            .iter()
+            .filter_map(|source| source.acquisition_timeout())
+            .min()
+            .map(|duration| AcquisitionDeadline(tokio::time::Instant::now() + duration));
         let mut reports = Vec::new();
         // The live set is snapshotted before the first await, so a transfer never
         // runs while a worker is holding the chain.
@@ -179,12 +194,38 @@ impl SourceChain {
             if cancellation.is_cancelled() {
                 return Err(crate::AcquireError::Cancelled);
             }
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline.0) {
+                reports.push(SourceError::Timeout {
+                    origin: source.name().to_owned(),
+                    kind: descriptor.kind().as_str(),
+                    digest: descriptor.digest.to_hex(),
+                    phase: "blob",
+                });
+                break;
+            }
             if !source.contains(descriptor) {
                 reports.push(SourceError::absent(source.name(), descriptor));
                 continue;
             }
-            let request = AcquireRequest::new(descriptor, cache, cancellation);
-            match source.acquire(request).await {
+            let mut request = AcquireRequest::new(descriptor, cache, cancellation);
+            request.deadline = deadline;
+            let result = async {
+                match deadline {
+                    Some(deadline) => tokio::time::timeout_at(deadline.0, source.acquire(request))
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(SourceError::Timeout {
+                                origin: source.name().to_owned(),
+                                kind: descriptor.kind().as_str(),
+                                digest: descriptor.digest.to_hex(),
+                                phase: "blob",
+                            })
+                        }),
+                    None => source.acquire(request).await,
+                }
+            }
+            .await;
+            match result {
                 Ok(blob) => {
                     self.failures[index].store(0, Ordering::Relaxed);
                     return Ok(blob);

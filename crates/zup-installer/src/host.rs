@@ -1061,7 +1061,7 @@ pub(crate) fn terminal_handoff(
 #[cfg(feature = "gui")]
 async fn update_acquisition<T, E: std::fmt::Display>(
     work: impl std::future::Future<Output = Result<T, E>>,
-    receiver: &mut tokio::sync::mpsc::Receiver<zup_acquire::AcquisitionEvent>,
+    receiver: &mut zup_acquire::ProgressReceiver,
     cancellation: zup_runtime::CancellationHandle,
     request: &zup_runtime::UpdateRequest,
     status: &mut (dyn FnMut(zup_preset_protocol::UpdateState) + Send),

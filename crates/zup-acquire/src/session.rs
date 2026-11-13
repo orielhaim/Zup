@@ -36,8 +36,8 @@
 //! Synchronous cache writes and publication are never interrupted between steps.
 //! A terminal event follows settlement, and only success yields a barrier.
 //! Callers must await `run` after requesting cancellation, rather than abort it.
-//! Terminal delivery applies backpressure: keep reading the event receiver or
-//! drop it. Intermediate progress samples are lossy.
+//! Progress delivery never blocks settlement. Slow readers skip old samples;
+//! terminal state remains available after settlement.
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -103,48 +103,150 @@ impl SchedulerConfig {
     }
 }
 
-/// Receives aggregate progress as a session runs.
-///
-/// Samples are delivered with a non-blocking send, so a consumer that is not
-/// keeping up loses intermediate samples rather than stalling the transfers.
-/// Terminal events are delivered with a blocking send after every worker has
-/// settled, so a consumer that is still reading always sees the outcome.
+/// Bounded progress history. Slow observers skip superseded samples; terminal
+/// state is retained and freezes the stream. Delivery never waits for readers.
 #[derive(Debug, Clone)]
-pub struct ProgressSink(mpsc::Sender<AcquisitionEvent>);
+pub struct ProgressSink(tokio::sync::watch::Sender<ProgressState>);
+
+#[derive(Debug, Clone)]
+struct ProgressState {
+    events: VecDeque<(u64, AcquisitionEvent)>,
+    next: u64,
+    capacity: usize,
+    terminal: bool,
+}
+
+/// An independent observer. Each retained event is returned at most once.
+/// Late subscribers start at the latest event, including a settled terminal.
+#[derive(Debug)]
+pub struct ProgressReceiver {
+    state: tokio::sync::watch::Receiver<ProgressState>,
+    next: u64,
+    done: bool,
+}
+
+impl ProgressReceiver {
+    /// Wait on a synchronous observer thread, without starting a listener task.
+    pub fn blocking_recv(&mut self) -> Option<AcquisitionEvent> {
+        struct WakeThread(std::thread::Thread);
+        impl std::task::Wake for WakeThread {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+        let waker = std::task::Waker::from(Arc::new(WakeThread(std::thread::current())));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(self.recv());
+        loop {
+            match std::future::Future::poll(future.as_mut(), &mut context) {
+                std::task::Poll::Ready(event) => return event,
+                std::task::Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+    pub fn try_recv(&mut self) -> Result<AcquisitionEvent, mpsc::error::TryRecvError> {
+        if self.done {
+            return Err(mpsc::error::TryRecvError::Disconnected);
+        }
+        let state = self.state.borrow();
+        if let Some((sequence, event)) = state
+            .events
+            .iter()
+            .find(|(sequence, _)| *sequence >= self.next)
+        {
+            self.next = sequence + 1;
+            self.done = state.terminal && self.next == state.next;
+            return Ok(event.clone());
+        }
+        if state.terminal || self.state.has_changed().is_err() {
+            Err(mpsc::error::TryRecvError::Disconnected)
+        } else {
+            Err(mpsc::error::TryRecvError::Empty)
+        }
+    }
+
+    pub async fn recv(&mut self) -> Option<AcquisitionEvent> {
+        loop {
+            match self.try_recv() {
+                Ok(event) => return Some(event),
+                Err(mpsc::error::TryRecvError::Disconnected) => return None,
+                Err(mpsc::error::TryRecvError::Empty) => {}
+            }
+            // Mark before rechecking, so publication between the check and wait
+            // cannot be missed.
+            self.state.borrow_and_update();
+            if let Ok(event) = self.try_recv() {
+                return Some(event);
+            }
+            if self.state.changed().await.is_err() {
+                return self.try_recv().ok();
+            }
+        }
+    }
+}
 
 impl ProgressSink {
-    /// A sink that discards events, for a caller that only wants the outcome.
     pub fn discard() -> Self {
-        let (sender, receiver) = mpsc::channel(1);
-        drop(receiver);
-        Self(sender)
+        Self::channel(1).0
     }
 
-    /// A sink that delivers every event it can.
-    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<AcquisitionEvent>) {
-        let (sender, receiver) = mpsc::channel(capacity.max(1));
-        (Self(sender), receiver)
+    pub fn channel(capacity: usize) -> (Self, ProgressReceiver) {
+        let (sender, receiver) = tokio::sync::watch::channel(ProgressState {
+            events: VecDeque::new(),
+            next: 0,
+            capacity: capacity.max(1),
+            terminal: false,
+        });
+        (
+            Self(sender),
+            ProgressReceiver {
+                state: receiver,
+                next: 0,
+                done: false,
+            },
+        )
     }
 
-    /// Offer a sample. A full channel drops it, which is the intended
-    /// behaviour: the next sample supersedes it.
+    pub fn subscribe(&self) -> ProgressReceiver {
+        let state = self.0.subscribe();
+        let next = state.borrow().next.saturating_sub(1);
+        ProgressReceiver {
+            state,
+            next,
+            done: false,
+        }
+    }
+
+    fn publish(&self, event: AcquisitionEvent, terminal: bool) {
+        self.0.send_modify(|state| {
+            if state.terminal {
+                return;
+            }
+            if state.events.len() == state.capacity {
+                state.events.pop_front();
+            }
+            state.events.push_back((state.next, event));
+            state.next += 1;
+            state.terminal = terminal;
+        });
+    }
+
     fn sample(&self, event: AcquisitionEvent) {
-        let _ = self.0.try_send(event);
+        self.publish(event, false);
     }
 
-    /// Offer an event from outside a session.
-    ///
-    /// Release resolution happens before a session exists and is still part of
-    /// one logical operation, so its events travel the same channel on the same
-    /// terms: a consumer that is not keeping up loses a sample rather than
-    /// stalling a network fetch.
     pub fn offer(&self, event: AcquisitionEvent) {
-        self.sample(event);
+        let terminal = matches!(
+            event,
+            AcquisitionEvent::AcquisitionComplete { .. }
+                | AcquisitionEvent::Cancelled { .. }
+                | AcquisitionEvent::Failed { .. }
+        );
+        self.publish(event, terminal);
     }
 
-    /// Deliver an event that must not be dropped.
-    async fn terminal(&self, event: AcquisitionEvent) {
-        let _ = self.0.send(event).await;
+    fn terminal(&self, event: AcquisitionEvent) {
+        self.publish(event, true);
     }
 }
 
@@ -326,7 +428,7 @@ impl AcquisitionSession {
                 reasons: failure_reasons(error),
             },
         };
-        progress.terminal(event).await;
+        progress.terminal(event);
         result
     }
 
@@ -547,8 +649,6 @@ impl AcquisitionSession {
             retries: 0,
         };
         sample.recompute();
-        sample.throughput = 0;
-        sample.eta = None;
         progress.sample(AcquisitionEvent::DownloadProgress {
             progress: Box::new(sample),
         });

@@ -19,6 +19,78 @@ fn client() -> HttpClient {
 }
 
 #[tokio::test(start_paused = true)]
+async fn distinct_sources_share_the_blob_deadline() {
+    use std::sync::Arc;
+    use zup_acquire::{
+        AcquireError, CachePolicy, ContentCache, ContentDescriptor, ContentKind, NeverCancelled,
+        SourceChain, SourceError,
+    };
+    use zup_acquire_http::{BackoffPolicy, HttpSource, OriginSet};
+    let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = HttpClientConfig {
+        use_platform_proxy: false,
+        timeouts: TimeoutPolicy {
+            connect: Duration::from_secs(10),
+            headers: Duration::from_secs(10),
+            idle: Duration::from_secs(10),
+            per_blob: Duration::from_secs(10),
+        },
+        ..HttpClientConfig::default()
+    };
+    let sources: Vec<Arc<dyn zup_acquire::ArtifactSource>> = [&first, &second]
+        .iter()
+        .enumerate()
+        .map(|(index, listener)| {
+            Arc::new(
+                HttpSource::with_config(
+                    format!("source-{index}"),
+                    &config,
+                    OriginSet::from_urls(
+                        &format!("http://{}/", listener.local_addr().unwrap()),
+                        Vec::<&str>::new(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .with_policy(BackoffPolicy {
+                    max_attempts: 1,
+                    ..BackoffPolicy::default()
+                }),
+            ) as Arc<dyn zup_acquire::ArtifactSource>
+        })
+        .collect();
+    let root = tempfile::tempdir().unwrap();
+    let cache = ContentCache::open(root.path(), CachePolicy::Keep).unwrap();
+    let descriptor = ContentDescriptor::stored(
+        ContentKind::Metadata,
+        zup_core::Sha256Digest::from_bytes([1; 32]),
+        10,
+    );
+    let start = tokio::time::Instant::now();
+    let acquire = tokio::spawn(async move {
+        SourceChain::new(sources)
+            .acquire(&descriptor, &cache, &NeverCancelled)
+            .await
+    });
+    let (mut socket, _) = first.accept().await.unwrap();
+    let mut buf = [0; 4096];
+    assert!(socket.read(&mut buf).await.unwrap() > 0);
+    tokio::time::advance(Duration::from_secs(6)).await;
+    socket
+        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let (mut other, _) = second.accept().await.unwrap();
+    assert!(other.read(&mut buf).await.unwrap() > 0);
+    let result = acquire.await.unwrap();
+    assert_eq!(start.elapsed(), Duration::from_secs(10));
+    assert!(
+        matches!(result, Err(AcquireError::Unavailable { reports, .. }) if reports.iter().any(|report| matches!(report, SourceError::Timeout { phase: "blob", .. })))
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn headers_have_their_own_deadline() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/blob", listener.local_addr().unwrap())

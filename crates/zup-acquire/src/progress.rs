@@ -94,7 +94,7 @@ impl AcquisitionProgress {
 
     /// Whether every byte the closure names is present.
     pub const fn is_complete(&self) -> bool {
-        self.total_bytes != 0 && self.completed_bytes >= self.total_bytes
+        self.completed_items == self.total_items && self.completed_bytes >= self.total_bytes
     }
 
     /// The line a GUI or a console renders under a progress bar.
@@ -117,17 +117,10 @@ impl AcquisitionProgress {
 
     /// Recompute the derived fields from the counters that changed.
     pub fn recompute(&mut self) {
-        self.throughput = if self.elapsed.as_secs_f64() > 0.05 {
-            (self.completed_bytes as f64 / self.elapsed.as_secs_f64()) as u64
-        } else {
-            0
-        };
-        self.eta = match (self.total_bytes, self.throughput) {
-            (total, rate) if total > self.completed_bytes && rate > 0 => {
-                Some(Duration::from_secs((total - self.completed_bytes) / rate))
-            }
-            _ => None,
-        };
+        // Aggregate counters include cache hits and local sources. They cannot
+        // measure network throughput or predict remaining staging time.
+        self.throughput = 0;
+        self.eta = None;
     }
 }
 

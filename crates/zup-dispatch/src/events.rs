@@ -30,7 +30,7 @@ pub struct Emitter {
 
 impl Emitter {
     /// Consume `events` on a background thread.
-    pub fn spawn(events: tokio::sync::mpsc::Receiver<AcquisitionEvent>, format: Format) -> Self {
+    pub fn spawn(events: zup_acquire::ProgressReceiver, format: Format) -> Self {
         let mut events = events;
         Self {
             handle: Some(std::thread::spawn(move || match format {

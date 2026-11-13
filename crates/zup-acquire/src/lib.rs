@@ -99,7 +99,7 @@ pub use retention::{
     write_retention,
 };
 pub use session::{
-    AcquisitionOutcome, AcquisitionSession, Barrier, BlobStager, NoStaging, ProgressSink,
-    RETRY_MARKER, SchedulerConfig, SharedCancellation, StagerFuture, retry_detail,
+    AcquisitionOutcome, AcquisitionSession, Barrier, BlobStager, NoStaging, ProgressReceiver,
+    ProgressSink, RETRY_MARKER, SchedulerConfig, SharedCancellation, StagerFuture, retry_detail,
 };
-pub use source::{AcquireRequest, ArtifactSource, SourceChain, SourceFuture};
+pub use source::{AcquireRequest, AcquisitionDeadline, ArtifactSource, SourceChain, SourceFuture};

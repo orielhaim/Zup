@@ -23,7 +23,7 @@
 //! directory. A digest and a byte count are stable; a path is not, and a
 //! consumer that parsed one would break on the first maintenance run.
 
-use tokio::sync::mpsc::Receiver;
+use zup_acquire::ProgressReceiver;
 
 use zup_acquire::{AcquisitionEvent, format_bytes};
 
@@ -40,7 +40,7 @@ pub struct AcquisitionThread {
 
 impl AcquisitionThread {
     /// Consume `events`, printing them as JSONL on stdout.
-    pub fn jsonl(events: Receiver<AcquisitionEvent>) -> Self {
+    pub fn jsonl(events: ProgressReceiver) -> Self {
         Self::spawn(events, |event| {
             let mapped = automation_events(&event);
             if mapped.is_empty() {
@@ -60,7 +60,7 @@ impl AcquisitionThread {
 
     /// Consume `events`, writing each rendered line through `emit`.
     pub fn spawn(
-        mut events: Receiver<AcquisitionEvent>,
+        mut events: ProgressReceiver,
         emit: impl Fn(AcquisitionEvent) + Send + 'static,
     ) -> Self {
         Self {
@@ -89,7 +89,7 @@ impl Drop for AcquisitionThread {
 }
 
 /// Consume `events` as JSONL on stdout.
-pub fn acquisition_thread(events: Receiver<AcquisitionEvent>) -> AcquisitionThread {
+pub fn acquisition_thread(events: ProgressReceiver) -> AcquisitionThread {
     AcquisitionThread::jsonl(events)
 }
 
