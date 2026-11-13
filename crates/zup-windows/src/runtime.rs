@@ -287,7 +287,7 @@ async fn run_bootstrap_phase(
     state
         .validate(&request.plan.plan)
         .map_err(|error| SessionError::Prerequisite(error.to_string()))?;
-    let satisfier = crate::WindowsPrerequisiteDetector;
+    let satisfier = crate::WindowsPrerequisiteDetector::new(request.plan.plan.key.scope);
     if state.operations.iter().any(|operation| {
         matches!(
             operation.state,
@@ -381,7 +381,7 @@ async fn run_bootstrap_phase(
     let store_inside_task = store_for_task.clone();
     let (outcome, mut completed_state, persisted_revision) =
         tokio::task::spawn_blocking(move || {
-            let satisfier = crate::WindowsPrerequisiteDetector;
+            let satisfier = crate::WindowsPrerequisiteDetector::new(plan.plan.key.scope);
             let provider = crate::WindowsPrerequisiteProvider;
             let quarantine =
                 match Quarantine::with_file_system(root, crate::windows_bootstrap_file_system()) {

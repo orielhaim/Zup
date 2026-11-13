@@ -80,7 +80,7 @@ pub fn prepare(
     assessment.id = id;
     zup_bootstrap::assess(
         &plan,
-        &crate::prerequisites::WindowsPrerequisiteDetector,
+        &crate::prerequisites::WindowsPrerequisiteDetector::new(scope),
         &mut assessment,
     )
     .map_err(|error| BootstrapPlanError::Detection(error.to_string()))?;

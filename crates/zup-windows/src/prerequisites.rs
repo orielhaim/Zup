@@ -31,9 +31,6 @@ pub mod package_requirements {
 const WEBVIEW2_CLIENT_KEY: &str =
     "SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}";
 
-const WEBVIEW2_CLIENT_KEY_WOW64: &str =
-    "SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8A7C-971BF3207148}";
-
 const VISUAL_CPP_V14_KEY: &str = "SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes";
 
 const DOTNET_INSTALLED_VERSIONS_KEY: &str = "SOFTWARE\\dotnet\\Setup\\InstalledVersions";
@@ -47,8 +44,15 @@ enum ArtifactFormat {
     Executable,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct WindowsPrerequisiteDetector;
+#[derive(Debug, Clone, Copy)]
+pub struct WindowsPrerequisiteDetector {
+    scope: zup_core::SelectedScope,
+}
+impl WindowsPrerequisiteDetector {
+    pub fn new(scope: zup_core::SelectedScope) -> Self {
+        Self { scope }
+    }
+}
 
 impl PrerequisiteSatisfier for WindowsPrerequisiteDetector {
     fn satisfy(&self, operation: &BootstrapOperation) -> Result<DetectionResult, BootstrapError> {
@@ -56,9 +60,11 @@ impl PrerequisiteSatisfier for WindowsPrerequisiteDetector {
             PrerequisiteRequirement::NativePackage { .. } => Err(BootstrapError::Requirement(
                 "native Linux packages are not supported on Windows".into(),
             )),
-            PrerequisiteRequirement::Runtime(runtime) => satisfy_runtime(operation, runtime),
+            PrerequisiteRequirement::Runtime(runtime) => {
+                satisfy_runtime(operation, runtime, self.scope)
+            }
             PrerequisiteRequirement::InstalledPackage(package) => {
-                satisfy_installed_package(package)
+                satisfy_installed_package(package, operation.target, self.scope)
             }
             PrerequisiteRequirement::FileVersion(file) => satisfy_file_version(file),
         }
@@ -68,11 +74,54 @@ impl PrerequisiteSatisfier for WindowsPrerequisiteDetector {
 fn satisfy_runtime(
     operation: &BootstrapOperation,
     runtime: &Runtime,
+    scope: zup_core::SelectedScope,
 ) -> Result<DetectionResult, BootstrapError> {
+    if runtime.id.as_str() == runtime_requirements::VISUAL_CPP_V14
+        && operation.target == PrerequisiteArchitecture::Any
+    {
+        let mut versions = Vec::new();
+        for target in supported_architectures() {
+            let mut operation = operation.clone();
+            operation.target = target;
+            match satisfy_runtime(&operation, runtime, scope)? {
+                result @ DetectionResult::Satisfied { .. } => return Ok(result),
+                DetectionResult::Incompatible { found, .. } => versions.push(found),
+                DetectionResult::Missing => {}
+            }
+        }
+        return select_version(versions, runtime.version.as_ref(), "VC++ v14".into());
+    }
+    if operation.target != PrerequisiteArchitecture::Any
+        && !supported_architectures()
+            .iter()
+            .any(|arch| architecture_name(*arch) == architecture_name(operation.target))
+    {
+        return Err(BootstrapError::Requirement(
+            "runtime architecture is unsupported by this OS".into(),
+        ));
+    }
     let id = runtime.id.as_str();
     let requirement = runtime.version.as_ref();
     let evidence = || format!("runtime {id}");
     if id == runtime_requirements::VISUAL_CPP_V14 {
+        let path = format!(
+            "{VISUAL_CPP_V14_KEY}\\{}",
+            architecture_name(operation.target)
+        );
+        let Some(key) = open_machine_key(&path, operation.target)? else {
+            return Ok(DetectionResult::Missing);
+        };
+        match key.get_u32("Installed").map_err(|error| {
+            BootstrapError::Requirement(format!("VC++ installed marker: {error}"))
+        })? {
+            0 => return Ok(DetectionResult::Missing),
+            1 => {}
+            _ => {
+                return Err(BootstrapError::Requirement(
+                    "invalid VC++ installed marker".into(),
+                ));
+            }
+        }
         return detect_version(
             &format!(
                 "{VISUAL_CPP_V14_KEY}\\{}",
@@ -85,17 +134,42 @@ fn satisfy_runtime(
         );
     }
     if id == runtime_requirements::WEBVIEW2_EVERGREEN {
-        let path = match operation.target {
-            PrerequisiteArchitecture::X64 | PrerequisiteArchitecture::Arm64 => WEBVIEW2_CLIENT_KEY,
-            _ => WEBVIEW2_CLIENT_KEY_WOW64,
+        if operation.target != PrerequisiteArchitecture::Any {
+            return Err(BootstrapError::Requirement("Evergreen platform registration does not prove a runtime architecture; use target any".into()));
+        }
+        let machine = detect_version(
+            WEBVIEW2_CLIENT_KEY,
+            "pv",
+            requirement,
+            PrerequisiteArchitecture::X86,
+            evidence(),
+        )?;
+        if machine != DetectionResult::Missing || scope == zup_core::SelectedScope::Machine {
+            return Ok(machine);
+        }
+        return match windows_registry::CURRENT_USER.open(WEBVIEW2_CLIENT_KEY) {
+            Ok(key) => detect_key_version(&key, WEBVIEW2_CLIENT_KEY, "pv", requirement, evidence()),
+            Err(error) if registry_not_found(&error) => Ok(DetectionResult::Missing),
+            Err(error) => Err(BootstrapError::Requirement(format!(
+                "Evergreen user inventory: {error}"
+            ))),
         };
-        return detect_version(path, "pv", requirement, operation.target, evidence());
     }
     if id == runtime_requirements::DOTNET_DESKTOP {
-        return detect_dotnet(operation.target, "WindowsDesktop", requirement, evidence());
+        return detect_dotnet(
+            operation.target,
+            "Microsoft.WindowsDesktop.App",
+            requirement,
+            evidence(),
+        );
     }
     if id == runtime_requirements::DOTNET_RUNTIME {
-        return detect_dotnet(operation.target, "NetCore", requirement, evidence());
+        return detect_dotnet(
+            operation.target,
+            "Microsoft.NETCore.App",
+            requirement,
+            evidence(),
+        );
     }
     Err(BootstrapError::Requirement(format!(
         "no Windows runtime is registered for requirement id `{id}`"
@@ -108,16 +182,111 @@ fn detect_dotnet(
     requirement: Option<&VersionReq>,
     evidence: String,
 ) -> Result<DetectionResult, BootstrapError> {
-    detect_version(
-        &format!(
-            "{DOTNET_INSTALLED_VERSIONS_KEY}\\{}\\sharedfx\\Microsoft\\{runtime}",
-            architecture_name(architecture)
-        ),
-        "Version",
-        requirement,
-        architecture,
-        evidence,
-    )
+    let architectures: &[PrerequisiteArchitecture] =
+        if architecture == PrerequisiteArchitecture::Any {
+            &[
+                PrerequisiteArchitecture::X86,
+                PrerequisiteArchitecture::X64,
+                PrerequisiteArchitecture::Arm64,
+            ]
+        } else {
+            std::slice::from_ref(&architecture)
+        };
+    let mut versions = Vec::new();
+    for architecture in architectures {
+        if !supported_architectures()
+            .iter()
+            .any(|arch| architecture_name(*arch) == architecture_name(*architecture))
+        {
+            continue;
+        }
+        let path = format!(
+            "{DOTNET_INSTALLED_VERSIONS_KEY}\\{}\\sharedfx\\{runtime}",
+            architecture_name(*architecture)
+        );
+        // .NET's installer writes all architecture inventories in the 32-bit view.
+        let Some(key) = open_machine_key(&path, PrerequisiteArchitecture::X86)? else {
+            continue;
+        };
+        for name in registry_value_names(&key)? {
+            if key.get_u32(&name).map_err(|error| {
+                BootstrapError::Requirement(format!(".NET inventory marker: {error}"))
+            })? != 1
+            {
+                return Err(BootstrapError::Requirement(format!(
+                    "invalid .NET inventory marker {name}"
+                )));
+            }
+            versions.push(Version::parse(&name).map_err(|error| {
+                BootstrapError::Requirement(format!(
+                    "invalid .NET inventory {path}: {name}: {error}"
+                ))
+            })?);
+        }
+    }
+    select_version(versions, requirement, evidence)
+}
+
+fn registry_value_names(key: &Key) -> Result<Vec<String>, BootstrapError> {
+    use windows::Win32::System::Registry::{HKEY, RegEnumValueW};
+    let mut names = Vec::new();
+    for index in 0..65536 {
+        let mut buffer = [0u16; 16384];
+        let mut length = buffer.len() as u32;
+        let status = unsafe {
+            RegEnumValueW(
+                HKEY(key.as_raw()),
+                index,
+                Some(windows::core::PWSTR(buffer.as_mut_ptr())),
+                &mut length,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        match status.0 {
+            259 => return Ok(names),
+            0 => names.push(
+                String::from_utf16(&buffer[..length as usize]).map_err(|error| {
+                    BootstrapError::Requirement(format!("invalid inventory name: {error}"))
+                })?,
+            ),
+            code => {
+                return Err(BootstrapError::Requirement(format!(
+                    "enumerate native inventory: Win32 {code}"
+                )));
+            }
+        }
+    }
+    Err(BootstrapError::Requirement(
+        "native inventory exceeds limit".into(),
+    ))
+}
+
+fn select_version(
+    mut versions: Vec<Version>,
+    requirement: Option<&VersionReq>,
+    evidence: String,
+) -> Result<DetectionResult, BootstrapError> {
+    versions.sort();
+    if let Some(version) = versions
+        .iter()
+        .rev()
+        .find(|version| requirement.is_none_or(|req| req.matches(version)))
+    {
+        return Ok(DetectionResult::Satisfied {
+            version: Some(version.clone()),
+            evidence,
+        });
+    }
+    Ok(match versions.pop() {
+        Some(found) => DetectionResult::Incompatible {
+            found,
+            required: requirement.expect("no unconstrained mismatch").clone(),
+        },
+        None => DetectionResult::Missing,
+    })
 }
 
 fn detect_version(
@@ -130,12 +299,27 @@ fn detect_version(
     let Some(key) = open_machine_key(path, architecture)? else {
         return Ok(DetectionResult::Missing);
     };
-    let Some(value) = read_version_value(&key, value_name)? else {
+    detect_key_version(&key, path, value_name, requirement, evidence)
+}
+
+fn detect_key_version(
+    key: &Key,
+    path: &str,
+    value_name: &str,
+    requirement: Option<&VersionReq>,
+    evidence: String,
+) -> Result<DetectionResult, BootstrapError> {
+    let value = read_version_value(key, value_name)?.ok_or_else(|| {
+        BootstrapError::Requirement(format!(
+            "missing native inventory value {path}: {value_name}"
+        ))
+    })?;
+    let version = parse_runtime_version(&value)
+        .ok_or_else(|| BootstrapError::Requirement(format!("invalid native version: {value}")))?;
+    if path == WEBVIEW2_CLIENT_KEY && version.major == 0 && version.minor == 0 && version.patch == 0
+    {
         return Ok(DetectionResult::Missing);
-    };
-    let Some(version) = parse_runtime_version(&value) else {
-        return Ok(DetectionResult::Missing);
-    };
+    }
     if requirement.is_some_and(|requirement| !requirement.matches(&version)) {
         return Ok(DetectionResult::Incompatible {
             found: version,
@@ -150,75 +334,186 @@ fn detect_version(
 
 fn satisfy_installed_package(
     package: &InstalledPackage,
+    architecture: PrerequisiteArchitecture,
+    scope: zup_core::SelectedScope,
 ) -> Result<DetectionResult, BootstrapError> {
     let product_code = package.id.as_str();
     let requirement = package.version.as_ref();
-    let state = unsafe {
-        windows::Win32::System::ApplicationInstallationAndServicing::MsiQueryProductStateW(
-            windows::core::PCWSTR(wide(product_code).as_ptr()),
+    if !product_code.is_ascii()
+        || product_code.len() != 38
+        || !product_code.starts_with('{')
+        || !product_code.ends_with('}')
+        || uuid::Uuid::parse_str(&product_code[1..37]).is_err()
+    {
+        return Err(BootstrapError::Requirement(
+            "MSI ProductCode must be a braced GUID".into(),
+        ));
+    }
+    use windows::Win32::System::ApplicationInstallationAndServicing::*;
+    let mut versions = Vec::new();
+    let mut wrong_architecture = false;
+    let contexts = if scope == zup_core::SelectedScope::Machine {
+        &[MSIINSTALLCONTEXT_MACHINE][..]
+    } else {
+        &[
+            MSIINSTALLCONTEXT_MACHINE,
+            MSIINSTALLCONTEXT_USERMANAGED,
+            MSIINSTALLCONTEXT_USERUNMANAGED,
+        ][..]
+    };
+    for &context in contexts {
+        let Some(state) = product_property(product_code, context, "State")? else {
+            continue;
+        };
+        match state.as_str() {
+            "1" => continue,
+            "5" => {}
+            _ => {
+                return Err(BootstrapError::Requirement(format!(
+                    "invalid MSI product state {state}"
+                )));
+            }
+        }
+        if architecture != PrerequisiteArchitecture::Any {
+            let path = product_property(product_code, context, "LocalPackage")?
+                .ok_or_else(|| BootstrapError::Requirement("MSI product disappeared".into()))?;
+            if msi_architecture(&path)? != architecture_name(architecture) {
+                wrong_architecture = true;
+                continue;
+            }
+        }
+        let text = product_property(product_code, context, "VersionString")?.ok_or_else(|| {
+            BootstrapError::Requirement("MSI product disappeared during inventory query".into())
+        })?;
+        versions.push(
+            parse_runtime_version(&text).ok_or_else(|| {
+                BootstrapError::Requirement(format!("invalid MSI version {text}"))
+            })?,
+        );
+    }
+    if versions.is_empty() && wrong_architecture {
+        return Err(BootstrapError::Requirement(
+            "MSI product is installed for a different architecture".into(),
+        ));
+    }
+    select_version(
+        versions,
+        requirement,
+        format!("MSI {product_code}, {scope:?} prerequisite context"),
+    )
+}
+
+fn msi_architecture(path: &str) -> Result<&'static str, BootstrapError> {
+    use windows::Win32::System::ApplicationInstallationAndServicing::*;
+    let path = wide(path);
+    let mut handle = MSIHANDLE::default();
+    let status = unsafe {
+        MsiGetSummaryInformationW(
+            MSIHANDLE::default(),
+            windows::core::PCWSTR(path.as_ptr()),
+            0,
+            &mut handle,
         )
     };
-    if state != windows::Win32::System::ApplicationInstallationAndServicing::INSTALLSTATE_LOCAL
-        && state
-            != windows::Win32::System::ApplicationInstallationAndServicing::INSTALLSTATE_DEFAULT
-    {
-        return Ok(DetectionResult::Missing);
+    if status != 0 {
+        return Err(BootstrapError::Requirement(format!(
+            "MSI cached package summary: Win32 {status}"
+        )));
     }
-    if requirement.is_none() {
-        return Ok(DetectionResult::Satisfied {
-            version: None,
-            evidence: format!("package {product_code}"),
-        });
+    struct Summary(MSIHANDLE);
+    impl Drop for Summary {
+        fn drop(&mut self) {
+            unsafe {
+                MsiCloseHandle(self.0);
+            }
+        }
     }
-    let text = product_version_string(product_code)?;
-    let Some(version) = parse_runtime_version(&text) else {
-        return Ok(DetectionResult::Missing);
-    };
-    if !requirement.expect("checked above").matches(&version) {
-        return Ok(DetectionResult::Incompatible {
-            found: version,
-            required: requirement.expect("checked above").clone(),
-        });
+    let handle = Summary(handle);
+    let template = read_msi_string(|buffer, length| unsafe {
+        MsiSummaryInfoGetPropertyW(
+            handle.0,
+            7,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            None,
+            buffer,
+            Some(length),
+        )
+    })?
+    .ok_or_else(|| BootstrapError::Requirement("missing MSI template".into()))?;
+    match template.split(';').next() {
+        Some("Intel") => Ok("x86"),
+        Some("x64") => Ok("x64"),
+        Some("Arm64") => Ok("arm64"),
+        _ => Err(BootstrapError::Requirement(format!(
+            "unsupported MSI architecture {template}"
+        ))),
     }
-    Ok(DetectionResult::Satisfied {
-        version: Some(version),
-        evidence: format!("package {product_code}"),
+}
+
+fn product_property(
+    product_code: &str,
+    context: windows::Win32::System::ApplicationInstallationAndServicing::MSIINSTALLCONTEXT,
+    property: &str,
+) -> Result<Option<String>, BootstrapError> {
+    let product = wide(&product_code.to_ascii_uppercase());
+    let attribute = wide(property);
+    read_msi_string(|buffer, length| unsafe {
+        windows::Win32::System::ApplicationInstallationAndServicing::MsiGetProductInfoExW(
+            windows::core::PCWSTR(product.as_ptr()),
+            windows::core::PCWSTR::null(),
+            context,
+            windows::core::PCWSTR(attribute.as_ptr()),
+            buffer,
+            Some(length),
+        )
     })
 }
 
-fn product_version_string(product_code: &str) -> Result<String, BootstrapError> {
-    let product = wide(product_code);
-    let attribute = wide("VersionString");
-    let mut length = 0u32;
-    let code = unsafe {
-        windows::Win32::System::ApplicationInstallationAndServicing::MsiGetProductInfoW(
-            windows::core::PCWSTR(product.as_ptr()),
-            windows::core::PCWSTR(attribute.as_ptr()),
-            None,
-            Some(&mut length),
-        )
-    };
-    if code != 0 || length == 0 {
-        return Err(BootstrapError::Requirement(format!(
-            "package {product_code} did not report a version"
-        )));
+fn read_msi_string(
+    mut query: impl FnMut(Option<windows::core::PWSTR>, *mut u32) -> u32,
+) -> Result<Option<String>, BootstrapError> {
+    use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_UNKNOWN_PRODUCT};
+    const SUCCESS: u32 = ERROR_SUCCESS.0;
+    const MORE_DATA: u32 = ERROR_MORE_DATA.0;
+    const UNKNOWN_PRODUCT: u32 = ERROR_UNKNOWN_PRODUCT.0;
+    let mut length = 0;
+    let status = query(None, &mut length);
+    match status {
+        SUCCESS | MORE_DATA => {}
+        UNKNOWN_PRODUCT => return Ok(None),
+        code => {
+            return Err(BootstrapError::Requirement(format!(
+                "MSI query: Win32 {code}"
+            )));
+        }
     }
-    let mut buffer = vec![0u16; length as usize];
-    let code = unsafe {
-        windows::Win32::System::ApplicationInstallationAndServicing::MsiGetProductInfoW(
-            windows::core::PCWSTR(product.as_ptr()),
-            windows::core::PCWSTR(attribute.as_ptr()),
-            Some(windows::core::PWSTR(buffer.as_mut_ptr())),
-            Some(&mut length),
-        )
-    };
-    if code != 0 {
-        return Err(BootstrapError::Requirement(format!(
-            "package {product_code} version query failed"
-        )));
+    for _ in 0..4 {
+        if length > 32767 {
+            return Err(BootstrapError::Requirement(
+                "MSI string exceeds limit".into(),
+            ));
+        }
+        let mut buffer = vec![0u16; length as usize + 1];
+        length = buffer.len() as u32;
+        match query(Some(windows::core::PWSTR(buffer.as_mut_ptr())), &mut length) {
+            MORE_DATA => continue,
+            SUCCESS if (length as usize) < buffer.len() && buffer[length as usize] == 0 => {
+                return String::from_utf16(&buffer[..length as usize])
+                    .map(Some)
+                    .map_err(|error| {
+                        BootstrapError::Requirement(format!("invalid MSI UTF-16: {error}"))
+                    });
+            }
+            code => {
+                return Err(BootstrapError::Requirement(format!(
+                    "MSI string read: Win32 {code}"
+                )));
+            }
+        }
     }
-    Ok(String::from_utf16_lossy(
-        &buffer[..length.saturating_sub(1) as usize],
+    Err(BootstrapError::Requirement(
+        "MSI string changed repeatedly".into(),
     ))
 }
 
@@ -520,10 +815,33 @@ fn read_version_value(key: &Key, name: &str) -> Result<Option<String>, Bootstrap
         }
     };
     match value.ty() {
-        Type::String | Type::ExpandString => Ok(String::try_from(value).ok()),
-        Type::U32 => Ok(u32::try_from(value).ok().map(|value| value.to_string())),
-        Type::U64 => Ok(u64::try_from(value).ok().map(|value| value.to_string())),
-        _ => Ok(None),
+        Type::String => String::try_from(value).map(Some).map_err(|error| {
+            BootstrapError::Requirement(format!("invalid registry version: {error}"))
+        }),
+        _ => Err(BootstrapError::Requirement(
+            "native version is not a string".into(),
+        )),
+    }
+}
+
+fn supported_architectures() -> Vec<PrerequisiteArchitecture> {
+    use windows::Win32::System::SystemInformation::*;
+    let mut info = SYSTEM_INFO::default();
+    unsafe {
+        GetNativeSystemInfo(&mut info);
+    }
+    let native = unsafe { info.Anonymous.Anonymous.wProcessorArchitecture };
+    match native {
+        PROCESSOR_ARCHITECTURE_AMD64 => {
+            vec![PrerequisiteArchitecture::X86, PrerequisiteArchitecture::X64]
+        }
+        PROCESSOR_ARCHITECTURE_ARM64 => vec![
+            PrerequisiteArchitecture::X86,
+            PrerequisiteArchitecture::X64,
+            PrerequisiteArchitecture::Arm64,
+        ],
+        PROCESSOR_ARCHITECTURE_INTEL => vec![PrerequisiteArchitecture::X86],
+        _ => vec![],
     }
 }
 
@@ -545,11 +863,28 @@ fn architecture_name(architecture: PrerequisiteArchitecture) -> &'static str {
 }
 
 fn parse_runtime_version(value: &str) -> Option<Version> {
-    let mut parts = value.trim().split('.').filter(|part| !part.is_empty());
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next().unwrap_or("0").parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().ok()?;
-    Some(Version::new(major, minor, patch))
+    let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
+    if let Ok(version) = Version::parse(value) {
+        return Some(version);
+    }
+    let parts = value.split('.').collect::<Vec<_>>();
+    if !(2..=4).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let mut version = Version::new(
+        parts[0].parse().ok()?,
+        parts[1].parse().ok()?,
+        parts.get(2).unwrap_or(&"0").parse().ok()?,
+    );
+    if let Some(revision) = parts.get(3) {
+        let revision: u64 = revision.parse().ok()?;
+        version.build = semver::BuildMetadata::new(&revision.to_string()).ok()?;
+    }
+    Some(version)
 }
 
 #[cfg(windows)]
@@ -584,7 +919,13 @@ fn read_file_version(path: &Path) -> Result<Option<Version>, BootstrapError> {
         .collect::<Vec<_>>();
     let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(encoded.as_ptr()), None) };
     if size == 0 {
-        return Ok(None);
+        let code = unsafe { windows::Win32::Foundation::GetLastError() }.0;
+        return match code {
+            2 | 3 | 1812..=1815 => Ok(None),
+            _ => Err(BootstrapError::Requirement(format!(
+                "file version size query: Win32 {code}"
+            ))),
+        };
     }
     let mut data = vec![0u8; size as usize];
     unsafe {
@@ -609,16 +950,23 @@ fn read_file_version(path: &Path) -> Result<Option<Version>, BootstrapError> {
     };
     if !ok.as_bool() || info.is_null() || (length as usize) < std::mem::size_of::<VsFixedFileInfo>()
     {
-        return Ok(None);
+        return Err(BootstrapError::Requirement(
+            "invalid native file version record".into(),
+        ));
     }
     let info = unsafe { &*info.cast::<VsFixedFileInfo>() };
     if info.signature != 0xFEEF_04BD {
-        return Ok(None);
+        return Err(BootstrapError::Requirement(
+            "invalid native file version signature".into(),
+        ));
     }
     let major = (info.file_version_ms >> 16) as u64;
     let minor = (info.file_version_ms & 0xffff) as u64;
     let build = (info.file_version_ls >> 16) as u64;
-    Ok(Some(Version::new(major, minor, build)))
+    Ok(parse_runtime_version(&format!(
+        "{major}.{minor}.{build}.{}",
+        info.file_version_ls & 0xffff
+    )))
 }
 
 #[cfg(not(windows))]
@@ -809,7 +1157,8 @@ mod tests {
             installer: zup_core::PrerequisiteInstaller::default(),
         };
         assert!(matches!(
-            WindowsPrerequisiteDetector.satisfy(&unknown_runtime),
+            WindowsPrerequisiteDetector::new(zup_core::SelectedScope::User)
+                .satisfy(&unknown_runtime),
             Err(BootstrapError::Requirement(_))
         ));
 
@@ -825,7 +1174,7 @@ mod tests {
             installer: zup_core::PrerequisiteInstaller::default(),
         };
         assert_eq!(
-            WindowsPrerequisiteDetector
+            WindowsPrerequisiteDetector::new(zup_core::SelectedScope::User)
                 .satisfy(&absent_package)
                 .unwrap(),
             DetectionResult::Missing

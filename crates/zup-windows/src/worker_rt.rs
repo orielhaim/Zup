@@ -1159,7 +1159,7 @@ async fn run_bootstrap_worker(
         .map_err(|error| WorkerError::Protocol(error.to_string()))?;
     outgoing = outgoing.saturating_add(1);
     let reader_task = split_reader(reader, cancel.clone(), incoming, None);
-    let satisfier = crate::WindowsPrerequisiteDetector;
+    let satisfier = crate::WindowsPrerequisiteDetector::new(bound.plan.key.scope);
     let provider = crate::WindowsPrerequisiteProvider;
     if state.operations.iter().any(|operation| {
         matches!(
