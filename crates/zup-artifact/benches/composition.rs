@@ -20,7 +20,7 @@ use zup_core::{
     NonEmptyString, RelativePath, ResolvedTargetConfig, Target, TargetProfileId, Template,
     UpdateConfig,
 };
-use zup_plugin_contract::{AOT_FORMAT_VERSION, PLUGIN_API_VERSION, WASMTIME_VERSION};
+use zup_plugin_contract::{COMPONENT_FORMAT_VERSION, PLUGIN_API_VERSION, WASMTIME_VERSION};
 
 /// The three machines a Windows application is usually built for.
 const TARGETS: &[(&str, &str, u64)] = &[
@@ -154,7 +154,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
 
     // Each machine gets its own ahead-of-time plugin, which is a real cost of
     // targeting more than one architecture.
-    let mut plugin_bytes = payload(b"plugin-aot", RUNTIME_MEBIBYTES);
+    let mut plugin_bytes = payload(b"plugin-component", RUNTIME_MEBIBYTES);
     plugin_bytes.extend_from_slice(target.as_bytes());
     let plugin_digest = zup_core::Sha256Digest::from_bytes(Sha256::digest(&plugin_bytes).into());
     let plugin = zup_bundle::CompiledPluginArtifact::new(
@@ -164,7 +164,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
             source_sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(b"source").into()),
             target: resolved.target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
-            aot_format_version: AOT_FORMAT_VERSION,
+            component_format_version: COMPONENT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: zup_core::Sha256Digest::from_bytes(
                 zup_plugin_contract::wit_package_digest(),
@@ -172,8 +172,8 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
             engine_fingerprint: zup_core::Sha256Digest::from_bytes(
                 *zup_plugin_contract::engine_fingerprint(target).as_bytes(),
             ),
-            aot_size: plugin_bytes.len() as u64,
-            aot_sha256: plugin_digest,
+            component_size: plugin_bytes.len() as u64,
+            component_sha256: plugin_digest,
             blob: plugin_digest,
         },
         plugin_bytes,

@@ -29,7 +29,7 @@ fn is_expected(error: &PackageError) -> bool {
             | PackageError::MetadataTooLarge { .. }
             | PackageError::TooManyBlobs { .. }
             | PackageError::TooManyPluginArtifacts { .. }
-            | PackageError::PluginAotTooLarge { .. }
+            | PackageError::PluginComponentTooLarge { .. }
             | PackageError::Allocation { .. }
             | PackageError::Payload(_)
             | PackageError::Missing { .. }

@@ -14,7 +14,7 @@ use zup_core::{
     App, AppId, Component, FileMapping, Frontend, Install, InstallDirectory, InstallScope,
     NonEmptyString, PluginBinding, PluginId, Target, TargetProfileId, Template, UpdateConfig,
 };
-use zup_plugin_contract::{AOT_FORMAT_VERSION, PLUGIN_API_VERSION, WASMTIME_VERSION};
+use zup_plugin_contract::{COMPONENT_FORMAT_VERSION, PLUGIN_API_VERSION, WASMTIME_VERSION};
 
 /// One resolved target in the fixture.
 pub struct FixtureTarget {
@@ -117,33 +117,33 @@ fn filler(seed: &str, target: u64) -> String {
 
 fn plugin_metadata(target: &str) -> zup_core::PluginArtifact {
     let parsed = Target::parse(target).unwrap();
-    let mut aot = Vec::new();
-    aot.extend_from_slice(filler("plugin-aot", 7).as_bytes());
-    aot.extend_from_slice(target.as_bytes());
-    let digest = zup_core::Sha256Digest::from_bytes(Sha256::digest(&aot).into());
+    let mut component = Vec::new();
+    component.extend_from_slice(filler("plugin-component", 7).as_bytes());
+    component.extend_from_slice(target.as_bytes());
+    let digest = zup_core::Sha256Digest::from_bytes(Sha256::digest(&component).into());
     zup_core::PluginArtifact {
         plugin_id: PluginId::new("acme-plugins").unwrap(),
         source_size: 16,
         source_sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(b"source").into()),
         target: parsed,
         wasmtime_version: WASMTIME_VERSION.to_owned(),
-        aot_format_version: AOT_FORMAT_VERSION,
+        component_format_version: COMPONENT_FORMAT_VERSION,
         plugin_api_version: PLUGIN_API_VERSION.to_owned(),
         wit_digest: zup_core::Sha256Digest::from_bytes(zup_plugin_contract::wit_package_digest()),
         engine_fingerprint: zup_core::Sha256Digest::from_bytes(
             *zup_plugin_contract::engine_fingerprint(parsed.rust_triple()).as_bytes(),
         ),
-        aot_size: aot.len() as u64,
-        aot_sha256: digest,
+        component_size: component.len() as u64,
+        component_sha256: digest,
         blob: digest,
     }
 }
 
 fn compiled_plugin(target: &str) -> CompiledPluginArtifact {
-    let mut aot = Vec::new();
-    aot.extend_from_slice(filler("plugin-aot", 7).as_bytes());
-    aot.extend_from_slice(target.as_bytes());
-    CompiledPluginArtifact::new(plugin_metadata(target), aot).unwrap()
+    let mut component = Vec::new();
+    component.extend_from_slice(filler("plugin-component", 7).as_bytes());
+    component.extend_from_slice(target.as_bytes());
+    CompiledPluginArtifact::new(plugin_metadata(target), component).unwrap()
 }
 
 /// What a target's preset needs, for a fixture that presents one.

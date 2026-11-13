@@ -16,7 +16,7 @@ use zup_core::{
 };
 use zup_plan::{NeverCancelled, PluginExecutor, PluginPlanningContext, PluginResource};
 use zup_plugin_contract::{
-    AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
+    COMPONENT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION,
     engine_fingerprint, wit_package_digest,
 };
 use zup_plugin_runtime::{LoadError, WasmtimePluginExecutor};
@@ -60,10 +60,7 @@ fn component_for_body(body: &str) -> Vec<u8> {
 
 fn fixture(name: &str) -> Vec<u8> {
     if matches!(name, "all" | "configure") {
-        return PluginEngine::new(HOST_TARGET)
-            .unwrap()
-            .precompile_component(&zup_plugin_abi::test_fixture::component())
-            .unwrap();
+        return zup_plugin_abi::test_fixture::component();
     }
     let body = match name {
         "empty" => {
@@ -80,14 +77,10 @@ fn fixture(name: &str) -> Vec<u8> {
         }
         _ => panic!("unknown fixture"),
     };
-    let component = component_for_body(body);
-    PluginEngine::new(HOST_TARGET)
-        .unwrap()
-        .precompile_component(&component)
-        .unwrap()
+    component_for_body(body)
 }
 
-fn empty_aot() -> Vec<u8> {
+fn empty_component() -> Vec<u8> {
     fixture("empty")
 }
 
@@ -160,14 +153,14 @@ fn artifact(bytes: &[u8], target: &Target) -> CompiledPluginArtifact {
             source_sha256: digest,
             target: *target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
-            aot_format_version: AOT_FORMAT_VERSION,
+            component_format_version: COMPONENT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
                 *engine_fingerprint(target.rust_triple()).as_bytes(),
             ),
-            aot_size: bytes.len() as u64,
-            aot_sha256: digest,
+            component_size: bytes.len() as u64,
+            component_sha256: digest,
             blob: digest,
         },
         bytes.to_vec(),
@@ -192,7 +185,7 @@ fn context(installer: &Installer) -> PluginPlanningContext {
 
 #[test]
 fn valid_empty_component_loads_and_runs() {
-    let bundle = build_package(&empty_aot(), &host_target());
+    let bundle = build_package(&empty_component(), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     assert_eq!(executor.target(), &host_target());
     let installer = installer();
@@ -389,7 +382,7 @@ fn other_target() -> Target {
 
 #[test]
 fn context_target_mismatch_is_rejected_before_invocation() {
-    let bundle = build_package(&empty_aot(), &host_target());
+    let bundle = build_package(&empty_component(), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
     let mut context = context(&installer);
@@ -406,16 +399,16 @@ fn context_target_mismatch_is_rejected_before_invocation() {
 #[rstest]
 #[case::raw_webassembly(b"\0asm\x01\0\0\0")]
 #[case::never_precompiled(b"not a precompiled component")]
-fn bytes_that_are_not_a_trusted_component_are_refused(#[case] aot: &[u8]) {
-    let bundle = build_package(aot, &host_target());
+fn bytes_that_are_not_a_trusted_component_are_refused(#[case] component: &[u8]) {
+    let bundle = build_package(component, &host_target());
     let error = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap_err();
     assert!(matches!(error, LoadError::NotAComponent { .. }));
 }
 
 #[test]
-fn target_mismatch_is_rejected_before_deserialize() {
+fn target_mismatch_is_rejected_before_compilation() {
     let target = other_target();
-    let bundle = build_package(&empty_aot(), &target);
+    let bundle = build_package(&empty_component(), &target);
     assert_eq!(bundle.plan().installer.target, target);
     assert_eq!(bundle.plugin_artifacts()[0].target, target);
     let error = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap_err();
@@ -431,12 +424,12 @@ enum TamperStage {
 #[rstest]
 #[case::before_load(TamperStage::BeforeLoad)]
 #[case::before_invocation(TamperStage::BeforeInvocation)]
-fn aot_mutation_is_rejected_or_isolated_from_execution(#[case] stage: TamperStage) {
+fn component_mutation_is_rejected_or_isolated_from_execution(#[case] stage: TamperStage) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("runtime.zupbundle");
     let mut bytes = BundleWriter::encode(
         &plan(host_target()),
-        &[artifact(&empty_aot(), &host_target())],
+        &[artifact(&empty_component(), &host_target())],
     )
     .unwrap();
     fs::write(&path, &bytes).unwrap();
@@ -471,7 +464,7 @@ fn aot_mutation_is_rejected_or_isolated_from_execution(#[case] stage: TamperStag
 fn assert_metadata_mutation_rejected(field: &str, value: serde_json::Value) {
     let mut package = BundleWriter::encode(
         &plan(host_target()),
-        &[artifact(&empty_aot(), &host_target())],
+        &[artifact(&empty_component(), &host_target())],
     )
     .unwrap();
     let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
@@ -490,7 +483,7 @@ fn package_rejects_contract_metadata_mismatches_before_loading() {
     let zero_digest = serde_json::json!("0".repeat(64));
     for (field, value) in [
         ("wasmtime_version", serde_json::json!("48.0.0")),
-        ("aot_format_version", serde_json::json!(2)),
+        ("component_format_version", serde_json::json!(1)),
         ("plugin_api_version", serde_json::json!("0.9.0")),
         ("wit_digest", zero_digest.clone()),
         ("engine_fingerprint", zero_digest),
@@ -536,7 +529,7 @@ fn acquired_and_embedded_plugins_produce_the_same_resources() {
 
 #[test]
 fn build_host_execution_preserves_the_requested_target_context() {
-    let bytes = empty_aot();
+    let bytes = empty_component();
     let mut installer = installer();
     installer.target = other_target();
     let mut executor =
@@ -547,4 +540,56 @@ fn build_host_execution_preserves_the_requested_target_context() {
         .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
         .unwrap();
     assert!(result.resources.is_empty());
+}
+#[rstest]
+#[case::unmodified(false)]
+#[case::forged(true)]
+fn native_payload_is_rejected_without_execution(#[case] mutate: bool) {
+    let mut config = wasmtime::Config::new();
+    config.wasm_component_model(true);
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    let mut bytes = engine
+        .precompile_component(&component_for_body("unreachable"))
+        .unwrap();
+    if mutate {
+        *bytes.last_mut().unwrap() ^= 0x55;
+    }
+    let package = build_package(&bytes, &host_target());
+    assert!(matches!(
+        WasmtimePluginExecutor::load(package.clone(), &host_target()),
+        Err(LoadError::NotAComponent { .. })
+    ));
+    use zup_acquire::{
+        CachePolicy, CatalogEntry, ContentCache, ContentCatalog, ContentDescriptor, ContentKind,
+    };
+    let root = TempDir::new().unwrap();
+    let metadata = &package.plan().plugins[0];
+    let cache = ContentCache::open(root.path().join("cache"), CachePolicy::Auto).unwrap();
+    let descriptor =
+        ContentDescriptor::stored(ContentKind::Payload, metadata.blob, bytes.len() as u64);
+    let mut writer = cache.writer(&descriptor).unwrap();
+    writer.write(&bytes).unwrap();
+    writer.commit().unwrap();
+    let catalog = ContentCatalog::new(vec![CatalogEntry::stored(
+        metadata.blob,
+        bytes.len() as u64,
+    )])
+    .unwrap();
+    let source = zup_bundle::AcquiredPayloadSource::new(cache, catalog, &package);
+    assert!(matches!(
+        WasmtimePluginExecutor::load_acquired(package.plan(), &source, &host_target()),
+        Err(LoadError::NotAComponent { .. })
+    ));
+}
+
+#[test]
+fn forged_wasm_header_reaches_only_safe_compilation() {
+    let package = build_package(b"\0asm\x0d\0\x01\0malformed", &host_target());
+    let mut executor = WasmtimePluginExecutor::load(package, &host_target()).unwrap();
+    let installer = installer();
+    assert!(
+        executor
+            .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
+            .is_err()
+    );
 }

@@ -20,7 +20,7 @@ use zup_bundle::CompiledPluginArtifact;
 use zup_core::{AppId, ResourceKey, SelectedScope, Sha256Digest, hash_reader};
 use zup_plan::OwnedResource;
 use zup_plugin_contract::{
-    AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
+    COMPONENT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
     wit_package_digest,
 };
 use zup_windows::{InstallationRecordStore, PAYLOAD_OVERLAY_DIRECTORY};
@@ -35,9 +35,10 @@ const PLUGIN: &str = "configure";
 fn artifact() -> CompiledPluginArtifact {
     let source = zup_plugin_abi::test_fixture::component();
     let engine = PluginEngine::new(HOST_TARGET).expect("a plugin engine");
-    let bytes = engine.precompile_component(&source).unwrap();
-    let (source_size, source_sha256) = hash_reader(source.as_slice()).expect("the source hashes");
-    let (aot_size, aot_sha256) = hash_reader(bytes.as_slice()).expect("the artifact hashes");
+    engine.compile_component(&source).unwrap();
+    let bytes = source;
+    let (source_size, source_sha256) = hash_reader(bytes.as_slice()).expect("the source hashes");
+    let (component_size, component_sha256) = (source_size, source_sha256);
     CompiledPluginArtifact::new(
         PluginArtifact {
             plugin_id: zup_core::PluginId::new(PLUGIN).expect("a plugin id"),
@@ -45,13 +46,13 @@ fn artifact() -> CompiledPluginArtifact {
             source_sha256,
             target: zup_core::Target::parse(HOST_TARGET).expect("a target"),
             wasmtime_version: WASMTIME_VERSION.to_owned(),
-            aot_format_version: AOT_FORMAT_VERSION,
+            component_format_version: COMPONENT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(*engine.fingerprint().as_bytes()),
-            aot_size,
-            aot_sha256,
-            blob: aot_sha256,
+            component_size,
+            component_sha256,
+            blob: component_sha256,
         },
         bytes,
     )

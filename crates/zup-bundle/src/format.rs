@@ -30,8 +30,8 @@ use zup_core::{
     hash_reader,
 };
 use zup_plugin_contract::{
-    AOT_FORMAT_VERSION, MAX_AOT_BYTES, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
-    wit_package_digest,
+    COMPONENT_FORMAT_VERSION, MAX_COMPONENT_BYTES, PLUGIN_API_VERSION, WASMTIME_VERSION,
+    engine_fingerprint, wit_package_digest,
 };
 
 /// Current portable package schema.
@@ -56,8 +56,8 @@ const MAX_METADATA: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_BLOBS: usize = 1_000_000;
 const MAX_PREREQUISITES: usize = 256;
-/// Maximum aggregate uncompressed plugin AOT bytes in one package.
-pub const MAX_PLUGIN_AOT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum aggregate uncompressed plugin component bytes in one package.
+pub const MAX_PLUGIN_COMPONENT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PLUGIN_ID_BYTES: usize = 128;
 const MAX_TARGET_BYTES: usize = 256;
 
@@ -76,8 +76,8 @@ pub enum PackageError {
     TooManyBlobs { count: usize, limit: usize },
     #[error("package has {count} plugin artifacts; the limit is {limit}")]
     TooManyPluginArtifacts { count: usize, limit: usize },
-    #[error("aggregate plugin AOT payload is {size} bytes; the limit is {limit} bytes")]
-    PluginAotTooLarge { size: u64, limit: u64 },
+    #[error("aggregate plugin COMPONENT payload is {size} bytes; the limit is {limit} bytes")]
+    PluginComponentTooLarge { size: u64, limit: u64 },
     #[error("cannot allocate {size} bytes while processing the package")]
     Allocation { size: u64 },
     #[error("package payload verification failed for {0}")]
@@ -114,15 +114,15 @@ pub fn validate_plugin_artifact(artifact: &PluginArtifact) -> Result<(), Package
             "source size exceeds the component limit".to_owned(),
         ));
     }
-    if artifact.aot_size == 0
-        || artifact.aot_size > u64::try_from(MAX_AOT_BYTES).unwrap_or(u64::MAX)
+    if artifact.component_size == 0
+        || artifact.component_size > u64::try_from(MAX_COMPONENT_BYTES).unwrap_or(u64::MAX)
     {
         return Err(PackageError::PluginArtifact(
-            "AOT size is outside the component limit".to_owned(),
+            "component size is outside the component limit".to_owned(),
         ));
     }
     if artifact.wasmtime_version != WASMTIME_VERSION
-        || artifact.aot_format_version != AOT_FORMAT_VERSION
+        || artifact.component_format_version != COMPONENT_FORMAT_VERSION
         || artifact.plugin_api_version != PLUGIN_API_VERSION
     {
         return Err(PackageError::PluginArtifact(
@@ -143,9 +143,9 @@ pub fn validate_plugin_artifact(artifact: &PluginArtifact) -> Result<(), Package
             "engine fingerprint does not match the target".to_owned(),
         ));
     }
-    if artifact.aot_sha256 != artifact.blob {
+    if artifact.component_sha256 != artifact.blob {
         return Err(PackageError::PluginArtifact(
-            "AOT and blob digests differ".to_owned(),
+            "component and blob digests differ".to_owned(),
         ));
     }
     Ok(())
@@ -160,15 +160,15 @@ pub struct CompiledPluginArtifact {
 impl CompiledPluginArtifact {
     pub fn new(metadata: PluginArtifact, bytes: Vec<u8>) -> Result<Self, PackageError> {
         validate_plugin_artifact(&metadata)?;
-        if bytes.len() as u64 != metadata.aot_size {
+        if bytes.len() as u64 != metadata.component_size {
             return Err(PackageError::PluginArtifact(
-                "AOT byte length does not match metadata".to_owned(),
+                "COMPONENT byte length does not match metadata".to_owned(),
             ));
         }
         let digest = Sha256Digest::from_bytes(Sha256::digest(&bytes).into());
-        if digest != metadata.aot_sha256 {
+        if digest != metadata.component_sha256 {
             return Err(PackageError::PluginArtifact(
-                "AOT digest does not match metadata".to_owned(),
+                "component digest does not match metadata".to_owned(),
             ));
         }
         Ok(Self { metadata, bytes })
@@ -610,7 +610,7 @@ impl Package {
             .find(|artifact| &artifact.plugin_id == id)
     }
 
-    pub fn plugin_aot(&self, id: &PluginId) -> Result<Vec<u8>, PackageError> {
+    pub fn plugin_component(&self, id: &PluginId) -> Result<Vec<u8>, PackageError> {
         if !self
             .metadata
             .plan
@@ -632,17 +632,17 @@ impl Package {
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(
-                usize::try_from(artifact.aot_size).map_err(|_| PackageError::Invalid)?,
+                usize::try_from(artifact.component_size).map_err(|_| PackageError::Invalid)?,
             )
             .map_err(|_| PackageError::Allocation {
-                size: artifact.aot_size,
+                size: artifact.component_size,
             })?;
         decoder
             .by_ref()
-            .take(artifact.aot_size.saturating_add(1))
+            .take(artifact.component_size.saturating_add(1))
             .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != artifact.aot_size
-            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.aot_sha256
+        if bytes.len() as u64 != artifact.component_size
+            || Sha256Digest::from_bytes(Sha256::digest(&bytes).into()) != artifact.component_sha256
         {
             return Err(PackageError::Payload(artifact.blob.to_string()));
         }
@@ -750,7 +750,7 @@ impl Package {
                             .find(|artifact| artifact.blob == blob.digest)
                             .map_or(blob.size, |artifact| artifact.size)
                     },
-                    |artifact| artifact.aot_size,
+                    |artifact| artifact.component_size,
                 );
             self.verify_blob(blob, limit)?;
         }
@@ -953,7 +953,7 @@ fn parse_metadata(
     {
         return Err(PackageError::Invalid);
     }
-    validate_plugin_aot_total(metadata.plan.plugins.iter())?;
+    validate_plugin_component_total(metadata.plan.plugins.iter())?;
 
     let computed_total = metadata.plan.entries.iter().try_fold(0u64, |sum, entry| {
         sum.checked_add(entry.size).ok_or(PackageError::Invalid)
@@ -1097,10 +1097,10 @@ fn parse_metadata(
         referenced.insert(artifact.blob);
     }
     for artifact in &metadata.plan.plugins {
-        if artifact.blob != artifact.aot_sha256 {
+        if artifact.blob != artifact.component_sha256 {
             return Err(PackageError::Invalid);
         }
-        if !external && by_digest.get(&artifact.blob) != Some(&artifact.aot_size) {
+        if !external && by_digest.get(&artifact.blob) != Some(&artifact.component_size) {
             return Err(PackageError::Invalid);
         }
         referenced.insert(artifact.blob);
@@ -1137,21 +1137,21 @@ fn validate_plugin_target(
     Ok(())
 }
 
-fn validate_plugin_aot_total<'a>(
+fn validate_plugin_component_total<'a>(
     mut artifacts: impl Iterator<Item = &'a PluginArtifact>,
 ) -> Result<u64, PackageError> {
     let total = artifacts.try_fold(0u64, |total, artifact| {
         total
-            .checked_add(artifact.aot_size)
-            .ok_or(PackageError::PluginAotTooLarge {
+            .checked_add(artifact.component_size)
+            .ok_or(PackageError::PluginComponentTooLarge {
                 size: u64::MAX,
-                limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
+                limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
             })
     })?;
-    if total > MAX_PLUGIN_AOT_TOTAL_BYTES {
-        return Err(PackageError::PluginAotTooLarge {
+    if total > MAX_PLUGIN_COMPONENT_TOTAL_BYTES {
+        return Err(PackageError::PluginComponentTooLarge {
             size: total,
-            limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
+            limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
         });
     }
     Ok(total)
@@ -1171,7 +1171,7 @@ fn canonical_artifacts(
     if artifacts.len() != plan.installer.plugins.len() {
         return Err(PackageError::Invalid);
     }
-    validate_plugin_aot_total(artifacts.iter().map(|artifact| &artifact.metadata))?;
+    validate_plugin_component_total(artifacts.iter().map(|artifact| &artifact.metadata))?;
     let mut expected = BTreeMap::<String, PluginId>::new();
     for plugin in &plan.installer.plugins {
         if expected
@@ -1195,7 +1195,7 @@ fn canonical_artifacts(
             return Err(PackageError::Invalid);
         }
     }
-    validate_plugin_aot_total(canonical.iter().map(|artifact| &artifact.metadata))?;
+    validate_plugin_component_total(canonical.iter().map(|artifact| &artifact.metadata))?;
     if !plan.plugins.is_empty() {
         if plan.plugins.len() != plan.installer.plugins.len() {
             return Err(PackageError::Invalid);
@@ -1620,7 +1620,7 @@ impl BundleWriter {
     /// addressed by path and digest. It proves nothing and copies nothing - the
     /// plan is already canonical, and the digests it names are the keys the
     /// verified cache is addressed by. `artifacts` is only the plugin *metadata*,
-    /// whose AOT bytes come from the cache rather than from here.
+    /// whose component bytes come from the cache rather than from here.
     pub fn encode_plan_only_plan(
         plan: &PackagePlan,
         artifacts: &[PluginArtifact],
@@ -1678,7 +1678,7 @@ impl BundleWriter {
             required.push((artifact.blob, artifact.size));
         }
         for artifact in &plan.plugins {
-            required.push((artifact.blob, artifact.aot_size));
+            required.push((artifact.blob, artifact.component_size));
         }
         for asset in &plan.ui_assets {
             required.push((asset.sha256, asset.size));
@@ -1812,12 +1812,12 @@ impl BundleWriter {
                 let spool_path = spool_dir.path().join(artifact.metadata.blob.to_hex());
                 let output_file = File::create(&spool_path)?;
                 let mut encoder = zstd::stream::write::Encoder::new(output_file, 9)?;
-                encoder.set_pledged_src_size(Some(artifact.metadata.aot_size))?;
+                encoder.set_pledged_src_size(Some(artifact.metadata.component_size))?;
                 encoder.write_all(artifact.bytes.as_slice())?;
                 let output_file = encoder.finish()?;
                 entry.insert(Spool {
                     path: spool_path,
-                    size: artifact.metadata.aot_size,
+                    size: artifact.metadata.component_size,
                     compressed_size: output_file.metadata()?.len(),
                 });
             }
@@ -1895,8 +1895,8 @@ mod tests {
         PluginId, Template,
     };
     use zup_plugin_contract::{
-        AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
-        wit_package_digest,
+        COMPONENT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION,
+        engine_fingerprint, wit_package_digest,
     };
 
     fn plan_with_plugins(count: usize) -> TargetBuildPlan {
@@ -2070,14 +2070,14 @@ mod tests {
                 source_sha256: digest,
                 target: Target::parse(HOST_TARGET).unwrap(),
                 wasmtime_version: WASMTIME_VERSION.to_owned(),
-                aot_format_version: AOT_FORMAT_VERSION,
+                component_format_version: COMPONENT_FORMAT_VERSION,
                 plugin_api_version: PLUGIN_API_VERSION.to_owned(),
                 wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
                 engine_fingerprint: Sha256Digest::from_bytes(
                     *engine_fingerprint(HOST_TARGET).as_bytes(),
                 ),
-                aot_size: MAX_AOT_BYTES as u64,
-                aot_sha256: digest,
+                component_size: MAX_COMPONENT_BYTES as u64,
+                component_sha256: digest,
                 blob: digest,
             },
             bytes: Vec::new(),
@@ -2181,7 +2181,7 @@ mod tests {
     /// first, and by the writer's own file path, which must not have created a
     /// half-written bundle before it discovered the refusal.
     #[test]
-    fn the_aggregate_uncompressed_aot_size_is_refused_before_anything_is_written() {
+    fn the_aggregate_uncompressed_component_size_is_refused_before_anything_is_written() {
         let plan = plan_with_plugins(5);
         let artifacts = plan
             .installer
@@ -2189,13 +2189,13 @@ mod tests {
             .iter()
             .map(|binding| unchecked_artifact(binding.id.as_str()))
             .collect::<Vec<_>>();
-        let expected = 5 * MAX_AOT_BYTES as u64;
+        let expected = 5 * MAX_COMPONENT_BYTES as u64;
 
         assert!(matches!(
             canonical_artifacts(&plan, &artifacts),
-            Err(PackageError::PluginAotTooLarge {
+            Err(PackageError::PluginComponentTooLarge {
                 size,
-                limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
+                limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
             }) if size == expected
         ));
 
@@ -2204,9 +2204,9 @@ mod tests {
         let error = BundleWriter::write_file(&plan, &artifacts, &output).unwrap_err();
         assert!(matches!(
             error,
-            PackageError::PluginAotTooLarge {
+            PackageError::PluginComponentTooLarge {
                 size,
-                limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
+                limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
             } if size == expected
         ));
         assert!(!output.exists());

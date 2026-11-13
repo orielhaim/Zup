@@ -1,7 +1,8 @@
+#![forbid(unsafe_code)]
+
 use std::fmt;
 
 use thiserror::Error;
-use wasmtime::Precompiled;
 use wasmtime::Trap;
 use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, Linker};
@@ -10,8 +11,8 @@ use crate::bindings::PluginPre;
 use crate::runtime::{InvocationError, Sandbox, run_with_watchdog, sandbox_store, sanitize_error};
 use crate::{Context, InstallationPlan, PluginError, ResourceItem};
 use crate::{
-    MAX_AOT_BYTES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES, MAX_PLAN_RESOURCES,
-    MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS, PluginEngine,
+    MAX_COMPONENT_BYTES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES,
+    MAX_PLAN_RESOURCES, MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS, PluginEngine,
 };
 use zup_plugin_abi::{PLAN_FUNCTION_NAME, PLANNER_EXPORT_NAME};
 
@@ -58,10 +59,8 @@ pub enum ContractError {
     },
     #[error("component does not implement the zup plugin contract: {message}")]
     Signature { message: String },
-    #[error("trusted AOT component could not be loaded: {message}")]
-    TrustedAot { message: String },
-    #[error("AOT component is {size} bytes; the limit is {limit} bytes")]
-    AotTooLarge { size: usize, limit: usize },
+    #[error("component is {size} bytes; the limit is {limit} bytes")]
+    ComponentTooLarge { size: usize, limit: usize },
 }
 
 impl ValidatedComponent {
@@ -128,52 +127,16 @@ impl ValidatedComponent {
 }
 
 impl PluginEngine {
-    #[cfg(feature = "compiler")]
-    pub fn precompile_component(&self, component_wasm: &[u8]) -> Result<Vec<u8>, ContractError> {
-        if is_core_module(component_wasm) {
-            return Err(ContractError::CoreModule);
-        }
-        if self.target != crate::HOST_TARGET {
-            PluginEngine::host()
-                .map_err(|error| ContractError::Compilation {
-                    message: sanitize_error(error.to_string()),
-                })?
-                .compile_component(component_wasm)?;
-        }
-        let component_aot = self
-            .engine
-            .precompile_component(component_wasm)
-            .map_err(|error| ContractError::Compilation {
-                message: sanitize_error(error.to_string()),
-            })?;
-        if self.target == crate::HOST_TARGET {
-            self.validate_trusted_aot_inner(&component_aot)?;
-        } else {
-            self.verify_precompiled(&component_aot)?;
-        }
-        Ok(component_aot)
-    }
-
-    pub fn verify_precompiled(&self, component_aot: &[u8]) -> Result<(), ContractError> {
-        if component_aot.len() > MAX_AOT_BYTES {
-            return Err(ContractError::AotTooLarge {
-                size: component_aot.len(),
-                limit: MAX_AOT_BYTES,
-            });
-        }
-        if wasmtime::Engine::detect_precompiled(component_aot) != Some(Precompiled::Component) {
-            return Err(ContractError::TrustedAot {
-                message: "precompiled output is not a Wasmtime component".to_owned(),
-            });
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "compiler")]
     pub fn compile_component(
         &self,
         component_wasm: &[u8],
     ) -> Result<ValidatedComponent, ContractError> {
+        if component_wasm.len() > MAX_COMPONENT_BYTES {
+            return Err(ContractError::ComponentTooLarge {
+                size: component_wasm.len(),
+                limit: MAX_COMPONENT_BYTES,
+            });
+        }
         if is_core_module(component_wasm) {
             return Err(ContractError::CoreModule);
         }
@@ -189,29 +152,6 @@ impl PluginEngine {
                 message: sanitize_error(error.to_string()),
             }
         })?;
-        self.validate(component)
-    }
-
-    /// # Safety
-    /// `component_aot` is bytes the verified package authenticated.
-    pub unsafe fn validate_trusted_aot(
-        &self,
-        component_aot: &[u8],
-    ) -> Result<ValidatedComponent, ContractError> {
-        self.validate_trusted_aot_inner(component_aot)
-    }
-
-    fn validate_trusted_aot_inner(
-        &self,
-        component_aot: &[u8],
-    ) -> Result<ValidatedComponent, ContractError> {
-        self.verify_precompiled(component_aot)?;
-        let component =
-            unsafe { Component::deserialize(&self.engine, component_aot) }.map_err(|error| {
-                ContractError::TrustedAot {
-                    message: sanitize_error(error.to_string()),
-                }
-            })?;
         self.validate(component)
     }
 
@@ -332,7 +272,6 @@ impl PluginEngine {
     }
 }
 
-#[cfg(feature = "compiler")]
 fn is_core_module(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\0asm\x01\0\0\0")
 }

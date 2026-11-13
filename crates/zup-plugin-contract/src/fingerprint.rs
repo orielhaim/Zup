@@ -10,7 +10,7 @@ use crate::{
     MAX_TABLE_ELEMENTS, MAX_WASM_STACK_BYTES, WASMTIME_VERSION,
 };
 
-const FINGERPRINT_DOMAIN: &[u8] = b"zup.plugin.engine-configuration.v2.wasip3";
+const FINGERPRINT_DOMAIN: &[u8] = b"zup.plugin.engine-configuration.v3.wasip3.safe-source";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EngineFingerprint([u8; 32]);

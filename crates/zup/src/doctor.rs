@@ -586,7 +586,7 @@ impl TargetChecks<'_> {
             ),
             Err(error) => self.fail(
                 CheckKind::PluginEngine,
-                format!("plugin AOT compilation is not ready: {error}"),
+                format!("plugin COMPONENT compilation is not ready: {error}"),
                 source.as_deref(),
             ),
         }

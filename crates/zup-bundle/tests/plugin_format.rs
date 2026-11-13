@@ -10,8 +10,8 @@ use zup_core::TargetOverrides;
 use zup_core::{MAX_PLUGIN_ARTIFACTS, PluginBinding, PluginId, Sha256Digest, Target};
 use zup_core::{ResolvedPrerequisite, TargetBuildPlan};
 use zup_plugin_contract::{
-    AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION, engine_fingerprint,
-    wit_package_digest,
+    COMPONENT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION,
+    engine_fingerprint, wit_package_digest,
 };
 
 fn project() -> (TempDir, TargetBuildPlan) {
@@ -65,13 +65,13 @@ source = "plugins/two.wasm"
     (root, plan.targets.pop().unwrap())
 }
 
-fn artifact(plan: &TargetBuildPlan, id: &str, aot: &[u8]) -> CompiledPluginArtifact {
+fn artifact(plan: &TargetBuildPlan, id: &str, component: &[u8]) -> CompiledPluginArtifact {
     let resolved = plan
         .plugins
         .iter()
         .find(|plugin| plugin.id.as_str() == id)
         .unwrap();
-    let digest = Sha256Digest::from_bytes(Sha256::digest(aot).into());
+    let digest = Sha256Digest::from_bytes(Sha256::digest(component).into());
     CompiledPluginArtifact::new(
         PluginArtifact {
             plugin_id: resolved.id.clone(),
@@ -79,17 +79,17 @@ fn artifact(plan: &TargetBuildPlan, id: &str, aot: &[u8]) -> CompiledPluginArtif
             source_sha256: resolved.sha256,
             target: plan.installer.target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
-            aot_format_version: AOT_FORMAT_VERSION,
+            component_format_version: COMPONENT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
                 *engine_fingerprint(plan.installer.target.rust_triple()).as_bytes(),
             ),
-            aot_size: aot.len() as u64,
-            aot_sha256: digest,
+            component_size: component.len() as u64,
+            component_sha256: digest,
             blob: digest,
         },
-        aot.to_vec(),
+        component.to_vec(),
     )
     .unwrap()
 }
@@ -103,14 +103,14 @@ fn synthetic_artifact(id: &str, bytes: &[u8]) -> CompiledPluginArtifact {
             source_sha256: digest,
             target: Target::parse(HOST_TARGET).unwrap(),
             wasmtime_version: WASMTIME_VERSION.to_owned(),
-            aot_format_version: AOT_FORMAT_VERSION,
+            component_format_version: COMPONENT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
                 *engine_fingerprint(Target::parse(HOST_TARGET).unwrap().rust_triple()).as_bytes(),
             ),
-            aot_size: bytes.len() as u64,
-            aot_sha256: digest,
+            component_size: bytes.len() as u64,
+            component_sha256: digest,
             blob: digest,
         },
         bytes.to_vec(),
@@ -133,9 +133,9 @@ fn rewrite_metadata(package: &mut Vec<u8>, mutate: impl FnOnce(&mut Value)) {
 #[case::multiple_streaming_buffers(256 * 1024 + 17)]
 fn schema_one_deduplicates_plugin_blobs_and_round_trips(#[case] size: usize) {
     let (root, plan) = project();
-    let aot: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
-    let one = artifact(&plan, "z-plugin", &aot);
-    let two = artifact(&plan, "a-plugin", &aot);
+    let component: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+    let one = artifact(&plan, "z-plugin", &component);
+    let two = artifact(&plan, "a-plugin", &component);
     let artifacts = vec![one.clone(), two.clone()];
     let package_bytes = BundleWriter::encode(&plan, &[two, one]).unwrap();
     assert_eq!(
@@ -157,19 +157,19 @@ fn schema_one_deduplicates_plugin_blobs_and_round_trips(#[case] size: usize) {
     );
     assert_eq!(fs::read(&written).unwrap(), package_bytes);
     let id = PluginId::new("a-plugin").unwrap();
-    assert_eq!(package.plugin_aot(&id).unwrap(), aot);
+    assert_eq!(package.plugin_component(&id).unwrap(), component);
     assert_eq!(package.build_plan().unwrap().targets.len(), 1);
 }
 
 #[test]
 fn artifact_bytes_cannot_disagree_with_metadata() {
     let (_root, plan) = project();
-    let bytes = b"aot";
+    let bytes = b"component";
     let compiled = artifact(&plan, "z-plugin", bytes);
     let metadata = compiled.metadata().clone();
     assert!(CompiledPluginArtifact::new(metadata.clone(), b"wrong".to_vec()).is_err());
     let mut wrong_size = metadata;
-    wrong_size.aot_size += 1;
+    wrong_size.component_size += 1;
     assert!(CompiledPluginArtifact::new(wrong_size, bytes.to_vec()).is_err());
 }
 
@@ -179,12 +179,12 @@ fn artifact_bytes_cannot_disagree_with_metadata() {
 #[test]
 fn plugin_metadata_that_disagrees_with_itself_is_refused() {
     let (_root, plan) = project();
-    let first = artifact(&plan, "z-plugin", b"aot");
-    let second = artifact(&plan, "a-plugin", b"other aot");
+    let first = artifact(&plan, "z-plugin", b"component");
+    let second = artifact(&plan, "a-plugin", b"other component");
 
     let mut wrong_size = BundleWriter::encode(&plan, &[first.clone(), second.clone()]).unwrap();
     rewrite_metadata(&mut wrong_size, |value| {
-        value["plan"]["plugins"][0]["aot_size"] = Value::from(99);
+        value["plan"]["plugins"][0]["component_size"] = Value::from(99);
     });
     assert!(Package::parse(wrong_size).is_err());
 
@@ -208,8 +208,8 @@ fn other_target() -> Target {
 fn plugin_target_must_match_target_plan() {
     let (_root, plan) = project();
     let other = other_target();
-    let mut first = artifact(&plan, "z-plugin", b"aot");
-    let mut second = artifact(&plan, "a-plugin", b"other aot");
+    let mut first = artifact(&plan, "z-plugin", b"component");
+    let mut second = artifact(&plan, "a-plugin", b"other component");
     for artifact in [&mut first, &mut second] {
         let mut metadata = artifact.metadata().clone();
         metadata.target = other;
@@ -230,8 +230,8 @@ fn plugin_target_must_match_target_plan() {
 #[test]
 fn persisted_plugin_target_must_match_installer_target() {
     let (_root, plan) = project();
-    let first = artifact(&plan, "z-plugin", b"aot");
-    let second = artifact(&plan, "a-plugin", b"other aot");
+    let first = artifact(&plan, "z-plugin", b"component");
+    let second = artifact(&plan, "a-plugin", b"other component");
     let mut package = BundleWriter::encode(&plan, &[first, second]).unwrap();
     rewrite_metadata(&mut package, |value| {
         value["plan"]["plugins"][0]["target"] = Value::from(other_target().to_string());
@@ -257,7 +257,7 @@ fn rejects_more_than_the_documented_plugin_descriptor_limit() {
         .installer
         .plugins
         .iter()
-        .map(|binding| synthetic_artifact(binding.id.as_str(), b"aot"))
+        .map(|binding| synthetic_artifact(binding.id.as_str(), b"component"))
         .collect::<Vec<_>>();
 
     let error = BundleWriter::encode(&plan, &artifacts).unwrap_err();
@@ -271,7 +271,7 @@ fn rejects_more_than_the_documented_plugin_descriptor_limit() {
 }
 
 #[test]
-fn rejects_aggregate_aot_overflow_while_parsing_metadata() {
+fn rejects_aggregate_component_overflow_while_parsing_metadata() {
     let (_root, mut plan) = project();
     plan.plugins.clear();
     plan.installer.plugins = (0..5)
@@ -290,12 +290,13 @@ fn rejects_aggregate_aot_overflow_while_parsing_metadata() {
     let mut package = BundleWriter::encode(&plan, &artifacts).unwrap();
     rewrite_metadata(&mut package, |value| {
         for artifact in value["plan"]["plugins"].as_array_mut().unwrap() {
-            artifact["aot_size"] = Value::from(zup_plugin_contract::MAX_AOT_BYTES as u64);
+            artifact["component_size"] =
+                Value::from(zup_plugin_contract::MAX_COMPONENT_BYTES as u64);
         }
     });
     assert!(matches!(
         Package::parse(package),
-        Err(PackageError::PluginAotTooLarge { .. })
+        Err(PackageError::PluginComponentTooLarge { .. })
     ));
 }
 

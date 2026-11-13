@@ -1,14 +1,15 @@
+#![forbid(unsafe_code)]
+
 use std::collections::BTreeMap;
 use zup_core::{PackagePlan, PluginArtifact};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use wasmtime::{Engine, Precompiled};
 use zup_bundle::{AcquiredPayloadSource, Package, PackageError, PayloadError};
 use zup_core::{PluginId, Sha256Digest, Target};
 use zup_plugin_contract::{
-    AOT_FORMAT_VERSION, ContractError, EngineError, HOST_TARGET, MAX_AOT_BYTES, PLUGIN_API_VERSION,
-    PluginEngine, ValidatedComponent, WASMTIME_VERSION, wit_package_digest,
+    COMPONENT_FORMAT_VERSION, ContractError, EngineError, HOST_TARGET, MAX_COMPONENT_BYTES,
+    PLUGIN_API_VERSION, PluginEngine, ValidatedComponent, WASMTIME_VERSION, wit_package_digest,
 };
 
 #[derive(Debug, Error)]
@@ -39,14 +40,16 @@ pub enum LoadError {
         field: &'static str,
         found: String,
     },
-    #[error("plugin `{plugin_id}` AOT bytes are not a precompiled component")]
+    #[error("plugin `{plugin_id}` component bytes are not a WASM component")]
     NotAComponent { plugin_id: PluginId },
-    #[error("plugin `{plugin_id}` AOT bytes are not owned by the verified package")]
-    UnverifiedAot { plugin_id: PluginId },
+    #[error("plugin `{plugin_id}` component bytes do not match package content identity")]
+    UnverifiedComponent { plugin_id: PluginId },
 }
 
+pub(crate) struct UntrustedSourceComponent(Vec<u8>);
+
 pub(crate) struct LoadedPlugin {
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: UntrustedSourceComponent,
     pub(crate) component: Option<ValidatedComponent>,
 }
 
@@ -65,7 +68,7 @@ pub(crate) fn load_bundle(
         &package.plan().installer,
         &package.plan().plugins,
         expected_target,
-        |artifact| Ok(package.plugin_aot(&artifact.plugin_id)?),
+        |artifact| Ok(package.plugin_component(&artifact.plugin_id)?),
     )
 }
 
@@ -132,11 +135,11 @@ fn load_sources(
     for (plugin_id, artifact) in artifacts {
         verify_metadata(&plugin_id, artifact, expected_target, expected_fingerprint)?;
         let bytes = read(artifact)?;
-        verify_aot(&plugin_id, artifact, &bytes)?;
+        verify_component(&plugin_id, artifact, &bytes)?;
         plugins.insert(
             plugin_id,
             LoadedPlugin {
-                bytes,
+                bytes: UntrustedSourceComponent(bytes),
                 component: None,
             },
         );
@@ -160,26 +163,25 @@ impl LoadedBundle {
                 plugin_id: plugin_id.clone(),
             })?;
         if plugin.component.is_none() {
-            // SAFETY: load_sources verified these bytes and their engine metadata against the authenticated plan.
-            plugin.component = Some(unsafe { self.engine.validate_trusted_aot(&plugin.bytes)? });
+            plugin.component = Some(self.engine.compile_component(&plugin.bytes.0)?);
         }
         Ok(plugin.component.as_ref().expect("component loaded above"))
     }
 }
 
-fn verify_aot(
+fn verify_component(
     plugin_id: &PluginId,
     artifact: &PluginArtifact,
     bytes: &[u8],
 ) -> Result<(), LoadError> {
-    if bytes.len() as u64 != artifact.aot_size
-        || Sha256Digest::from_bytes(Sha256::digest(bytes).into()) != artifact.aot_sha256
+    if bytes.len() as u64 != artifact.component_size
+        || Sha256Digest::from_bytes(Sha256::digest(bytes).into()) != artifact.component_sha256
     {
-        return Err(LoadError::UnverifiedAot {
+        return Err(LoadError::UnverifiedComponent {
             plugin_id: plugin_id.clone(),
         });
     }
-    if Engine::detect_precompiled(bytes) != Some(Precompiled::Component) {
+    if !bytes.starts_with(b"\0asm\x0d\0\x01\0") {
         return Err(LoadError::NotAComponent {
             plugin_id: plugin_id.clone(),
         });
@@ -254,11 +256,11 @@ fn verify_metadata(
             found: artifact.wasmtime_version.clone(),
         });
     }
-    if artifact.aot_format_version != AOT_FORMAT_VERSION {
+    if artifact.component_format_version != COMPONENT_FORMAT_VERSION {
         return Err(LoadError::MetadataMismatch {
             plugin_id: plugin_id.clone(),
-            field: "AOT format version",
-            found: artifact.aot_format_version.to_string(),
+            field: "component format version",
+            found: artifact.component_format_version.to_string(),
         });
     }
     if artifact.plugin_api_version != PLUGIN_API_VERSION {
@@ -282,20 +284,20 @@ fn verify_metadata(
             found: artifact.engine_fingerprint.to_hex(),
         });
     }
-    if artifact.aot_sha256 != artifact.blob {
+    if artifact.component_sha256 != artifact.blob {
         return Err(LoadError::MetadataMismatch {
             plugin_id: plugin_id.clone(),
-            field: "AOT digest binding",
+            field: "component digest binding",
             found: artifact.blob.to_hex(),
         });
     }
-    if artifact.aot_size == 0
-        || artifact.aot_size > u64::try_from(MAX_AOT_BYTES).unwrap_or(u64::MAX)
+    if artifact.component_size == 0
+        || artifact.component_size > u64::try_from(MAX_COMPONENT_BYTES).unwrap_or(u64::MAX)
     {
         return Err(LoadError::MetadataMismatch {
             plugin_id: plugin_id.clone(),
-            field: "AOT size",
-            found: artifact.aot_size.to_string(),
+            field: "component size",
+            found: artifact.component_size.to_string(),
         });
     }
     zup_bundle::validate_plugin_artifact(artifact).map_err(LoadError::Package)?;

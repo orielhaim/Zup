@@ -738,7 +738,7 @@ source = "plugins/helper.wasm"
     let plugins = find(&rows, "plugin_engine");
     assert_eq!(plugins["status"], "fail", "{}", message(plugins));
     assert!(
-        message(plugins).contains("plugin AOT compilation is not ready"),
+        message(plugins).contains("plugin COMPONENT compilation is not ready"),
         "the plugin diagnostic explains the failure: {}",
         message(plugins)
     );

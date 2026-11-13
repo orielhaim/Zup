@@ -362,7 +362,7 @@ source = "plugins/helper.wasm"
     );
     assert!(
         !package
-            .plugin_aot(&id)
+            .plugin_component(&id)
             .expect("the artifact is readable")
             .is_empty()
     );

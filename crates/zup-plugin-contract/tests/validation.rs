@@ -99,19 +99,6 @@ fn refusal_of(error: &ContractError) -> &'static str {
     }
 }
 
-#[rstest]
-#[case::arbitrary_bytes(&b"not aot"[..])]
-#[case::raw_core_module(&component_wat("(module)"))]
-#[case::component_that_was_never_precompiled(&component_for_wit(VALID_WIT))]
-fn a_precompiled_output_the_engine_did_not_produce_is_refused(#[case] aot: &[u8]) {
-    let engine = PluginEngine::host().unwrap();
-    let error = engine.verify_precompiled(aot).unwrap_err();
-    assert!(
-        matches!(error, ContractError::TrustedAot { .. }),
-        "{error:?}"
-    );
-}
-
 #[test]
 fn the_engine_fingerprint_is_stable_and_target_specific() {
     let first = engine_fingerprint("x86_64-pc-windows-msvc");

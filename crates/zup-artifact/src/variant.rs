@@ -424,9 +424,9 @@ fn logical_size(
                 .try_fold(sum, |sum, artifact| sum.checked_add(artifact.size))
         })
         .and_then(|sum| {
-            plan.plugins
-                .iter()
-                .try_fold(sum, |sum, artifact| sum.checked_add(artifact.aot_size))
+            plan.plugins.iter().try_fold(sum, |sum, artifact| {
+                sum.checked_add(artifact.component_size)
+            })
         })
         .unwrap_or(u64::MAX);
 

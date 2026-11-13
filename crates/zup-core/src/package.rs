@@ -11,12 +11,12 @@ pub struct PluginArtifact {
     pub source_sha256: Sha256Digest,
     pub target: Target,
     pub wasmtime_version: String,
-    pub aot_format_version: u32,
+    pub component_format_version: u32,
     pub plugin_api_version: String,
     pub wit_digest: Sha256Digest,
     pub engine_fingerprint: Sha256Digest,
-    pub aot_size: u64,
-    pub aot_sha256: Sha256Digest,
+    pub component_size: u64,
+    pub component_sha256: Sha256Digest,
     pub blob: Sha256Digest,
 }
 

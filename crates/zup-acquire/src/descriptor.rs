@@ -128,7 +128,7 @@ pub enum ContentReason {
     File { component: Option<String> },
     /// An embedded prerequisite package.
     Prerequisite { id: String },
-    /// A plugin's AOT image.
+    /// A plugin's COMPONENT image.
     Plugin { id: String },
     /// The native image a graphical variant presents its preset with.
     ///

@@ -90,11 +90,10 @@ fn compiles_and_verifies_a_valid_component() {
     let metadata = artifacts[0].metadata();
     assert_eq!(metadata.target, plan.installer.target);
     assert_eq!(metadata.source_sha256, plan.plugins[0].sha256);
-    assert_eq!(metadata.blob, metadata.aot_sha256);
+    assert_eq!(metadata.blob, metadata.component_sha256);
     assert!(!artifacts[0].bytes().is_empty());
     let runtime = PluginEngine::new(HOST_TARGET).unwrap();
-    // SAFETY: these bytes were compiled from WebAssembly by this process.
-    let component = unsafe { runtime.validate_trusted_aot(artifacts[0].bytes()) }.unwrap();
+    let component = runtime.compile_component(artifacts[0].bytes()).unwrap();
     assert_eq!(component.fingerprint(), runtime.fingerprint());
 }
 

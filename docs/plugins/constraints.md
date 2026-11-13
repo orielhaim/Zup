@@ -43,7 +43,7 @@ than exposing nondeterministic state. Filesystem, sockets, random and other
 imports are rejected before instantiation.
 
 Both CPU execution and suspended async execution are bounded by cancellation
-and the invocation deadline. AOT artifacts include the engine feature configuration
+and the invocation deadline. Component metadata binds the engine feature configuration
 and sandbox policy in their fingerprint; rebuild installers after this migration.
 
 Wasmtime labels its Preview 3 implementation experimental and incomplete, with
@@ -63,3 +63,5 @@ The target is the Rust 1.100 improvement adopted here. The allocator, never-type
 and convenience APIs do not simplify this integration enough to justify unrelated
 changes. Cargo build output is located through its JSON artifact messages rather
 than its unstable intermediate directory layout.
+
+See [component trust](./trust) for package provenance, safe runtime compilation, and format compatibility.

@@ -13,9 +13,10 @@ mod preset;
 
 pub use acquired::{AcquiredPayloadSource, refuse_self_verified};
 pub use format::{
-    BundleWriter, CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES, MAX_PLUGIN_SOURCE_BYTES,
-    PACKAGE_FEATURE_EXTERNAL_PAYLOAD, PACKAGE_SCHEMA, Package, PackageError, PackageIndex,
-    PackagePayloadSource, validate_payload_entries, validate_plugin_artifact,
+    BundleWriter, CompiledPluginArtifact, MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
+    MAX_PLUGIN_SOURCE_BYTES, PACKAGE_FEATURE_EXTERNAL_PAYLOAD, PACKAGE_SCHEMA, Package,
+    PackageError, PackageIndex, PackagePayloadSource, validate_payload_entries,
+    validate_plugin_artifact,
 };
 pub use payload::{
     AutoPayloadSource, DirectoryPayloadSource, OverlayPayloadSource, PayloadError, PayloadReader,

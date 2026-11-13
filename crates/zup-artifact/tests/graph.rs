@@ -484,10 +484,10 @@ fn a_plugin_is_compiled_for_one_target_only_and_selected_through_the_manifest() 
     // The plugin's ahead-of-time content is in the shared store, referenced by
     // digest through the manifest.
     let entry = graph.table().entry(&plugin.blob).expect("stored");
-    assert_eq!(entry.size, plugin.aot_size);
+    assert_eq!(entry.size, plugin.component_size);
     assert_eq!(
         view.store().blob(entry).unwrap().len() as u64,
-        plugin.aot_size
+        plugin.component_size
     );
     assert!(
         !x64.plan

@@ -164,8 +164,7 @@ fn probe_context(name: &str) -> Context {
 fn native_wasi_streams_and_guest_failures_are_isolated_per_invocation() {
     use zup_plugin_contract::InvocationError;
     let engine = PluginEngine::host().unwrap();
-    let aot = engine.precompile_component(&component()).unwrap();
-    let validated = unsafe { engine.validate_trusted_aot(&aot) }.unwrap();
+    let validated = engine.compile_component(&component()).unwrap();
     for name in ["clock", "wait", "exit", "panic"] {
         let error = validated.plan(&probe_context(name)).unwrap_err();
         assert!(

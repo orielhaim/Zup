@@ -124,8 +124,8 @@ impl EmbeddedBundle {
         self.package.plugin_artifact(id)
     }
 
-    pub fn plugin_aot(&self, id: &zup_core::PluginId) -> Result<Vec<u8>, BundleError> {
-        Ok(self.package.plugin_aot(id)?)
+    pub fn plugin_component(&self, id: &zup_core::PluginId) -> Result<Vec<u8>, BundleError> {
+        Ok(self.package.plugin_component(id)?)
     }
 
     pub fn prerequisite_artifact(
