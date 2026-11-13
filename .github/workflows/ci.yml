@@ -130,7 +130,14 @@ jobs:
 
       - name: Windows machine authority tests
         if: runner.os == 'Windows'
-        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
+        run: python scripts/ci/verify_windows_privileged.py
+
+      - name: Privileged coverage evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-privileged-evidence
+          path: target/f15
 
       - name: Linux tests
         if: runner.os == 'Linux'

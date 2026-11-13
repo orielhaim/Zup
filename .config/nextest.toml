@@ -55,3 +55,6 @@ default-filter = '''
 
 [profile.integration.junit]
 path = "junit.xml"
+
+[profile.privileged.junit]
+path = "junit.xml"

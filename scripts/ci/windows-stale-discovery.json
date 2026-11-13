@@ -1,0 +1,421 @@
+{
+  "test-count": 366,
+  "rust-suites": {
+    "zup-windows": {
+      "testcases": {
+        "filesystem::authority::tests::machine_staging_preserves_public_payload_policy_and_native_identity": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "filesystem::authority::tests::service_data_grants_preserve_root_identity_and_refuse_permission_migration": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "filesystem::authority::tests::shared_data_creation_excludes_parent_writers_and_authenticates_identity": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "filesystem::tests::cleanup_is_delete_only_recursive_and_rejects_changed_security": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "filesystem::tests::concurrent_privilege_scopes_leave_process_and_thread_tokens_unchanged": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "filesystem::tests::directory_handles_prevent_namespace_redirection_and_refuse_reparse_points": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "filesystem::tests::publication_recovers_after_process_exit_and_never_hides_an_unsupported_barrier": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "filesystem::tests::publication_replaces_preserves_collisions_and_reports_sharing_conflicts": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "filesystem::tests::restricted_token_can_read_ledgers_but_cannot_modify_machine_state": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "ledger::tests::prepare_machine_observation_probe": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "ledger::tests::standard_user_observes_machine_metadata_without_private_journal_access": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "machine_authority::tests::a_second_process_sees_the_machine_lock_as_busy": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "machine_authority::tests::machine_journal_creation_crash_matrix": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "machine_authority::tests::machine_journal_creation_process": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "machine_authority::tests::machine_journals_use_shared_revision_cas_and_reopen": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "machine_authority::tests::machine_repository_state_recovers_a_committed_batch_after_process_exit": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "machine_state::tests::the_default_state_root_depends_on_the_scope_and_never_on_the_environment": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "prerequisites::native_tests::native_execution_elevated_copies_untrusted_acquisition": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "prerequisites::native_tests::native_execution_elevated_custody_survives_worker_interruption": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "prerequisites::native_tests::native_execution_interrupted_worker_child": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "recovery::tests::machine_runtime_recovery_source_is_private_and_independent_of_original_overlay": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "service_control::tests::native::explicit_accounts_pending_transitions_and_executable_locks_are_verified::case_1": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::explicit_accounts_pending_transitions_and_executable_locks_are_verified::case_2": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::explicit_accounts_pending_transitions_and_executable_locks_are_verified::case_3": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::failed_starts_and_pending_deadlines_never_produce_success_receipts": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::lost_stop_receipts_do_not_release_a_process_that_reported_stopped": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_dependencies_refuse_stopping_a_required_running_service": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_failure_actions_stop_after_the_declared_restart_budget": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_transactions_replace_compensate_and_recover_real_service_executables::case_1": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_transactions_replace_compensate_and_recover_real_service_executables::case_2": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_transactions_replace_compensate_and_recover_real_service_executables::case_3": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_transactions_replace_compensate_and_recover_real_service_executables::case_4": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_transactions_replace_compensate_and_recover_real_service_executables::case_5": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_transactions_replace_compensate_and_recover_real_service_executables::case_6": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::native_transactions_replace_compensate_and_recover_real_service_executables::case_7": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::startup_inhibition_protects_payloads_and_refuses_ambiguous_release::case_1_running": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::startup_inhibition_protects_payloads_and_refuses_ambiguous_release::case_2_stopped_without_execution": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::startup_inhibition_protects_payloads_and_refuses_ambiguous_release::case_3_queued_restart": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::startup_inhibition_protects_payloads_and_refuses_ambiguous_release::case_4_application_reports_never_started": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::stopped_main_does_not_authorize_mutation_with_remaining_job_workers": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native::stopped_receipts_wait_for_the_native_process_to_exit": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native_reboot_recovery_child": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "service_control::tests::native_transaction_child": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        },
+        "services::tests::uniquely_named_service_create_upgrade_reconcile_and_drift": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        }
+      }
+    },
+    "zup-windows::bootstrap_fs": {
+      "testcases": {}
+    },
+    "zup-windows::bundle_packager": {
+      "testcases": {}
+    },
+    "zup-windows::cmdline_property": {
+      "testcases": {}
+    },
+    "zup-windows::file_executor": {
+      "testcases": {}
+    },
+    "zup-windows::generations": {
+      "testcases": {}
+    },
+    "zup-windows::inspect": {
+      "testcases": {}
+    },
+    "zup-windows::multiprocess": {
+      "testcases": {}
+    },
+    "zup-windows::preset_stage": {
+      "testcases": {}
+    },
+    "zup-windows::process": {
+      "testcases": {}
+    },
+    "zup-windows::repair_binding": {
+      "testcases": {}
+    },
+    "zup-windows::runtime": {
+      "testcases": {}
+    },
+    "zup-windows::search_path": {
+      "testcases": {}
+    },
+    "zup-windows::signing": {
+      "testcases": {}
+    },
+    "zup-windows::source_policy": {
+      "testcases": {}
+    },
+    "zup-windows::universal": {
+      "testcases": {}
+    },
+    "zup-windows::windows_target": {
+      "testcases": {
+        "the_user_state_root_and_the_user_data_location_are_one_directory": {
+          "kind": "test",
+          "ignored": true,
+          "filter-match": {
+            "status": "mismatch",
+            "reason": "expression"
+          }
+        }
+      }
+    },
+    "zup-windows::worker_protocol": {
+      "testcases": {}
+    },
+    "zup-windows::bin/zup-test-service": {
+      "testcases": {}
+    },
+    "zup-windows::bin/zup-test-worker": {
+      "testcases": {}
+    }
+  }
+}
