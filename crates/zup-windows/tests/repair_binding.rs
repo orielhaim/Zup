@@ -214,6 +214,15 @@ executable = "${payload}/app.exe"
         IntegrationChangeKind::UpdateOwned
     );
 
+    let mut selection_changed = desired.clone();
+    selection_changed
+        .selected_components
+        .push(zup_core::ComponentId::new("unowned").unwrap());
+    assert!(matches!(
+        plan(&selection_changed, &installed, &observed),
+        Err(zup_plan::LifecycleError::RepairSelectionChanged)
+    ));
+
     let mut substituted = desired.clone();
     substituted.launchers[0].target = substituted
         .generation

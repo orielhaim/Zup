@@ -891,3 +891,50 @@ mod cleanup_lifecycle {
         "/../../fixtures/cleanup_lifecycle.rs"
     ));
 }
+
+#[test]
+fn native_repair_retains_committed_component_selection_and_payload_identity() {
+    let temporary =
+        tempfile::tempdir_in(directories::BaseDirs::new().unwrap().data_local_dir()).unwrap();
+    let state = temporary.path().join("state");
+    let application = temporary.path().join("application");
+    let source = temporary.path().join("source");
+    std::fs::create_dir_all(source.join("build")).unwrap();
+    std::fs::write(source.join("build/asset.bin"), b"selected payload").unwrap();
+    let selected = ["core", "extra"]
+        .map(|id| zup_core::ComponentId::new(id).unwrap())
+        .to_vec();
+    let mut effects = deployment_effects(&application, &source, b"selected payload", None, None);
+    effects.selected_components = selected.clone();
+    effects.requirements.components = selected.clone();
+    let installed = commit_effects(&state, &source, effects);
+    let original = installed.current.materialization.as_ref().unwrap();
+    std::fs::write(
+        Path::new(original.directory().as_str()).join("lib/data.txt"),
+        b"damaged",
+    )
+    .unwrap();
+    let mut effects = deployment_effects(
+        &application,
+        &source,
+        b"selected payload",
+        Some(&installed),
+        None,
+    );
+    effects.selected_components = installed.current.selected_components.clone();
+    effects.requirements.components = installed.current.requirements.components.clone();
+    let repaired = commit_effects(&state, &source, effects);
+    assert_eq!(repaired.current.selected_components, selected);
+    assert_eq!(repaired.directory, installed.directory);
+    assert_eq!(repaired.id, installed.id);
+    let generation = repaired.current.materialization.as_ref().unwrap();
+    assert_eq!(generation.descriptor(), original.descriptor());
+    assert_eq!(
+        std::fs::read(Path::new(generation.directory().as_str()).join("lib/data.txt")).unwrap(),
+        b"selected payload"
+    );
+    let transaction = FilesystemTransactionStore::private_at(&state)
+        .load(&repaired.current.transaction)
+        .unwrap();
+    assert_eq!(transaction.plan.selected_components, selected);
+}

@@ -115,6 +115,8 @@ pub enum LifecycleError {
         "repair requirements differ from the committed deployment; use Upgrade or Modify for application changes"
     )]
     RepairRequirementsChanged,
+    #[error("repair source does not reproduce the installed component selection or location")]
+    RepairSelectionChanged,
     #[error("repair target differs from committed owned state: {key:?}")]
     RepairDesiredChanged { key: ResourceKey },
     #[error("missing ownership observation for {0:?}")]
@@ -212,6 +214,20 @@ pub fn plan_lifecycle(
                 });
             }
             _ => {}
+        }
+    }
+    if matches!(action, LifecycleAction::Repair { .. }) {
+        let target = desired.unwrap();
+        let record = ledger.unwrap();
+        if target.selected_components.iter().collect::<BTreeSet<_>>()
+            != record
+                .current
+                .selected_components
+                .iter()
+                .collect::<BTreeSet<_>>()
+            || target.install_directory != record.directory
+        {
+            return Err(LifecycleError::RepairSelectionChanged);
         }
     }
     let mut execution = match desired {

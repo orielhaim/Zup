@@ -216,8 +216,7 @@ impl SessionHost for WindowsSessionHost {
             zup_plan::select_components(&installer.components, &request.components)
                 .map_err(|error| error.to_string())?
         };
-        let selected_names = selected.iter().map(|id| id.as_str()).collect::<Vec<_>>();
-        let components = zup_update::ComponentSelection::Only(&selected_names);
+        let components = zup_update::ComponentSelection::Only(&selected);
         let content_root = if context.scope == SelectedScope::Machine {
             state::peer_user_state_root(&build.installer.app.id)
                 .map_err(|error| error.to_string())?
@@ -271,9 +270,7 @@ impl SessionHost for WindowsSessionHost {
             } else {
                 let seeds = self.seed.iter().cloned().collect::<Vec<_>>();
                 runtime
-                    .block_on(crate::acquire::acquire(
-                        trust, components, None, &seeds, sink,
-                    ))
+                    .block_on(crate::acquire::acquire(trust, components, &seeds, sink))
                     .map_err(|error| error.to_string())
             }
         })?;
@@ -670,16 +667,10 @@ impl SessionHost for WindowsSessionHost {
         }
         let manifest =
             crate::acquire::parse_manifest(&resolved).map_err(|error| error.to_string())?;
-        let selected_names = ledger
-            .current
-            .selected_components
-            .iter()
-            .map(|id| id.as_str())
-            .collect::<Vec<_>>();
         let closure = crate::acquire::component_closure(
             &resolved,
             &manifest,
-            ComponentSelection::Only(&selected_names),
+            ComponentSelection::Only(&ledger.current.selected_components),
         )
         .map_err(|error| error.to_string())?;
         let cancellation = control.cancellation();

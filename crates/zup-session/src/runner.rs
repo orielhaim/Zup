@@ -68,13 +68,19 @@ async fn drive_operation<H: SessionHost>(
         Ok(context) => context,
         Err(message) => return (InstallOutcome::Failed(message), Vec::new()),
     };
-    let (enable, disable) = if matches!(
-        action,
-        LifecycleAction::Rollback { .. } | LifecycleAction::Cleanup { .. }
-    ) {
-        (Vec::new(), Vec::new())
-    } else {
-        selection_of(discovery.installer(), selection)
+    let selection = match action {
+        LifecycleAction::Repair { .. }
+        | LifecycleAction::Rollback { .. }
+        | LifecycleAction::Cleanup { .. } => zup_runtime::OperationSelection::default(),
+        _ => {
+            let (enable, disable) = selection_of(discovery.installer(), selection);
+            zup_runtime::OperationSelection {
+                enable,
+                disable,
+                install_directory: selection.install_directory.as_deref().map(PathBuf::from),
+                ..zup_runtime::OperationSelection::default()
+            }
+        }
     };
     let cancel = control.cancellation();
     let query = CancelQuery(&cancel);
@@ -88,19 +94,7 @@ async fn drive_operation<H: SessionHost>(
             installer: &host.content_executable(executable),
             scope: context.scope,
             operation: zup_runtime::Operation::from(action),
-            selection: zup_runtime::OperationSelection {
-                deployment: None,
-                enable,
-                disable,
-                install_directory: if matches!(
-                    action,
-                    LifecycleAction::Rollback { .. } | LifecycleAction::Cleanup { .. }
-                ) {
-                    None
-                } else {
-                    selection.install_directory.as_deref().map(PathBuf::from)
-                },
-            },
+            selection,
             prior: context.ledger.as_ref(),
             state_root: &context.state_root,
             cancellation: &query,

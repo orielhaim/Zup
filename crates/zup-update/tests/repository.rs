@@ -809,7 +809,9 @@ async fn the_closure_narrows_by_component_selection() {
             entries,
             [],
             [],
-            zup_update::ComponentSelection::Only(&["core", "docs"]),
+            zup_update::ComponentSelection::Only(
+                &["core", "docs"].map(|id| zup_core::ComponentId::new(id).unwrap()),
+            ),
         )
         .expect("a closure");
     // Required content plus the two named components; the CLI tools cost zero.

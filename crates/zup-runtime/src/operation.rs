@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use zup_plan::{DeploymentEffects, DeploymentPlan, compile_deployment};
 
@@ -74,6 +74,18 @@ pub struct OperationSelection {
     pub enable: Vec<String>,
     pub disable: Vec<String>,
     pub install_directory: Option<PathBuf>,
+}
+
+impl OperationSelection {
+    pub fn validate_repair(&self) -> Result<(), OperationError> {
+        if !self.enable.is_empty() || !self.disable.is_empty() || self.install_directory.is_some() {
+            return Err(OperationError::refused(
+                "selection",
+                "repair uses the committed component selection and install location",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,15 +481,8 @@ pub fn prepare_operation<H: OperationHost>(
     }
     let claims = host.persistent_claims(input)?;
     let installer = &input.build.installer;
-    if matches!(input.operation, Operation::Repair { .. })
-        && (!input.selection.enable.is_empty()
-            || !input.selection.disable.is_empty()
-            || input.selection.install_directory.is_some())
-    {
-        return Err(OperationError::refused(
-            "selection",
-            "repair uses the committed component selection and install location",
-        ));
+    if matches!(input.operation, Operation::Repair { .. }) {
+        input.selection.validate_repair()?;
     }
     let action = resolve_operation(
         input.operation,
@@ -827,6 +832,9 @@ pub fn plan_request(
     action: LifecycleAction,
     install_directory: Option<Template>,
 ) -> Result<PlanRequest, OperationError> {
+    if matches!(action, LifecycleAction::Repair { .. }) {
+        selection.validate_repair()?;
+    }
     let mut request = PlanRequest::new(installer.target, scope);
     if matches!(action, LifecycleAction::Repair { .. }) {
         request.generation_policy = zup_plan::GenerationPolicy::Reconstruct;
@@ -861,6 +869,29 @@ pub fn plan_request(
             } else if !component.required {
                 request.components.disable.insert(component.id.clone());
             }
+        }
+    }
+    if matches!(action, LifecycleAction::Repair { .. }) {
+        let previous = prior.ok_or_else(|| {
+            OperationError::refused("selection", "repair requires an installed deployment")
+        })?;
+        request
+            .components
+            .enable
+            .extend(previous.current.selected_components.iter().cloned());
+        let selected = zup_plan::select_components(&installer.components, &request.components)
+            .map_err(|error| OperationError::refused("selection", error))?;
+        if selected.iter().collect::<BTreeSet<_>>()
+            != previous
+                .current
+                .selected_components
+                .iter()
+                .collect::<BTreeSet<_>>()
+        {
+            return Err(OperationError::refused(
+                "selection",
+                "source cannot reproduce the committed repair component selection; use the original release or explicitly modify/upgrade",
+            ));
         }
     }
     apply_selection(&mut request, selection)?;
@@ -1480,6 +1511,72 @@ mod tests {
             reused
         );
         assert_eq!(candidate.app.version, previous.current.version);
+    }
+
+    #[test]
+    fn repair_selection_is_exact_and_rejects_source_component_drift() {
+        let mut build = fixture_build();
+        build.installer.components = [
+            ("core", true, true),
+            ("optional", false, true),
+            ("extra", false, false),
+        ]
+        .into_iter()
+        .map(|(id, required, default)| zup_core::Component {
+            id: ComponentId::new(id).unwrap(),
+            name: zup_core::NonEmptyString::new(id).unwrap(),
+            description: None,
+            required,
+            default,
+            requires: Vec::new(),
+            group: None,
+        })
+        .collect();
+        let mut prior = fixture_ledger(&build);
+        prior.current.selected_components = ["core", "extra"]
+            .map(|id| ComponentId::new(id).unwrap())
+            .to_vec();
+        prior.current.requirements.components = prior.current.selected_components.clone();
+        let resolve = |build: &TargetBuildPlan, selection: &OperationSelection| {
+            plan_request(
+                &build.installer,
+                SelectedScope::User,
+                Some(&prior),
+                selection,
+                LifecycleAction::Repair { force: true },
+                None,
+            )
+        };
+        let request = resolve(&build, &OperationSelection::default()).unwrap();
+        assert_eq!(
+            zup_plan::select_components(&build.installer.components, &request.components).unwrap(),
+            prior.current.selected_components
+        );
+        assert!(
+            resolve(
+                &build,
+                &OperationSelection {
+                    enable: vec!["optional".into()],
+                    ..OperationSelection::default()
+                }
+            )
+            .is_err()
+        );
+        build
+            .installer
+            .components
+            .retain(|component| component.id.as_str() != "extra");
+        assert!(resolve(&build, &OperationSelection::default()).is_err());
+        build.installer.components.push(zup_core::Component {
+            id: ComponentId::new("extra").unwrap(),
+            name: zup_core::NonEmptyString::new("extra").unwrap(),
+            description: None,
+            required: false,
+            default: false,
+            requires: vec![ComponentId::new("optional").unwrap()],
+            group: None,
+        });
+        assert!(resolve(&build, &OperationSelection::default()).is_err());
     }
 
     #[test]

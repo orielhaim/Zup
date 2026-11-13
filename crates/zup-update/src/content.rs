@@ -113,7 +113,6 @@ impl Acquired {
 pub async fn acquire(
     context: TrustContext,
     selection: ComponentSelection<'_>,
-    required: Option<&[Sha256Digest]>,
     seeds: &[PathBuf],
     progress: ProgressSink,
 ) -> Result<Acquired, GraphError> {
@@ -124,12 +123,7 @@ pub async fn acquire(
     }
     let resolved = resolver.resolve().await?;
     let manifest = parse_manifest(&resolved)?;
-    let plan = match required {
-        Some(required) => {
-            repair_closure(&resolved, &manifest, &required.iter().copied().collect())?
-        }
-        None => component_closure(&resolved, &manifest, selection)?,
-    };
+    let plan = component_closure(&resolved, &manifest, selection)?;
     barrier(&resolver, resolved, manifest, plan).await
 }
 
@@ -218,56 +212,6 @@ pub fn declared_content(
         ))),
         (None, None) => Ok(declared),
     }
-}
-
-pub fn repair_closure(
-    resolved: &ResolvedRelease,
-    manifest: &VariantManifest,
-    drifted: &BTreeSet<Sha256Digest>,
-) -> Result<AcquisitionPlan, GraphError> {
-    let known = drifted
-        .iter()
-        .filter(|digest| {
-            resolved.catalog.entry(digest).is_some()
-                && (manifest
-                    .plan
-                    .entries
-                    .iter()
-                    .any(|entry| entry.sha256 == **digest)
-                    || manifest
-                        .plan
-                        .prerequisite_artifacts
-                        .iter()
-                        .any(|artifact| artifact.sha256 == **digest)
-                    || manifest
-                        .plan
-                        .ui_assets
-                        .iter()
-                        .any(|asset| asset.sha256 == **digest)
-                    || manifest
-                        .preset
-                        .as_ref()
-                        .is_some_and(|preset| preset.digest == **digest))
-        })
-        .copied()
-        .collect::<Vec<_>>();
-    if known.is_empty() {
-        return Err(GraphError::Manifest(
-            "no drifted resource names content this release carries".to_owned(),
-        ));
-    }
-    let mut items = Vec::new();
-    for digest in known {
-        let entry = resolved
-            .catalog
-            .entry(&digest)
-            .expect("filtered to catalogued digests");
-        items.push(zup_acquire::AcquisitionItem::new(
-            entry.descriptor(ContentKind::Payload),
-            ContentReason::Retained,
-        ));
-    }
-    Ok(AcquisitionPlan::build(items)?)
 }
 
 pub fn parse_manifest(resolved: &ResolvedRelease) -> Result<VariantManifest, GraphError> {

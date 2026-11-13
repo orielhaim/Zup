@@ -77,7 +77,7 @@ pub enum ComponentSelection<'a> {
     /// Everything the variant can install.
     All,
     /// Exactly these component identifiers.
-    Only(&'a [&'a str]),
+    Only(&'a [zup_core::ComponentId]),
 }
 
 /// Where a client's persistent TUF state lives, and why.
@@ -346,13 +346,13 @@ fn wanted(component: &Option<String>, selection: ComponentSelection<'_>) -> bool
             None => true,
             Some(component) => selection
                 .only()
-                .is_some_and(|only| only.contains(&component.as_str())),
+                .is_some_and(|only| only.iter().any(|id| id.as_str() == component)),
         },
     }
 }
 
 impl ComponentSelection<'_> {
-    fn only(&self) -> Option<&[&str]> {
+    fn only(&self) -> Option<&[zup_core::ComponentId]> {
         match self {
             Self::All => None,
             Self::Only(only) => Some(only),

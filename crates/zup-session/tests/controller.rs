@@ -261,6 +261,8 @@ impl zup_runtime::OperationHost for FakeHost {
         let mut plan = fixture_install();
         plan.installation = request.installation;
         plan.scope = request.scope;
+        plan.selected_components =
+            zup_plan::select_components(&_build.installer.components, &request.components).unwrap();
         Ok(zup_plan::PlannedInstallation {
             plan,
             generated_files: Vec::new(),
@@ -274,6 +276,8 @@ impl zup_runtime::OperationHost for FakeHost {
         let mut target = fixture_target();
         target.installation = install.installation;
         target.scope = install.scope;
+        target.selected_components = install.selected_components.clone();
+        target.requirements.components = install.selected_components.clone();
         target.requirements.scope = install.scope;
         Ok(target)
     }
@@ -301,6 +305,7 @@ impl zup_runtime::OperationHost for FakeHost {
         let binding = execution.binding.as_ref().expect("bound execution");
         let mut effects =
             zup_plan::DeploymentEffects::new(binding.installation, binding.requirements.clone());
+        effects.selected_components = execution.selected_components.clone();
         effects.install_directory = execution.install_directory.clone();
         effects.observed = binding.observed_activation;
         effects.observed_transaction = binding.observed_transaction;
@@ -819,4 +824,71 @@ async fn closing_after_commit_keeps_the_committed_result() {
         .expect("session task")
         .expect("a late close does not fail a committed operation");
     assert!(session_host.backend.ran.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn repair_uses_committed_components_despite_surface_defaults() {
+    let root = tempfile::tempdir().unwrap();
+    let mut session_host = host("close_preset");
+    session_host.build.installer.components = [
+        ("core", true, true),
+        ("optional", false, true),
+        ("extra", false, false),
+    ]
+    .into_iter()
+    .map(|(id, required, default)| zup_core::Component {
+        id: zup_core::ComponentId::new(id).unwrap(),
+        name: zup_core::NonEmptyString::new(id).unwrap(),
+        description: None,
+        required,
+        default,
+        requires: Vec::new(),
+        group: None,
+    })
+    .collect();
+    let mut ledger = installed(SelectedScope::User);
+    ledger.current.selected_components = ["core", "extra"]
+        .map(|id| zup_core::ComponentId::new(id).unwrap())
+        .to_vec();
+    ledger.current.requirements.components = ledger.current.selected_components.clone();
+    session_host.installations = vec![zup_session::ScopedInstallation {
+        scope: SelectedScope::User,
+        state_root: root.path().to_owned(),
+        ledger: Some(ledger),
+    }];
+    let discovery = session_host
+        .discover(fake_exe(), &SessionLaunch::default())
+        .unwrap();
+    let selection = zup_session::Selection {
+        scope: SelectedScope::User,
+        components: ["core", "optional"]
+            .map(|id| zup_core::ComponentId::new(id).unwrap())
+            .to_vec(),
+        install_directory: Some("C:/different".into()),
+    };
+    for force in [false, true] {
+        let completion = zup_session::complete_operation(
+            &session_host,
+            fake_exe(),
+            &discovery,
+            zup_session::OperationLaunch {
+                id: uuid::Uuid::now_v7(),
+                action: zup_plan::LifecycleAction::Repair { force },
+                selection: &selection,
+                control: zup_runtime::OperationControl::new(
+                    zup_runtime::ExecutionPolicy::Interactive,
+                ),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                completion.outcome,
+                zup_session::SessionOutcome::Deployment(zup_runtime::InstallOutcome::Committed)
+            ),
+            "{:?}",
+            completion.outcome
+        );
+        assert!(session_host.backend.ran.load(Ordering::SeqCst));
+    }
 }

@@ -34,6 +34,16 @@ pub fn apply(context: RuntimeContext, args: LifecycleArgs) -> miette::Result<()>
 }
 
 pub fn run(context: RuntimeContext, verb: Verb, args: LifecycleArgs) -> miette::Result<()> {
+    if matches!(verb, Verb::Repair { .. }) {
+        OperationSelection {
+            enable: args.enable.clone(),
+            disable: args.disable.clone(),
+            install_directory: args.install_directory.clone(),
+            ..OperationSelection::default()
+        }
+        .validate_repair()
+        .map_err(|error| miette::miette!("{error}"))?;
+    }
     if args.ui && context.frontend == zup_core::Frontend::Gui {
         return frontend::graphical_for(context, args);
     }
@@ -306,10 +316,26 @@ fn run_graph_transition(
         .build()
         .map_err(|error| miette::miette!("acquisition runtime: {error}"))?;
 
+    let selection = OperationSelection {
+        enable: args.enable.clone(),
+        disable: args.disable.clone(),
+        install_directory: args.install_directory.clone(),
+        ..OperationSelection::default()
+    };
+    let action = resolve_operation(
+        request,
+        ledger.as_ref().map(|record| &record.current.version),
+        &installer.app.version,
+    )
+    .map_err(|error| miette::miette!("{error}"))?;
+    let plan_request =
+        zup_runtime::plan_request(installer, scope, ledger.as_ref(), &selection, action, None)
+            .map_err(|error| miette::miette!("{error}"))?;
+    let selected = zup_plan::select_components(&installer.components, &plan_request.components)
+        .map_err(|error| miette::miette!("component selection: {error}"))?;
     let acquired = tokio.block_on(acquire::acquire(
         context,
-        zup_update::ComponentSelection::All,
-        None,
+        zup_update::ComponentSelection::Only(&selected),
         &seeds,
         sink,
     ));
@@ -320,14 +346,6 @@ fn run_graph_transition(
         .map_err(|error| miette::miette!("source selection: {error}"))?;
 
     if let Operation::Repair { force } = request {
-        let owned = ledger
-            .as_ref()
-            .map(zup_plan::owned_content_digests)
-            .ok_or_else(|| miette::miette!("installation not found in the {scope} scope"))?;
-        let manifest = &acquired.manifest;
-        let plan = acquire::repair_closure(&acquired.resolved, manifest, &owned)
-            .map_err(|error| miette::miette!("repair closure: {error}"))?;
-        let narrowed = acquire::Acquired { plan, ..acquired };
         return run_acquired_transition(
             acquire::Request {
                 state_root: Some(state_root.clone()),
@@ -335,7 +353,7 @@ fn run_graph_transition(
                 scope: Some(scope),
                 ..acquire::Request::default()
             },
-            &narrowed,
+            &acquired,
             args.output(),
             policy,
         );
