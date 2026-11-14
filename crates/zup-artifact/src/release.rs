@@ -140,6 +140,45 @@ pub struct ReleaseManifest {
     pub root: String,
     pub variants: Vec<ReleaseVariant>,
     pub artifacts: Vec<ReleaseArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<BuildSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transport: Vec<ReleaseTransport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<ReleaseDocument>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<ReleaseObject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildSource {
+    pub commit: String,
+    pub repository: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseTransport {
+    pub variant: String,
+    pub descriptor: String,
+    pub identity: BuildArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseDocument {
+    pub path: String,
+    pub identity: BuildArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseObject {
+    pub path: String,
+    pub identity: BuildArtifact,
+    pub media_type: crate::MediaType,
+    pub variants: Vec<String>,
 }
 
 impl ReleaseManifest {
@@ -150,6 +189,10 @@ impl ReleaseManifest {
             root: ".".to_owned(),
             variants: Vec::new(),
             artifacts: Vec::new(),
+            source: None,
+            transport: Vec::new(),
+            documents: Vec::new(),
+            objects: Vec::new(),
         }
     }
 
@@ -457,10 +500,82 @@ impl ReleaseManifest {
 
     pub fn parse(bytes: &[u8]) -> Result<Self, ReleaseError> {
         let manifest: Self = serde_json::from_slice(bytes)?;
-        if manifest.schema != RELEASE_SCHEMA || manifest.root != "." {
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn validate(&self) -> Result<(), ReleaseError> {
+        if self.schema != RELEASE_SCHEMA || self.root != "." {
             return Err(ReleaseError::Invalid);
         }
-        Ok(manifest)
+        let mut variants = std::collections::BTreeSet::new();
+        let mut artifacts = std::collections::BTreeSet::new();
+        let mut paths = std::collections::BTreeSet::new();
+        for variant in &self.variants {
+            if !variants.insert(&variant.id)
+                || variant.id.is_empty()
+                || !variant
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                || variant.platform != Platform::from_target(&variant.target)
+            {
+                return Err(ReleaseError::Invalid);
+            }
+        }
+        for artifact in &self.artifacts {
+            require_relative(&artifact.path)?;
+            if !artifacts.insert(&artifact.id)
+                || !paths.insert(&artifact.path)
+                || artifact.variants.is_empty()
+                || artifact.variants.iter().any(|id| !variants.contains(id))
+            {
+                return Err(ReleaseError::Invalid);
+            }
+        }
+        for variant in &self.variants {
+            let referenced = self
+                .artifacts
+                .iter()
+                .filter(|a| a.variants.contains(&variant.id))
+                .map(|a| &a.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            if referenced != variant.artifacts.iter().collect() {
+                return Err(ReleaseError::Invalid);
+            }
+        }
+        let mut transports = std::collections::BTreeSet::new();
+        for transport in &self.transport {
+            require_relative(&transport.descriptor)?;
+            if !transports.insert(&transport.variant) || !variants.contains(&transport.variant) {
+                return Err(ReleaseError::Invalid);
+            }
+        }
+        if !transports.is_empty() && transports != variants {
+            return Err(ReleaseError::Invalid);
+        }
+        paths.clear();
+        for document in &self.documents {
+            require_relative(&document.path)?;
+            if !paths.insert(&document.path) {
+                return Err(ReleaseError::Invalid);
+            }
+        }
+        paths.clear();
+        for object in &self.objects {
+            if object.path != zup_acquire::blob_path(&object.identity.digest).to_string()
+                || !paths.insert(&object.path)
+                || object.variants.is_empty()
+                || object.variants.iter().any(|id| !variants.contains(id))
+                || !matches!(
+                    object.media_type,
+                    crate::MediaType::Runtime | crate::MediaType::Preset
+                )
+            {
+                return Err(ReleaseError::Invalid);
+            }
+        }
+        Ok(())
     }
 
     pub fn artifacts_by_id(&self) -> BTreeMap<&str, &ReleaseArtifact> {

@@ -24,22 +24,31 @@ Use this in CI to fail when the committed workflow no longer matches the manifes
 
 ## GitHub Action
 
-The repository also exposes `orielhaim/zup@action-v1`. A compact release step is:
-
-```yaml
-permissions:
-  contents: write
-
-steps:
-  - uses: actions/checkout@v7
-  - uses: orielhaim/zup@action-v1
-    with:
-      operation: release
-```
+Generated workflows pin actions and the publisher CLI to immutable revisions.
+The generator's default Zup revision comes from its own source checkout or packaged
+VCS metadata. A source archive without that evidence requires an explicit full SHA
+in `workflow.action` or `ZUP_ACTION_REVISION` when compiling the generator.
 
 The action supports separate `setup`, `build`, `compose`, `finalize`, `attest`, `publish`, and `release` operations when a pipeline needs explicit phases.
 
 Prefer the generated workflow when you want Zup to keep the target matrix and release steps synchronized with `zup.toml`.
+
+Each native matrix job uploads its installer and release manifest under one profile.
+Composition reads those installer bytes, then signs and finalizes once. Attestation
+and publication consume the same finalized workflow artifact. Without configured
+signing, composition explicitly finalizes as unsigned. With signing configured,
+missing signing evidence fails verification. Supply a signing command valid for
+the composition runner and its signing tools; Bash and PowerShell launches are
+selected by the actual runner OS.
+
+Manual dispatch requires a tag. The plan checks out that tag, resolves its peeled
+commit, and makes every later job use that exact commit. Dry-run dispatch skips
+remote attestation and release mutation. Only the publication job receives
+`contents: write`; build commands do not receive the publication token.
+
+Generated graph tests parse job dependencies, outputs, pinned tool installation,
+and artifact transfer paths, then run actionlint. Repository CI installs the pinned
+validator. Locally, set `ACTIONLINT` to its executable if it is outside `PATH`.
 
 ## Repository checks
 

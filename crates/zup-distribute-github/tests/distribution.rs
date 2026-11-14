@@ -396,6 +396,9 @@ async fn a_corrupt_package_frame_is_rejected_rather_than_published() {
     release.packed.pieces[0][offset] ^= 0xff;
     let piece = &release.packed.pieces[0];
     origin.put(ASSET, piece);
+    // Keep the outer transport valid so the authenticated blob digest is the refusal.
+    release.descriptor.shards[0].digest = zup_core::hash_bytes(piece);
+    release.descriptor.package.digest = zup_core::hash_bytes(piece);
 
     let (source, descriptors) = open_source(&release, &blobs).await;
     let cache = Cache::new();
@@ -471,7 +474,7 @@ async fn a_sharded_package_reads_as_one_logical_source() {
     let blobs = blobs(6, 24 * 1024);
     let origin = Origin::start(BTreeMap::new());
     // A ceiling well under the package, so the writer has to split.
-    let release = release(&origin, origin.pinned(), &blobs, 12 * 1024);
+    let release = release(&origin, origin.pinned(), &blobs, 20 * 1024);
     assert!(
         release.descriptor.shards.len() > 1,
         "the fixture is sharded: {:?}",
@@ -503,7 +506,7 @@ async fn a_sharded_package_reads_as_one_logical_source() {
 async fn a_blob_whose_shard_is_missing_cannot_be_acquired() {
     let blobs = blobs(6, 24 * 1024);
     let origin = Origin::start(BTreeMap::new());
-    let release = release(&origin, origin.pinned(), &blobs, 12 * 1024);
+    let release = release(&origin, origin.pinned(), &blobs, 20 * 1024);
     let last = release
         .descriptor
         .shards
@@ -570,7 +573,7 @@ fn a_written_package_is_its_pieces_in_order_and_nothing_is_left_out() {
     // order reproduces the package exactly, and the pieces tile it with no gap.
     // A boundary that started after the header would put those bytes in no piece
     // at all, and every reader would be short by sixty.
-    for shard_bytes in [u64::MAX, 64 * 1024, 12 * 1024, 4 * 1024] {
+    for shard_bytes in [u64::MAX, 64 * 1024, 32 * 1024, 20 * 1024] {
         let blobs = blobs(6, 24 * 1024);
         let packed = pack(&blobs, shard_bytes);
         let mut cursor = 0u64;
@@ -581,6 +584,7 @@ fn a_written_package_is_its_pieces_in_order_and_nothing_is_left_out() {
                 "piece {index} starts where the last ended"
             );
             assert_eq!(shard.size, packed.pieces[index].len() as u64);
+            assert!(shard.size <= shard_bytes);
             cursor += shard.size;
         }
         assert_eq!(
@@ -668,14 +672,23 @@ fn a_package_over_the_per_asset_limit_is_refused_before_anything_is_written() {
     let user = base(zup_publish::ProductClass::UserFacing)
         .preflight(&limits)
         .expect_err("an installer at the limit is a refusal");
-    assert!(
-        user.to_string().contains("the installer that was signed"),
-        "{user}"
-    );
+    assert!(matches!(
+        user,
+        zup_publish::PlanError::TooLarge {
+            splittable: false,
+            ..
+        }
+    ));
     let transport = base(zup_publish::ProductClass::Transport)
         .preflight(&limits)
         .expect_err("a package at the limit is a refusal too, and says it may be sharded");
-    assert!(transport.to_string().contains("shards"), "{transport}");
+    assert!(matches!(
+        transport,
+        zup_publish::PlanError::TooLarge {
+            splittable: true,
+            ..
+        }
+    ));
     // And the ceiling a publisher actually packs to leaves room under the host's
     // limit rather than sitting on it. Both are constants, so this is a fact about
     // the build rather than a runtime check.

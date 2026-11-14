@@ -10,7 +10,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -443,6 +443,40 @@ function stripAlgorithm(value: string | undefined): string | undefined {
  * names, not distinct artifact names. That is reported rather than worked around -
  * the caller gets the name the service used.
  */
+export async function workflowArtifactFiles(
+  inputs: string[],
+  rootDirectory: string,
+): Promise<string[]> {
+  const root = path.resolve(rootDirectory);
+  const files: string[] = [];
+  const visit = async (input: string): Promise<void> => {
+    const file = path.resolve(input);
+    const relative = path.relative(root, file);
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    ) {
+      throw new Error(
+        "Workflow artifacts must stay within the release directory",
+      );
+    }
+    const metadata = await lstat(file);
+    if (metadata.isSymbolicLink())
+      throw new Error("Workflow artifacts cannot contain links");
+    if (metadata.isDirectory()) {
+      for (const entry of await readdir(file))
+        await visit(path.join(file, entry));
+    } else if (metadata.isFile()) {
+      files.push(file);
+    } else throw new Error("Workflow artifacts must be regular files");
+  };
+  for (const input of inputs) await visit(input);
+  if (files.length === 0)
+    throw new Error("The release directory contains no artifact files");
+  return [...new Set(files)].sort();
+}
+
 export class ToolkitArtifactUploader {
   constructor(private readonly github: GithubContext) {}
 
@@ -453,7 +487,7 @@ export class ToolkitArtifactUploader {
     const { default: client } = await import("@actions/artifact");
     const response = await client.uploadArtifact(
       request.name,
-      request.paths,
+      await workflowArtifactFiles(request.paths, request.rootDirectory),
       request.rootDirectory,
       {
         ...(request.retentionDays === undefined
@@ -504,17 +538,26 @@ export class ToolkitArtifactUploader {
  * audience and the claims are the service's to choose.
  */
 export class ToolkitAttestor {
-  async attest(subjects: AttestationSubject[]): Promise<void> {
+  async attest(
+    subjects: AttestationSubject[],
+    githubToken: string,
+    source: import("./provenance.js").ReleaseSource,
+  ): Promise<void> {
     if (subjects.length === 0) {
       return;
     }
-    const { attestProvenance } = await import("@actions/attest");
-    await attestProvenance({
+    const { attest, buildSLSAProvenancePredicate } =
+      await import("@actions/attest");
+    const { withReleaseSource } = await import("./provenance.js");
+    const predicate = await buildSLSAProvenancePredicate();
+    await attest({
+      predicateType: predicate.type,
+      predicate: withReleaseSource(predicate.params, source),
       subjects: subjects.map((subject) => ({
         name: subject.name,
         digest: { sha256: subject.digest },
       })),
-      token: await core.getIDToken(),
+      token: githubToken,
     });
   }
 }

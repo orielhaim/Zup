@@ -23,6 +23,16 @@ pub struct Behaviour {
     pub release_immutable: Option<bool>,
     pub draft: bool,
     pub present: bool,
+    pub tag_missing: bool,
+    pub tag_commit: Option<String>,
+    pub annotated_depth: u8,
+    pub wrong_repository: bool,
+    pub moved_after_reads: Option<usize>,
+    pub lost_tag_ack: bool,
+    pub tag_creation_collision: bool,
+    pub ref_override: Option<String>,
+    pub release_tag: Option<String>,
+    pub target_commitish: Option<String>,
 }
 
 impl Behaviour {
@@ -177,6 +187,16 @@ impl Github {
         self.assets().into_iter().map(|(name, ..)| name).collect()
     }
 
+    pub fn public_assets(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+        self.state
+            .lock()
+            .unwrap()
+            .assets
+            .iter()
+            .map(|a| (a.name.clone(), a.bytes.clone()))
+            .collect()
+    }
+
     pub fn authorization(&self) -> Vec<Option<String>> {
         self.state
             .lock()
@@ -299,6 +319,69 @@ fn serve(
             &serde_json::json!({ "message": message }),
         );
     }
+    if method == "GET" && path.contains("/git/ref/tags/") {
+        let reads = state
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|s| s.contains("/git/ref/tags/"))
+            .count();
+        let commit = if behaviour.moved_after_reads.is_some_and(|n| reads > n) {
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        } else {
+            behaviour
+                .tag_commit
+                .as_deref()
+                .unwrap_or("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        };
+        let sha = if behaviour.annotated_depth > 0 {
+            "1111111111111111111111111111111111111111"
+        } else {
+            commit
+        };
+        return write_json(
+            &mut writer,
+            if behaviour.tag_missing { 404 } else { 200 },
+            &behaviour,
+            &serde_json::json!({"ref": behaviour.ref_override.clone().unwrap_or_else(|| format!("refs/tags/{}", percent_decode(&path.split("/git/ref/tags/").nth(1).unwrap().replace('+', "%2B")))), "object": {"type": if behaviour.annotated_depth > 0 { "tag" } else { "commit" }, "sha": sha}}),
+        );
+    }
+    if method == "GET" && path.contains("/git/tags/") {
+        let sha = path.rsplit('/').next().unwrap();
+        let nested = behaviour.annotated_depth > 1 && sha.starts_with('1');
+        return write_json(
+            &mut writer,
+            200,
+            &behaviour,
+            &serde_json::json!({"sha": sha, "object": {"type": if nested { "tag" } else { "commit" }, "sha": if nested { "2222222222222222222222222222222222222222" } else { behaviour.tag_commit.as_deref().unwrap_or("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") }}}),
+        );
+    }
+    if method == "GET" && path.contains("/git/commits/") {
+        return write_json(
+            &mut writer,
+            200,
+            &behaviour,
+            &serde_json::json!({"sha": path.rsplit('/').next().unwrap()}),
+        );
+    }
+    if method == "POST" && path.ends_with("/git/refs") {
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let mut guard = state.lock().unwrap();
+        guard.behaviour.tag_missing = false;
+        guard.behaviour.tag_commit = if behaviour.tag_creation_collision {
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into())
+        } else {
+            value["sha"].as_str().map(str::to_owned)
+        };
+        drop(guard);
+        return write_json(
+            &mut writer,
+            if behaviour.lost_tag_ack { 502 } else { 201 },
+            &behaviour,
+            &serde_json::json!({"ref": value["ref"], "object": {"type":"commit", "sha": value["sha"]}}),
+        );
+    }
     if path.ends_with("/assets") && method == "POST" {
         uploads.fetch_add(1, Ordering::Relaxed);
         return upload(&mut writer, state, query, &body, &behaviour);
@@ -320,7 +403,7 @@ fn serve(
             200,
             &behaviour,
             &serde_json::json!({
-                "full_name": "acme/acme",
+                "full_name": if behaviour.wrong_repository { "foreign/repository" } else { "acme/acme" },
                 "private": behaviour.private,
                 "archived": behaviour.archived,
                 "default_branch": "main",
@@ -427,14 +510,14 @@ fn release_json(state: &State, behaviour: &Behaviour) -> serde_json::Value {
     let assets: Vec<serde_json::Value> = state.assets.iter().map(asset_json).collect();
     serde_json::json!({
         "id": state.release_id,
-        "tag_name": "v1.4.0",
+        "tag_name": behaviour.release_tag.as_deref().unwrap_or("v1.4.0"),
         "name": "v1.4.0",
         "body": "notes",
         "draft": behaviour.draft,
         "prerelease": false,
         "immutable": behaviour.release_immutable,
         "html_url": "http://example.invalid/releases/v1.4.0",
-        "target_commitish": "main",
+        "target_commitish": behaviour.target_commitish.as_deref().unwrap_or("main"),
         "assets": assets,
     })
 }

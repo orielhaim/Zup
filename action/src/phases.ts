@@ -134,8 +134,13 @@ function commandFor(phase: Phase, inputs: Inputs): string[] {
       for (const artifact of inputs.artifacts) {
         args.push("--artifact", artifact);
       }
-      args.push("--output", inputs.releaseDir);
-      args.push("--release-manifest", releaseManifestPath(inputs.releaseDir));
+      args.push(
+        "--output-dir",
+        inputs.operation === "release"
+          ? `${inputs.releaseDir}/variants/build`
+          : inputs.releaseDir,
+      );
+      args.push("--release-manifest", RELEASE_MANIFEST_NAME);
       return args;
     }
     case "compose":
@@ -150,7 +155,7 @@ function commandFor(phase: Phase, inputs: Inputs): string[] {
         inputs.releaseDir,
       ];
     case "finalize": {
-      const args = ["sign", "verify", "--release-dir", inputs.releaseDir];
+      const args = ["sign", "--release-dir", inputs.releaseDir, "verify"];
       if (inputs.allowUnsigned) {
         args.push("--allow-unsigned");
       }

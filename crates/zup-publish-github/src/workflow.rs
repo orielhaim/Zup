@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use crate::pins::{PinError, pin};
 use crate::runner::{Runner, cross_runner, native_runner};
 
-pub const DEFAULT_ACTION: &str = "orielhaim/zup@action-v1";
+pub const DEFAULT_ACTION: &str = concat!("orielhaim/zup@", env!("ZUP_PUBLISH_SOURCE_REVISION"));
 
 pub const WORKFLOW_PATH: &str = ".github/workflows/release.yml";
 
@@ -76,20 +76,169 @@ const GENERATED_HEADER: &str = "\
 
 fn uses(repository: &str) -> String {
     match pin(repository) {
-        Ok(action) => action.uses(),
+        Ok(action) => format!("{}@{}", action.repository, action.sha),
         Err(PinError::Unknown { .. }) => {
             panic!("{repository} is not in the action pin lock; see github-actions.lock.json")
         }
     }
 }
 
-pub fn generate(policy: &WorkflowPolicy, targets: &[MatrixTarget]) -> String {
+fn scalar(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_/.*".contains(&b))
+    {
+        value.to_owned()
+    } else {
+        serde_json::to_string(value).expect("YAML scalar")
+    }
+}
+
+fn bootstrap(policy: &WorkflowPolicy, out: &mut String) {
+    let (repository, revision) = policy.action.split_once('@').expect("validated action pin");
+    step(
+        out,
+        "Checkout pinned publisher source",
+        &uses("actions/checkout"),
+        &[
+            &format!("repository: {repository}"),
+            &format!("ref: {revision}"),
+            "path: .zup-toolchain",
+            "persist-credentials: false",
+        ],
+    );
+    step(
+        out,
+        "Install pinned Rust toolchain",
+        &uses("dtolnay/rust-toolchain"),
+        &["toolchain: '1.100'"],
+    );
+    step(
+        out,
+        "Cache the pinned publisher build",
+        &uses("Swatinem/rust-cache"),
+        &[
+            "workspaces: '.zup-toolchain -> target'",
+            "shared-key: publisher-${{ runner.os }}-${{ runner.arch }}",
+            "cache-on-failure: false",
+        ],
+    );
+    let _ = writeln!(
+        out,
+        "      - name: Install assembler on Windows\n        if: runner.os == 'Windows'\n        uses: {}\n        with:\n          platform: win64",
+        uses("ilammy/setup-nasm")
+    );
+    out.push_str("      - name: Build the pinned publisher\n        shell: bash\n        working-directory: .zup-toolchain\n        env:\n          RUSTUP_TOOLCHAIN: '1.100'\n          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '-C debuginfo=0' }}\n        run: cargo build --locked --release -p zup --bin zup\n");
+}
+
+const TOOL_PATH: &str =
+    ".zup-toolchain/target/release/zup${{ runner.os == 'Windows' && '.exe' || '' }}";
+
+enum FinalizedProducer {
+    Compose,
+    Sign,
+}
+
+impl FinalizedProducer {
+    fn upstream(&self) -> &'static [&'static str] {
+        match self {
+            Self::Compose => &["plan", "compose"],
+            Self::Sign => &["plan", "sign"],
+        }
+    }
+}
+
+pub fn validate_policy(policy: &WorkflowPolicy, targets: &[MatrixTarget]) -> Result<(), String> {
+    if targets.is_empty() {
+        return Err("a release workflow requires at least one target".to_owned());
+    }
+    let fields = [
+        &policy.name,
+        &policy.tag_glob,
+        &policy.compose_runner,
+        &policy.release_dir,
+        &policy.receipt,
+    ];
+    if fields
+        .into_iter()
+        .chain(policy.environment.iter())
+        .chain(policy.runner_overrides.values())
+        .chain(policy.attest_paths.iter())
+        .any(|s| s.is_empty() || s.contains("${{") || s.contains(['\n', '\r', '\0']))
+    {
+        return Err(
+            "workflow values must be nonempty single-line literals, without Actions expressions"
+                .to_owned(),
+        );
+    }
+    for path in [&policy.release_dir, &policy.receipt] {
+        if path.contains(['\\', ':'])
+            || path.starts_with('/')
+            || path
+                .split('/')
+                .any(|s| s.is_empty() || s == "." || s == "..")
+        {
+            return Err("workflow paths must be relative to the project".to_owned());
+        }
+    }
+    let (repository, revision) = policy
+        .action
+        .split_once('@')
+        .ok_or("pin the Zup action to a full commit SHA")?;
+    if !zup_publish::valid_commit(revision) {
+        return Err("pin the Zup action to a full commit SHA".to_owned());
+    }
+    if repository.split('/').count() != 2
+        || repository.split('/').any(|s| {
+            s.is_empty()
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        })
+    {
+        return Err("the action must name a repository and a full commit SHA".to_owned());
+    }
+    if policy.release_dir.starts_with(".zup-toolchain") {
+        return Err(".zup-toolchain is reserved for the pinned publisher".to_owned());
+    }
+    if policy.signing.as_ref().is_some_and(|s| {
+        s.command.trim().is_empty() || s.command.contains("${{") || s.command.contains(['\r', '\0'])
+    }) {
+        return Err(
+            "signing requires an explicit command without Actions expression interpolation"
+                .to_owned(),
+        );
+    }
+    let mut profiles = std::collections::BTreeSet::new();
+    for target in targets {
+        if !profiles.insert(&target.profile)
+            || target.profile.is_empty()
+            || target.profile == "."
+            || target.profile == ".."
+            || !target
+                .profile
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        {
+            return Err("matrix profile names must be unique portable path components".to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub fn generate(policy: &WorkflowPolicy, targets: &[MatrixTarget]) -> Result<String, String> {
+    validate_policy(policy, targets)?;
     let mut out = String::new();
     out.push_str(GENERATED_HEADER);
-    let _ = writeln!(out, "name: {}", policy.name);
+    let _ = writeln!(out, "name: {}", scalar(&policy.name));
     out.push('\n');
     out.push_str("on:\n");
-    let _ = writeln!(out, "  push:\n    tags: [\"{}\"]", policy.tag_glob);
+    let _ = writeln!(
+        out,
+        "  push:\n    tags: [{}]",
+        serde_json::to_string(&policy.tag_glob).unwrap()
+    );
     out.push_str("  workflow_dispatch:\n");
     out.push_str("    inputs:\n");
     out.push_str(
@@ -116,40 +265,38 @@ pub fn generate(policy: &WorkflowPolicy, targets: &[MatrixTarget]) -> String {
     build(policy, targets, &mut out);
     compose(policy, targets, &mut out);
     sign(policy, &mut out);
-    let signed = vec!["compose", "sign"];
+    let finalized = if policy.signing.is_some() {
+        FinalizedProducer::Sign
+    } else {
+        FinalizedProducer::Compose
+    };
     if policy.attestations {
-        attest(policy, &signed, &mut out);
+        attest(policy, finalized.upstream(), &mut out);
     }
-    publish(policy, &signed, policy.attestations, &mut out);
-    out
+    publish(policy, finalized.upstream(), policy.attestations, &mut out);
+    Ok(out)
 }
 
-fn plan(_policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
-    out.push_str("  plan:\n");
-    out.push_str("    name: plan\n");
-    out.push_str("    runs-on: ubuntu-latest\n");
-    out.push_str("    permissions:\n      contents: read\n");
-    out.push_str("    outputs:\n");
-    out.push_str("      profiles: ${{ steps.plan.outputs.profiles }}\n");
-    out.push_str("    steps:\n");
+fn plan(policy: &WorkflowPolicy, _targets: &[MatrixTarget], out: &mut String) {
+    out.push_str("  plan:\n    name: plan\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    outputs:\n      commit: ${{ steps.source.outputs.commit }}\n      tag: ${{ steps.source.outputs.tag }}\n    steps:\n");
     step(
         out,
-        "Checkout",
+        "Checkout requested tag",
         &uses("actions/checkout"),
-        &["fetch-depth: '0'"],
+        &[
+            "ref: ${{ inputs.tag || github.ref }}",
+            "fetch-depth: 0",
+            "persist-credentials: false",
+        ],
     );
-    out.push_str("      - name: Resolve the plan\n        run: |\n");
-    out.push_str("          zup ci github check --format json\n");
+    bootstrap(policy, out);
+    out.push_str("      - name: Resolve immutable source\n        id: source\n        shell: bash\n        env:\n          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}\n        run: |\n          git check-ref-format \"refs/tags/$RELEASE_TAG\"\n          commit=$(git rev-parse --verify \"refs/tags/$RELEASE_TAG^{commit}\")\n          test \"$commit\" = \"$(git rev-parse HEAD)\"\n          printf 'commit=%s\\ntag=%s\\n' \"$commit\" \"$RELEASE_TAG\" >> \"$GITHUB_OUTPUT\"\n");
     let _ = writeln!(
         out,
-        "          echo \"profiles={profile_list}\" >> \"$GITHUB_OUTPUT\"",
-        profile_list = targets
-            .iter()
-            .map(|target| target.profile.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
+        "      - name: Resolve pinned publisher\n        id: tool\n        uses: {}\n        with:\n          operation: setup\n          zup-path: {TOOL_PATH}",
+        policy.action
     );
-    out.push('\n');
+    out.push_str("      - name: Check generated workflow\n        shell: bash\n        env:\n          ZUP_PATH: ${{ steps.tool.outputs.zup-path }}\n        run: '\"$ZUP_PATH\" ci github check --format json'\n\n");
 }
 
 fn build(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
@@ -170,10 +317,13 @@ fn build(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
                     .map(|runner: Runner| runner.label().to_owned())
                     .unwrap_or_else(|| cross_runner(target.target).to_owned())
             });
+        let runner = scalar(&runner);
         let _ = writeln!(
             out,
-            "          - profile: {}\n            target: {}\n            runner: {runner}",
-            target.profile, target.target
+            "          - profile: {}\n            target: {}\n            rust-target: {}\n            runner: {runner}",
+            scalar(&target.profile),
+            target.target,
+            target.target.rust_triple()
         );
     }
     out.push_str("    steps:\n");
@@ -181,13 +331,32 @@ fn build(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) {
         out,
         "Checkout",
         &uses("actions/checkout"),
-        &["persist-credentials: false"],
+        &[
+            "ref: ${{ needs.plan.outputs.commit }}",
+            "persist-credentials: false",
+        ],
+    );
+    bootstrap(policy, out);
+    out.push_str("      - name: Install Linux build dependencies\n        if: runner.os == 'Linux'\n        shell: bash\n        run: |\n          sudo apt-get update\n          sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev\n");
+    let _ = writeln!(
+        out,
+        "      - name: Install cross linker on Linux\n        if: runner.os == 'Linux'\n        uses: {}\n        with:\n          version: '0.15.2'",
+        uses("mlugg/setup-zig")
     );
     let _ = writeln!(
         out,
-        "      - name: Build variant\n        uses: {}\n        with:\n          operation: build\n          target: ${{{{ matrix.profile }}}}\n          release-dir: {release}/variants/${{{{ matrix.profile }}}}\n          upload-workflow-artifacts: true\n          workflow-artifact-name: variant-${{{{ matrix.profile }}}}\n          artifact-retention-days: 7",
+        "      - name: Install pinned cross build driver\n        if: runner.os == 'Linux'\n        uses: {}\n        with:\n          tool: cargo-zigbuild@0.24.0",
+        uses("taiki-e/install-action")
+    );
+    out.push_str("      - name: Build native installer components\n        shell: bash\n        working-directory: .zup-toolchain\n        env:\n          RUSTUP_TOOLCHAIN: '1.100'\n          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '-C debuginfo=0' }}\n          ZUP_TARGET: ${{ matrix.target }}\n          ZUP_RUST_TARGET: ${{ matrix.rust-target }}\n        run: |\n          rustup target add \"$ZUP_RUST_TARGET\" i686-pc-windows-msvc wasm32-wasip3\n          cargo xtask toolchain build --profile release\n          host=$(rustc -vV | sed -n 's/^host: //p')\n          if [ \"$host\" != \"$ZUP_RUST_TARGET\" ]; then\n            cargo xtask toolchain build --profile release --target \"$ZUP_TARGET\"\n          fi\n");
+    let _ = writeln!(
+        out,
+        "      - name: Build variant\n        uses: {}\n        with:\n          operation: build\n          zup-path: {TOOL_PATH}\n          target: ${{{{ matrix.profile }}}}\n          release-dir: {release}\n          upload-workflow-artifacts: true\n          workflow-artifact-name: variant-${{{{ matrix.profile }}}}\n          artifact-retention-days: 7",
         policy.action,
-        release = policy.release_dir
+        release = scalar(&format!(
+            "{}/variants/${{{{ matrix.profile }}}}",
+            policy.release_dir
+        ))
     );
     out.push('\n');
 }
@@ -196,21 +365,32 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
     out.push_str("  compose:\n");
     out.push_str("    name: compose\n");
     out.push_str("    needs: [plan, build]\n");
-    let _ = writeln!(out, "    runs-on: {}", policy.compose_runner);
+    let _ = writeln!(out, "    runs-on: {}", scalar(&policy.compose_runner));
     out.push_str("    permissions:\n      contents: read\n");
     out.push_str("    steps:\n");
     step(
         out,
         "Checkout",
         &uses("actions/checkout"),
-        &["persist-credentials: false"],
+        &[
+            "ref: ${{ needs.plan.outputs.commit }}",
+            "persist-credentials: false",
+        ],
     );
-    let _ = writeln!(
-        out,
-        "      - name: Collect variants\n        uses: {}\n        with:\n          pattern: variant-*\n          path: {}/variants\n          merge-multiple: true",
-        uses("actions/download-artifact"),
-        policy.release_dir
-    );
+    bootstrap(policy, out);
+    for target in targets {
+        let _ = writeln!(
+            out,
+            "      - name: {}\n        uses: {}\n        with:\n          name: {}\n          path: {}",
+            scalar(&format!("Collect {}", target.profile)),
+            uses("actions/download-artifact"),
+            scalar(&format!("variant-{}", target.profile)),
+            scalar(&format!(
+                "{}/variants/{}",
+                policy.release_dir, target.profile
+            ))
+        );
+    }
     let mut inputs = vec![format!("{}/**", policy.release_dir)];
     for target in targets {
         inputs.push(format!(
@@ -222,8 +402,9 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
     }
     let _ = writeln!(
         out,
-        "      - name: Compose release\n        uses: {}\n        with:\n          operation: compose\n          release-dir: {}",
-        policy.action, policy.release_dir
+        "      - name: Compose release\n        uses: {}\n        with:\n          operation: compose\n          zup-path: {TOOL_PATH}\n          release-dir: {}",
+        policy.action,
+        scalar(&policy.release_dir)
     );
     out.push_str("      # collected by this job:\n");
     for input in &inputs {
@@ -237,8 +418,9 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
         );
         let _ = writeln!(
             out,
-            "      - name: Finalize\n        uses: {}\n        with:\n          operation: finalize\n          release-dir: {}\n          allow-unsigned: true",
-            policy.action, policy.release_dir
+            "      - name: Finalize\n        uses: {}\n        with:\n          operation: finalize\n          zup-path: {TOOL_PATH}\n          release-dir: {}\n          allow-unsigned: true",
+            policy.action,
+            scalar(&policy.release_dir)
         );
     }
     let _ = writeln!(
@@ -246,7 +428,7 @@ fn compose(policy: &WorkflowPolicy, targets: &[MatrixTarget], out: &mut String) 
         "      - name: Upload the release\n        uses: {}\n        with:\n          name: {}\n          path: {}\n          retention-days: 7\n          if-no-files-found: error",
         uses("actions/upload-artifact"),
         composed_artifact(policy),
-        policy.release_dir
+        scalar(&policy.release_dir)
     );
     out.push('\n');
 }
@@ -265,41 +447,51 @@ fn sign(policy: &WorkflowPolicy, out: &mut String) {
     };
     out.push_str("  sign:\n");
     out.push_str("    name: sign and finalize\n");
-    out.push_str("    needs: compose\n");
-    let _ = writeln!(out, "    runs-on: {}", policy.compose_runner);
+    out.push_str("    needs: [plan, compose]\n");
+    let _ = writeln!(out, "    runs-on: {}", scalar(&policy.compose_runner));
     out.push_str("    permissions:\n      contents: read\n");
     out.push_str("    steps:\n");
     step(
         out,
         "Checkout",
         &uses("actions/checkout"),
-        &["persist-credentials: false"],
+        &[
+            "ref: ${{ needs.plan.outputs.commit }}",
+            "persist-credentials: false",
+        ],
     );
+    bootstrap(policy, out);
     let _ = writeln!(
         out,
         "      - name: Collect the composed release\n        uses: {}\n        with:\n          name: {}\n          path: {}",
         uses("actions/download-artifact"),
         composed_artifact(policy),
-        policy.release_dir
+        scalar(&policy.release_dir)
     );
-    let _ = writeln!(
-        out,
-        "      - name: Sign\n        shell: pwsh\n        working-directory: {}\n        run: |",
-        policy.release_dir
-    );
-    for line in signing.command.lines() {
-        let _ = writeln!(out, "          {line}");
+    for (shell, condition) in [
+        ("pwsh", "runner.os == 'Windows'"),
+        ("bash", "runner.os != 'Windows'"),
+    ] {
+        let _ = writeln!(
+            out,
+            "      - name: Sign ({shell})\n        if: {condition}\n        shell: {shell}\n        working-directory: {}\n        run: |",
+            scalar(&policy.release_dir)
+        );
+        for line in signing.command.lines() {
+            let _ = writeln!(out, "          {line}");
+        }
     }
     let _ = writeln!(
         out,
-        "      - name: Verify signatures and finalize\n        uses: {}\n        with:\n          operation: finalize\n          release-dir: {}",
-        policy.action, policy.release_dir
+        "      - name: Verify signatures and finalize\n        uses: {}\n        with:\n          operation: finalize\n          zup-path: {TOOL_PATH}\n          release-dir: {}",
+        policy.action,
+        scalar(&policy.release_dir)
     );
     let _ = writeln!(
         out,
         "      - name: Upload the signed release\n        uses: {}\n        with:\n          name: compose\n          path: {}\n          retention-days: 7\n          if-no-files-found: error",
         uses("actions/upload-artifact"),
-        policy.release_dir
+        scalar(&policy.release_dir)
     );
     out.push('\n');
 }
@@ -326,18 +518,23 @@ fn attest(policy: &WorkflowPolicy, upstream: &[&str], out: &mut String) {
         out,
         "Checkout",
         &uses("actions/checkout"),
-        &["persist-credentials: false"],
+        &[
+            "ref: ${{ needs.plan.outputs.commit }}",
+            "persist-credentials: false",
+        ],
     );
+    bootstrap(policy, out);
     let _ = writeln!(
         out,
         "      - name: Collect the finalized release\n        uses: {}\n        with:\n          name: compose\n          path: {}",
         uses("actions/download-artifact"),
-        policy.release_dir
+        scalar(&policy.release_dir)
     );
     let _ = writeln!(
         out,
-        "      - name: Attest provenance\n        uses: {}\n        with:\n          operation: attest\n          release-dir: {}",
-        policy.action, policy.release_dir
+        "      - name: Attest provenance\n        uses: {}\n        with:\n          operation: attest\n          zup-path: {TOOL_PATH}\n          dry-run: ${{{{ github.event.inputs.dry_run == 'true' }}}}\n          release-dir: {}",
+        policy.action,
+        scalar(&policy.release_dir)
     );
     if !policy.attest_paths.is_empty() {
         let _ = writeln!(out, "          attest-paths: |");
@@ -355,25 +552,31 @@ fn publish(policy: &WorkflowPolicy, upstream: &[&str], attestations: bool, out: 
     out.push_str("    runs-on: ubuntu-latest\n");
     out.push_str("    permissions:\n      contents: write\n");
     if let Some(environment) = &policy.environment {
-        let _ = writeln!(out, "    environment: {environment}");
+        let _ = writeln!(out, "    environment: {}", scalar(environment));
     }
     out.push_str("    steps:\n");
     step(
         out,
         "Checkout",
         &uses("actions/checkout"),
-        &["persist-credentials: false"],
+        &[
+            "ref: ${{ needs.plan.outputs.commit }}",
+            "persist-credentials: false",
+        ],
     );
+    bootstrap(policy, out);
     let _ = writeln!(
         out,
         "      - name: Collect the finalized release\n        uses: {}\n        with:\n          name: compose\n          path: {}",
         uses("actions/download-artifact"),
-        policy.release_dir
+        scalar(&policy.release_dir)
     );
     let _ = writeln!(
         out,
-        "      - name: Publish release\n        uses: {}\n        with:\n          operation: publish\n          release-dir: {}\n          receipt: {}\n          github-token: ${{{{ secrets.GITHUB_TOKEN }}}}\n          dry-run: ${{{{ github.event.inputs.dry_run == 'true' }}}}",
-        policy.action, policy.release_dir, policy.receipt
+        "      - name: Publish release\n        uses: {}\n        with:\n          operation: publish\n          zup-path: {TOOL_PATH}\n          tag: ${{{{ needs.plan.outputs.tag }}}}\n          repo: ${{{{ github.repository }}}}\n          release-dir: {}\n          receipt: {}\n          github-token: ${{{{ secrets.GITHUB_TOKEN }}}}\n          dry-run: ${{{{ github.event.inputs.dry_run == 'true' }}}}",
+        policy.action,
+        scalar(&policy.release_dir),
+        scalar(&policy.receipt)
     );
 }
 
@@ -393,9 +596,19 @@ pub fn check(
     policy: &WorkflowPolicy,
     targets: &[MatrixTarget],
 ) -> Freshness {
-    let expected = generate(policy, targets);
     let path = root.join(WORKFLOW_PATH);
     let present = path.is_file();
+    let expected = match generate(policy, targets) {
+        Ok(expected) => expected,
+        Err(detail) => {
+            return Freshness {
+                current: false,
+                present,
+                path: WORKFLOW_PATH.to_owned(),
+                detail,
+            };
+        }
+    };
     if !present {
         return Freshness {
             current: false,

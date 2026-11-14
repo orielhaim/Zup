@@ -69,6 +69,14 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint@1.7.12
+
       - name: Linux dependencies
         if: runner.os == 'Linux'
         shell: bash

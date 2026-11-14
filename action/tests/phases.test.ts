@@ -65,6 +65,20 @@ describe("operationFor", () => {
 });
 
 describe("argumentsFor", () => {
+  it("stages release builds where composition reads matrix parts", () => {
+    expect(
+      argumentsFor(
+        "build",
+        inputs({ operation: "release", releaseDir: "out release" }),
+      ),
+    ).toContain("out release/variants/build");
+    expect(
+      argumentsFor(
+        "compose",
+        inputs({ operation: "release", releaseDir: "out release" }),
+      ),
+    ).toContain("out release");
+  });
   it("checks the project in the streaming format, and names no output of its own", () => {
     // A check answers from the project the working directory names, so it carries
     // no `--output` and no `--target`: those are questions about a build's result,
@@ -82,10 +96,10 @@ describe("argumentsFor", () => {
     // the first second is a build somebody can stop.
     expect(argumentsFor("build", inputs())).toEqual([
       "build",
-      "--output",
+      "--output-dir",
       "dist",
       "--release-manifest",
-      "dist/zup-release.json",
+      "zup-release.json",
       "--format",
       "jsonl",
     ]);
@@ -220,7 +234,7 @@ describe("argumentsFor", () => {
     const build = argumentsFor("build", hostile);
     expect(build).toContain("x64; rm -rf /");
     expect(build).toContain("dist/with space");
-    expect(build).toContain("dist/with space/zup-release.json");
+    expect(build).toContain("zup-release.json");
 
     for (const phase of ["build", "compose", "publish"] as Phase[]) {
       const args = argumentsFor(phase, hostile);

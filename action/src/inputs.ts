@@ -115,6 +115,8 @@ const RAW: Readonly<Record<string, string>> = Object.freeze(
       "workflow-artifact-name",
       "artifact-retention-days",
       "attest",
+      "allow-unsigned",
+      "online-revocation",
       "attest-paths",
       "allow-unsafe-publish",
       "receipt",

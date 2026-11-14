@@ -181,6 +181,63 @@ pub struct DistributionVariant {
 }
 
 impl DistributionVariant {
+    pub fn from_manifest(
+        id: &str,
+        manifest: VariantManifest,
+        sources: VariantSources,
+    ) -> Result<Self, ArtifactError> {
+        manifest.validate()?;
+        let profile = TargetProfileId::new(id).map_err(|_| ArtifactError::Invalid)?;
+        Ok(Self {
+            id: id.to_owned(),
+            profile,
+            target: manifest.target,
+            platform: manifest.platform,
+            frontend: manifest.frontend,
+            install: manifest.plan.installer.install.clone(),
+            application: manifest.plan.installer.app.clone(),
+            plan: manifest.plan,
+            requirements: manifest.requirements,
+            runtime: manifest.runtime,
+            preset: manifest.preset,
+            sources,
+            logical_size: manifest.logical_size,
+        })
+    }
+
+    pub fn from_package(
+        id: &str,
+        package: &zup_bundle::Package,
+        sources: VariantSources,
+        natives: &[(MediaType, Vec<u8>)],
+    ) -> Result<Self, ArtifactError> {
+        let mut sources = sources;
+        let mut runtime = None;
+        let mut preset = None;
+        for (kind, bytes) in natives {
+            let descriptor = Descriptor::of(*kind, bytes);
+            sources = sources.with_bytes(descriptor.digest, bytes.clone());
+            match kind {
+                MediaType::Runtime => runtime = Some(descriptor),
+                MediaType::Preset => preset = Some(descriptor),
+                _ => return Err(ArtifactError::Invalid),
+            }
+        }
+        let plan = package.plan().clone();
+        let manifest = VariantManifest {
+            schema: VARIANT_MANIFEST_SCHEMA,
+            required_features: crate::index::FEATURE_VARIANT_MANIFESTS,
+            target: plan.installer.target,
+            platform: Platform::from_target(&plan.installer.target),
+            frontend: plan.installer.frontend,
+            logical_size: logical_size(&plan, runtime.as_ref(), preset.as_ref()),
+            plan,
+            runtime,
+            preset,
+            requirements: VariantRequirements::default(),
+        };
+        Self::from_manifest(id, manifest, sources)
+    }
     pub fn resolve(
         config: &zup_core::ResolvedTargetConfig,
         plan: &zup_core::TargetBuildPlan,

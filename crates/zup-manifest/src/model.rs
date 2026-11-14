@@ -249,6 +249,9 @@ pub struct Github {
     /// amount of downstream verification puts that commit back.
     pub create_tag: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Require a recorded build commit matching the remote tag. Defaults to true.
+    pub require_commit: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Replace a differing asset on a draft release.
     pub replace_conflicts: Option<bool>,
 }

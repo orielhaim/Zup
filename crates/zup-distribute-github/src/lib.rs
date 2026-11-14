@@ -12,7 +12,9 @@ mod metrics;
 mod package;
 mod source;
 
-pub use descriptor::{DESCRIPTOR_SCHEMA, FileRef, PackageDescriptor, ShardRef};
+pub use descriptor::{
+    DESCRIPTOR_SCHEMA, FileRef, MAX_DESCRIPTOR_BYTES, PackageDescriptor, ShardRef,
+};
 pub use error::{DistributeError, PackageError};
 pub use layout::{ReleaseLayout, ReleaseRef};
 pub use metrics::{Metrics, MetricsSnapshot};

@@ -31,6 +31,7 @@ import {
   releaseManifestPath,
 } from "./phases.js";
 import { UnsupportedRunnerError } from "./platform.js";
+import { releaseSource } from "./provenance.js";
 import type { GithubContext, Log } from "./ports.js";
 import {
   type AutomationResult,
@@ -301,7 +302,11 @@ async function execute(
       if (phase === "attest") {
         attestation = await attest(inputs, log, filesystem);
       }
-      if (producesArtifacts(phase) && inputs.uploadWorkflowArtifacts) {
+      if (
+        producesArtifacts(phase) &&
+        inputs.uploadWorkflowArtifacts &&
+        (inputs.operation !== "release" || phase === "finalize")
+      ) {
         await upload(inputs, tool, log, github, filesystem, results.get(phase));
       }
     } catch (error) {
@@ -607,7 +612,18 @@ async function attest(
   log.info(
     `attesting ${subjects.length} subject${subjects.length === 1 ? "" : "s"}`,
   );
-  await new ToolkitAttestor().attest(subjects);
+  if (inputs.token === undefined) {
+    throw new InputError(
+      "github-token",
+      "attestation storage requires a GitHub API credential",
+      "Supply a token with attestations:write; the toolkit obtains its OIDC signing token separately.",
+    );
+  }
+  await new ToolkitAttestor().attest(
+    subjects,
+    inputs.token,
+    releaseSource(document.source),
+  );
   return { requested: true, performed: true, subjects: subjects.length };
 }
 

@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+mod composed;
+mod inventory;
+
 use zup_automation::{
     Artifact, AutomationResult, ByteCount, Details, LogLevel, Publication, PublishStageDetails,
     StagedPackage,
@@ -14,6 +17,9 @@ pub fn run_stage(
     args: PublishStageCommand,
     toolchain_root: Option<PathBuf>,
 ) -> miette::Result<AutomationResult> {
+    if args.release_dir.is_some() {
+        return composed::run(args);
+    }
     let reporter = Reporter::new(args.format);
     let selection = crate::cli::ProjectSelection {
         manifest: args.manifest.clone(),
@@ -135,15 +141,14 @@ pub fn run_stage(
             stage_thin_installers(&args, &loaded, &borrowed, &tree.root, &resolver, &reporter)?;
     }
     if let Some(directory) = &args.packages {
-        packages = stage_packages(&args, &loaded, &graph, &tree, directory, &reporter)?;
-    }
-    let mut release_manifest = None;
-    if let Some(release_dir) = &args.release_dir {
-        release_manifest = Some(crate::automation::project_path(&compose_release(
-            release_dir,
+        packages = stage_packages(
+            &args,
             &loaded.manifest.app,
+            &graph,
+            &tree,
+            directory,
             &reporter,
-        )?));
+        )?;
     }
     let staged = PublishStageDetails {
         web_root: crate::automation::project_path(&tree.root),
@@ -155,7 +160,7 @@ pub fn run_stage(
         release_digest: Some(tree.release_digest.to_hex()),
         packages,
         thin_installers,
-        release_manifest,
+        release_manifest: None,
     };
     let staged_summary = format!(
         "{} objects · {} variant(s)",
@@ -469,7 +474,7 @@ fn stage_thin_windows(
 
 fn stage_packages(
     args: &PublishStageCommand,
-    loaded: &LoadedProject,
+    application: &zup_core::App,
     graph: &zup_artifact::ArtifactGraph,
     tree: &zup_artifact::WebTree,
     output: &Path,
@@ -511,9 +516,7 @@ fn stage_packages(
     let shard_bytes = args
         .shard_bytes
         .unwrap_or(zup_publish_github::PACKAGE_SHARD_BYTES);
-    let name = loaded
-        .manifest
-        .app
+    let name = application
         .name
         .as_str()
         .chars()
@@ -548,7 +551,7 @@ fn stage_packages(
                 .find(|described| described.id == variant.id)
                 .map(|described| described.target.as_str())
                 .unwrap_or_default(),
-            application: loaded.manifest.app.id.as_str(),
+            application: application.id.as_str(),
             manifest: document,
             catalog: catalog_document,
             blobs: &blobs,
@@ -603,18 +606,31 @@ fn compose_release(
     for entry in entries {
         let directory = entry.path();
         if !directory.is_dir() {
-            continue;
+            return Err(miette::miette!(
+                "matrix collection contains a foreign non-directory entry"
+            ));
         }
-        let description = directory.join(zup_artifact::RELEASE_MANIFEST_NAME);
-        let Ok(bytes) = std::fs::read(&description) else {
-            continue;
-        };
+        let description = inventory::file(&directory, zup_artifact::RELEASE_MANIFEST_NAME)?;
+        let bytes = std::fs::read(&description)
+            .map_err(|e| miette::miette!("matrix release manifest: {e}"))?;
         let part = zup_artifact::ReleaseManifest::parse(&bytes).map_err(|error| {
             crate::failure::error(
                 "zup.publish.variant_description_invalid",
                 format!("`{}`: {error}", description.display()),
             )
         })?;
+        if variants == 0 {
+            composed.source = part.source.clone();
+        } else if composed.source != part.source {
+            return Err(miette::miette!(
+                "matrix artifacts were built from different sources; rebuild all variants"
+            ));
+        }
+        if part.application != *app {
+            return Err(miette::miette!(
+                "matrix artifact belongs to a different application or version"
+            ));
+        }
         for variant in &part.variants {
             composed.add_variant(variant).map_err(|error| {
                 crate::failure::error(
@@ -625,7 +641,24 @@ fn compose_release(
             variants += 1;
         }
         for artifact in &part.artifacts {
-            let path = join_release_path(release_dir, &artifact.path)?;
+            let path = inventory::file(&directory, &artifact.path)?;
+            if measure(&path)? != (artifact.built.size, artifact.built.digest) {
+                return Err(miette::miette!(
+                    "matrix artifact content differs from its build identity"
+                ));
+            }
+            if composed.artifacts.iter().any(|a| a.id == artifact.id) {
+                return Err(miette::miette!(
+                    "duplicate matrix artifact id `{}`",
+                    artifact.id
+                ));
+            }
+            let mut artifact = artifact.clone();
+            artifact.path = format!(
+                "variants/{}/{}",
+                entry.file_name().to_string_lossy(),
+                artifact.path
+            );
             let size = std::fs::metadata(&path)
                 .map(|meta| meta.len())
                 .map_err(|error| {
@@ -648,12 +681,26 @@ fn compose_release(
                     ),
                 ));
             }
-            composed.add_composed(artifact, &path).map_err(|error| {
+            composed.add_composed(&artifact, &path).map_err(|error| {
                 crate::failure::error(
                     "zup.publish.artifact_rejected",
                     format!("`{}`: {error}", path.display()),
                 )
             })?;
+        }
+        for variant in &part.variants {
+            let relative = format!(
+                "runtime/{}{}",
+                variant.id,
+                variant.target.executable_suffix()
+            );
+            if directory.join(&relative).exists() {
+                let input = inventory::file(&directory, &relative)?;
+                let output = release_dir.join(&relative);
+                std::fs::create_dir_all(output.parent().unwrap())
+                    .map_err(|e| miette::miette!("runtime directory: {e}"))?;
+                std::fs::copy(input, output).map_err(|e| miette::miette!("runtime: {e}"))?;
+            }
         }
     }
     if variants == 0 {
@@ -693,15 +740,43 @@ fn compose_release(
     Ok(path)
 }
 
-fn join_release_path(root: &Path, relative: &str) -> miette::Result<PathBuf> {
-    let relative = relative.replace('\\', "/");
-    if relative.starts_with('/') || relative.contains("..") || relative.contains(':') {
-        return Err(crate::failure::error(
-            "zup.publish.path_escapes_release",
-            format!("`{relative}` is not a path inside the release root"),
-        ));
+pub fn build_source(manifest_path: &Path) -> miette::Result<Option<zup_artifact::BuildSource>> {
+    let directory = manifest_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let git = |args: &[&str]| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .current_dir(directory)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let Some(commit) = git(&["rev-parse", "--verify", "HEAD^{commit}"]) else {
+        return Ok(None);
+    };
+    if git(&["status", "--porcelain", "--untracked-files=no"]).is_none_or(|s| !s.is_empty()) {
+        return Ok(None);
     }
-    Ok(root.join(relative))
+    let Some(remote) = git(&["remote", "get-url", "origin"]) else {
+        return Ok(None);
+    };
+    let Some((host, owner, name)) = zup_publish_github::parse_remote_url(&remote) else {
+        return Ok(None);
+    };
+    if !zup_publish::valid_commit(&commit) {
+        return Err(miette::miette!("build source is not a full SHA-1 commit"));
+    }
+    Ok(Some(zup_artifact::BuildSource {
+        commit,
+        repository: format!("{host}/{owner}/{name}"),
+    }))
 }
 
 pub fn run_github(args: PublishGithubCommand) -> miette::Result<AutomationResult> {
@@ -739,11 +814,26 @@ pub fn run_github(args: PublishGithubCommand) -> miette::Result<AutomationResult
                     "Pass a token in GH_TOKEN or GITHUB_TOKEN, or authenticate `gh auth login`.",
                 ));
             }
+            let staged = Staged {
+                release_dir: args.release_dir.clone(),
+                web: args.web.clone(),
+                packages: args.packages.clone(),
+            };
+            let release = read_release(&staged.release_dir)?;
+            check_release_repository(&release, &repository)?;
+            let tag = resolve_tag(
+                &release.application.version.to_string(),
+                &config,
+                args.tag.as_deref(),
+            )?;
+            let products = build_plan(&manifest, &config, &release, &staged, &tag, &LIMITS)?
+                .plan
+                .products()
+                .map_err(|e| miette::miette!("{e}"))?;
             reporter.log(
                 LogLevel::Warning,
                 format!(
-                    "  - no credential: {error}\n  - the plan below is complete; publication was \
-                     not attempted"
+                    "  - no credential: {error}\n  - local inventory verified; remote source and assets were not checked; publication was not attempted"
                 ),
             );
             return Ok(no_credential_result(
@@ -752,6 +842,7 @@ pub fn run_github(args: PublishGithubCommand) -> miette::Result<AutomationResult
                 &args,
                 &repository,
                 error.to_string(),
+                products,
             ));
         }
     };
@@ -766,6 +857,7 @@ pub fn run_github(args: PublishGithubCommand) -> miette::Result<AutomationResult
         prerelease: None,
         receipt: args.receipt.clone(),
         notes_text: args.notes_text.clone(),
+        endpoints: None,
     };
     let report = crate::publish::run(&manifest, &config, &staged, &repository, &token, &options)?;
     reporter.log(LogLevel::Info, report.human());
@@ -836,6 +928,7 @@ fn no_credential_result(
     args: &PublishGithubCommand,
     repository: &zup_publish_github::GithubRepository,
     reason: String,
+    products: Vec<ReleaseProduct>,
 ) -> AutomationResult {
     let tag = crate::publish::preview_tag(manifest, config);
     let summary = format!("Planned a publication to {tag}; nothing was written");
@@ -859,7 +952,15 @@ fn no_credential_result(
             state: zup_automation::Identifier::fixed("planned"),
             url: None,
             immutable: None,
-            assets: Vec::new(),
+            assets: products
+                .into_iter()
+                .map(|p| zup_automation::PublicationAsset {
+                    name: p.name,
+                    size: ByteCount::new(p.size),
+                    digest: Some(zup_automation::Digest::sha256(p.digest.to_hex())),
+                    state: zup_automation::Identifier::fixed("planned"),
+                })
+                .collect(),
             receipt: args
                 .receipt
                 .as_ref()
@@ -914,6 +1015,12 @@ pub struct Options {
     pub prerelease: Option<bool>,
     pub receipt: Option<PathBuf>,
     pub notes_text: Option<String>,
+    pub endpoints: Option<zup_publish_github::ClientEndpoints>,
+}
+
+pub struct PublicationPlan {
+    pub plan: ReleasePlan,
+    pub sources: BTreeMap<String, PathBuf>,
 }
 
 pub fn build_plan(
@@ -923,7 +1030,8 @@ pub fn build_plan(
     staged: &Staged,
     tag: &TagIntent,
     limits: &HostLimits,
-) -> miette::Result<ReleasePlan> {
+) -> miette::Result<PublicationPlan> {
+    release.validate().map_err(|e| miette::miette!("{e}"))?;
     if !release.is_finalized() {
         let unfinalized = release.unfinalized();
         return Err(miette::miette!(
@@ -937,9 +1045,21 @@ pub fn build_plan(
             zup_signing::SIGNING_PLAN_NAME
         ));
     }
+    if config.workflow.signing.is_some()
+        && release.artifacts.iter().any(|a| {
+            a.finalized
+                .as_ref()
+                .is_none_or(|f| !zup_signing::covers_bytes(f.evidence()))
+        })
+    {
+        return Err(miette::miette!(
+            "signing was requested but an installer lacks byte-covering signing evidence; sign and verify the complete release"
+        ));
+    }
     let release_dir = staged.release_dir.as_path();
     let web = staged.web.as_deref();
     let packages = staged.packages.as_deref();
+    let mut sources = BTreeMap::new();
     let mut plan = ReleasePlan::new(
         Application::new(
             release.application.id.clone(),
@@ -948,7 +1068,16 @@ pub fn build_plan(
         ),
         tag.clone(),
     )
-    .with_source(SourceClaim::none());
+    .with_source(SourceClaim {
+        commit: release.source.as_ref().map(|source| source.commit.clone()),
+        require_commit: config.require_commit,
+    });
+
+    if release.application != manifest.app {
+        return Err(miette::miette!(
+            "release belongs to a different application or version"
+        ));
+    }
 
     for artifact in &release.artifacts {
         let path = join_release(release_dir, &artifact.path)?;
@@ -983,92 +1112,170 @@ pub fn build_plan(
         )
         .with_media_type(media_type_for(&artifact.path))
         .serving(std::iter::once(artifact.id.clone()));
+        add_source(&mut sources, &product.name, path)?;
         plan.push(product);
     }
 
-    let manifest_path = release_dir.join(zup_artifact::RELEASE_MANIFEST_NAME);
+    let manifest_path = inventory::file(release_dir, zup_artifact::RELEASE_MANIFEST_NAME)?;
+    let manifest_bytes =
+        std::fs::read(&manifest_path).map_err(|e| miette::miette!("release manifest: {e}"))?;
+    if zup_artifact::ReleaseManifest::parse(&manifest_bytes).map_err(|e| miette::miette!("{e}"))?
+        != *release
+    {
+        return Err(miette::miette!(
+            "release manifest changed while planning publication"
+        ));
+    }
+    add_source(
+        &mut sources,
+        zup_artifact::RELEASE_MANIFEST_NAME,
+        manifest_path.clone(),
+    )?;
     plan.push(
         ReleaseProduct::new(
             zup_artifact::RELEASE_MANIFEST_NAME,
             ProductRole::Manifest,
-            ProductClass::UserFacing,
-            digest_of(&manifest_path)?,
-            size_of(&manifest_path)?,
+            ProductClass::Metadata,
+            zup_core::hash_bytes(&manifest_bytes),
+            manifest_bytes.len() as u64,
         )
         .with_media_type("application/json")
         .serving(["release".to_owned()]),
     );
 
-    if let Some(web) = web
-        && web.is_dir()
-    {
-        for (document, path) in documents(web)? {
-            plan.push(
-                ReleaseProduct::new(
-                    document,
-                    ProductRole::Manifest,
-                    ProductClass::Transport,
-                    digest_of(&path)?,
-                    size_of(&path)?,
+    if let Some(web) = web {
+        for object in &release.objects {
+            let expected_path = zup_acquire::blob_path(&object.identity.digest).to_string();
+            if object.path != expected_path
+                || !matches!(
+                    object.media_type,
+                    zup_artifact::MediaType::Runtime | zup_artifact::MediaType::Preset
                 )
-                .with_media_type("application/json"),
-            );
-        }
-    }
-
-    if let Some(packages) = packages
-        && packages.is_dir()
-    {
-        for (document, path) in package_documents(packages)? {
-            plan.push(
-                ReleaseProduct::new(
-                    document,
-                    ProductRole::Manifest,
-                    ProductClass::Transport,
-                    digest_of(&path)?,
-                    size_of(&path)?,
-                )
-                .with_media_type("application/json"),
-            );
-        }
-        for (name, path) in package_files(packages)? {
+                || object
+                    .variants
+                    .iter()
+                    .any(|id| !release.variants.iter().any(|v| &v.id == id))
+            {
+                return Err(miette::miette!(
+                    "invalid native object identity or variant relationship"
+                ));
+            }
+            let path = inventory::file(web, &object.path)?;
+            if measure(&path)? != (object.identity.size, object.identity.digest) {
+                return Err(miette::miette!(
+                    "native object differs from the release inventory"
+                ));
+            }
+            let name = zup_publish::blob_name(&object.identity.digest);
+            add_source(&mut sources, &name, path)?;
             plan.push(
                 ReleaseProduct::new(
                     name,
                     ProductRole::Auxiliary,
-                    ProductClass::Transport,
+                    ProductClass::NativeImage,
+                    object.identity.digest,
+                    object.identity.size,
+                )
+                .serving(object.variants.clone()),
+            );
+        }
+        for recorded in &release.documents {
+            let path = inventory::file(web, &recorded.path)?;
+            let identity = measure(&path)?;
+            if identity != (recorded.identity.size, recorded.identity.digest) {
+                return Err(miette::miette!(
+                    "web document differs from the release inventory"
+                ));
+            }
+            let parsed = recorded
+                .path
+                .parse::<zup_acquire::RelativeContentPath>()
+                .map_err(|e| miette::miette!("{e}"))?;
+            let document = zup_publish::asset_name(&parsed).map_err(|e| miette::miette!("{e}"))?;
+            add_source(&mut sources, &document, path.clone())?;
+            plan.push(
+                ReleaseProduct::new(
+                    document,
+                    ProductRole::Manifest,
+                    ProductClass::Metadata,
                     digest_of(&path)?,
                     size_of(&path)?,
                 )
-                .with_media_type("application/vnd.zup.package.v1"),
+                .with_media_type("application/json"),
             );
         }
+        let actual = documents(web)?
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = release
+            .documents
+            .iter()
+            .map(|d| web.join(&d.path))
+            .collect();
+        if actual != expected {
+            return Err(miette::miette!(
+                "web documents differ from the finite release inventory; restage the web tree"
+            ));
+        }
+        inventory::web_closure(release, web)?;
+    } else if !release.documents.is_empty() || !release.objects.is_empty() {
+        return Err(miette::miette!(
+            "release requires staged web documents; pass --web"
+        ));
     }
 
-    if let Some(origin) = content_origin(manifest, config) {
-        plan = plan.with_origins(vec![origin]);
+    if let Some(packages) = packages {
+        for (product, path) in inventory::packages(release, packages, web)? {
+            add_source(&mut sources, &product.name, path)?;
+            plan.push(product);
+        }
+    } else if !release.transport.is_empty() {
+        return Err(miette::miette!(
+            "release requires its staged transport packages; pass --packages"
+        ));
     }
+
+    let required = plan
+        .products()
+        .map_err(|e| miette::miette!("{e}"))?
+        .into_iter()
+        .map(|p| p.name)
+        .filter(|name| name != zup_artifact::RELEASE_MANIFEST_NAME)
+        .collect();
+    plan.manifests
+        .iter_mut()
+        .find(|p| p.name == zup_artifact::RELEASE_MANIFEST_NAME)
+        .expect("release manifest product")
+        .requires = required;
     plan.preflight(limits)
         .map_err(|error| miette::miette!("{error}"))?;
-    Ok(plan)
+    Ok(PublicationPlan { plan, sources })
 }
 
-fn content_origin(
-    _manifest: &zup_manifest::Manifest,
-    config: &PublishConfig,
-) -> Option<zup_publish::ContentOrigin> {
-    let repository = config.repository.as_ref()?;
-    let host = config.install();
-    let path = format!("{}/{}", repository.owner, repository.name);
-    let base = host.latest_download_url(&path, "");
-    Some(zup_publish_github::content_origin(
-        config.distribution,
-        base,
-    ))
+fn add_source(
+    sources: &mut BTreeMap<String, PathBuf>,
+    name: &str,
+    path: PathBuf,
+) -> miette::Result<()> {
+    if sources.insert(name.to_owned(), path).is_some() {
+        return Err(miette::miette!("ambiguous release asset `{name}`"));
+    }
+    Ok(())
 }
 
 fn documents(web: &Path) -> miette::Result<Vec<(String, PathBuf)>> {
     let mut out = Vec::new();
+    for entry in std::fs::read_dir(web).map_err(|e| miette::miette!("web directory: {e}"))? {
+        let entry = entry.map_err(|e| miette::miette!("web directory: {e}"))?;
+        if !["metadata", "releases", "documents", "blobs", "tuf-input"]
+            .contains(&entry.file_name().to_string_lossy().as_ref())
+        {
+            return Err(miette::miette!(
+                "unreferenced file or namespace in the staged web tree"
+            ));
+        }
+    }
     for namespace in ["metadata", "releases", "documents"] {
         collect_documents(web, &web.join(namespace), &mut out)?;
     }
@@ -1113,7 +1320,9 @@ fn collect_documents(
             continue;
         }
         let Some(parsed) = relative.parse::<zup_acquire::RelativeContentPath>().ok() else {
-            continue;
+            return Err(miette::miette!(
+                "unrecognized staged document path `{relative}`"
+            ));
         };
         let name =
             zup_publish::asset_name(&parsed).map_err(|reason| miette::miette!("{reason}"))?;
@@ -1122,58 +1331,12 @@ fn collect_documents(
     Ok(())
 }
 
-fn package_documents(packages: &Path) -> miette::Result<Vec<(String, PathBuf)>> {
-    let mut out = Vec::new();
-    for (name, path) in package_files(packages)? {
-        let Some(stem) = name.strip_suffix(".json") else {
-            continue;
-        };
-        let variant = stem
-            .rsplit_once('-')
-            .map(|(_, variant)| variant)
-            .unwrap_or(stem);
-        out.push((
-            zup_publish::document_name(&zup_publish::DocumentKind::Package { variant }),
-            path,
-        ));
-    }
-    out.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(out)
-}
-
-fn package_files(packages: &Path) -> miette::Result<Vec<(String, PathBuf)>> {
-    let mut out = Vec::new();
-    let entries = std::fs::read_dir(packages)
-        .map_err(|error| miette::miette!("`{}`: {error}", packages.display()))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|error| miette::miette!("`{}`: {error}", packages.display()))?
-            .path();
-        if !path.is_file() {
-            continue;
-        }
-        let file = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| miette::miette!("`{}` has no file name", path.display()))?;
-        if !file.ends_with(".zup") {
-            continue;
-        }
-        zup_publish::check_asset_name(file).map_err(|reason| {
-            miette::miette!("`{file}` cannot be a release asset name: {reason}")
-        })?;
-        out.push((file.to_owned(), path));
-    }
-    out.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(out)
-}
-
 pub fn resolve_tag(
     version: &str,
     config: &PublishConfig,
     override_tag: Option<&str>,
 ) -> miette::Result<TagIntent> {
-    if let Some(tag) = override_tag {
+    if let Some(tag) = override_tag.or(config.tag.as_deref()) {
         if tag.trim().is_empty() {
             return Err(miette::miette!("`--tag` was given an empty tag"));
         }
@@ -1187,9 +1350,6 @@ pub fn resolve_tag(
         } else {
             TagIntent::required(tag.trim())
         });
-    }
-    if let Some(tag) = &config.tag {
-        return Ok(TagIntent::required(tag));
     }
     let policy = config.tag_policy();
     let tag = policy
@@ -1235,6 +1395,24 @@ fn failed(error: GithubError) -> miette::Report {
     miette::miette!("{error}")
 }
 
+fn check_release_repository(
+    release: &zup_artifact::ReleaseManifest,
+    repository: &GithubRepository,
+) -> miette::Result<()> {
+    if let Some(source) = &release.source
+        && !source.repository.eq_ignore_ascii_case(&format!(
+            "{}/{}",
+            repository.host.host,
+            repository.path()
+        ))
+    {
+        return Err(miette::miette!(
+            "release source repository differs from publication repository; rebuild from the intended repository"
+        ));
+    }
+    Ok(())
+}
+
 pub fn run(
     manifest: &zup_manifest::Manifest,
     config: &PublishConfig,
@@ -1244,12 +1422,19 @@ pub fn run(
     options: &Options,
 ) -> miette::Result<zup_publish::PublishReport> {
     let release_dir = staged.release_dir.as_path();
-    let web = staged.web.as_deref();
-    let packages = staged.packages.as_deref();
     let release = read_release(release_dir)?;
+    check_release_repository(&release, repository)?;
     let tag = resolve_tag(&release.application.version.to_string(), config, None)?;
-    let plan = build_plan(manifest, config, &release, staged, &tag, &LIMITS)?;
-    let sources = locate_sources(&plan, release_dir, web, packages)?;
+    let PublicationPlan { mut plan, sources } =
+        build_plan(manifest, config, &release, staged, &tag, &LIMITS)?;
+    if config.distribution == zup_manifest::DistributionHost::Github {
+        plan.content_origins = vec![zup_publish_github::content_origin(
+            config.distribution,
+            repository
+                .host
+                .download_url(&repository.path(), &tag.tag, ""),
+        )];
+    }
 
     let mut request = PublishRequest::new(plan);
     request.sources = sources;
@@ -1267,6 +1452,7 @@ pub fn run(
     request.prerelease = options.prerelease.unwrap_or(config.prerelease);
     request.replace_conflicts = config.replace_conflicts;
     request.receipt = options.receipt.clone();
+    request.endpoints = options.endpoints.clone();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1274,95 +1460,6 @@ pub fn run(
     runtime
         .block_on(publish(repository, token, &request))
         .map_err(failed)
-}
-
-fn locate_sources(
-    plan: &ReleasePlan,
-    release_dir: &Path,
-    web: Option<&Path>,
-    packages: Option<&Path>,
-) -> miette::Result<BTreeMap<String, PathBuf>> {
-    let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for role in ProductRole::ALL {
-        for product in plan.role(role) {
-            if by_name.contains_key(&product.name) {
-                continue;
-            }
-            let path = match product.name.as_str() {
-                zup_artifact::RELEASE_MANIFEST_NAME => {
-                    release_dir.join(zup_artifact::RELEASE_MANIFEST_NAME)
-                }
-                name if name.ends_with(".zup") || name.contains(".zup.") => {
-                    let packages = packages.ok_or_else(|| {
-                        miette::miette!(
-                            "`{name}` is a transport package but no package directory was given"
-                        )
-                    })?;
-                    packages.join(name)
-                }
-                name => {
-                    let mut candidates = vec![release_dir.join(name)];
-                    if let Some(web) = web {
-                        candidates.push(web.join(name));
-                    }
-                    match candidates.into_iter().find(|path| path.is_file()) {
-                        Some(found) => found,
-                        None => search_tree(web, name, &product.name)?,
-                    }
-                }
-            };
-            if !path.is_file() {
-                return Err(miette::miette!(
-                    "the release plan names `{}` but `{}` does not exist",
-                    product.name,
-                    path.display()
-                ));
-            }
-            by_name.insert(product.name.clone(), path);
-        }
-    }
-    Ok(by_name)
-}
-
-fn search_tree(web: Option<&Path>, asset: &str, original: &str) -> miette::Result<PathBuf> {
-    let Some(web) = web else {
-        return Err(miette::miette!(
-            "the release plan names `{original}`, which is not in the release directory"
-        ));
-    };
-    let mut found = None;
-    let mut stack = vec![web.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if found.is_some() {
-                continue;
-            }
-            let Ok(relative) = path.strip_prefix(web) else {
-                continue;
-            };
-            let relative = relative.to_string_lossy().replace('\\', "/");
-            if relative.starts_with("blobs/") {
-                continue;
-            }
-            let Ok(parsed) = relative.parse::<zup_acquire::RelativeContentPath>() else {
-                continue;
-            };
-            if zup_publish::asset_name(&parsed).ok().as_deref() == Some(asset) {
-                found = Some(path);
-            }
-        }
-    }
-    found.ok_or_else(|| {
-        miette::miette!("the release plan names `{original}`, which is not in the staged tree")
-    })
 }
 
 pub fn matrix(manifest: &zup_manifest::Manifest) -> miette::Result<Vec<MatrixTarget>> {
@@ -1382,6 +1479,7 @@ pub fn workflow(
 ) -> miette::Result<zup_publish_github::Freshness> {
     let policy: &WorkflowPolicy = &config.workflow;
     let targets = matrix(manifest)?;
+    zup_publish_github::validate_policy(policy, &targets).map_err(|e| miette::miette!("{e}"))?;
     Ok(zup_publish_github::check(root, policy, &targets))
 }
 
@@ -1389,10 +1487,10 @@ pub fn render_workflow(
     manifest: &zup_manifest::Manifest,
     config: &PublishConfig,
 ) -> miette::Result<String> {
-    Ok(zup_publish_github::generate(
-        &config.workflow,
-        &matrix(manifest)?,
-    ))
+    zup_publish_github::validate_policy(&config.workflow, &matrix(manifest)?)
+        .map_err(|e| miette::miette!("{e}"))?;
+    zup_publish_github::generate(&config.workflow, &matrix(manifest)?)
+        .map_err(|e| miette::miette!("{e}"))
 }
 
 pub fn preview_tag(manifest: &zup_manifest::Manifest, config: &PublishConfig) -> String {
@@ -1424,13 +1522,7 @@ fn media_type_for(path: &str) -> &'static str {
 }
 
 fn join_release(root: &Path, relative: &str) -> miette::Result<PathBuf> {
-    let relative = relative.replace('\\', "/");
-    if relative.starts_with('/') || relative.contains("..") || relative.contains(':') {
-        return Err(miette::miette!(
-            "`{relative}` is not a path inside the release root"
-        ));
-    }
-    Ok(root.join(relative))
+    inventory::file(root, relative)
 }
 
 fn digest_of(path: &Path) -> miette::Result<zup_core::Sha256Digest> {
@@ -1441,7 +1533,6 @@ fn digest_of(path: &Path) -> miette::Result<zup_core::Sha256Digest> {
         .map_err(|error| miette::miette!("`{}`: {error}", path.display()))
 }
 
-/// from another describes a file that never existed, and the check above is only
 fn measure(path: &Path) -> miette::Result<(u64, zup_core::Sha256Digest)> {
     let file = std::fs::File::open(path)
         .map_err(|error| miette::miette!("`{}`: {error}", path.display()))?;

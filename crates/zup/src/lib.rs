@@ -15,6 +15,8 @@ pub mod plugin;
 pub mod preset;
 pub mod preview;
 pub mod project;
+#[cfg(test)]
+mod publication_tests;
 mod publish;
 mod signing;
 mod toolchain;

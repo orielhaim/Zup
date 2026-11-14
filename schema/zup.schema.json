@@ -1002,6 +1002,9 @@
       "description": "GitHub Releases as a publish target.\n\nThere is deliberately no field for a credential. A manifest is committed and\nshared, so a token in one reaches every fork of the project; the credential\ncomes from the environment or from `gh`, and this type cannot hold it.",
       "type": "object",
       "properties": {
+        "require_commit": {
+          "type": ["boolean", "null"]
+        },
         "repository": {
           "description": "`owner/name`, or `host/owner/name` for GitHub Enterprise.",
           "type": "string"

@@ -63,8 +63,10 @@ pub fn write(
         request.manifest,
         request.catalog,
     );
+    let mut logical = sha2::Sha256::new();
     let metadata = writer
         .write(header, shard_bytes, |index, bytes| {
+            logical.update(bytes);
             let staged = staged_path(output, index);
             write_atomic(&staged, bytes)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -86,6 +88,11 @@ pub fn write(
             return Err(miette::miette!(
                 "the writer reported piece {index} as {} bytes and wrote {written}",
                 shard.size
+            ));
+        }
+        if written > shard_bytes {
+            return Err(miette::miette!(
+                "transport piece {index} is {written} bytes, above the {shard_bytes} byte shard limit; increase the limit or reduce indivisible compressed frames"
             ));
         }
         let piece_name = if sharded {
@@ -117,7 +124,7 @@ pub fn write(
         application: request.application.to_owned(),
         package: FileRef {
             name: name.clone(),
-            digest: package_digest(&shard_refs),
+            digest: Sha256Digest::from_hasher(logical),
             size: total,
         },
         shards: shard_refs,
@@ -148,17 +155,6 @@ pub fn write(
         blob_count: descriptor.blob_count,
         logical_size: descriptor.logical_size,
     })
-}
-
-fn package_digest(shards: &[ShardRef]) -> Sha256Digest {
-    if shards.len() == 1 {
-        return shards[0].digest;
-    }
-    let mut hasher = sha2::Sha256::new();
-    for shard in shards {
-        hasher.update(shard.digest.as_bytes());
-    }
-    Sha256Digest::from_hasher(hasher)
 }
 
 fn staged_path(output: &Path, index: usize) -> PathBuf {

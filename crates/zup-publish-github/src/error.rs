@@ -2,6 +2,8 @@ use zup_publish::PlanError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GithubError {
+    #[error("source identity: {reason}")]
+    Source { reason: String },
     #[error("github endpoint: {reason}")]
     Host { reason: String },
 

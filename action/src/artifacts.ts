@@ -31,6 +31,7 @@ export interface ReleaseManifestDocument {
   schema: number;
   application: { id: string; name: string; version: string };
   root: string;
+  source?: unknown;
   variants: {
     id: string;
     target: string;

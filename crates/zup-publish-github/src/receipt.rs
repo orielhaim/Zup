@@ -15,6 +15,8 @@ pub struct GithubAsset {
     pub state: ProductState,
     pub digest: Sha256Digest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_digest: Option<Sha256Digest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_url: Option<String>,
 }
 
@@ -31,6 +33,10 @@ pub struct GithubReceipt {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_commitish: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::api::ResolvedTag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_commit: Option<String>,
     pub assets: Vec<GithubAsset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub immutable: Option<bool>,
@@ -51,6 +57,8 @@ impl GithubReceipt {
             state: PublicationState::Planned,
             url: None,
             target_commitish: None,
+            source: None,
+            claimed_commit: None,
             assets: Vec::new(),
             immutable: None,
             attestation: None,

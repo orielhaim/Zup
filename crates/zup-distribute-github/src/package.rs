@@ -443,6 +443,13 @@ impl Writer {
                 });
             }
             if encoded.len() as u64 == metadata_len {
+                if let Some(shard) = metadata.shards.iter().find(|s| s.size > shard_bytes) {
+                    return Err(PackageError::ShardLimit {
+                        index: shard.index,
+                        size: shard.size,
+                        limit: shard_bytes,
+                    });
+                }
                 let head = Header {
                     schema: SCHEMA,
                     required_features: FEATURE_FRAMES,

@@ -1,6 +1,10 @@
 use zup_acquire::RelativeContentPath;
 use zup_core::Sha256Digest;
 
+pub fn blob_name(digest: &Sha256Digest) -> String {
+    format!("zup-blob-{}.bin", digest.to_hex())
+}
+
 pub const ASSET_NAME_MAX: usize = 255;
 pub const DOCUMENT_PREFIX: &str = "zup-";
 pub const DOCUMENT_SUFFIX: &str = ".json";

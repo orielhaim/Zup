@@ -794,6 +794,36 @@ impl Package {
         )
     }
 
+    pub fn copy_verified_blob(
+        &self,
+        digest: &Sha256Digest,
+        output: &mut impl Write,
+    ) -> Result<u64, PackageError> {
+        let blob = self
+            .metadata
+            .blobs
+            .iter()
+            .find(|b| &b.digest == digest)
+            .ok_or(PackageError::Invalid)?;
+        let mut input = self.open_blob(blob)?.take(blob.size.saturating_add(1));
+        let mut hash = Sha256::new();
+        let mut size = 0u64;
+        let mut buffer = [0u8; 65536];
+        loop {
+            let count = input.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+            output.write_all(&buffer[..count])?;
+            size += count as u64;
+        }
+        if size != blob.size || Sha256Digest::from_hasher(hash) != *digest {
+            return Err(PackageError::Payload(digest.to_string()));
+        }
+        Ok(size)
+    }
+
     fn verify_blob(&self, blob: &BlobIndex, limit: u64) -> Result<(), PackageError> {
         let decoder = self.open_blob(blob)?;
         let (size, digest) = hash_reader(decoder.take(limit.saturating_add(1)))?;

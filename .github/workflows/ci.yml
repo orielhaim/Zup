@@ -4,6 +4,8 @@ on:
   push:
     branches: [master]
     paths:
+      - "action.yml"
+      - "action/scripts/validate-workflow.ts"
       - "**/*.rs"
       - "**/*.wit"
       - "native/**"
@@ -19,6 +21,8 @@ on:
       - ".github/workflows/**"
   pull_request:
     paths:
+      - "action.yml"
+      - "action/scripts/validate-workflow.ts"
       - "**/*.rs"
       - "**/*.wit"
       - "native/**"
@@ -96,6 +100,14 @@ jobs:
           portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
           linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
           printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint@1.7.12
 
       - name: Linux dependencies
         if: runner.os == 'Linux'

@@ -384,6 +384,8 @@ pub struct BuildCommand {
     pub format: OutputArg,
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub output: Vec<PathBuf>,
+    #[arg(long, conflicts_with = "output", value_hint = ValueHint::DirPath)]
+    pub output_dir: Option<PathBuf>,
     #[arg(long, value_hint = ValueHint::FilePath, hide = true)]
     pub runtime: Vec<PathBuf>,
     #[arg(long, value_hint = ValueHint::FilePath, hide = true)]

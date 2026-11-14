@@ -148,10 +148,30 @@ fn build_variants(
         &args.runtime,
         targets,
     )?;
+    let supplied = match &args.output_dir {
+        Some(directory) => build_inputs::resolve_outputs(
+            build_inputs::InputMode::Preflight,
+            Overwrite::from(args.force),
+            &[],
+            &loaded.manifest_path,
+            &loaded.manifest.app,
+            targets,
+            &runtimes,
+        )?
+        .into_iter()
+        .map(|slot| {
+            slot.path
+                .file_name()
+                .map(|name| directory.join(name))
+                .ok_or_else(|| miette::miette!("derived output has no file name"))
+        })
+        .collect::<miette::Result<Vec<_>>>()?,
+        None => args.output.clone(),
+    };
     let outputs = build_inputs::resolve_outputs(
         build_inputs::InputMode::Enforce,
         Overwrite::from(args.force),
-        &args.output,
+        &supplied,
         &loaded.manifest_path,
         &loaded.manifest.app,
         targets,
@@ -185,6 +205,7 @@ fn build_variants(
     }
 
     let mut release = crate::artifacts::release_manifest(&loaded.manifest.app);
+    release.source = crate::publish::build_source(&loaded.manifest_path)?;
     for (index, ((target_plan, config, runtime, plugin_artifacts), output)) in
         prepared.iter().zip(&outputs).enumerate()
     {
@@ -420,9 +441,14 @@ fn build_artifacts(
         .iter()
         .map(|(id, _, _, file_name)| (id.clone(), file_name.clone()))
         .collect::<Vec<_>>();
-    let outputs = crate::artifacts::resolve_outputs(&args.output, &named, &loaded.manifest_path)?;
+    let supplied = match &args.output_dir {
+        Some(directory) => named.iter().map(|(_, name)| directory.join(name)).collect(),
+        None => args.output.clone(),
+    };
+    let outputs = crate::artifacts::resolve_outputs(&supplied, &named, &loaded.manifest_path)?;
 
     let mut release = crate::artifacts::release_manifest(app);
+    release.source = crate::publish::build_source(&loaded.manifest_path)?;
     for ((id, profile, indices, _), output) in jobs.iter().zip(&outputs) {
         let relative = release_relative(&outputs, output)?;
         reporter.phase("compose", format!("→ Composing artifact {id}"));
@@ -780,7 +806,7 @@ fn finish(
     })
 }
 
-fn signing_plan(
+pub(crate) fn signing_plan(
     release: &zup_artifact::ReleaseManifest,
     root: &Path,
     subject: Option<&str>,

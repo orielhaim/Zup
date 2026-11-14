@@ -26,6 +26,7 @@ use crate::error::DistributeError;
 
 /// Version of the package descriptor shape.
 pub const DESCRIPTOR_SCHEMA: u32 = 1;
+pub const MAX_DESCRIPTOR_BYTES: usize = 1 << 20;
 
 /// A file's identity, as a descriptor records it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +89,12 @@ impl PackageDescriptor {
 
     /// Read a descriptor, bounded, and check its own claims.
     pub fn parse(bytes: &[u8], expected: Option<Sha256Digest>) -> Result<Self, DistributeError> {
+        if bytes.len() > MAX_DESCRIPTOR_BYTES {
+            return Err(DistributeError::Untrusted {
+                name: "package descriptor".to_owned(),
+                reason: "descriptor exceeds one MiB".to_owned(),
+            });
+        }
         if let Some(expected) = expected {
             let found = zup_core::hash_bytes(bytes);
             if found != expected {
@@ -146,8 +153,27 @@ impl PackageDescriptor {
                 reason: "it names no pieces".to_owned(),
             });
         }
+        if !self.package.name.ends_with(".zup")
+            || (!self.is_sharded() && self.package.digest != self.shards[0].digest)
+        {
+            return Err(DistributeError::Untrusted {
+                name: "package descriptor".to_owned(),
+                reason: "invalid logical package identity".to_owned(),
+            });
+        }
         let mut cursor = 0u64;
         for (index, shard) in self.shards.iter().enumerate() {
+            let expected = if self.is_sharded() {
+                zup_publish::shard_name(&self.package.name, index)
+            } else {
+                self.package.name.clone()
+            };
+            if shard.name != expected || shard.size == 0 {
+                return Err(DistributeError::Untrusted {
+                    name: "package descriptor".to_owned(),
+                    reason: "noncanonical or empty shard".to_owned(),
+                });
+            }
             if usize::try_from(shard.index).ok() != Some(index) {
                 return Err(DistributeError::Untrusted {
                     name: "package descriptor".to_owned(),
@@ -169,7 +195,12 @@ impl PackageDescriptor {
                     reason,
                 }
             })?;
-            cursor = cursor.saturating_add(shard.size);
+            cursor = cursor
+                .checked_add(shard.size)
+                .ok_or_else(|| DistributeError::Untrusted {
+                    name: "package descriptor".to_owned(),
+                    reason: "package size overflow".to_owned(),
+                })?;
         }
         if cursor != self.package.size {
             return Err(DistributeError::Untrusted {
@@ -180,7 +211,7 @@ impl PackageDescriptor {
                 ),
             });
         }
-        if self.package.name.is_empty() {
+        if zup_publish::check_asset_name(&self.package.name).is_err() {
             return Err(DistributeError::Untrusted {
                 name: "package descriptor".to_owned(),
                 reason: "it names no package".to_owned(),

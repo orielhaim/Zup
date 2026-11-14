@@ -19,6 +19,20 @@ const MAX_JSON_BYTES: u64 = 1 << 20;
 
 const MAX_REDIRECTS: usize = 5;
 
+fn source_error(reason: &str) -> GithubError {
+    GithubError::Source {
+        reason: reason.to_owned(),
+    }
+}
+
+fn git_sha(value: &Json) -> Result<String, GithubError> {
+    let sha = value["sha"]
+        .as_str()
+        .filter(|sha| zup_publish::valid_commit(sha))
+        .ok_or_else(|| source_error("GitHub returned a malformed object SHA"))?;
+    Ok(sha.to_owned())
+}
+
 pub struct GithubClient {
     host: GithubHost,
     client: HttpClient,
@@ -32,6 +46,14 @@ pub struct GithubClient {
 pub struct ClientEndpoints {
     pub api: zup_acquire_http::Origin,
     pub upload: zup_acquire_http::Origin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedTag {
+    pub reference: String,
+    pub object: String,
+    pub commit: String,
 }
 
 impl GithubClient {
@@ -106,7 +128,8 @@ impl GithubClient {
         let url = self.api_url(&format!("repos/{}", self.repository))?;
         let value = self.get_json(&url).await?;
         Ok(RepositoryInfo {
-            full_name: string_field(&value, "full_name").unwrap_or_else(|| self.repository.clone()),
+            full_name: string_field(&value, "full_name")
+                .ok_or_else(|| source_error("GitHub did not identify the repository"))?,
             private: value["private"].as_bool().unwrap_or(false),
             archived: value["archived"].as_bool().unwrap_or(false),
             default_branch: string_field(&value, "default_branch").unwrap_or_default(),
@@ -125,6 +148,87 @@ impl GithubClient {
             Ok(value) => Ok(Some(Release::from_json(value)?)),
             Err(GithubError::NotFound { .. }) => Ok(None),
             Err(error) => Err(error),
+        }
+    }
+
+    pub async fn tag(&self, tag: &str) -> Result<Option<ResolvedTag>, GithubError> {
+        if !zup_publish::valid_tag(tag) {
+            return Err(source_error("invalid tag name"));
+        }
+        let mut url = self.api_url(&format!("repos/{}/git/ref/tags", self.repository))?;
+        url.path_segments_mut()
+            .map_err(|()| source_error("invalid API URL"))?
+            .push(tag);
+        let value = match self.get_json(&url).await {
+            Ok(value) => value,
+            Err(GithubError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let reference = format!("refs/tags/{tag}");
+        if value["ref"].as_str() != Some(&reference) {
+            return Err(source_error("GitHub returned a different or ambiguous ref"));
+        }
+        let mut object = value["object"].clone();
+        let root = git_sha(&object)?;
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..16 {
+            let sha = git_sha(&object)?;
+            if !visited.insert(sha.clone()) {
+                return Err(source_error("cyclic annotated tag"));
+            }
+            match object["type"].as_str() {
+                Some("commit") => {
+                    self.prove_commit(&sha).await?;
+                    return Ok(Some(ResolvedTag {
+                        reference,
+                        object: root,
+                        commit: sha,
+                    }));
+                }
+                Some("tag") => {
+                    let url = self.api_url(&format!("repos/{}/git/tags/{sha}", self.repository))?;
+                    let tag_object = self.get_json(&url).await?;
+                    if git_sha(&tag_object)? != sha {
+                        return Err(source_error("tag object identity mismatch"));
+                    }
+                    object = tag_object["object"].clone();
+                }
+                _ => return Err(source_error("tag does not resolve to a commit")),
+            }
+        }
+        Err(source_error("annotated tag nesting exceeds 16"))
+    }
+
+    pub async fn prove_commit(&self, commit: &str) -> Result<(), GithubError> {
+        if !zup_publish::valid_commit(commit) {
+            return Err(source_error("expected a full 40-hex SHA"));
+        }
+        let url = self.api_url(&format!("repos/{}/git/commits/{commit}", self.repository))?;
+        if git_sha(&self.get_json(&url).await?)? != commit {
+            return Err(source_error("repository commit identity mismatch"));
+        }
+        Ok(())
+    }
+
+    pub async fn create_tag(&self, tag: &str, commit: &str) -> Result<ResolvedTag, GithubError> {
+        self.prove_commit(commit).await?;
+        let url = self.api_url(&format!("repos/{}/git/refs", self.repository))?;
+        let body = serde_json::to_vec(
+            &serde_json::json!({"ref": format!("refs/tags/{tag}"), "sha": commit}),
+        )
+        .map_err(|e| source_error(&e.to_string()))?;
+        let acknowledgment = self.send_json(&url, reqwest::Method::POST, body).await;
+        // A lost response can follow a committed create. Only exact readback permits continuation.
+        match self.tag(tag).await? {
+            Some(resolved) if resolved.commit == commit && resolved.object == commit => {
+                Ok(resolved)
+            }
+            Some(_) => Err(source_error(
+                "tag collision during creation; no ref was overwritten",
+            )),
+            None => Err(acknowledgment.err().unwrap_or_else(|| {
+                source_error("tag creation has no readback; retry after inspecting the remote ref")
+            })),
         }
     }
 
@@ -194,7 +298,16 @@ impl GithubClient {
                     reason: error.to_string(),
                 })?;
             let count = page_items.len();
-            all.extend(page_items.into_iter().filter_map(Asset::from_json));
+            all.extend(
+                page_items
+                    .into_iter()
+                    .map(|value| {
+                        Asset::from_json(value).ok_or_else(|| GithubError::Decode {
+                            reason: "GitHub returned a malformed asset inventory".to_owned(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
             if count < 100 {
                 return Ok(all);
             }
@@ -280,7 +393,7 @@ impl GithubClient {
             .header("Accept", ACCEPT_JSON)
             .header("Content-Type", "application/json")
             .with_body(body);
-        let response = self.exchange(request, self.max_attempts).await?;
+        let response = self.exchange(request, 1).await?;
         if !response.status().is_success() {
             return Err(status_error(response, url).await);
         }

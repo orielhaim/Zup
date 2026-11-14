@@ -11,6 +11,7 @@ pub struct PublishConfig {
     pub tag_prefix: Option<String>,
     pub tag: Option<String>,
     pub create_tag: bool,
+    pub require_commit: bool,
     pub replace_conflicts: bool,
     pub draft: bool,
     pub prerelease: bool,
@@ -29,6 +30,7 @@ impl PublishConfig {
             tag_prefix: None,
             tag: None,
             create_tag: false,
+            require_commit: true,
             replace_conflicts: false,
             draft: false,
             prerelease: false,
@@ -77,6 +79,7 @@ impl PublishConfig {
         config.draft = github.draft.unwrap_or(false);
         config.prerelease = github.prerelease.unwrap_or(false);
         config.create_tag = github.create_tag.unwrap_or(false);
+        config.require_commit = github.require_commit.unwrap_or(true);
         config.replace_conflicts = github.replace_conflicts.unwrap_or(false);
         if let Some(tag) = &github.tag {
             config.tag_prefix = tag.prefix.clone();
