@@ -1,23 +1,13 @@
-//! Host filesystem seam for the verified content cache.
+//! Publication and link checks for the disposable content cache.
 //!
-//! The cache must publish atomically and must refuse to traverse links. How
-//! strongly a host can honour that is a property of the platform, so the cache
-//! takes an injected [`CacheFileSystem`] rather than assuming one.
-//!
-//! [`PortableCacheFileSystem`] is the default for development, tests, and
-//! non-Windows hosts. Production Windows hosts inject an adapter that publishes
-//! through `MoveFileExW` and rejects reparse points.
+//! These path-based checks do not establish filesystem authority. Callers must
+//! access untrusted cache paths under the requesting user's permissions.
 
 use std::path::Path;
 
-/// The filesystem guarantees the content cache depends on.
-///
-/// Neither operation may follow a link. The cache writes below a root it has
-/// already cleared of links, so a link met at any stage means the read or the
-/// write would leave the root.
+/// Host operations used during cache publication and validation.
 pub trait CacheFileSystem: Send + Sync {
-    /// Publish `from` at `to`, replacing any existing entry, and return only
-    /// once the destination content survives a crash.
+    /// Replace `to` with `from`. Lost cache entries can be acquired again.
     fn publish_replace(&self, from: &Path, to: &Path) -> Result<(), std::io::Error>;
 
     /// Report whether `path` is a link - a symlink, a reparse point, or the
@@ -27,13 +17,7 @@ pub trait CacheFileSystem: Send + Sync {
     fn is_link(&self, path: &Path) -> Result<bool, std::io::Error>;
 }
 
-/// `std::fs`-backed adapter: rename publication and symlink detection.
-///
-/// On a platform where `rename` replaces its destination this publishes
-/// atomically. Where it does not - Windows - the existing entry is removed
-/// first, which is a window a crash can be caught in; a production Windows
-/// host injects the durable adapter instead. A cache that is caught in that
-/// window simply has one missing blob, which the next acquisition re-fetches.
+/// Standard filesystem publication; replacement can leave a missing entry on Windows.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PortableCacheFileSystem;
 
@@ -62,7 +46,18 @@ impl CacheFileSystem for PortableCacheFileSystem {
 
     fn is_link(&self, path: &Path) -> Result<bool, std::io::Error> {
         match std::fs::symlink_metadata(path) {
-            Ok(metadata) => Ok(metadata.file_type().is_symlink()),
+            Ok(metadata) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+                    Ok(metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+                }
+                #[cfg(not(windows))]
+                {
+                    Ok(metadata.file_type().is_symlink())
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
         }

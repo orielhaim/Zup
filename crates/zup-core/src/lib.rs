@@ -1,15 +1,53 @@
 #![forbid(unsafe_code)]
 
+mod recovery;
+mod storage;
+pub use recovery::{
+    ActiveLauncher, ActiveLaunchers, DeploymentSettlement, RecoveryCleanup, RecoveryKind,
+    RecoverySummary,
+};
+pub use storage::DeploymentStorageEstimate;
+
 mod build_plan;
+mod command;
 mod condition;
+pub use command::CommandSpec;
+mod deployment_id;
 mod digest;
+pub use deployment_id::{
+    ActivationRevision, DeploymentIdentityError, InstallationId, MaterializationId,
+};
+mod generation;
+pub use generation::{
+    DEPLOYMENTS_DIRECTORY, DeploymentContractId, GenerationDescriptor, GenerationError,
+    GenerationFile, MAINTENANCE_DEPLOYMENTS_DIRECTORY, MaterializationRef, MaterializationSpec,
+    MaterializationTree, PayloadTreeId,
+};
 mod ids;
 mod installer;
 mod model;
+mod service;
+mod service_argument;
+pub use service::{
+    ChangedServiceState, InitialServiceState, NativeServiceRegistration, NativeServiceTimeouts,
+    ObservedServiceRegistration, ServiceExecution, ServiceFailurePolicy, ServiceLifecycle,
+    ServiceOwnershipClaim, ServiceReadiness, ServiceTimeouts, SystemdRestartCondition,
+    WindowsServiceAccount,
+};
+pub use service_argument::{InvalidServiceArgument, ServiceArgument, service_job_name};
+mod package;
+pub use package::{PackagePlan, PayloadEntry, PluginArtifact, PrerequisiteArtifact};
 mod path;
+mod payload;
+pub use payload::{
+    FixedReplacement, PayloadId, PayloadMapping, PayloadPlacement, PayloadRequirement, ResourceId,
+    ResourceIdError,
+};
 mod prerequisite;
 mod release;
 mod target;
+mod target_path;
+pub use target_path::{TargetPath, TargetPathError};
 mod template;
 
 pub use build_plan::{
@@ -19,9 +57,10 @@ pub use build_plan::{
 pub use condition::{Condition, ConditionError};
 pub use digest::{DigestParseError, Sha256Digest, hash_bytes, hash_reader};
 pub use ids::{
-    AppId, BackendResourceId, ComponentId, FileAssociationId, INSTALL_LOCATIONS, InstallLocation,
-    NonEmptyString, PluginId, ProtocolScheme, ResourceKey, ServiceId, SessionId, TransactionId,
-    ValueError, base64_decode, base64_encode,
+    AppId, BackendResourceId, ComponentId, DeclaredResourceId, FileAssociationId, FileResourceId,
+    FixedFileInstance, INSTALL_LOCATIONS, InstallLocation, MaintenanceArtifact, NativeFileId,
+    NativeObjectIdentity, NonEmptyString, PluginId, ProtocolScheme, ResourceKey, ServiceId,
+    SessionId, TransactionId, ValueError, base64_decode, base64_encode,
 };
 pub use installer::{
     InstalledPreset, Installer, MAX_PRESET_BINARY_BYTES, PresetAsset, PresetRuntime, UpdateConfig,
@@ -40,7 +79,9 @@ pub use prerequisite::{
     PrerequisiteArchitecture, PrerequisiteId, PrerequisiteInstaller, PrerequisitePackage,
     PrerequisiteRequirement, Runtime, RuntimeRequirementId,
 };
-pub use release::{IdentityError, MAX_IDENTITY_COMPONENTS, ReleaseIdentity};
+pub use release::{
+    IdentityError, MAX_IDENTITY_COMPONENTS, ReleaseCandidate, ReleaseIdentity, ReleasePin,
+};
 pub use target::{
     ResolvedTargetConfig, Target, TargetArchitecture, TargetOperatingSystem, TargetOverrides,
     TargetParseError, TargetProfile, TargetProfileId, host_architecture, host_operating_system,
@@ -104,3 +145,14 @@ pub use source_policy::{PortableSourceFilePolicy, SourceFilePolicy};
 
 mod phase;
 pub use phase::OperationPhase;
+
+mod persistent;
+mod retention;
+pub use persistent::{
+    DataCompatibility, InvalidServiceDataWriters, PersistentAccess, PersistentDirectory,
+    PersistentLocation, ServiceDataWriters,
+};
+pub use retention::GenerationReaders;
+
+mod service_graph;
+pub use service_graph::{ServiceGraph, service_dependency_keys, validate_service_graph};

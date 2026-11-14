@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use zup_plan::DeploymentNode;
+use zup_transaction::TransactionStore;
 
 use thiserror::Error;
 use zup_bootstrap::{
@@ -8,29 +10,30 @@ use zup_bootstrap::{
 
 use crate::{AutoPayloadSource, EmbeddedBundle};
 use tokio_util::sync::CancellationToken;
+use zup_core::SessionId;
 use zup_core::Target;
 use zup_protocol::{
-    Capabilities, Message, PROTOCOL_VERSION, ParentHello, ProgressKind, ProgressReport,
-    SequenceTracker, SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
+    Capabilities, Message, PROTOCOL_VERSION, ProgressKind, ProgressReport, SequenceTracker,
+    WireEnvelope, WorkerHello,
 };
 use zup_transaction::{
     CancellationProbe, FilesystemTransactionStore, OperationExecutor, OperationReceipt,
-    ReconcileResult, TransactionCoordinator, TransactionNode, TransactionOutcome, TransactionPlan,
+    ReconcileResult, TransactionCoordinator, TransactionOutcome,
 };
 
-use crate::file_executor::{NullProgress, WindowsFileExecutor, apply_node};
+use crate::file_executor::{WindowsFileExecutor, apply_node};
 use crate::payload_overlay::{
     PayloadOverlayIdentity, cleanup_payload_overlay, validate_payload_overlay_base,
-    verify_payload_overlay,
 };
-use zup_plan::FilePrecondition;
-use zup_transaction::{InstallationLock, LockScope};
+use zup_transaction::{LockScope, ResourceLock};
 
 use crate::pipe::{ClientReader, ClientWriter, HANDSHAKE_TIMEOUT, PipeError, frame_client};
-use crate::transport::{UserSid, verify_server_pid};
+use crate::transport::verify_server_pid;
 
-fn drop_overlay(base: Option<&Path>, root: Option<&Path>) {
-    if let (Some(base), Some(root)) = (base, root) {
+fn drop_overlay(peer: &crate::peer_access::PeerAccess, base: Option<&Path>, root: Option<&Path>) {
+    if let (Some(base), Some(root)) = (base, root)
+        && let Ok(_guard) = peer.enter()
+    {
         let _ = cleanup_payload_overlay(base, Some(root));
     }
 }
@@ -43,19 +46,28 @@ pub struct WorkerBootstrap {
     pub expected_parent_pid: u32,
     pub expected_parent_sid: String,
     pub target: Target,
-    pub expected_plan_hash: String,
+    pub expected_request_digest: String,
 }
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
+    #[error("transaction {transaction} remains pending: {detail}")]
+    RecoverySourceUnavailable {
+        transaction: zup_core::TransactionId,
+        detail: String,
+    },
+    #[error("unfinished transaction {0} requires recovery")]
+    RecoveryRequired(zup_core::TransactionId),
+    #[error("transaction preparation cancelled")]
+    Cancelled,
     #[error("invalid bootstrap: {0}")]
     InvalidBootstrap(String),
 
     #[error("authentication failed: {0}")]
     AuthFailed(String),
 
-    #[error("plan hash mismatch")]
-    PlanHashMismatch,
+    #[error("authenticated request digest mismatch")]
+    RequestDigestMismatch,
 
     #[error("target mismatch")]
     TargetMismatch,
@@ -83,18 +95,123 @@ impl WorkerError {
     fn failure_kind(&self) -> zup_protocol::WorkerFailure {
         use zup_protocol::WorkerFailure;
         match self {
+            Self::RecoveryRequired(transaction)
+            | Self::RecoverySourceUnavailable { transaction, .. } => {
+                WorkerFailure::RecoveryRequired {
+                    transaction: Some(*transaction),
+                }
+            }
+            Self::Cancelled => WorkerFailure::Cancelled,
             Self::AuthFailed(_) => WorkerFailure::Authentication,
             Self::PlanChanged => WorkerFailure::StalePlan,
             Self::Busy => WorkerFailure::InstallationBusy,
             Self::Transaction(_) => WorkerFailure::Transaction,
             Self::InvalidBootstrap(_)
-            | Self::PlanHashMismatch
+            | Self::RequestDigestMismatch
             | Self::TargetMismatch
             | Self::MissingCapability(_)
             | Self::Protocol(_)
             | Self::ParentDisconnect => WorkerFailure::Protocol,
         }
     }
+}
+
+fn inspect_recovery(
+    exec: &zup_protocol::PrepareTransaction,
+    bootstrap: &WorkerBootstrap,
+    authorized_scope: zup_core::SelectedScope,
+) -> Result<
+    (
+        Option<zup_core::RecoverySummary>,
+        Option<Box<zup_core::ActiveLaunchers>>,
+    ),
+    WorkerError,
+> {
+    if exec.target != bootstrap.target
+        || exec
+            .digest()
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?
+            != bootstrap.expected_request_digest
+        || exec.content.is_some()
+        || exec.release.is_some()
+        || !exec.payload_root.is_empty()
+        || exec.payload_overlay_root.is_some()
+        || exec.payload_overlay_base_root.is_some()
+    {
+        return Err(WorkerError::AuthFailed(
+            "invalid protected recovery inspection request".into(),
+        ));
+    }
+    let app = zup_core::AppId::new(&exec.app_id)
+        .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+    let scope = match exec.scope.as_str() {
+        "user" => zup_core::SelectedScope::User,
+        "machine" => zup_core::SelectedScope::Machine,
+        _ => {
+            return Err(WorkerError::Protocol(
+                "invalid recovery inspection scope".into(),
+            ));
+        }
+    };
+    if scope != authorized_scope {
+        return Err(WorkerError::AuthFailed(
+            "recovery inspection scope exceeds worker authority".into(),
+        ));
+    }
+    let bundle = EmbeddedBundle::open(
+        &current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
+    )
+    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    validate_transaction_bundle_identity(
+        &app,
+        &bundle.plan().installer.app.version,
+        scope,
+        &bootstrap.target,
+        &bundle,
+    )?;
+    let machine = if scope == zup_core::SelectedScope::Machine {
+        Some(
+            crate::machine_authority::MachineRoot::acquire(&app)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let root = machine.as_ref().map_or_else(
+        || PathBuf::from(&exec.state_root),
+        |root| root.path().to_owned(),
+    );
+    let store = machine.as_ref().map_or_else(
+        || FilesystemTransactionStore::private_at(&root),
+        |root| root.transaction_store(),
+    );
+    let key = ResourceLock::lock_key(app.as_str(), &exec.scope);
+    let _lock = match &machine {
+        Some(root) => root
+            .try_lock(&key)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+        None => ResourceLock::try_acquire(&root, &key)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+    }
+    .ok_or_else(|| WorkerError::Transaction("installation busy".into()))?;
+    let target = store
+        .pending_recovery(&app, scope)
+        .map_err(|error| WorkerError::Transaction(error.to_string()))?
+        .map(|target| target.summary());
+    if target
+        .as_ref()
+        .is_some_and(|target| target.target != exec.target)
+    {
+        return Err(WorkerError::AuthFailed(
+            "recovery inspection target mismatch".into(),
+        ));
+    }
+    let active = crate::ledger::InstallationRecordStore::new(&root)
+        .observe(&app, scope)
+        .ok()
+        .flatten()
+        .and_then(|installation| store.active_launchers(&installation).ok().flatten());
+    Ok((target, active.map(Box::new)))
 }
 
 pub fn worker_capabilities() -> Capabilities {
@@ -141,8 +258,11 @@ pub fn parse_bootstrap(arg: &str) -> Result<WorkerBootstrap, WorkerError> {
     }
     let target = Target::parse(parts[5])
         .map_err(|error| WorkerError::InvalidBootstrap(error.to_string()))?;
-    let expected_plan_hash = parts[6].to_owned();
-    if expected_plan_hash.len() != 64 || !expected_plan_hash.chars().all(|c| c.is_ascii_hexdigit())
+    let expected_request_digest = parts[6].to_owned();
+    if expected_request_digest.len() != 64
+        || !expected_request_digest
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
     {
         return Err(WorkerError::InvalidBootstrap("plan hash".into()));
     }
@@ -154,7 +274,7 @@ pub fn parse_bootstrap(arg: &str) -> Result<WorkerBootstrap, WorkerError> {
         expected_parent_pid,
         expected_parent_sid,
         target,
-        expected_plan_hash: expected_plan_hash.to_lowercase(),
+        expected_request_digest: expected_request_digest.to_lowercase(),
     })
 }
 
@@ -167,247 +287,16 @@ pub fn format_bootstrap(bootstrap: &WorkerBootstrap) -> String {
         bootstrap.expected_parent_pid,
         bootstrap.expected_parent_sid,
         bootstrap.target,
-        bootstrap.expected_plan_hash
+        bootstrap.expected_request_digest
     )
 }
 
-pub fn plan_hash_hex(plan_json: &str) -> String {
+pub fn request_digest_hex(plan_json: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(plan_json.as_bytes());
     let digest = zup_core::Sha256Digest::from_hasher(hasher);
     digest.to_hex()
-}
-
-pub struct WorkerSession {
-    pub bootstrap: WorkerBootstrap,
-    sequence: SequenceTracker,
-    authenticated: bool,
-    plan_hash_checked: bool,
-}
-
-impl WorkerSession {
-    pub fn new(bootstrap: WorkerBootstrap) -> Self {
-        Self {
-            bootstrap,
-            sequence: SequenceTracker::new(),
-            authenticated: false,
-            plan_hash_checked: false,
-        }
-    }
-
-    pub fn handle_message(
-        &mut self,
-        envelope: WireEnvelope,
-    ) -> Result<Option<WireEnvelope>, WorkerError> {
-        self.sequence
-            .accept(envelope.sequence)
-            .map_err(|e| WorkerError::Protocol(e.to_string()))?;
-        if envelope.session_id != self.bootstrap.session_id {
-            return Err(WorkerError::AuthFailed("session id mismatch".into()));
-        }
-        if envelope.version != PROTOCOL_VERSION {
-            return Err(WorkerError::AuthFailed("protocol version mismatch".into()));
-        }
-
-        match envelope.message {
-            Message::WorkerHello(_) => Err(WorkerError::Protocol(
-                "worker hello is parent-side only".into(),
-            )),
-            Message::ParentHello(hello) => self.on_parent_hello(envelope.sequence, hello),
-            Message::ExecuteTransaction(exec) => self.on_execute(envelope.sequence, *exec),
-            Message::ExecuteBootstrap(exec) => self.on_bootstrap(envelope.sequence, exec),
-            Message::Cancel => Ok(None),
-            Message::Ping => Ok(Some(WireEnvelope {
-                version: PROTOCOL_VERSION,
-                session_id: self.bootstrap.session_id,
-                sequence: envelope.sequence,
-                message: Message::Pong,
-            })),
-            Message::Pong
-            | Message::Progress(_)
-            | Message::TransactionStateChanged(_)
-            | Message::Completed(_)
-            | Message::Failed(_)
-            | Message::Prepare(_)
-            | Message::Prepared(_)
-            | Message::Execute(_) => Err(WorkerError::Protocol("unexpected message".into())),
-        }
-    }
-
-    pub fn hello(&self) -> WireEnvelope {
-        WireEnvelope {
-            version: PROTOCOL_VERSION,
-            session_id: self.bootstrap.session_id,
-            sequence: 0,
-            message: Message::WorkerHello(WorkerHello {
-                protocol_version: PROTOCOL_VERSION,
-                session_id: self.bootstrap.session_id,
-                target: self.bootstrap.target,
-                worker_pid: std::process::id(),
-                capabilities: worker_capabilities(),
-            }),
-        }
-    }
-
-    fn on_parent_hello(
-        &mut self,
-        sequence: u64,
-        hello: ParentHello,
-    ) -> Result<Option<WireEnvelope>, WorkerError> {
-        if self.authenticated {
-            return Err(WorkerError::Protocol("duplicate hello".into()));
-        }
-        if hello.protocol_version != PROTOCOL_VERSION {
-            return Err(WorkerError::AuthFailed("protocol version".into()));
-        }
-        if hello.session_id != self.bootstrap.session_id {
-            return Err(WorkerError::AuthFailed("session id".into()));
-        }
-        if hello.target != self.bootstrap.target {
-            return Err(WorkerError::TargetMismatch);
-        }
-        if hello.expected_plan_hash != self.bootstrap.expected_plan_hash {
-            return Err(WorkerError::PlanHashMismatch);
-        }
-        self.authenticated = true;
-        let _ = sequence;
-        Ok(None)
-    }
-
-    fn on_bootstrap(
-        &mut self,
-        _sequence: u64,
-        exec: zup_protocol::ExecuteBootstrap,
-    ) -> Result<Option<WireEnvelope>, WorkerError> {
-        if !self.authenticated {
-            return Err(WorkerError::AuthFailed("not authenticated".into()));
-        }
-        if self.plan_hash_checked {
-            return Err(WorkerError::Protocol("second operation rejected".into()));
-        }
-        if exec.target != self.bootstrap.target {
-            return Err(WorkerError::TargetMismatch);
-        }
-        if exec.bootstrap_json.len() > zup_protocol::MAX_PLAN_BYTES {
-            return Err(WorkerError::Protocol("bootstrap plan too large".into()));
-        }
-        let hash = plan_hash_hex(&exec.bootstrap_json);
-        if hash != self.bootstrap.expected_plan_hash || hash != exec.bootstrap_hash {
-            return Err(WorkerError::PlanHashMismatch);
-        }
-        let plan: zup_bootstrap::BoundBootstrapPlan = serde_json::from_str(&exec.bootstrap_json)
-            .map_err(|error| WorkerError::Protocol(format!("bad bootstrap plan: {error}")))?;
-        let declared_plan_hash = plan.plan_hash;
-        let validated =
-            zup_bootstrap::BoundBootstrapPlan::with_id(plan.id, plan.plan, plan.artifacts)
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        if validated.plan.key.target != self.bootstrap.target
-            || exec.target != validated.plan.key.target
-        {
-            return Err(WorkerError::TargetMismatch);
-        }
-        if validated.plan_hash != declared_plan_hash
-            || validated.id.as_uuid() != exec.bootstrap_id
-            || validated.plan.key.app_id.as_str() != exec.app_id
-            || validated.plan.key.app_version.to_string() != exec.app_version
-            || validated.plan.key.scope.to_string() != exec.scope
-        {
-            return Err(WorkerError::AuthFailed(
-                "bootstrap identity mismatch".into(),
-            ));
-        }
-        if exec.recovery_id.is_some() {
-            return Err(WorkerError::AuthFailed(
-                "bootstrap recovery ids are not supported".into(),
-            ));
-        }
-        if exec.state_root.is_empty()
-            || exec.quarantine_root.is_empty()
-            || exec.state_root.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
-            || exec.quarantine_root.len() > zup_protocol::MAX_PAYLOAD_OVERLAY_PATH_BYTES
-            || exec.state_root.contains('\0')
-            || exec.quarantine_root.contains('\0')
-            || !Path::new(&exec.state_root).is_absolute()
-            || !Path::new(&exec.quarantine_root).is_absolute()
-        {
-            return Err(WorkerError::AuthFailed(
-                "bootstrap roots must be absolute".into(),
-            ));
-        }
-        self.plan_hash_checked = true;
-        Ok(Some(WireEnvelope {
-            version: PROTOCOL_VERSION,
-            session_id: self.bootstrap.session_id,
-            sequence: 0,
-            message: Message::Progress(zup_protocol::ProgressReport {
-                phase: zup_core::OperationPhase::Files,
-                kind: zup_protocol::ProgressKind::OperationStarted,
-                detail: "bootstrap plan accepted".into(),
-                completed: None,
-                total: None,
-            }),
-        }))
-    }
-
-    fn on_execute(
-        &mut self,
-        _sequence: u64,
-        exec: zup_protocol::ExecuteTransaction,
-    ) -> Result<Option<WireEnvelope>, WorkerError> {
-        if !self.authenticated {
-            return Err(WorkerError::AuthFailed("not authenticated".into()));
-        }
-        if self.plan_hash_checked {
-            return Err(WorkerError::Protocol("second transaction rejected".into()));
-        }
-        if exec.target != self.bootstrap.target {
-            return Err(WorkerError::TargetMismatch);
-        }
-        if exec.plan_json.len() > zup_protocol::MAX_PLAN_BYTES {
-            return Err(WorkerError::Protocol("plan too large".into()));
-        }
-        let hash = plan_hash_hex(&exec.plan_json);
-        if hash != self.bootstrap.expected_plan_hash || hash != exec.plan_hash {
-            return Err(WorkerError::PlanHashMismatch);
-        }
-        self.plan_hash_checked = true;
-
-        let plan: zup_transaction::TransactionPlan = serde_json::from_str(&exec.plan_json)
-            .map_err(|e| WorkerError::Protocol(format!("bad plan: {e}")))?;
-        if exec.target != plan.target {
-            return Err(WorkerError::TargetMismatch);
-        }
-        plan.validate()
-            .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
-
-        Ok(Some(WireEnvelope {
-            version: PROTOCOL_VERSION,
-            session_id: self.bootstrap.session_id,
-            sequence: 0,
-            message: Message::Progress(zup_protocol::ProgressReport {
-                phase: zup_core::OperationPhase::Files,
-                kind: zup_protocol::ProgressKind::OperationStarted,
-                detail: "plan accepted".into(),
-                completed: None,
-                total: None,
-            }),
-        }))
-    }
-}
-
-pub fn encode_reply(session_id: SessionId, sequence: u64, message: Message) -> Vec<u8> {
-    encode_payload(&WireEnvelope {
-        version: PROTOCOL_VERSION,
-        session_id,
-        sequence,
-        message,
-    })
-    .unwrap_or_default()
-}
-
-pub fn decode_frame(bytes: &[u8]) -> Result<WireEnvelope, WorkerError> {
-    decode_payload(bytes).map_err(|e| WorkerError::Protocol(e.to_string()))
 }
 
 pub fn current_exe() -> Result<PathBuf, WorkerError> {
@@ -447,11 +336,11 @@ async fn run_worker_inner(
 
     verify_server_pid(client.as_raw() as isize, bootstrap.expected_parent_pid)
         .map_err(|e| WorkerError::AuthFailed(e.to_string()))?;
-    let parent_sid = UserSid::for_process(bootstrap.expected_parent_pid)
-        .map_err(|e| WorkerError::AuthFailed(e.to_string()))?;
-    if parent_sid.display() != bootstrap.expected_parent_sid {
-        return Err(WorkerError::AuthFailed("parent SID mismatch".into()));
-    }
+    let peer = crate::peer_access::PeerAccess::for_process(
+        bootstrap.expected_parent_pid,
+        &bootstrap.expected_parent_sid,
+    )
+    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
 
     let (mut reader, mut writer) = frame_client(client.into_inner());
     let mut incoming = SequenceTracker::new();
@@ -487,7 +376,7 @@ async fn run_worker_inner(
             if hello.protocol_version != PROTOCOL_VERSION
                 || hello.session_id != bootstrap.session_id
                 || hello.target != bootstrap.target
-                || hello.expected_plan_hash != bootstrap.expected_plan_hash
+                || hello.expected_request_digest != bootstrap.expected_request_digest
             {
                 return Err(WorkerError::AuthFailed("parent hello mismatch".into()));
             }
@@ -509,64 +398,78 @@ async fn run_worker_inner(
             )
             .await;
         }
-        Message::ExecuteTransaction(exec) => exec,
-        Message::Cancel => return Err(WorkerError::Protocol("cancelled".into())),
+        Message::PrepareTransaction(exec) => exec,
+        Message::Cancel => return Err(WorkerError::Cancelled),
         _ => {
             return Err(WorkerError::Protocol(
-                "expected ExecuteTransaction or ExecuteBootstrap".into(),
+                "expected PrepareTransaction or ExecuteBootstrap".into(),
             ));
         }
     };
 
-    let recovering = exec.recovery_id.is_some();
-    let prepared = (|| {
+    if matches!(
+        exec.operation,
+        zup_protocol::PreparedTransactionRequest::InspectRecovery
+    ) {
+        let message = match inspect_recovery(&exec, &bootstrap, authorized_scope) {
+            Ok((target, active)) => Message::RecoveryInspected { target, active },
+            Err(error) => Message::Failed(zup_protocol::Failed {
+                kind: error.failure_kind(),
+                message: error.to_string(),
+            }),
+        };
+        send_and_close(writer, bootstrap.session_id, outgoing, message)
+            .await
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+        return Ok(zup_protocol::WorkerOutcome::RecoveryInspected);
+    }
+
+    let recovering = matches!(
+        exec.operation,
+        zup_protocol::PreparedTransactionRequest::Recovery { .. }
+    );
+    let (execute_tx, execute_rx) = tokio::sync::oneshot::channel();
+    let reader_task = split_reader(reader, cancel.clone(), incoming, Some(execute_tx));
+    let recovery_request = match &exec.operation {
+        zup_protocol::PreparedTransactionRequest::Recovery { request, .. } => request.clone(),
+        _ => Default::default(),
+    };
+    let preparation = async {
         if exec.target != bootstrap.target {
             return Err(WorkerError::TargetMismatch);
         }
-        if exec.plan_json.len() > zup_protocol::MAX_PLAN_BYTES {
-            return Err(WorkerError::Protocol("plan too large".into()));
+        let hash = exec
+            .digest()
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+        if hash != bootstrap.expected_request_digest {
+            return Err(WorkerError::RequestDigestMismatch);
         }
-        let hash = plan_hash_hex(&exec.plan_json);
-        if hash != bootstrap.expected_plan_hash || hash != exec.plan_hash {
-            return Err(WorkerError::PlanHashMismatch);
-        }
-        let machine_recovery = exec.recovery_intent.is_some();
-        if let Some(intent) = &exec.recovery_intent {
-            intent
-                .validate_shape()
-                .map_err(|error| WorkerError::Protocol(error.to_string()))?;
-            if exec.recovery_id != Some(intent.transaction_id)
-                || exec.app_id != intent.app_id
-                || exec.app_version != intent.app_version
-                || exec.scope != intent.scope
-                || exec.target != intent.target
-                || exec.plan_json != intent.canonical_json().unwrap_or_default()
-            {
-                return Err(WorkerError::AuthFailed(
-                    "machine recovery intent does not match the authenticated request".into(),
-                ));
+        let recovery_id = match &exec.operation {
+            zup_protocol::PreparedTransactionRequest::Recovery { transaction, .. } => {
+                Some(*transaction)
             }
-        } else if exec.scope == "machine" && exec.recovery_id.is_some() {
-            return Err(WorkerError::Protocol(
-                "machine recovery requires a typed recovery intent".into(),
-            ));
-        }
-        let mut plan = if machine_recovery {
-            None
-        } else {
-            let plan: TransactionPlan = serde_json::from_str(&exec.plan_json)
-                .map_err(|e| WorkerError::Protocol(format!("bad plan: {e}")))?;
-            if exec.target != plan.target {
-                return Err(WorkerError::TargetMismatch);
+            _ => None,
+        };
+        let intent = match &exec.operation {
+            zup_protocol::PreparedTransactionRequest::Deployment { intent, .. } => Some(intent),
+            _ => None,
+        };
+        let mut plan = match &exec.operation {
+            zup_protocol::PreparedTransactionRequest::Deployment { plan, .. } => {
+                if plan.target != exec.target {
+                    return Err(WorkerError::TargetMismatch);
+                }
+                plan.validate()
+                    .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
+                Some(plan.as_ref().clone())
             }
-            plan.validate()
-                .map_err(|error| WorkerError::Protocol(format!("invalid plan: {error}")))?;
-            Some(plan)
+            zup_protocol::PreparedTransactionRequest::Recovery { .. } => None,
+            zup_protocol::PreparedTransactionRequest::InspectRecovery => unreachable!(),
         };
 
         let app_id = zup_core::AppId::new(&exec.app_id)
             .map_err(|e| WorkerError::Protocol(format!("bad app id: {e}")))?;
-        let app_version: semver::Version = exec
+        let mut app_version: semver::Version = exec
             .app_version
             .parse()
             .map_err(|e| WorkerError::Protocol(format!("bad app version: {e}")))?;
@@ -587,7 +490,20 @@ async fn run_worker_inner(
                 .map_err(|error| WorkerError::AuthFailed(format!("worker bundle: {error}")))?;
             validate_transaction_bundle_identity(
                 &app_id,
-                &app_version,
+                if recovering
+                    || exec.content.is_some()
+                    || intent.is_some_and(|intent| {
+                        matches!(
+                            intent.action,
+                            zup_plan::LifecycleAction::Rollback { .. }
+                                | zup_plan::LifecycleAction::Cleanup { .. }
+                        )
+                    })
+                {
+                    &bundle.plan().installer.app.version
+                } else {
+                    &app_version
+                },
                 scope,
                 &bootstrap.target,
                 &bundle,
@@ -595,7 +511,7 @@ async fn run_worker_inner(
         }
         let machine = if scope == zup_core::SelectedScope::Machine {
             Some(
-                crate::machine_authority::MachineRoot::acquire()
+                crate::machine_authority::MachineRoot::acquire(&app_id)
                     .map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
             )
         } else {
@@ -605,39 +521,37 @@ async fn run_worker_inner(
             Some(machine) => machine.path().to_path_buf(),
             None => PathBuf::from(exec.state_root),
         };
-        let _machine_work = machine
-            .as_ref()
-            .map(|machine| machine.work_dir())
-            .transpose()
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let work_root = state_root.join("work");
         let store = match &machine {
             Some(machine) => machine.transaction_store(),
             None => FilesystemTransactionStore::private_at(&state_root),
         };
-        let lock_key = InstallationLock::lock_key(app_id.as_str(), &exec.scope);
+        let lock_key = ResourceLock::lock_key(app_id.as_str(), &exec.scope);
         let _lock = match &machine {
             Some(machine) => machine
                 .try_lock(&lock_key)
                 .map_err(|error| WorkerError::Transaction(error.to_string()))?,
-            None => InstallationLock::try_acquire(&state_root, &lock_key)
+            None => ResourceLock::try_acquire(&state_root, &lock_key)
                 .map_err(|error| WorkerError::Transaction(error.to_string()))?,
         }
         .ok_or_else(|| WorkerError::Transaction("installation busy".into()))?;
+        if recovering
+            && (exec.content.is_some()
+                || exec.release.is_some()
+                || exec.payload_overlay_root.is_some()
+                || exec.payload_overlay_base_root.is_some()
+                || !exec.payload_root.is_empty())
+        {
+            return Err(WorkerError::Protocol(
+                "recovery source is owned by the protected transaction".into(),
+            ));
+        }
         let payload_overlay_root = decode_overlay_path(exec.payload_overlay_root.as_deref())?;
         let payload_overlay_base_root =
             decode_overlay_path(exec.payload_overlay_base_root.as_deref())?;
-        let existing_record = if let Some(id) = exec.recovery_id {
-            let record = zup_transaction::TransactionStore::load(
-                &store,
-                &zup_transaction::TransactionId::from_uuid(id),
-            )
-            .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-            if record.app_id != app_id
-                || record.scope != scope
-                || record.app_version != app_version
-                || record.target != exec.target
-            {
+        let existing_record = if let Some(id) = recovery_id {
+            let record = zup_transaction::TransactionStore::load(&store, &id)
+                .map_err(|e| WorkerError::Transaction(e.to_string()))?;
+            if record.app_id != app_id || record.scope != scope || record.target != exec.target {
                 return Err(WorkerError::AuthFailed("recovery record mismatch".into()));
             }
             if let Some(plan) = &plan {
@@ -647,34 +561,7 @@ async fn run_worker_inner(
             } else {
                 plan = Some(record.plan.clone());
             }
-            let identity = PayloadOverlayIdentity::from_transaction(
-                app_id.clone(),
-                app_version.clone(),
-                scope,
-                plan.as_ref().expect("recovery plan"),
-            )
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            validate_worker_overlay(
-                &state_root,
-                scope,
-                &identity,
-                payload_overlay_root.as_deref(),
-                payload_overlay_base_root.as_deref(),
-                true,
-                &bootstrap.expected_parent_sid,
-            )?;
-            if identity.has_files() {
-                verify_payload_overlay(
-                    payload_overlay_base_root.as_deref().ok_or_else(|| {
-                        WorkerError::AuthFailed("missing recovery overlay base".into())
-                    })?,
-                    &identity,
-                    payload_overlay_root.as_deref().ok_or_else(|| {
-                        WorkerError::AuthFailed("missing recovery overlay".into())
-                    })?,
-                )
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            }
+            app_version = record.app_version.clone();
             Some(record)
         } else {
             let plan = plan
@@ -693,79 +580,121 @@ async fn run_worker_inner(
                 &identity,
                 payload_overlay_root.as_deref(),
                 payload_overlay_base_root.as_deref(),
-                false,
                 &bootstrap.expected_parent_sid,
             )?;
             None
         };
+        let mut release = existing_record
+            .as_ref()
+            .and_then(|record| record.release.clone());
         let payload_root = PathBuf::from(exec.payload_root);
         let executable =
             current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let acquired = if let Some(content) = &exec.content {
-            content
-                .validate()
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            if content.scope != exec.scope
-                || content.app_id != app_id
-                || content.target != exec.target
+        let authority = EmbeddedBundle::open(&executable)
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+        let acquired = if let Some(source) = &exec.content {
+            if source.handoff.scope != exec.scope
+                || source.handoff.app_id != app_id
+                || source.handoff.target != exec.target
             {
                 return Err(WorkerError::AuthFailed(
                     "acquired content context mismatch".into(),
                 ));
             }
-            let cache = crate::open_cache(&payload_root, zup_acquire::CachePolicy::Auto)
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            let verified = crate::verify(&executable, &cache, content)
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            let bundle = crate::AcquiredBundle::open(&executable, &cache, &verified)
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            let manifest = zup_artifact::VariantManifest::parse(&verified.manifest)
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            if exec.release.as_ref().is_none_or(|release| {
-                release.release != content.release
-                    || release.catalog != content.catalog
-                    || release.manifest != content.manifest
-                    || release.runtime != Some(content.runtime)
-                    || release.variant != content.variant
-            }) {
+            let source = crate::acquired::AuthenticatedSource::open(
+                source,
+                &payload_root,
+                &state_root,
+                &authority,
+                &peer,
+                machine.as_ref(),
+            )
+            .await
+            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            if exec.release.as_ref() != Some(&source.release) {
                 return Err(WorkerError::AuthFailed(
                     "acquired release identity mismatch".into(),
                 ));
             }
-            let source = bundle
-                .payload_source(cache)
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            Some((manifest, std::sync::Arc::new(source)))
+            Some(source)
         } else {
             None
         };
-        let base_payload = match &acquired {
-            Some((_, source)) => AutoPayloadSource::Portable(
-                zup_bundle::AutoPayloadSource::Acquired(std::sync::Arc::clone(source)),
-            ),
-            None => AutoPayloadSource::from_path(payload_root.clone())
-                .map_err(|error| WorkerError::Transaction(format!("payload package: {error}")))?,
+        let source_image = acquired
+            .as_ref()
+            .map_or(executable.as_path(), |source| source.image.as_path());
+        let source_bundle = acquired
+            .as_ref()
+            .map_or(&authority, |source| &source.bundle);
+        let payload = if let Some(record) = &existing_record {
+            crate::runtime::SharedPayload(std::sync::Arc::new(
+                crate::recovery::RetainedSource::load(&state_root, record).map_err(|detail| {
+                    WorkerError::RecoverySourceUnavailable {
+                        transaction: record.transaction_id,
+                        detail,
+                    }
+                })?,
+            ))
+        } else {
+            let base_payload = match &acquired {
+                Some(source) => AutoPayloadSource::Acquired(std::sync::Arc::new(
+                    crate::acquired::AcquiredDeploymentSource::new(
+                        std::sync::Arc::clone(&source.payload),
+                        source.image.clone(),
+                        source.runtime,
+                        source.manifest.clone(),
+                    ),
+                )),
+                None => {
+                    let _guard = peer
+                        .enter()
+                        .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+                    AutoPayloadSource::from_path(payload_root.clone()).map_err(|error| {
+                        WorkerError::Transaction(format!("payload package: {error}"))
+                    })?
+                }
+            };
+            let live = crate::peer_access::PeerPayloadSource {
+                source: AutoPayloadSource::Overlay(zup_bundle::OverlayPayloadSource::new(
+                    base_payload,
+                    payload_overlay_root.clone(),
+                )),
+                peer: peer.clone(),
+            };
+            crate::runtime::SharedPayload(std::sync::Arc::new(live))
         };
-        let payload = AutoPayloadSource::Overlay(zup_bundle::OverlayPayloadSource::new(
-            base_payload,
-            payload_overlay_root.clone(),
-        ));
 
-        let authorized = plan
+        let mut authorized = plan
             .clone()
             .ok_or_else(|| WorkerError::Protocol("missing transaction plan".into()))?;
-        if exec.recovery_id.is_none() {
-            crate::ledger::InstallLedgerStore::new(&state_root)
+        if recovery_id.is_none() {
+            crate::ledger::InstallationRecordStore::new(&state_root)
                 .repair_committed(&app_id, scope)
-                .map_err(|e| WorkerError::Transaction(e.to_string()))?;
-            let intent = exec.intent.as_ref().ok_or_else(|| {
+                .map_err(|error| match error {
+                    crate::ledger::LedgerError::RecoveryRequired(transaction) => {
+                        WorkerError::RecoveryRequired(transaction)
+                    }
+                    error => WorkerError::Transaction(error.to_string()),
+                })?;
+            let intent = intent.ok_or_else(|| {
                 WorkerError::AuthFailed("fresh execution requires deployment intent".into())
             })?;
-            let executable =
-                current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            let bundle = EmbeddedBundle::open(&executable)
-                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            let build = bundle
+            validate_transaction_bundle_identity(
+                &app_id,
+                if matches!(
+                    intent.action,
+                    zup_plan::LifecycleAction::Rollback { .. }
+                        | zup_plan::LifecycleAction::Cleanup { .. }
+                ) {
+                    &source_bundle.plan().installer.app.version
+                } else {
+                    &app_version
+                },
+                scope,
+                &bootstrap.target,
+                source_bundle,
+            )?;
+            let build = source_bundle
                 .package()
                 .build_plan()
                 .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
@@ -773,29 +702,67 @@ async fn run_worker_inner(
                 .targets
                 .first()
                 .ok_or_else(|| WorkerError::AuthFailed("worker bundle has no target".into()))?;
-            let ledger = crate::ledger::InstallLedgerStore::new(&state_root)
+            let ledger = crate::ledger::InstallationRecordStore::new(&state_root)
                 .load(&app_id, scope)
                 .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            if matches!(
+                intent.action,
+                zup_plan::LifecycleAction::Repair { .. }
+                    | zup_plan::LifecycleAction::Modify
+                    | zup_plan::LifecycleAction::Rollback { .. }
+            ) && let Some(source) = &acquired
+            {
+                let expected = match intent.action {
+                    zup_plan::LifecycleAction::Rollback { revision } => ledger
+                        .as_ref()
+                        .and_then(|record| {
+                            record
+                                .retained
+                                .iter()
+                                .find(|snapshot| snapshot.revision == revision)
+                        })
+                        .and_then(|snapshot| snapshot.release.as_ref()),
+                    _ => ledger
+                        .as_ref()
+                        .and_then(zup_plan::InstallationRecord::release_identity),
+                }
+                .ok_or_else(|| {
+                    WorkerError::AuthFailed(
+                        "maintenance requires the selected release's authenticated source identity"
+                            .into(),
+                    )
+                })?;
+                source
+                    .release
+                    .verify_source(expected)
+                    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+            }
             let host = crate::operation_host::WindowsOperationHost {
                 app_id: app_id.clone(),
                 scope,
-                frontend: bundle.frontend(),
+                frontend: source_bundle.frontend(),
                 state_root: state_root.clone(),
                 content: match &acquired {
-                    Some((manifest, source)) => {
-                        crate::operation_host::WindowsContent::Acquired(manifest, source)
-                    }
-                    None => crate::operation_host::WindowsContent::Embedded(&bundle),
+                    Some(source) => crate::operation_host::WindowsContent::Acquired(
+                        &source.manifest,
+                        &source.payload,
+                    ),
+                    None => crate::operation_host::WindowsContent::Embedded(source_bundle),
                 },
                 acquire_prerequisites: false,
+            };
+            let host = crate::peer_access::PeerOperationHost {
+                inner: host,
+                peer: &peer,
             };
             let prepared = zup_runtime::prepare_operation(
                 &zup_runtime::OperationInput {
                     build,
-                    installer: &executable,
+                    installer: source_image,
                     scope,
                     operation: intent.action.into(),
                     selection: zup_runtime::OperationSelection {
+                        deployment: Some(intent.deployment.clone()),
                         enable: intent.enable.clone(),
                         disable: intent.disable.clone(),
                         install_directory: intent.install_directory.clone(),
@@ -806,61 +773,76 @@ async fn run_worker_inner(
                 },
                 &host,
             )
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-            if prepared.transaction_plan != authorized {
+            .map_err(|error| match error {
+                zup_runtime::OperationError::RecoveryRequired(transaction) => {
+                    WorkerError::RecoveryRequired(transaction)
+                }
+                error => WorkerError::AuthFailed(error.to_string()),
+            })?;
+            release = match &prepared.body {
+                zup_runtime::OperationBody::Retained { release, .. }
+                | zup_runtime::OperationBody::Cleanup { release } => release.clone(),
+                zup_runtime::OperationBody::Planned(_) | zup_runtime::OperationBody::Uninstall => {
+                    acquired.as_ref().map(|source| source.release.clone())
+                }
+            };
+            if exec.release != release {
+                return Err(WorkerError::AuthFailed(
+                    "release provenance differs from authenticated source authority".into(),
+                ));
+            }
+
+            if prepared.transaction_plan.requirements != authorized.requirements
+                || prepared.transaction_plan.install_directory != authorized.install_directory
+                || prepared.transaction_plan.transition.is_remove()
+                    != authorized.transition.is_remove()
+            {
                 return Err(WorkerError::PlanChanged);
             }
-            crate::ledger::InstallLedgerStore::new(&state_root)
-                .validate_plan(&app_id, scope, &app_version, &authorized)
+            authorized = prepared.transaction_plan;
+            crate::ledger::InstallationRecordStore::new(&state_root)
+                .validate_plan(&app_id, scope, &authorized)
                 .map_err(|e| WorkerError::Transaction(e.to_string()))?;
         }
 
-        let coordinator = TransactionCoordinator::new(store.clone());
-        let fresh = if existing_record.is_none() {
-            Some(
-                coordinator
-                    .begin(app_id, scope, app_version, authorized)
-                    .and_then(|open| open.with_release(exec.release.clone()))
-                    .map_err(|e| WorkerError::Transaction(e.to_string()))?,
-            )
-        } else {
-            drop(coordinator);
-            None
-        };
-        let record = match &fresh {
-            Some(open) => open.record().clone(),
-            None => existing_record.expect("recovery loads its journal"),
-        };
-
+        if cancel.is_cancelled() {
+            return Err(WorkerError::Cancelled);
+        }
         Ok::<_, WorkerError>((
-            record,
-            fresh,
+            authorized,
+            existing_record,
+            release,
             store,
             payload,
             _lock,
-            _machine_work,
             state_root,
-            work_root,
             scope,
             payload_overlay_base_root,
             payload_overlay_root,
+            acquired,
         ))
-    })();
+    };
+    let prepared = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(WorkerError::Cancelled),
+        result = preparation => result,
+    };
     let (
-        record,
-        fresh,
+        authorized,
+        existing_record,
+        release,
         store,
         payload,
         _lock,
-        _machine_work,
         state_root,
-        work_root,
         scope,
         payload_overlay_base_root,
         payload_overlay_root,
+        _acquired_source,
     ) = match prepared {
         Ok(prepared) => prepared,
         Err(error) => {
+            reader_task.abort();
             let _ = writer
                 .send(&WireEnvelope {
                     version: PROTOCOL_VERSION,
@@ -875,12 +857,115 @@ async fn run_worker_inner(
             return Err(error);
         }
     };
+    let digest = authorized.fingerprint().to_hex();
+    writer
+        .send(&WireEnvelope {
+            version: PROTOCOL_VERSION,
+            session_id: bootstrap.session_id,
+            sequence: outgoing,
+            message: Message::Prepared(zup_protocol::PreparedOperation {
+                plan: Box::new(authorized.clone()),
+                plan_digest: digest.clone(),
+                operation: if recovering { "recover" } else { "deploy" }.into(),
+                app_id: authorized.requirements.app.id.to_string(),
+                app_version: authorized.requirements.app.version.to_string(),
+                scope: scope.to_string(),
+                target: authorized.target,
+                file_count: authorized
+                    .nodes
+                    .iter()
+                    .filter(|node| matches!(node.kind, zup_plan::NodeKind::FileMutation { .. }))
+                    .count()
+                    .try_into()
+                    .map_err(|_| {
+                        WorkerError::Protocol("plan file count exceeds its limit".into())
+                    })?,
+            }),
+        })
+        .await
+        .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+    outgoing = outgoing.saturating_add(1);
+    let execute = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(WorkerError::Cancelled),
+        result = tokio::time::timeout(std::time::Duration::from_secs(600), execute_rx) => match result {
+            Ok(Ok(execute)) if execute.plan_digest == digest => Ok(execute),
+            Ok(Ok(_)) => Err(WorkerError::RequestDigestMismatch),
+            Ok(Err(_)) => Err(WorkerError::ParentDisconnect),
+            Err(_) => Err(WorkerError::Protocol("prepared plan execution timeout".into())),
+        },
+    };
+    if let Err(error) = execute {
+        reader_task.abort();
+        let _ = writer
+            .send(&WireEnvelope {
+                version: PROTOCOL_VERSION,
+                session_id: bootstrap.session_id,
+                sequence: outgoing,
+                message: Message::Failed(zup_protocol::Failed {
+                    kind: error.failure_kind(),
+                    message: error.to_string(),
+                }),
+            })
+            .await;
+        return Err(error);
+    }
+    let fresh = if existing_record.is_none() {
+        Some(
+            TransactionCoordinator::new(store.clone())
+                .begin(
+                    authorized.requirements.app.id.clone(),
+                    scope,
+                    authorized.requirements.app.version.clone(),
+                    authorized,
+                )
+                .and_then(|open| open.with_release(release))
+                .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let record = match &fresh {
+        Some(open) => open.record().clone(),
+        None => existing_record.expect("recovery loads its protected journal"),
+    };
+    let payload = if fresh.is_some() {
+        match crate::recovery::RetainedSource::capture(&state_root, &record, &payload) {
+            Ok(retained) => crate::runtime::SharedPayload(std::sync::Arc::new(retained)),
+            Err(detail) => {
+                let error = WorkerError::RecoverySourceUnavailable {
+                    transaction: record.transaction_id,
+                    detail,
+                };
+                reader_task.abort();
+                let _ = send_and_close(
+                    writer,
+                    bootstrap.session_id,
+                    outgoing,
+                    Message::Failed(zup_protocol::Failed {
+                        kind: error.failure_kind(),
+                        message: error.to_string(),
+                    }),
+                )
+                .await;
+                return Err(error);
+            }
+        }
+    } else {
+        payload
+    };
+    drop_overlay(
+        &peer,
+        payload_overlay_base_root.as_deref(),
+        payload_overlay_root.as_deref(),
+    );
     writer
         .send(&WireEnvelope {
             version: PROTOCOL_VERSION,
             session_id: bootstrap.session_id,
             sequence: outgoing,
             message: Message::Progress(ProgressReport {
+                blocked_pids: Vec::new(),
                 phase: zup_core::OperationPhase::Prepare,
                 kind: ProgressKind::OperationStarted,
                 detail: "transaction accepted".into(),
@@ -912,49 +997,51 @@ async fn run_worker_inner(
         Ok::<_, WorkerError>((writer, progress_sequence))
     });
 
-    let mut executor = WorkerFileExecutor {
-        inner: WindowsFileExecutor::new(
-            payload,
-            work_root,
-            record.transaction_id.to_string(),
-            record.target.executable_suffix(),
-            Box::new(NullProgress),
-        ),
-        cancel: TokenProbe(cancel.clone()),
-        progress: progress_tx.clone(),
-        completed_work: 0,
-        total_work,
-        blocked_paths: crate::plan_mutating_paths(&record.plan, &record.target),
-    };
-    for node in &record.plan.nodes {
-        if matches!(
-            node.kind,
-            zup_transaction::NodeKind::StageFile { .. }
-                | zup_transaction::NodeKind::FileMutation { .. }
-        ) && let (Some(sha256), Some(size)) =
-            (node.meta.expected_sha256, node.meta.expected_size)
-        {
-            let precondition = node
-                .meta
-                .file_precondition
-                .unwrap_or(FilePrecondition::Absent);
-            executor
-                .inner
-                .note_file(&node.id, precondition, sha256, size);
-        }
-    }
-
-    let cancel_token = cancel.clone();
-    let reader_task = split_reader(reader, cancel_token, incoming);
+    let executor_cancel = TokenProbe(cancel.clone());
+    let executor_progress = progress_tx.clone();
     let journal_id = record.transaction_id;
 
+    let publisher = crate::ledger::InstallationRecordStore::new(&state_root);
+    let executor_state_root = state_root.clone();
+    let cleanup_store = store.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let mut executor = WorkerFileExecutor {
+            lifecycle: crate::service_control::ScmLifecycle::default(),
+            inner: WindowsFileExecutor::new(
+                payload,
+                record.transaction_id,
+                record.target.executable_suffix(),
+            )
+            .with_state_authority(executor_state_root, record.scope, &record.app_id),
+            cancel: executor_cancel,
+            progress: executor_progress,
+            completed_work: 0,
+            total_work,
+            blocked_paths: crate::preflight_paths(&record.plan),
+            service_controls: record
+                .plan
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.kind {
+                    zup_plan::NodeKind::ServiceControl { operation } => {
+                        Some(operation.as_ref().clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+        };
         if recovering {
-            zup_transaction::recover(record, &store, &mut executor)
+            zup_transaction::recover_requested(
+                record,
+                &store,
+                &mut executor,
+                &publisher,
+                &recovery_request,
+            )
         } else {
             fresh
                 .expect("a fresh transaction")
-                .execute(&mut executor)
+                .execute(&mut executor, &publisher)
                 .map(|settled| (settled.record, settled.outcome))
         }
     })
@@ -969,49 +1056,90 @@ async fn run_worker_inner(
     drop(progress_tx);
     let progress_ended = progress_task.await;
 
-    let (transaction_id, outcome) = match result {
+    let (transaction_id, outcome, detail) = match result {
+        Ok((r, TransactionOutcome::Assessed(assessment))) => (
+            r.transaction_id.as_uuid(),
+            zup_protocol::WorkerOutcome::RecoveryAssessed,
+            Some(
+                serde_json::to_string(&assessment)
+                    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
+            ),
+        ),
         Ok((r, TransactionOutcome::Committed)) => {
             drop_overlay(
+                &peer,
                 payload_overlay_base_root.as_deref(),
                 payload_overlay_root.as_deref(),
             );
-            let ledgers = crate::ledger::InstallLedgerStore::new(&state_root);
+            let ledgers = crate::ledger::InstallationRecordStore::new(&state_root);
+            zup_transaction::fault_injection::boundary(
+                zup_transaction::fault_injection::Boundary::ReconciliationBefore,
+                &r.transaction_id.to_string(),
+            );
             let publication = if recovering {
                 ledgers.repair_committed(&r.app_id, scope)
             } else {
-                ledgers.publish_committed(&r, scope).map(|_| ())
+                ledgers.reconcile_installation(&r, scope).map(|_| ())
             };
-            let outcome = match publication {
+            let (outcome, detail) = match publication {
                 Ok(()) => {
+                    zup_transaction::fault_injection::boundary(
+                        zup_transaction::fault_injection::Boundary::Reconciled,
+                        &r.transaction_id.to_string(),
+                    );
                     crate::integration::notify_committed_path_change(&r);
-                    zup_protocol::WorkerOutcome::Committed
+                    (zup_protocol::WorkerOutcome::Committed, None)
                 }
-                Err(_) => zup_protocol::WorkerOutcome::CommittedPendingReconciliation,
+                Err(error) => (
+                    zup_protocol::WorkerOutcome::CommittedPendingReconciliation,
+                    Some(format!(
+                        "Deployment committed; ownership reconciliation requires recovery: {error}"
+                    )),
+                ),
             };
-            (r.transaction_id.as_uuid(), outcome.to_owned())
+            (r.transaction_id.as_uuid(), outcome, detail)
         }
         Ok((r, TransactionOutcome::RolledBack)) => {
-            crate::ledger::InstallLedgerStore::new(&state_root)
-                .cleanup_work(&r)
-                .map_err(|error| WorkerError::Transaction(error.to_string()))?;
             drop_overlay(
+                &peer,
                 payload_overlay_base_root.as_deref(),
                 payload_overlay_root.as_deref(),
             );
             (
                 r.transaction_id.as_uuid(),
                 zup_protocol::WorkerOutcome::RolledBack,
+                r.failure.as_ref().map(|failure| failure.message.clone()),
             )
         }
         Ok((r, TransactionOutcome::RecoveryRequired)) => (
             r.transaction_id.as_uuid(),
-            zup_protocol::WorkerOutcome::RecoveryRequired,
+            if r.phase == zup_transaction::TransactionPhase::Committed {
+                zup_protocol::WorkerOutcome::CommittedPendingReconciliation
+            } else {
+                zup_protocol::WorkerOutcome::RecoveryRequired
+            },
+            Some(r.recovery_detail()),
         ),
-        Err(_) => (
+        Err(error) => (
             journal_id.as_uuid(),
-            zup_protocol::WorkerOutcome::RecoveryRequired,
+            if matches!(
+                zup_runtime::InstallOutcome::recovery_failure(
+                    &cleanup_store,
+                    journal_id,
+                    error.to_string()
+                ),
+                zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. }
+            ) {
+                zup_protocol::WorkerOutcome::CommittedPendingReconciliation
+            } else {
+                zup_protocol::WorkerOutcome::RecoveryRequired
+            },
+            Some(error.to_string()),
         ),
     };
+    if let Ok(record) = cleanup_store.load(&zup_core::TransactionId::from_uuid(transaction_id)) {
+        let _ = crate::recovery::collect(&state_root, &record);
+    }
     drop(_lock);
 
     if let Ok(Ok((writer, outgoing))) = progress_ended {
@@ -1020,7 +1148,7 @@ async fn run_worker_inner(
             bootstrap.session_id,
             outgoing,
             Message::Completed(zup_protocol::Completed {
-                detail: None,
+                detail,
                 transaction_id,
                 outcome,
                 prerequisite_id: None,
@@ -1029,6 +1157,7 @@ async fn run_worker_inner(
         )
         .await;
     }
+    reader_task.abort();
     let _ = reader_task.await;
     Ok(outcome)
 }
@@ -1048,9 +1177,9 @@ async fn run_bootstrap_worker(
     if exec.bootstrap_json.len() > zup_protocol::MAX_PLAN_BYTES {
         return Err(WorkerError::Protocol("bootstrap plan too large".into()));
     }
-    let hash = plan_hash_hex(&exec.bootstrap_json);
-    if hash != bootstrap.expected_plan_hash || hash != exec.bootstrap_hash {
-        return Err(WorkerError::PlanHashMismatch);
+    let hash = request_digest_hex(&exec.bootstrap_json);
+    if hash != bootstrap.expected_request_digest || hash != exec.bootstrap_hash {
+        return Err(WorkerError::RequestDigestMismatch);
     }
     let bound: BoundBootstrapPlan = serde_json::from_str(&exec.bootstrap_json)
         .map_err(|error| WorkerError::Protocol(format!("bad bootstrap plan: {error}")))?;
@@ -1097,11 +1226,6 @@ async fn run_bootstrap_worker(
     let quarantine =
         Quarantine::with_file_system(&quarantine_root, crate::windows_bootstrap_file_system())
             .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    for artifact in bound.artifacts.values() {
-        quarantine
-            .verify(artifact)
-            .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-    }
     let store = FilesystemBootstrapStateStore::with_file_system(
         &state_root,
         crate::windows_bootstrap_file_system(),
@@ -1123,8 +1247,8 @@ async fn run_bootstrap_worker(
         .validate(&bound.plan)
         .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
 
-    let lock_key = InstallationLock::key_for(&exec.app_id, &exec.scope, LockScope::Bootstrap);
-    let _lock = match InstallationLock::try_acquire(&state_root, &lock_key) {
+    let lock_key = ResourceLock::key_for(&exec.app_id, &exec.scope, LockScope::Bootstrap);
+    let _lock = match ResourceLock::try_acquire(&state_root, &lock_key) {
         Ok(Some(lock)) => lock,
 
         Ok(None) => {
@@ -1150,6 +1274,7 @@ async fn run_bootstrap_worker(
             session_id: bootstrap.session_id,
             sequence: outgoing,
             message: Message::Progress(ProgressReport {
+                blocked_pids: Vec::new(),
                 phase: zup_core::OperationPhase::Prepare,
                 kind: ProgressKind::OperationStarted,
                 detail: "Checking prerequisites…".into(),
@@ -1160,8 +1285,8 @@ async fn run_bootstrap_worker(
         .await
         .map_err(|error| WorkerError::Protocol(error.to_string()))?;
     outgoing = outgoing.saturating_add(1);
-    let reader_task = split_reader(reader, cancel.clone(), incoming);
-    let satisfier = crate::WindowsPrerequisiteDetector;
+    let reader_task = split_reader(reader, cancel.clone(), incoming, None);
+    let satisfier = crate::WindowsPrerequisiteDetector::new(bound.plan.key.scope);
     let provider = crate::WindowsPrerequisiteProvider;
     if state.operations.iter().any(|operation| {
         matches!(
@@ -1323,6 +1448,7 @@ async fn run_bootstrap_worker(
     )
     .await;
     let _ = cancel;
+    reader_task.abort();
     let _ = reader_task.await;
     Ok(outcome)
 }
@@ -1432,7 +1558,6 @@ fn validate_worker_overlay(
     identity: &PayloadOverlayIdentity,
     actual: Option<&Path>,
     overlay_base_root: Option<&Path>,
-    recovery: bool,
     expected_parent_sid: &str,
 ) -> Result<(), WorkerError> {
     if identity.has_files() {
@@ -1441,13 +1566,10 @@ fn validate_worker_overlay(
         })?;
         validate_payload_overlay_base(state_root, scope, base, expected_parent_sid)
             .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let expected = identity.path_under(base).ok_or_else(|| {
-            WorkerError::AuthFailed("generated payload identity has no overlay path".into())
-        })?;
         let actual = actual.ok_or_else(|| {
             WorkerError::AuthFailed("generated plugin payload has no overlay".into())
         })?;
-        if actual != expected {
+        if !identity.matches_path(base, actual) {
             return Err(WorkerError::AuthFailed(
                 "payload overlay identity mismatch".into(),
             ));
@@ -1455,11 +1577,7 @@ fn validate_worker_overlay(
         return Ok(());
     }
     if overlay_base_root.is_some() || actual.is_some() {
-        let detail = if recovery {
-            "recovery overlay has no generated plugin payload"
-        } else {
-            "overlay has no generated plugin payload"
-        };
+        let detail = "overlay has no generated plugin payload";
         return Err(WorkerError::AuthFailed(detail.into()));
     }
     Ok(())
@@ -1469,14 +1587,25 @@ fn split_reader(
     mut reader: ClientReader,
     cancel: CancellationToken,
     mut sequence: SequenceTracker,
+    mut execute: Option<tokio::sync::oneshot::Sender<zup_protocol::ExecuteOperation>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Ok(env) = reader.recv().await {
             if sequence.accept(env.sequence).is_err() {
                 break;
             }
-            if matches!(env.message, Message::Cancel) {
-                cancel.cancel();
+            match env.message {
+                Message::Cancel => cancel.cancel(),
+                Message::Execute(operation) => {
+                    let Some(sender) = execute.take() else {
+                        break;
+                    };
+                    if sender.send(operation).is_err() {
+                        break;
+                    }
+                }
+                Message::Ping => {}
+                _ => break,
             }
         }
         cancel.cancel();
@@ -1500,13 +1629,15 @@ async fn send_and_close(
 }
 
 struct WorkerFileExecutor {
-    inner: WindowsFileExecutor<AutoPayloadSource>,
+    inner: WindowsFileExecutor<crate::runtime::SharedPayload>,
     cancel: TokenProbe,
     progress: tokio::sync::mpsc::UnboundedSender<ProgressReport>,
     completed_work: u64,
     total_work: u64,
 
     blocked_paths: Vec<PathBuf>,
+    service_controls: Vec<zup_plan::ServiceControlOperation>,
+    lifecycle: crate::service_control::ScmLifecycle,
 }
 
 struct TokenProbe(CancellationToken);
@@ -1520,26 +1651,95 @@ impl CancellationProbe for TokenProbe {
 impl OperationExecutor for WorkerFileExecutor {
     type Error = String;
 
-    fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error> {
+    fn prepare_compensation(
+        &mut self,
+        _operation: &DeploymentNode,
+        receipt: &OperationReceipt,
+    ) -> Result<OperationReceipt, String> {
+        match receipt {
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::prepare_service_compensation(&mut self.lifecycle, receipt)
+                    .map(|receipt| OperationReceipt::ServiceControl(Box::new(receipt)))
+            }
+            _ => Ok(receipt.clone()),
+        }
+    }
+
+    fn reconcile_rollback(
+        &mut self,
+        _operation: &DeploymentNode,
+        receipt: &OperationReceipt,
+    ) -> Result<zup_transaction::RollbackReconcileResult, String> {
+        match receipt {
+            OperationReceipt::PersistentDirectory(owned) => {
+                self.inner.verify_persistent(_operation, owned)?;
+                Ok(zup_transaction::RollbackReconcileResult::Restored)
+            }
+            OperationReceipt::NativeService(receipt) => {
+                let zup_plan::NodeKind::NativeService { operation } = &_operation.kind else {
+                    return Err("native service receipt requires a native service operation".into());
+                };
+                crate::services::reconcile_native_rollback(operation, receipt)
+                    .map_err(|error| error.to_string())
+            }
+            OperationReceipt::Generation(receipt) => {
+                self.inner.retain_generation(_operation, receipt)?;
+                Ok(zup_transaction::RollbackReconcileResult::Restored)
+            }
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::reconcile_service_rollback(&mut self.lifecycle, receipt)
+            }
+            OperationReceipt::Control => Ok(zup_transaction::RollbackReconcileResult::Restored),
+            OperationReceipt::RetainedFile { .. }
+            | OperationReceipt::StageFile { .. }
+            | OperationReceipt::CreateFile { .. }
+            | OperationReceipt::ReplaceFile { .. }
+            | OperationReceipt::RemoveFile { .. } => {
+                Ok(zup_transaction::RollbackReconcileResult::Retry)
+            }
+            _ => Ok(zup_transaction::RollbackReconcileResult::Ambiguous),
+        }
+    }
+
+    fn prepare(&mut self, operation: &DeploymentNode) -> Result<(), Self::Error> {
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
-        if !matches!(operation.kind, zup_transaction::NodeKind::Barrier) {
+        if !matches!(operation.kind, zup_plan::NodeKind::Barrier) {
             return Ok(());
         }
+        let _ = self.progress.send(ProgressReport {
+            blocked_pids: Vec::new(),
+            phase: zup_core::OperationPhase::Files,
+            kind: ProgressKind::PreflightStarted,
+            detail: String::new(),
+            completed: None,
+            total: None,
+        });
 
         let blockers = self
             .blocked_paths
             .iter()
             .map(|path| path.as_path())
             .collect::<Vec<_>>();
-        let blocked = crate::preflight(&blockers).map_err(|error| error.to_string())?;
+        let blocked = crate::restart_manager::preflight_services(
+            &blockers,
+            &self.service_controls,
+            &mut self.lifecycle,
+        )
+        .map_err(|error| error.to_string())?;
         let Some(detail) = crate::blocked_reason(&blocked) else {
             return Ok(());
         };
         let _ = self.progress.send(ProgressReport {
+            blocked_pids: match &blocked {
+                crate::FilePreflight::Blocked { processes, .. } => {
+                    processes.iter().map(|process| process.pid).collect()
+                }
+                crate::FilePreflight::Ready => Vec::new(),
+            },
             phase: zup_core::OperationPhase::Files,
-            kind: ProgressKind::OperationProgress,
+            kind: ProgressKind::ResourceBlocked,
             detail: format!("blocked: {}", detail.replace('\n', ", ")),
             completed: Some(self.completed_work.min(self.total_work)),
             total: Some(self.total_work),
@@ -1552,54 +1752,94 @@ impl OperationExecutor for WorkerFileExecutor {
 
     fn verify(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
+        if matches!(receipt, OperationReceipt::Cleanup { .. }) {
+            return self.inner.verify_cleanup(operation, receipt);
+        }
+        if let OperationReceipt::PersistentDirectory(owned) = receipt {
+            return self.inner.verify_persistent(operation, owned);
+        }
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
+        if let OperationReceipt::NativeService(receipt) = receipt {
+            let zup_plan::NodeKind::NativeService { operation } = &operation.kind else {
+                return Err("native service receipt requires a native service operation".into());
+            };
+            return crate::services::verify_native(operation, receipt, &mut self.lifecycle)
+                .map_err(|error| error.to_string());
+        }
+        if let OperationReceipt::Generation(receipt) = receipt {
+            return self.inner.verify_generation(operation, receipt);
+        }
+        if let OperationReceipt::ServiceControl(receipt) = receipt {
+            return zup_transaction::verify_service_control(&mut self.lifecycle, receipt);
+        }
         match &operation.kind {
-            zup_transaction::NodeKind::BackendOperation { .. }
-            | zup_transaction::NodeKind::BackendRemoval { .. } => {
-                crate::integration::verify_managed(receipt).map_err(|e| e.to_string())
+            zup_plan::NodeKind::BackendOperation { .. }
+            | zup_plan::NodeKind::BackendRemoval { .. } => {
+                crate::integration::verify_managed(operation, receipt).map_err(|e| e.to_string())
             }
-            zup_transaction::NodeKind::Barrier => Ok(()),
-            _ => crate::verify_installed_file(receipt).map_err(|e| e.to_string()),
+            zup_plan::NodeKind::Barrier => Ok(()),
+            _ => crate::verify_installed_file(operation, receipt).map_err(|e| e.to_string()),
         }
     }
 
-    fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error> {
+    fn apply(
+        &mut self,
+        operation: &DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, Self::Error> {
         if self.cancel.is_cancelled() {
             return Err("cancelled".into());
         }
         let receipt = match &operation.kind {
-            zup_transaction::NodeKind::Barrier => Ok(OperationReceipt::Control),
-            zup_transaction::NodeKind::BackendOperation { .. } => {
+            zup_plan::NodeKind::Cleanup { .. } => self.inner.apply_cleanup(operation, transaction),
+            zup_plan::NodeKind::PersistentDirectory { .. } => {
+                self.inner.apply_persistent(operation, transaction)
+            }
+            zup_plan::NodeKind::NativeService { operation } => {
+                crate::services::apply_native(operation, &mut self.lifecycle)
+                    .map_err(|error| error.to_string())
+            }
+            zup_plan::NodeKind::NativeCache { .. } => {
+                Err("Linux native cache operation is unsupported on Windows".into())
+            }
+            zup_plan::NodeKind::Generation { .. } => self.inner.apply_generation(operation),
+            zup_plan::NodeKind::Retention { .. }
+            | zup_plan::NodeKind::ReserveInstallation
+            | zup_plan::NodeKind::PublishInstallation => {
+                Err("installation publication belongs to the coordinator".into())
+            }
+            zup_plan::NodeKind::ServiceControl { operation } => {
+                zup_transaction::apply_service_control(&mut self.lifecycle, operation)
+            }
+            zup_plan::NodeKind::Barrier => Ok(OperationReceipt::Control),
+            zup_plan::NodeKind::BackendOperation { .. } => {
                 crate::integration::apply_managed(operation).map_err(|e| e.to_string())
             }
-            zup_transaction::NodeKind::BackendRemoval { .. } => {
+            zup_plan::NodeKind::BackendRemoval { .. } => {
                 crate::integration::apply_owned_removal(operation).map_err(|e| e.to_string())
             }
-            zup_transaction::NodeKind::FileRemoval { .. } => self
+            zup_plan::NodeKind::FileRemoval { .. } => self
                 .inner
                 .apply_owned_file_removal(operation)
                 .map_err(|e| e.to_string()),
-            zup_transaction::NodeKind::StageFile { .. }
-            | zup_transaction::NodeKind::FileMutation { .. } => {
-                let (rel, dest) = extract_file(operation)?;
-                apply_node(&mut self.inner, operation, &rel, &dest)
-                    .map(crate::transaction_receipt)
-                    .map_err(|e| e.to_string())
+            zup_plan::NodeKind::StageFile { .. }
+            | zup_plan::NodeKind::RetainFile { .. }
+            | zup_plan::NodeKind::FileMutation { .. } => {
+                apply_node(&mut self.inner, operation, transaction).map_err(|e| e.to_string())
             }
         }?;
 
-        self.completed_work = self
-            .completed_work
-            .saturating_add(zup_runtime::operation_work(operation));
+        self.completed_work = self.completed_work.saturating_add(operation.work());
         let _ = self.progress.send(ProgressReport {
+            blocked_pids: Vec::new(),
             phase: zup_runtime::operation_phase(operation),
             kind: ProgressKind::OperationProgress,
-            detail: zup_runtime::operation_action(operation).into(),
+            detail: zup_runtime::operation_result_action(operation, &receipt).into(),
             completed: Some(self.completed_work.min(self.total_work)),
             total: Some(self.total_work),
         });
@@ -1608,34 +1848,72 @@ impl OperationExecutor for WorkerFileExecutor {
 
     fn rollback(
         &mut self,
-        _op: &TransactionNode,
+        op: &DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         match receipt {
-            OperationReceipt::StageFile { .. }
+            OperationReceipt::PersistentDirectory(owned) => self.inner.verify_persistent(op, owned),
+            OperationReceipt::NativeService(receipt) => {
+                let zup_plan::NodeKind::NativeService { operation } = &op.kind else {
+                    return Err("native service receipt requires a native service operation".into());
+                };
+                crate::services::rollback_native(operation, receipt, &mut self.lifecycle)
+                    .map_err(|error| error.to_string())
+            }
+            OperationReceipt::Generation(receipt) => self.inner.retain_generation(op, receipt),
+            OperationReceipt::ServiceControl(receipt) => {
+                zup_transaction::rollback_service_control(&mut self.lifecycle, receipt)
+            }
+            OperationReceipt::RetainedFile { .. }
+            | OperationReceipt::StageFile { .. }
             | OperationReceipt::CreateFile { .. }
             | OperationReceipt::ReplaceFile { .. }
             | OperationReceipt::RemoveFile { .. } => self
                 .inner
-                .rollback_transaction_receipt(receipt)
+                .rollback_transaction_receipt(op, receipt)
                 .map_err(|e| e.to_string()),
-            _ => crate::integration::rollback_managed(receipt).map_err(|e| e.to_string()),
+            _ => crate::integration::rollback_managed(op, receipt).map_err(|e| e.to_string()),
         }
     }
 
     fn reconcile(
         &mut self,
-        op: &TransactionNode,
+        op: &DeploymentNode,
         _receipt: Option<&OperationReceipt>,
+        transaction: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, Self::Error> {
+        if matches!(op.kind, zup_plan::NodeKind::Cleanup { .. }) {
+            return self
+                .inner
+                .apply_cleanup(op, transaction)
+                .map(ReconcileResult::AppliedWithReceipt);
+        }
+        if let zup_plan::NodeKind::NativeService { operation } = &op.kind {
+            return crate::services::reconcile_native(operation, &mut self.lifecycle)
+                .map_err(|error| error.to_string());
+        }
+        if matches!(op.kind, zup_plan::NodeKind::Generation { .. }) {
+            return self.inner.reconcile_generation(op, _receipt);
+        }
+        if let zup_plan::NodeKind::ServiceControl { operation } = &op.kind {
+            let receipt = match _receipt {
+                Some(OperationReceipt::ServiceControl(receipt)) => Some(receipt.as_ref()),
+                _ => None,
+            };
+            return zup_transaction::reconcile_service_control(
+                &mut self.lifecycle,
+                operation,
+                receipt,
+            );
+        }
         match &op.kind {
-            zup_transaction::NodeKind::BackendOperation { .. } => {
+            zup_plan::NodeKind::BackendOperation { .. } => {
                 return crate::integration::reconcile_managed(op).map_err(|e| e.to_string());
             }
-            zup_transaction::NodeKind::BackendRemoval { .. } => {
+            zup_plan::NodeKind::BackendRemoval { .. } => {
                 return crate::integration::reconcile_owned_removal(op).map_err(|e| e.to_string());
             }
-            zup_transaction::NodeKind::FileRemoval { .. } => {
+            zup_plan::NodeKind::FileRemoval { .. } => {
                 return self
                     .inner
                     .reconcile_owned_file_removal(op)
@@ -1644,31 +1922,8 @@ impl OperationExecutor for WorkerFileExecutor {
             _ => {}
         }
         self.inner
-            .reconcile_transaction_node(op)
+            .reconcile_transaction_node(op, _receipt, transaction)
             .map_err(|e| e.to_string())
-    }
-}
-
-fn extract_file(
-    operation: &TransactionNode,
-) -> Result<(zup_core::RelativePath, std::path::PathBuf), String> {
-    match &operation.kind {
-        zup_transaction::NodeKind::StageFile { key }
-        | zup_transaction::NodeKind::FileMutation { key, .. } => {
-            let destination = match key {
-                zup_core::ResourceKey::File { destination }
-                | zup_core::ResourceKey::Maintenance { destination, .. } => destination,
-                _ => return Err("not a file resource".into()),
-            };
-            let dest = std::path::PathBuf::from(destination);
-            let source_relative = operation
-                .meta
-                .source_relative
-                .clone()
-                .ok_or_else(|| "file operation has no payload path".to_owned())?;
-            Ok((source_relative, dest))
-        }
-        _ => Err("unsupported node".into()),
     }
 }
 
@@ -1707,7 +1962,7 @@ mod tests {
         let state_root = PathBuf::from(r"C:\state");
         let identity = identity_with_file();
         let base = machine_base_for_sid(parent_sid);
-        let overlay = identity.path_under(&base).unwrap();
+        let overlay = identity.new_staging_path(&base).unwrap();
 
         assert!(
             validate_worker_overlay(
@@ -1716,7 +1971,6 @@ mod tests {
                 &identity,
                 Some(&overlay),
                 Some(&base),
-                false,
                 parent_sid,
             )
             .is_ok()
@@ -1728,7 +1982,6 @@ mod tests {
                 &identity,
                 Some(&overlay),
                 Some(&base),
-                false,
                 "S-1-5-21-9999999999-8888888888-7777777777",
             )
             .is_err()
@@ -1756,7 +2009,6 @@ mod tests {
                 &identity,
                 Some(&base),
                 Some(&base),
-                false,
                 parent_sid,
             )
             .is_err()
@@ -1768,7 +2020,6 @@ mod tests {
                 &identity,
                 None,
                 Some(&base),
-                false,
                 parent_sid,
             )
             .is_err()

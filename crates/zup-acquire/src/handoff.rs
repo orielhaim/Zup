@@ -1,38 +1,5 @@
-//! The handoff: what one process tells the next about what it already did.
-//!
-//! A thin bootstrapper resolves a release, verifies a native runtime, and starts
-//! it. Two properties have to hold at that moment:
-//!
-//! 1. **The native runtime must not take the bootstrapper's word for anything
-//!    that matters.** It is about to install files, registry entries, and
-//!    services on a user's machine. A bootstrapper that can name a different
-//!    release, a different variant, a different target, or a different payload
-//!    is a remote code execution primitive.
-//! 2. **The user must not experience it as two installers.** The progress they
-//!    were watching has to continue rather than restart at zero.
-//!
-//! Both are solved by the same object. Every field in [`RuntimeHandoff`] is a
-//! digest, a name, or a count, and the whole document has its own digest. The
-//! binding that makes it more than a hint is one line in the runtime's own
-//! verification:
-//!
-//! ```text
-//! handoff.runtime == sha256(this executable)
-//! ```
-//!
-//! A bootstrapper cannot substitute a release, because the release has to name
-//! *this* image's digest as one of its variants, and a release that does is a
-//! release whose fingerprint the client has already checked. It cannot
-//! substitute a payload, because every payload blob is named by digest in the
-//! authenticated catalog. It cannot substitute a target, because the runtime
-//! compares the handoff's target against the target compiled into its own
-//! embedded plan.
-//!
-//! What the bootstrapper *does* supply is a location: where the verified cache
-//! is, and where this document is. A hostile location yields a hostile cache
-//! full of blobs that do not hash to the authenticated digests, which is a
-//! failure, not a compromise. Locations are therefore the only untrusted part,
-//! and they are labelled as such wherever they are passed.
+//! Untrusted release locators and acquisition progress passed between installer processes.
+//! Runtime-image and content hashes establish consistency, not TUF authorization.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -55,10 +22,17 @@ pub const MAX_HANDOFF_BYTES: u64 = 64 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandoffMode {
+    Cleanup {
+        keep: u16,
+    },
     /// A first install from an authenticated release.
     Install,
     /// A move to a newer release.
     Upgrade,
+    Downgrade,
+    Rollback {
+        revision: zup_core::ActivationRevision,
+    },
     /// A different component selection of the same release.
     Modify,
     /// Restoring committed ownership after drift.
@@ -70,8 +44,11 @@ impl HandoffMode {
     /// The lifecycle verb a command line uses.
     pub const fn verb(self) -> &'static str {
         match self {
+            Self::Cleanup { .. } => "cleanup",
             Self::Install => "install",
             Self::Upgrade => "upgrade",
+            Self::Downgrade => "downgrade",
+            Self::Rollback { .. } => "rollback",
             Self::Modify => "modify",
             Self::Repair => "repair",
             Self::Uninstall => "uninstall",
@@ -142,6 +119,8 @@ impl std::fmt::Display for SessionSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeHandoff {
+    pub repository: String,
+    pub pin: zup_core::ReleasePin,
     pub schema: u32,
     pub app_id: AppId,
     /// The release graph, identified by its own recomputed fingerprint.
@@ -149,12 +128,6 @@ pub struct RuntimeHandoff {
     /// The digest of the release document's *bytes*, which is how a content cache
     /// is addressed.
     ///
-    /// This is the one field a bootstrapper supplies freely, and it is a cache
-    /// key rather than an authority: pointing it at a different document
-    /// selects bytes whose recomputed `release` fingerprint is not the `release`
-    /// above, and the check fails. Two digests are needed because a release
-    /// document names its own fingerprint as a field - it cannot also be the hash
-    /// of its own encoding - while a cache can only be keyed by a hash.
     pub document: Sha256Digest,
     /// The content catalog that release names.
     pub catalog: Sha256Digest,
@@ -164,10 +137,6 @@ pub struct RuntimeHandoff {
     pub manifest: Sha256Digest,
     /// The native runtime image.
     ///
-    /// The receiving process checks this against the hash of its own file. That
-    /// single check is what binds every other field, because the release names
-    /// this digest and the release's fingerprint was verified before anything
-    /// was downloaded.
     pub runtime: Sha256Digest,
     pub target: Target,
     /// `gui` or `console`, which decides what the user sees.
@@ -185,6 +154,10 @@ pub struct RuntimeHandoff {
 /// Why a handoff could not describe a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum HandoffError {
+    #[error("handoff repository locator is empty or exceeds 2048 bytes")]
+    Repository,
+    #[error("invalid handoff release pin: {0}")]
+    Pin(&'static str),
     #[error("unsupported handoff schema")]
     Schema,
     #[error("a handoff names no version-independent scope")]
@@ -220,6 +193,19 @@ impl RuntimeHandoff {
         if self.schema != HANDOFF_SCHEMA {
             return Err(HandoffError::Schema);
         }
+        if self.repository.is_empty() || self.repository.len() > 2048 {
+            return Err(HandoffError::Repository);
+        }
+        match &self.pin {
+            zup_core::ReleasePin::Release { document, .. } => {
+                if *document != self.document {
+                    return Err(HandoffError::Pin("release pin names a different document"));
+                }
+            }
+            zup_core::ReleasePin::Channel { channel } => {
+                crate::layout::release_path(channel).map_err(HandoffError::Pin)?;
+            }
+        }
         crate::layout::check_segment(&self.variant).map_err(HandoffError::Variant)?;
         if !matches!(self.scope.as_str(), "user" | "machine") {
             return Err(HandoffError::Scope);
@@ -230,81 +216,11 @@ impl RuntimeHandoff {
         Ok(())
     }
 
-    /// This handoff's own fingerprint.
-    ///
-    /// A file whose bytes hash to this is the handoff the process was meant to
-    /// be handed. It is not a signature - nothing here needs one, because the
-    /// document is not the authority; `runtime` is.
     pub fn digest(&self) -> Sha256Digest {
-        let body = HandoffBody {
-            schema: self.schema,
-            app_id: &self.app_id,
-            release: self.release,
-            document: self.document,
-            catalog: self.catalog,
-            variant: &self.variant,
-            manifest: self.manifest,
-            runtime: self.runtime,
-            target: &self.target,
-            frontend: &self.frontend,
-            mode: self.mode,
-            scope: &self.scope,
-            session: &self.session,
-            components: &self.components,
-        };
-        let bytes = serde_json::to_vec(&body).expect("a handoff body always serializes");
-        Sha256Digest::from_bytes(Sha256::digest(&bytes).into())
+        Sha256Digest::from_bytes(
+            Sha256::digest(serde_json::to_vec(self).expect("handoff serializes")).into(),
+        )
     }
-
-    /// The identity an installation persists when this handoff commits.
-    ///
-    /// `trust_anchor` is supplied by the caller because it is the digest of the
-    /// root the release was authenticated under, which the acquisition engine
-    /// deliberately does not hold.
-    pub fn identity(
-        &self,
-        version: &str,
-        channel: &str,
-        pinned: bool,
-        trust_anchor: Sha256Digest,
-    ) -> zup_core::ReleaseIdentity {
-        zup_core::ReleaseIdentity {
-            app_id: self.app_id.clone(),
-            release: self.release,
-            catalog: self.catalog,
-            variant: self.variant.clone(),
-            manifest: self.manifest,
-            runtime: Some(self.runtime),
-            version: version.to_owned(),
-            target: self.target,
-            channel: channel.to_owned(),
-            pinned,
-            trust_anchor,
-            frontend: self.frontend.clone(),
-            components: self.components.clone(),
-        }
-    }
-}
-
-/// The part of a handoff its fingerprint covers. Every field is, including the
-/// session summary: a progress line that disagrees with the document it came
-/// from is a bug worth catching, and it costs nothing to include.
-#[derive(Debug, Serialize)]
-struct HandoffBody<'a> {
-    schema: u32,
-    app_id: &'a AppId,
-    release: Sha256Digest,
-    document: Sha256Digest,
-    catalog: Sha256Digest,
-    variant: &'a str,
-    manifest: Sha256Digest,
-    runtime: Sha256Digest,
-    target: &'a Target,
-    frontend: &'a str,
-    mode: HandoffMode,
-    scope: &'a str,
-    session: &'a SessionSummary,
-    components: &'a [String],
 }
 
 #[cfg(test)]
@@ -313,6 +229,10 @@ mod tests {
 
     fn handoff() -> RuntimeHandoff {
         RuntimeHandoff {
+            repository: "https://example.invalid".into(),
+            pin: zup_core::ReleasePin::Channel {
+                channel: "stable".into(),
+            },
             schema: HANDOFF_SCHEMA,
             app_id: AppId::new("com.example.app").expect("valid app id"),
             release: Sha256Digest::from_bytes([1; 32]),

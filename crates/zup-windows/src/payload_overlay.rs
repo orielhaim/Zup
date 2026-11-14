@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use zup_plan::DeploymentPlan;
+#[cfg(test)]
+use zup_plan::{DeploymentEffects, compile_deployment};
 
 use semver::Version;
 use sha2::{Digest, Sha256};
@@ -8,8 +11,9 @@ use thiserror::Error;
 use zup_core::{
     AppId, ComponentId, PLUGIN_PAYLOAD_ROOT, RelativePath, SelectedScope, Sha256Digest, hash_reader,
 };
-use zup_plan::{DesiredState, GeneratedFile};
-use zup_transaction::{NodeKind, TransactionPlan};
+#[cfg(test)]
+use zup_plan::DesiredState;
+use zup_plan::GeneratedFile;
 
 use crate::durable::{DurableError, write_durable};
 use crate::transport::UserSid;
@@ -149,7 +153,8 @@ impl PayloadOverlayIdentity {
         )
     }
 
-    pub fn from_desired_state(plan: &DesiredState) -> Result<Self, PayloadOverlayError> {
+    #[cfg(test)]
+    fn from_desired_state(plan: &DesiredState) -> Result<Self, PayloadOverlayError> {
         Self::from_parts(
             plan.app.id.clone(),
             plan.app.version.clone(),
@@ -171,41 +176,17 @@ impl PayloadOverlayIdentity {
         app_id: AppId,
         app_version: Version,
         scope: SelectedScope,
-        plan: &TransactionPlan,
+        plan: &DeploymentPlan,
     ) -> Result<Self, PayloadOverlayError> {
-        let files = plan
-            .nodes
-            .iter()
-            .filter_map(|node| {
-                if !matches!(
-                    node.kind,
-                    NodeKind::StageFile { .. } | NodeKind::FileMutation { .. }
-                ) {
-                    return None;
-                }
-                let source_relative = node.meta.source_relative.as_ref()?;
-                if !is_plugin_payload_path(source_relative) {
-                    return None;
-                }
-                Some((|| {
-                    let size = node.meta.expected_size.ok_or_else(|| {
-                        PayloadOverlayError::InvalidIdentity(format!(
-                            "generated source `{source_relative}` has no expected size"
-                        ))
-                    })?;
-                    let sha256 = node.meta.expected_sha256.ok_or_else(|| {
-                        PayloadOverlayError::InvalidIdentity(format!(
-                            "generated source `{source_relative}` has no expected digest"
-                        ))
-                    })?;
-                    Ok(PayloadOverlayFileIdentity {
-                        source_relative: source_relative.clone(),
-                        size,
-                        sha256,
-                    })
-                })())
-            })
-            .collect::<Result<Vec<_>, PayloadOverlayError>>()?;
+        let files = crate::recovery::required_files(plan)
+            .map_err(PayloadOverlayError::InvalidIdentity)?
+            .into_iter()
+            .filter(|(path, _)| is_plugin_payload_path(path))
+            .map(|(source_relative, blob)| PayloadOverlayFileIdentity {
+                source_relative,
+                size: blob.size,
+                sha256: blob.sha256,
+            });
         Self::from_parts(
             app_id,
             app_version,
@@ -272,7 +253,28 @@ impl PayloadOverlayIdentity {
         Sha256Digest::from_hasher(hasher)
     }
 
-    pub fn path_under(&self, base_root: &Path) -> Option<PathBuf> {
+    pub fn new_staging_path(&self, base_root: &Path) -> Option<PathBuf> {
+        let content = self.content_path(base_root)?;
+        Some(content.with_file_name(format!(
+            "{}-{}",
+            content.file_name()?.to_str()?,
+            uuid::Uuid::now_v7()
+        )))
+    }
+
+    pub fn matches_path(&self, base_root: &Path, actual: &Path) -> bool {
+        let Some(content) = self.content_path(base_root) else {
+            return false;
+        };
+        actual.parent() == content.parent()
+            && actual
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix(&format!("{}-", self.digest().to_hex())))
+                .is_some_and(valid_staging_nonce)
+    }
+
+    fn content_path(&self, base_root: &Path) -> Option<PathBuf> {
         if !self.has_files() {
             return None;
         }
@@ -292,11 +294,10 @@ impl PayloadOverlayIdentity {
 
 pub fn materialize_payload_overlay(
     overlay_base_root: &Path,
-    plan: &DesiredState,
+    identity: &PayloadOverlayIdentity,
     generated_files: &[GeneratedFile],
 ) -> Result<Option<PathBuf>, PayloadOverlayError> {
-    let identity = PayloadOverlayIdentity::from_desired_state(plan)?;
-    let Some(overlay_root) = identity.path_under(overlay_base_root) else {
+    let Some(overlay_root) = identity.new_staging_path(overlay_base_root) else {
         if generated_files.is_empty() {
             return Ok(None);
         }
@@ -363,15 +364,21 @@ pub fn materialize_payload_overlay(
         });
     }
 
-    ensure_overlay_directories(overlay_base_root, &identity)?;
-    for (source, expected) in &identity.files {
-        let target = resolve_overlay_path(&overlay_root, source)?;
-        ensure_overlay_parents(&overlay_root, source)?;
-        verify_target_is_safe(&overlay_root, &target, source)?;
-        write_durable(&target, generated[source])?;
-        verify_regular_file(&target, source, expected)?;
+    let result = (|| {
+        ensure_overlay_directories(overlay_base_root, &overlay_root)?;
+        for (source, expected) in &identity.files {
+            let target = resolve_overlay_path(&overlay_root, source)?;
+            ensure_overlay_parents(&overlay_root, source)?;
+            verify_target_is_safe(&overlay_root, &target, source)?;
+            write_durable(&target, generated[source])?;
+            verify_regular_file(&target, source, expected)?;
+        }
+        verify_payload_overlay(overlay_base_root, identity, &overlay_root)
+    })();
+    if let Err(error) = result {
+        let _ = cleanup_payload_overlay(overlay_base_root, Some(&overlay_root));
+        return Err(error);
     }
-    verify_payload_overlay(overlay_base_root, &identity, &overlay_root)?;
     Ok(Some(overlay_root))
 }
 
@@ -380,15 +387,10 @@ pub fn verify_payload_overlay(
     identity: &PayloadOverlayIdentity,
     overlay_root: &Path,
 ) -> Result<(), PayloadOverlayError> {
-    let expected = identity.path_under(overlay_base_root).ok_or_else(|| {
-        PayloadOverlayError::InvalidIdentity("overlay identity has no generated files".into())
-    })?;
-    if overlay_root != expected {
-        return Err(PayloadOverlayError::InvalidIdentity(format!(
-            "expected overlay `{}`, found `{}`",
-            expected.display(),
-            overlay_root.display()
-        )));
+    if !identity.matches_path(overlay_base_root, overlay_root) {
+        return Err(PayloadOverlayError::InvalidIdentity(
+            "overlay is outside the authenticated content namespace".into(),
+        ));
     }
     verify_existing_directory_chain(overlay_base_root)?;
     verify_directory_chain(overlay_base_root, overlay_root)?;
@@ -447,9 +449,12 @@ pub fn cleanup_payload_overlay(
     };
     if app.len() != 64
         || scope != SelectedScope::User.to_string() && scope != SelectedScope::Machine.to_string()
-        || identity.len() != 64
+        || identity.split_once('-').is_none_or(|(digest, nonce)| {
+            digest.len() != 64
+                || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !valid_staging_nonce(nonce)
+        })
         || !app.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || !identity.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(PayloadOverlayError::UnsafePath {
             path: overlay_root.display().to_string(),
@@ -471,24 +476,6 @@ pub fn cleanup_payload_overlay(
         })?;
     remove_directory_if_empty(scope_root)?;
     remove_directory_if_empty(app_root)?;
-    remove_directory_if_empty(&namespace)?;
-    Ok(())
-}
-
-pub fn cleanup_app_payload_overlays(
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-) -> Result<(), PayloadOverlayError> {
-    let overlay_base_root = payload_overlay_base_root(state_root, scope)?;
-    let mut app_hasher = Sha256::new();
-    hash_field(&mut app_hasher, OVERLAY_APP_DOMAIN);
-    hash_field(&mut app_hasher, app_id.as_str().as_bytes());
-    let app = Sha256Digest::from_hasher(app_hasher).to_hex();
-    let namespace = overlay_base_root.join(PAYLOAD_OVERLAY_DIRECTORY);
-    let scope_root = namespace.join(app).join(scope.to_string());
-    remove_directory_if_present(&scope_root)?;
-    remove_directory_if_empty(scope_root.parent().expect("scope has app parent"))?;
     remove_directory_if_empty(&namespace)?;
     Ok(())
 }
@@ -533,16 +520,17 @@ fn hash_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
+fn valid_staging_nonce(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == value)
+}
+
 fn ensure_overlay_directories(
     overlay_base_root: &Path,
-    identity: &PayloadOverlayIdentity,
+    overlay_root: &Path,
 ) -> Result<(), PayloadOverlayError> {
     ensure_directory_chain(overlay_base_root)?;
     let namespace = overlay_base_root.join(PAYLOAD_OVERLAY_DIRECTORY);
     ensure_directory(&namespace)?;
-    let overlay_root = identity
-        .path_under(overlay_base_root)
-        .expect("overlay identity has files");
     let scope_root = overlay_root
         .parent()
         .expect("overlay has scope parent")
@@ -553,7 +541,7 @@ fn ensure_overlay_directories(
         .to_path_buf();
     ensure_directory(&app_root)?;
     ensure_directory(&scope_root)?;
-    ensure_directory(&overlay_root)
+    ensure_directory(overlay_root)
 }
 
 fn ensure_directory_chain(path: &Path) -> Result<(), PayloadOverlayError> {
@@ -782,11 +770,10 @@ fn io_error(path: &Path, source: std::io::Error) -> PayloadOverlayError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zup_core::TargetPath;
     use zup_core::{App, NonEmptyString, ResourceKey, Target, Template};
     use zup_plan::DesiredFile;
-    use zup_plan::TargetPath;
     use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
-    use zup_transaction::{TransactionInput, compile_transaction};
 
     fn generated_source() -> RelativePath {
         RelativePath::new("__zup_plugins__/generated.bin").unwrap()
@@ -796,7 +783,6 @@ mod tests {
         let bytes = b"generated".to_vec();
         GeneratedFile {
             source_relative: generated_source(),
-            destination: Template::parse("C:/target/generated.bin").unwrap(),
             size: bytes.len() as u64,
             sha256: Sha256Digest::from_bytes(Sha256::digest(&bytes).into()),
             bytes,
@@ -806,6 +792,12 @@ mod tests {
     fn install_plan() -> DesiredState {
         let generated = generated_file();
         DesiredState {
+            generation_readers: Default::default(),
+            data: Vec::new(),
+            requirements: (),
+            maintenance: None,
+            installation: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+            generation: None,
             app: App {
                 id: AppId::new("com.example.overlay").unwrap(),
                 name: NonEmptyString::new("Overlay").unwrap(),
@@ -821,10 +813,17 @@ mod tests {
             prerequisites: Vec::new(),
             files: vec![DesiredFile {
                 key: ResourceKey::File {
-                    destination: generated.destination.to_string(),
+                    id: zup_core::FileResourceId::Payload {
+                        id: zup_core::PayloadId::File {
+                            declaration: zup_core::ResourceId::new("fixture-0").unwrap(),
+                        },
+                    },
                 },
                 source_relative: generated.source_relative,
-                destination: generated.destination,
+                placement: zup_core::PayloadPlacement::Fixed {
+                    replacement: zup_core::FixedReplacement::Atomic,
+                    path: Template::parse("C:/target/generated.bin").unwrap(),
+                },
                 size: generated.size,
                 sha256: generated.sha256,
                 executable: true,
@@ -848,20 +847,28 @@ mod tests {
         let mut changed = install_plan();
         changed.app.version = Version::parse("1.2.4").unwrap();
         let changed = PayloadOverlayIdentity::from_desired_state(&changed).unwrap();
-        assert_ne!(first.path_under(state_root), changed.path_under(state_root));
+        assert_ne!(
+            first.content_path(state_root),
+            changed.content_path(state_root)
+        );
     }
 
     #[test]
-    fn install_and_transaction_derive_the_same_recovery_path() {
+    fn install_and_transaction_derive_the_same_content_namespace() {
         let install = install_plan();
-        let mut input = TransactionInput::new(install.target);
+        let mut input = DeploymentEffects::new(
+            install.installation,
+            zup_plan::DeploymentRequirements::capture(&install).unwrap(),
+        );
+        input.install_directory = Some(TargetPath::new(install.target, r"C:\target").unwrap());
         input.selected_components = install.selected_components.clone();
         input.files.push(FileOperation {
+            replacement: zup_core::FixedReplacement::Atomic,
             key: install.files[0].key.clone(),
             source_relative: install.files[0].source_relative.clone(),
             destination: TargetPath::new(
                 Target::parse("windows-x64").unwrap(),
-                install.files[0].destination.to_string(),
+                install.files[0].destination().to_string(),
             )
             .unwrap(),
             precondition: FilePrecondition::Absent,
@@ -873,7 +880,7 @@ mod tests {
             kind: FileOperationKind::Create,
             conflict: None,
         });
-        let transaction = compile_transaction(&input).unwrap();
+        let transaction = compile_deployment(&input).unwrap();
         let state_root = Path::new("state");
         let from_install = PayloadOverlayIdentity::from_desired_state(&install).unwrap();
         let from_transaction = PayloadOverlayIdentity::from_transaction(
@@ -884,8 +891,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            from_install.path_under(state_root),
-            from_transaction.path_under(state_root)
+            from_install.content_path(state_root),
+            from_transaction.content_path(state_root)
         );
     }
 
@@ -896,14 +903,18 @@ mod tests {
 
         let mut changed = generated_file();
         changed.bytes = b"different".to_vec();
-        let error =
-            materialize_payload_overlay(&root.path().join("state"), &plan, &[changed]).unwrap_err();
+        let error = materialize_payload_overlay(
+            &root.path().join("state"),
+            &PayloadOverlayIdentity::from_desired_state(&plan).unwrap(),
+            &[changed],
+        )
+        .unwrap_err();
         assert!(matches!(error, PayloadOverlayError::DigestMismatch { .. }));
 
         let duplicate = generated_file();
         let error = materialize_payload_overlay(
             &root.path().join("state-duplicate"),
-            &plan,
+            &PayloadOverlayIdentity::from_desired_state(&plan).unwrap(),
             &[duplicate.clone(), duplicate],
         )
         .unwrap_err();
@@ -912,14 +923,14 @@ mod tests {
         let state_root = root.path().join("state-not-a-file");
         let identity = PayloadOverlayIdentity::from_desired_state(&plan).unwrap();
         let generated = generated_file();
-        let target = resolve_overlay_path(
-            &identity.path_under(&state_root).unwrap(),
-            &generated.source_relative,
-        )
-        .unwrap();
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let overlay =
+            materialize_payload_overlay(&state_root, &identity, std::slice::from_ref(&generated))
+                .unwrap()
+                .unwrap();
+        let target = resolve_overlay_path(&overlay, &generated.source_relative).unwrap();
+        fs::remove_file(&target).unwrap();
         fs::create_dir(&target).unwrap();
-        let error = materialize_payload_overlay(&state_root, &plan, &[generated]).unwrap_err();
+        let error = verify_payload_overlay(&state_root, &identity, &overlay).unwrap_err();
         assert!(matches!(error, PayloadOverlayError::NotRegular { .. }));
     }
 
@@ -935,25 +946,39 @@ mod tests {
         assert!(!base.starts_with(&state_root));
 
         let generated = generated_file();
-        let overlay = materialize_payload_overlay(&base, &plan, &[generated]).unwrap();
+        let overlay = materialize_payload_overlay(
+            &base,
+            &PayloadOverlayIdentity::from_desired_state(&plan).unwrap(),
+            &[generated],
+        )
+        .unwrap();
         assert!(overlay.as_deref().unwrap().starts_with(&base));
         assert!(state_root.is_file());
         cleanup_payload_overlay(&base, overlay.as_deref()).unwrap();
     }
 
     #[test]
-    fn app_overlay_cleanup_is_scoped_to_one_installation() {
+    fn retiring_one_overlay_preserves_a_second_process_input_for_the_same_app() {
         let root = tempfile::TempDir::new().unwrap();
         let state_root = root.path().join("state");
         let first_plan = install_plan();
-        let first =
-            materialize_payload_overlay(&state_root, &first_plan, &[generated_file()]).unwrap();
-        let mut second_plan = install_plan();
-        second_plan.app.id = AppId::new("com.example.other-overlay").unwrap();
-        let second =
-            materialize_payload_overlay(&state_root, &second_plan, &[generated_file()]).unwrap();
+        let first = materialize_payload_overlay(
+            &state_root,
+            &PayloadOverlayIdentity::from_desired_state(&first_plan).unwrap(),
+            &[generated_file()],
+        )
+        .unwrap();
+        let second_plan = install_plan();
 
-        cleanup_app_payload_overlays(&state_root, &first_plan.app.id, first_plan.scope).unwrap();
+        let second = materialize_payload_overlay(
+            &state_root,
+            &PayloadOverlayIdentity::from_desired_state(&second_plan).unwrap(),
+            &[generated_file()],
+        )
+        .unwrap();
+
+        assert_ne!(first, second);
+        cleanup_payload_overlay(&state_root, first.as_deref()).unwrap();
         assert!(!first.unwrap().exists());
         assert!(second.unwrap().exists());
     }

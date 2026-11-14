@@ -335,7 +335,7 @@ fn derived_output_path(
 
 /// The dispatch is on the *target's* operating system, never on the build
 pub fn check_target_lowering(
-    build: &zup_build::BuildPlan,
+    build: &zup_core::BuildPlan,
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
     let capabilities = zup_plan::capabilities(&config.target)
@@ -357,7 +357,7 @@ pub fn check_target_lowering(
 }
 
 fn check_linux_lowering(
-    build: &zup_build::BuildPlan,
+    build: &zup_core::BuildPlan,
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
     let plan = build
@@ -387,7 +387,7 @@ fn check_linux_lowering(
 }
 
 fn check_windows_lowering(
-    build: &zup_build::BuildPlan,
+    build: &zup_core::BuildPlan,
     config: &ResolvedTargetConfig,
 ) -> miette::Result<Vec<SelectedScope>> {
     let scopes = config.install.scope.scopes().to_vec();
@@ -461,7 +461,7 @@ mod tests {
         ToolchainResolver::new(
             "0.0.0-test".to_owned(),
             PathBuf::from("C:/nowhere/zup.exe"),
-            PathBuf::from("C:/nowhere/state"),
+            crate::ToolchainCache::Directory(PathBuf::from("C:/nowhere/state")),
         )
     }
 
@@ -614,6 +614,8 @@ mod tests {
             source: zup_core::Source::new(PathBuf::from("dist")).unwrap(),
             frontend: Frontend::Gui,
             install: zup_core::Install {
+                generation_readers: Default::default(),
+                data: Vec::new(),
                 scope: zup_core::InstallScope::User,
                 directory: zup_core::InstallDirectory {
                     user: None,

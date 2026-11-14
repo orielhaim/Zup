@@ -1,45 +1,14 @@
-//! Resolving an authenticated release graph, and nothing else.
+//! TUF-authenticated release resolution and acquisition.
 //!
-//! This crate is the seam between TUF and the acquisition engine. It answers one
-//! question - *which release graph, and which content does this machine need
-//! from it* - and it answers it the same way for a first install, an update, a
-//! modify, and a repair.
-//!
-//! ```text
-//! trust block + durable TUF state
-//!         ↓
-//!   authenticated ReleaseDescriptor     releases/<channel>.json
-//!         ↓                             or releases/<channel>/versions/<v>.json
-//!   selected variant                   one host, one variant
-//!         ↓
-//!   verified catalog + manifest        both named by digest above
-//!         ↓
-//!   zup-acquire                        the closure, the cache, the barrier
-//!         ↓
-//!   RuntimeHandoff                     the identity the lifecycle commits
-//! ```
-//!
-//! # What this crate deliberately does not have
-//!
-//! No knowledge of transactions, files, registry entries, or Windows. It hands
-//! over a verified cache and a bound handoff; what happens next belongs to the
-//! native runtime under the transaction engine, where it already is.
-//!
-//! # TUF state is durable
-//!
-//! `tough`'s datastore exists to hold the most recently observed
-//! timestamp/snapshot/targets metadata, and rollback detection is only possible
-//! across processes if it survives one. So the datastore is a directory under
-//! the machine's state root, namespaced by everything that can change the answer
-//! (application, repository, channel, and the trust anchor's own digest), and it
-//! is never deleted because a fetch failed. A publisher who cannot be reached
-//! must not be able to reset a client's rollback memory.
+//! Persistent repository metadata records prior observations independently of
+//! the content cache. Metadata publication uses the TUF client's datastore.
 
 #[cfg(feature = "bundle")]
 pub mod content;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use zup_core::ReleasePin;
 
 use sha2::{Digest, Sha256};
 use tough::{ExpirationEnforcement, Limits, RepositoryLoader, TargetName};
@@ -47,10 +16,11 @@ use url::Url;
 use zup_acquire::{
     AcquireError, AcquisitionItem, AcquisitionPlan, ArtifactSource, CachePolicy, ContentCatalog,
     ContentDescriptor, ContentKind, ContentReason, DirectorySource, HostProfile, OnlineTrust,
-    ProgressSink, ReleaseDescriptor, ReleasePin, ReleaseVariant, SourceChain, WebLayout,
-    select_variant,
+    ProgressSink, ReleaseDescriptor, ReleaseVariant, SourceChain, select_variant,
 };
 use zup_acquire_http::{HttpClient, HttpClientConfig, HttpSource, Origin, OriginSet};
+
+pub mod repository_state;
 
 mod pinned;
 pub use pinned::{PinnedDownload, fetch_pinned};
@@ -90,16 +60,6 @@ pub enum UpdateError {
     Cancelled,
 }
 
-impl UpdateError {
-    /// Whether this failure left the machine untouched.
-    ///
-    /// Every one of these is raised before the barrier, so the answer is always
-    /// yes. It is stated rather than inferred so a frontend can assert it.
-    pub const fn left_machine_unchanged(&self) -> bool {
-        true
-    }
-}
-
 impl From<tough::error::Error> for UpdateError {
     fn from(error: tough::error::Error) -> Self {
         Self::Tuf(Box::new(error))
@@ -117,7 +77,7 @@ pub enum ComponentSelection<'a> {
     /// Everything the variant can install.
     All,
     /// Exactly these component identifiers.
-    Only(&'a [&'a str]),
+    Only(&'a [zup_core::ComponentId]),
 }
 
 /// Where a client's persistent TUF state lives, and why.
@@ -133,8 +93,6 @@ pub struct TrustContext {
     pub trust: OnlineTrust,
     /// The machine's state root. TUF state and the content cache live under it.
     pub state_root: PathBuf,
-    /// The version this client insists on, when it is pinned.
-    pub pin: ReleasePin,
 }
 
 impl TrustContext {
@@ -146,6 +104,7 @@ impl TrustContext {
     pub fn from_update_config(
         config: &zup_core::UpdateConfig,
         app_id: zup_core::AppId,
+        scope: zup_core::InstallScope,
         state_root: impl Into<PathBuf>,
     ) -> Self {
         let channel = ReleasePin::Channel {
@@ -159,76 +118,51 @@ impl TrustContext {
                 trusted_root: zup_core::base64_encode(&config.trusted_root),
                 pin: channel.clone(),
                 mirrors: Vec::new(),
-                // An update client is driven by a configuration file, not by an
-                // artifact a person double-clicked, so the scope comes from that
-                // configuration rather than from a default that would have to be
-                // guessed. `User` here is the value a client is constructed with
-                // by `zup`, which passes the manifest's declared scope.
-                scope: zup_core::InstallScope::User,
+                scope,
             },
             state_root: state_root.into(),
-            pin: channel,
         }
     }
 
-    /// The same context, pinned to one exact version.
-    ///
-    /// This is what a version-labelled thin installer is. It reads the immutable
-    /// version-addressed release document, so a later publication of the channel
-    /// cannot move it - which is the entire difference between the two thin
-    /// artifacts and the reason they are two files.
-    pub fn pinned_to(mut self, version: &str) -> Self {
-        self.pin = ReleasePin::Version {
-            version: version.to_owned(),
+    pub fn from_release(
+        config: &zup_core::UpdateConfig,
+        identity: &zup_core::ReleaseIdentity,
+        scope: zup_core::InstallScope,
+        state_root: impl Into<PathBuf>,
+    ) -> Result<Self, UpdateError> {
+        identity
+            .validate()
+            .map_err(|error| UpdateError::Graph(error.to_string()))?;
+        if zup_core::hash_bytes(&config.trusted_root) != identity.trust_anchor {
+            return Err(UpdateError::Graph(
+                "the recorded source requires a different update trust anchor".into(),
+            ));
+        }
+        let mut context =
+            Self::from_update_config(config, identity.app_id.clone(), scope, state_root);
+        context.trust.repository = identity.repository.clone();
+        context.trust.channel = identity.channel.clone();
+        context.trust.pin = ReleasePin::Release {
+            version: identity
+                .version
+                .parse()
+                .map_err(|error| UpdateError::Graph(format!("recorded source version: {error}")))?,
+            document: identity.document,
         };
-        self.trust.pin = self.pin.clone();
-        self
+        Ok(context)
     }
 
-    /// The channel this context resolves through, which a pinned context still
-    /// names: the version-addressed document lives inside the channel.
-    pub fn channel(&self) -> &str {
-        match &self.pin {
-            ReleasePin::Version { .. } => &self.trust.channel,
-            ReleasePin::Channel { channel } => channel,
-        }
-    }
-
-    /// Where TUF's persistent metadata for this context lives.
+    /// Repository trust state is independent of channels and transport locations.
     pub fn datastore_dir(&self) -> Result<PathBuf, UpdateError> {
         let anchor = self
             .trust
             .trust_anchor()
             .map_err(|detail| UpdateError::Graph(detail.to_owned()))?;
-        zup_acquire::check_channel(self.channel())
-            .map_err(|detail| UpdateError::Graph(detail.to_owned()))?;
         Ok(self
             .state_root
             .join("repositories")
-            .join(&anchor.to_hex()[..32])
-            .join(self.repository_fingerprint())
-            .join(self.channel()))
-    }
-
-    /// A short digest of where this context looks.
-    ///
-    /// The path component is a digest rather than the URL itself so a state
-    /// directory listing cannot be used to enumerate the mirrors a deployment
-    /// uses, and so a URL with characters a filesystem dislikes cannot become a
-    /// path.
-    fn repository_fingerprint(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(b"zup/repository-location/v1\0");
-        hasher.update(self.trust.repository.as_bytes());
-        for mirror in &self.trust.mirrors {
-            hasher.update([0]);
-            hasher.update(mirror.as_bytes());
-        }
-        Sha256Digest::from_bytes(hasher.finalize().into())
-            .to_hex()
-            .chars()
-            .take(32)
-            .collect()
+            .join(self.trust.app_id.as_str())
+            .join(anchor.to_hex()))
     }
 
     /// Where the verified content cache for this context lives.
@@ -242,20 +176,9 @@ impl TrustContext {
 
     /// The document that answers this context.
     pub fn release_document(&self) -> Result<zup_acquire::RelativeContentPath, UpdateError> {
-        let mut trust = self.trust.clone();
-        trust.pin = self.pin.clone();
-        trust
+        self.trust
             .release_document()
             .map_err(|detail| UpdateError::Graph(detail.to_owned()))
-    }
-
-    /// The origins content may be served from, primary first.
-    pub fn origins(&self) -> Result<OriginSet, UpdateError> {
-        OriginSet::from_urls(
-            &self.trust.repository,
-            self.trust.mirrors.iter().map(String::as_str),
-        )
-        .map_err(UpdateError::Transport)
     }
 
     /// The digest identifying the publisher's trust anchor.
@@ -308,10 +231,35 @@ pub struct ResolvedRelease {
     /// The document that produced the release, relative to the repository root.
     pub document: String,
     /// Whether this release was addressed by version rather than by channel.
-    pub pinned: bool,
+    pub pin: ReleasePin,
+    pub repository: String,
+    pub trust_anchor: Sha256Digest,
 }
 
 impl ResolvedRelease {
+    pub fn identity(&self, components: &[zup_core::Component]) -> zup_core::ReleaseIdentity {
+        zup_core::ReleaseIdentity {
+            app_id: self.descriptor.app_id.clone(),
+            release: self.descriptor.release_digest,
+            document: self.descriptor_digest,
+            catalog: self.descriptor.catalog.digest,
+            variant: self.variant.id.clone(),
+            manifest: self.variant.manifest.digest,
+            runtime: self.variant.runtime.map(|runtime| runtime.digest),
+            version: self.descriptor.version.clone(),
+            target: self.variant.target,
+            channel: self.descriptor.channel.clone(),
+            repository: self.repository.clone(),
+            pin: self.pin.clone(),
+            trust_anchor: self.trust_anchor,
+            frontend: self.variant.frontend.clone(),
+            components: components
+                .iter()
+                .map(|component| component.id.to_string())
+                .collect(),
+        }
+    }
+
     /// The runtime this machine must execute, if the release names one.
     ///
     /// A thin release names one per variant because the machine has to fetch the
@@ -398,13 +346,13 @@ fn wanted(component: &Option<String>, selection: ComponentSelection<'_>) -> bool
             None => true,
             Some(component) => selection
                 .only()
-                .is_some_and(|only| only.contains(&component.as_str())),
+                .is_some_and(|only| only.iter().any(|id| id.as_str() == component)),
         },
     }
 }
 
 impl ComponentSelection<'_> {
-    fn only(&self) -> Option<&[&str]> {
+    fn only(&self) -> Option<&[zup_core::ComponentId]> {
         match self {
             Self::All => None,
             Self::Only(only) => Some(only),
@@ -430,6 +378,7 @@ pub struct ReleaseResolver {
     client: HttpClient,
     cache: Arc<zup_acquire::ContentCache>,
     progress: ProgressSink,
+    metadata_store: Option<Arc<dyn tough::MetadataStore>>,
 }
 
 impl ReleaseResolver {
@@ -453,7 +402,13 @@ impl ReleaseResolver {
             client,
             cache,
             progress,
+            metadata_store: None,
         })
+    }
+
+    pub fn with_metadata_store(mut self, store: Arc<dyn tough::MetadataStore>) -> Self {
+        self.metadata_store = Some(store);
+        self
     }
 
     /// Add a local source ahead of the network.
@@ -490,25 +445,60 @@ impl ReleaseResolver {
     /// there.
     pub fn chain(&self) -> Result<SourceChain, UpdateError> {
         let mut sources: Vec<Arc<dyn ArtifactSource>> = self.seeds.clone();
-        sources.push(Arc::new(HttpSource::new(
-            "repository",
-            self.client.clone(),
-            self.context.origins()?,
-        )));
+        let mut remote = Vec::new();
+        for (index, address) in std::iter::once(self.context.trust.repository.as_str())
+            .chain(self.context.trust.mirrors.iter().map(String::as_str))
+            .enumerate()
+        {
+            let url = repository_base(address)?;
+            if url.scheme() == "file" {
+                if !remote.is_empty() {
+                    sources.push(Arc::new(HttpSource::new(
+                        "repository",
+                        self.client.clone(),
+                        OriginSet::from_origins(std::mem::take(&mut remote)),
+                    )));
+                }
+                let directory = url.to_file_path().map_err(|_| UpdateError::Graph("file repository cannot be represented as a native directory on this platform".into()))?;
+                sources.push(Arc::new(DirectorySource::new(
+                    format!("repository location {}", index + 1),
+                    directory,
+                )));
+            } else {
+                remote.push(Origin::parse(address).map_err(UpdateError::Transport)?);
+            }
+        }
+        if !remote.is_empty() {
+            sources.push(Arc::new(HttpSource::new(
+                "repository",
+                self.client.clone(),
+                OriginSet::from_origins(remote),
+            )));
+        }
         Ok(SourceChain::new(sources))
     }
 
     /// Authenticate the repository and read the release this context addresses.
     pub async fn resolve(&self) -> Result<ResolvedRelease, UpdateError> {
-        let repository = self.load_repository().await?;
+        self.resolve_with_transport(tough::DefaultTransport::default())
+            .await
+    }
+
+    pub async fn resolve_with_transport<T: tough::Transport + 'static>(
+        &self,
+        transport: T,
+    ) -> Result<ResolvedRelease, UpdateError> {
+        let repository = self.load_repository_with_transport(transport).await?;
         let document = self.context.release_document()?;
         let bytes = read_target(&repository, &document.to_string(), MAX_DOCUMENT_BYTES).await?;
+        if let ReleasePin::Release { document, .. } = &self.context.trust.pin {
+            check_digest(&bytes, *document, "release document")?;
+        }
         let descriptor = ReleaseDescriptor::parse(&bytes)
             .map_err(|error| UpdateError::Graph(error.to_string()))?;
         self.check_belongs(&descriptor)?;
 
-        let catalog_document = WebLayout::catalog(self.context.channel())
-            .map_err(|detail| UpdateError::Graph(detail.to_owned()))?;
+        let catalog_document = zup_acquire::document_path(&descriptor.catalog.digest);
         let catalog_bytes = read_target(
             &repository,
             &catalog_document.to_string(),
@@ -522,8 +512,7 @@ impl ReleaseResolver {
         let variant = select_variant(&descriptor, &self.host)
             .map_err(|error| UpdateError::Graph(error.to_string()))?
             .clone();
-        let manifest_document = WebLayout::variant_manifest(self.context.channel(), &variant.id)
-            .map_err(|detail| UpdateError::Graph(detail.to_owned()))?;
+        let manifest_document = zup_acquire::document_path(&variant.manifest.digest);
         let manifest = read_target(
             &repository,
             &manifest_document.to_string(),
@@ -531,6 +520,36 @@ impl ReleaseResolver {
         )
         .await?;
         check_digest(&manifest, variant.manifest.digest, "variant manifest")?;
+
+        for (kind, digest, document) in [
+            (
+                ContentKind::Metadata,
+                zup_core::hash_bytes(&bytes),
+                bytes.as_slice(),
+            ),
+            (
+                ContentKind::Catalog,
+                descriptor.catalog.digest,
+                catalog_bytes.as_slice(),
+            ),
+            (
+                ContentKind::Metadata,
+                variant.manifest.digest,
+                manifest.as_slice(),
+            ),
+        ] {
+            let content = ContentDescriptor::stored(kind, digest, document.len() as u64);
+            if self
+                .cache
+                .get(&content, zup_acquire::Verify::Full)
+                .map_err(AcquireError::Cache)?
+                .is_none()
+            {
+                let mut output = self.cache.writer(&content).map_err(AcquireError::Cache)?;
+                output.write(document).map_err(AcquireError::Cache)?;
+                output.commit().map_err(AcquireError::Cache)?;
+            }
+        }
 
         self.progress
             .offer(zup_acquire::AcquisitionEvent::ReleaseResolved {
@@ -558,7 +577,9 @@ impl ReleaseResolver {
             descriptor_digest: Sha256Digest::from_bytes(Sha256::digest(&bytes).into()),
             descriptor_bytes: bytes,
             document: document.to_string(),
-            pinned: matches!(self.context.pin, ReleasePin::Version { .. }),
+            pin: self.context.trust.pin.clone(),
+            repository: self.context.trust.repository.clone(),
+            trust_anchor: self.context.trust_anchor()?,
         })
     }
 
@@ -576,40 +597,49 @@ impl ReleaseResolver {
                 descriptor.channel, self.context.trust.channel
             )));
         }
-        // A pinned client reads the version-addressed document, and TUF already
-        // bound that name to these bytes. Checking the claim against the pin as
-        // well means a mis-published repository is a refusal rather than a
-        // surprise install.
-        if let ReleasePin::Version { version } = &self.context.pin
-            && &descriptor.version != version
+        if let ReleasePin::Release { version, .. } = &self.context.trust.pin
+            && descriptor.version != version.to_string()
         {
             return Err(UpdateError::WrongVersion {
-                expected: version.clone(),
+                expected: version.to_string(),
                 found: descriptor.version.clone(),
             });
         }
         Ok(())
     }
 
-    /// Load the TUF repository against this context's durable datastore.
+    /// Load the TUF repository against this context's persistent datastore.
     pub async fn load_repository(&self) -> Result<tough::Repository, UpdateError> {
+        self.load_repository_with_transport(tough::DefaultTransport::default())
+            .await
+    }
+
+    async fn load_repository_with_transport<T: tough::Transport + 'static>(
+        &self,
+        transport: T,
+    ) -> Result<tough::Repository, UpdateError> {
         let base = repository_base(&self.context.trust.repository)?;
         let metadata = base.join("metadata/")?;
         let targets = base.join("targets/")?;
-        let datastore = self.context.datastore_dir()?;
-        tokio::fs::create_dir_all(&datastore).await?;
+        let store = match &self.metadata_store {
+            Some(store) => Arc::clone(store),
+            None => {
+                let context = self.context.clone();
+                tokio::task::spawn_blocking(move || repository_state::open_private(&context))
+                    .await
+                    .map_err(|error| UpdateError::Io(std::io::Error::other(error)))??
+            }
+        };
         let root = self
             .context
             .trust
             .root_bytes()
             .map_err(|detail| UpdateError::Graph(detail.to_owned()))?;
-        let mut loader = RepositoryLoader::new(&root, metadata, targets)
-            .datastore(datastore)
+        let loader = RepositoryLoader::new(&root, metadata, targets)
+            .transport(transport)
+            .metadata_store(store)
             .expiration_enforcement(ExpirationEnforcement::Safe)
             .limits(limits());
-        if base.scheme() == "file" {
-            loader = loader.transport(tough::FilesystemTransport);
-        }
         Ok(loader.load().await?)
     }
 }
@@ -685,7 +715,6 @@ pub fn check_digest(bytes: &[u8], expected: Sha256Digest, what: &str) -> Result<
 /// measurement it did not make.
 pub const fn default_scheduler() -> zup_acquire::SchedulerConfig {
     zup_acquire::SchedulerConfig {
-        per_origin: 6,
         total: 12,
         staging: 2,
         progress_interval: std::time::Duration::from_millis(100),
@@ -701,16 +730,12 @@ pub const fn bootstrap_scheduler() -> zup_acquire::SchedulerConfig {
     zup_acquire::SchedulerConfig::sequential()
 }
 
-/// A re-export so a consumer of this crate's sources does not need the transport
-/// crate for a type it only names.
-pub type Origins = OriginSet;
-
 /// A re-export for the same reason.
 pub type SingleOrigin = Origin;
 
 /// The directory an origin serves one blob under, relative to its base.
 pub fn blob_relative_path(digest: &Sha256Digest) -> PathBuf {
-    let path = WebLayout::blob(digest).to_string();
+    let path = zup_acquire::blob_path(digest).to_string();
     let mut out = PathBuf::new();
     for segment in path.split('/') {
         out.push(segment);
@@ -736,9 +761,6 @@ mod tests {
                 zup_core::InstallScope::User,
             ),
             state_root: PathBuf::from("/state"),
-            pin: ReleasePin::Channel {
-                channel: channel.to_owned(),
-            },
         }
     }
 
@@ -795,18 +817,28 @@ mod tests {
             catalog: ContentCatalog::new(entries).expect("catalog"),
             manifest: b"{}".to_vec(),
             document: "releases/stable.json".to_owned(),
-            pinned: false,
+            pin: ReleasePin::Channel {
+                channel: "stable".into(),
+            },
+            repository: "https://example.invalid".into(),
+            trust_anchor: zup_core::hash_bytes(b"fixture root"),
         }
     }
 
     #[test]
-    fn two_repositories_never_share_rollback_memory() {
+    fn rollback_history_follows_application_and_root_identity() {
         let one = context("https://a.example.com/acme", "stable");
         let other = context("https://b.example.com/acme", "stable");
         let beta = context("https://a.example.com/acme", "beta");
         let state = |context: &TrustContext| context.datastore_dir().expect("a directory");
-        assert_ne!(state(&one), state(&other));
-        assert_ne!(state(&one), state(&beta));
+        assert_eq!(state(&one), state(&other));
+        assert_eq!(state(&one), state(&beta));
+        let mut application = one.clone();
+        application.trust.app_id = zup_core::AppId::new("com.acme.other").unwrap();
+        assert_ne!(state(&one), state(&application));
+        let mut root = one.clone();
+        root.trust.trusted_root = zup_core::base64_encode(b"different root");
+        assert_ne!(state(&one), state(&root));
         assert_eq!(
             one.cache_dir(),
             other.cache_dir(),

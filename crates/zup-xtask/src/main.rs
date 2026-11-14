@@ -11,6 +11,8 @@ xtask toolchain package --cli <file> [--profile <name>] [--out <dir>] [--source 
 xtask release clean-room [--material <dir>] [--work <dir>]
 xtask automation generate [--root <dir>]
 xtask automation check [--root <dir>]
+xtask fixtures build [--root <dir>]
+xtask fixtures runtime --target <target> [--profile <name>] [--root <dir>]
 
 options:
     --root <dir>         workspace to inspect (default: this repository)
@@ -91,6 +93,32 @@ fn run() -> Result<ExitCode, String> {
         "emit-host-packages" => emit_host(&mut arguments),
         "toolchain" => stage_toolchain(&mut arguments),
         "automation" => automation(&mut arguments),
+        "fixtures" => {
+            let subcommand = arguments
+                .next()
+                .ok_or("fixtures requires `build` or `runtime`")?;
+            let allowed: &[&str] = match subcommand.as_str() {
+                "build" => &["--root"],
+                "runtime" => &["--root", "--target", "--profile"],
+                _ => return Err("fixtures requires `build` or `runtime`".into()),
+            };
+            let options = parse(&mut arguments, "fixtures", allowed)?;
+            let root = options
+                .root
+                .unwrap_or_else(zup_xtask::toolchain::repository_root);
+            if subcommand == "build" {
+                zup_xtask::fixtures::build(&root)?;
+            } else {
+                let target = options.target.ok_or("fixtures runtime requires --target")?;
+                let path = zup_xtask::toolchain::build_fault_runtime(
+                    &root,
+                    options.profile.as_deref().unwrap_or("dev"),
+                    &target,
+                )?;
+                println!("{}", path.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         "release" => release(&mut arguments),
         unknown => Err(format!("unknown command `{unknown}`\n\n{USAGE}")),
     }

@@ -17,7 +17,7 @@ zup-plugin-contract.workspace = true
 
 [dev-dependencies]
 zup-acquire.workspace = true
-zup-plugin-abi = { workspace = true }
+zup-plugin-abi = { workspace = true, features = ["test-fixture"] }
 rstest.workspace = true
 semver.workspace = true
 serde_json.workspace = true

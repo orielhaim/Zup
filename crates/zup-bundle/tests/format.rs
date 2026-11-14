@@ -1,18 +1,18 @@
 use std::{fs, io::Read, path::Path};
 
 use tempfile::TempDir;
-use zup_build::TargetBuildPlan;
 use zup_bundle::{
     AutoPayloadSource, BundleWriter, PACKAGE_SCHEMA, Package, PackageError, PayloadError,
     PayloadSource,
 };
+use zup_core::TargetBuildPlan;
+use zup_core::TargetOverrides;
 use zup_core::{RelativePath, hash_reader};
-use zup_manifest::TargetOverrides;
 
-fn plan(root: &Path) -> TargetBuildPlan {
+fn plan(root: &Path, payload: &[u8]) -> TargetBuildPlan {
     fs::create_dir_all(root.join("dist")).unwrap();
-    fs::write(root.join("dist/a.bin"), b"duplicate payload").unwrap();
-    fs::write(root.join("dist/b.bin"), b"duplicate payload").unwrap();
+    fs::write(root.join("dist/a.bin"), payload).unwrap();
+    fs::write(root.join("dist/b.bin"), payload).unwrap();
     let manifest = format!(
         r#"
 schema = 1
@@ -29,8 +29,8 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/BundleTest"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
 "#,
         target = zup_plugin_contract::HOST_TARGET
     );
@@ -52,16 +52,45 @@ destination = "${{install}}"
 }
 
 #[test]
-fn package_create_read_and_write_round_trip_without_an_executable() {
+fn opened_package_content_survives_path_replacement_with_independent_streams() {
     let root = TempDir::new().unwrap();
-    let bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
+    let build = plan(root.path(), b"duplicate payload");
+    let path = root.path().join("package.zup");
+    BundleWriter::write_file(&build, &[], &path).unwrap();
+    let package = Package::open(&path).unwrap();
+    fs::rename(&path, root.path().join("original.zup")).unwrap();
+    fs::write(&path, b"a different object").unwrap();
+
+    let source = package.payload_source();
+    let entry = &package.plan().entries[0];
+    let mut first = source.open(&entry.path, &entry.sha256, entry.size).unwrap();
+    let mut second = source.open(&entry.path, &entry.sha256, entry.size).unwrap();
+    let mut prefix = [0; 3];
+    first.read_exact(&mut prefix).unwrap();
+    let mut second_bytes = Vec::new();
+    second.read_to_end(&mut second_bytes).unwrap();
+    let mut first_bytes = prefix.to_vec();
+    first.read_to_end(&mut first_bytes).unwrap();
+    assert_eq!(first_bytes, b"duplicate payload");
+    assert_eq!(second_bytes, b"duplicate payload");
+}
+
+#[rstest::rstest]
+#[case::empty(0)]
+#[case::small(17)]
+#[case::multiple_streaming_buffers(256 * 1024 + 17)]
+fn package_create_read_and_write_round_trip_without_an_executable(#[case] size: usize) {
+    let root = TempDir::new().unwrap();
+    let payload: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+    let build = plan(root.path(), &payload);
+    let bytes = BundleWriter::encode(&build, &[]).unwrap();
     let package = Package::parse(&bytes).unwrap();
     assert_eq!(package.plan().entries.len(), 2);
     assert_eq!(package.build_plan().unwrap().targets.len(), 1);
 
     let package_path = root.path().join("package.zup");
     assert_eq!(
-        BundleWriter::write_file(&plan(root.path()), &[], &package_path).unwrap(),
+        BundleWriter::write_file(&build, &[], &package_path).unwrap(),
         bytes.len() as u64
     );
     assert_eq!(fs::read(&package_path).unwrap(), bytes);
@@ -82,7 +111,7 @@ fn package_create_read_and_write_round_trip_without_an_executable() {
             .unwrap();
         let mut data = Vec::new();
         reader.read_to_end(&mut data).unwrap();
-        assert_eq!(data, b"duplicate payload");
+        assert_eq!(data, payload);
     }
 }
 
@@ -93,7 +122,7 @@ fn package_create_read_and_write_round_trip_without_an_executable() {
 fn package_verify_rechecks_file_contents() {
     let root = TempDir::new().unwrap();
     let package_path = root.path().join("package.zup");
-    let mut bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
+    let mut bytes = BundleWriter::encode(&plan(root.path(), b"duplicate payload"), &[]).unwrap();
     fs::write(&package_path, &bytes).unwrap();
     let package = Package::open(&package_path).unwrap();
     let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
@@ -105,7 +134,7 @@ fn package_verify_rechecks_file_contents() {
 #[test]
 fn package_tampering_is_rejected_before_payload_access() {
     let root = TempDir::new().unwrap();
-    let mut bytes = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
+    let mut bytes = BundleWriter::encode(&plan(root.path(), b"duplicate payload"), &[]).unwrap();
     let metadata_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
     bytes[60 + metadata_len] ^= 1;
     assert!(Package::parse(&bytes).is_err());
@@ -187,7 +216,8 @@ fn malformed_package_headers_are_rejected() {
     ));
 
     let root = TempDir::new().unwrap();
-    let mut wrong_schema = BundleWriter::encode(&plan(root.path()), &[]).unwrap();
+    let mut wrong_schema =
+        BundleWriter::encode(&plan(root.path(), b"duplicate payload"), &[]).unwrap();
     let mismatch = PACKAGE_SCHEMA + 1;
     wrong_schema[8..12].copy_from_slice(&mismatch.to_le_bytes());
     assert!(matches!(
@@ -203,4 +233,20 @@ fn malformed_package_headers_are_rejected() {
         Package::parse(oversized),
         Err(PackageError::MetadataTooLarge { .. })
     ));
+}
+
+#[rstest::rstest]
+#[case::shorter(b"short")]
+#[case::longer(b"duplicate payload with more bytes")]
+#[case::same_size(b"different payload")]
+fn streaming_writer_refuses_sources_changed_after_planning(#[case] changed: &[u8]) {
+    let root = TempDir::new().unwrap();
+    let build = plan(root.path(), b"duplicate payload");
+    fs::write(&build.files[0].source, changed).unwrap();
+    let output = root.path().join("package.zup");
+    assert!(matches!(
+        BundleWriter::write_file(&build, &[], &output),
+        Err(PackageError::Payload(_))
+    ));
+    assert!(!output.exists());
 }

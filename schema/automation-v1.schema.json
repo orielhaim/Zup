@@ -736,6 +736,9 @@
               "type": "string",
               "const": "file"
             },
+            "placement": {
+              "$ref": "#/$defs/PlanFilePlacement"
+            },
             "destination": {
               "type": "string"
             },
@@ -751,6 +754,7 @@
           },
           "required": [
             "kind",
+            "placement",
             "destination",
             "size",
             "digest",
@@ -919,6 +923,14 @@
             "name"
           ]
         }
+      ]
+    },
+    "PlanFilePlacement": {
+      "type": "string",
+      "enum": [
+        "generation",
+        "fixed_atomic",
+        "fixed_quiescent"
       ]
     },
     "PlanDetails": {

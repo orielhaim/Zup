@@ -16,6 +16,9 @@ struct Fixture {
 
 impl Fixture {
     fn new(frontend: Frontend) -> Self {
+        #[cfg(windows)]
+        let root = tempfile::tempdir_in(zup_windows::user_data().unwrap()).unwrap();
+        #[cfg(not(windows))]
         let root = tempfile::tempdir().unwrap();
         let target = Target::host().unwrap();
         let directory = root
@@ -33,20 +36,45 @@ impl Fixture {
             },
             "files": [], "plugins": [], "prerequisites": [], "total_size": 0, "prerequisite_size": 0
         })).unwrap();
+        let replacement = if cfg!(windows) {
+            zup_core::FixedReplacement::Quiescent
+        } else {
+            zup_core::FixedReplacement::Atomic
+        };
         for component in ["core", "docs"] {
             let source = root.path().join(format!("{component}.txt"));
             std::fs::write(&source, component).unwrap();
+            let mapping = zup_core::FileMapping {
+                id: zup_core::ResourceId::new(component).unwrap(),
+                source: format!("{component}.txt"),
+                placement: zup_core::PayloadMapping::FixedFile {
+                    path: zup_core::Template::parse(&format!("${{install}}/{component}.txt"))
+                        .unwrap(),
+                    replacement,
+                },
+                component: Some(zup_core::ComponentId::new(component).unwrap()),
+                when: None,
+                allow_empty: false,
+                executable: false,
+            };
             plan.files.push(zup_core::ResolvedFile {
+                id: zup_core::PayloadId::File {
+                    declaration: mapping.id.clone(),
+                },
                 source,
                 source_relative: zup_core::RelativePath::new(format!("{component}.txt")).unwrap(),
-                destination: zup_core::Template::parse(&format!("${{install}}/{component}.txt"))
-                    .unwrap(),
+                placement: zup_core::PayloadPlacement::Fixed {
+                    path: zup_core::Template::parse(&format!("${{install}}/{component}.txt"))
+                        .unwrap(),
+                    replacement,
+                },
                 size: component.len() as u64,
                 sha256: zup_core::hash_bytes(component.as_bytes()),
                 component: Some(zup_core::ComponentId::new(component).unwrap()),
                 condition: None,
                 executable: false,
             });
+            plan.installer.files.push(mapping);
         }
         plan.total_size = plan.files.iter().map(|file| file.size).sum();
         #[cfg(all(target_os = "linux", feature = "online"))]
@@ -201,7 +229,8 @@ fn automation_is_one_document_or_a_framed_stream_and_never_prompts() {
                 .unwrap();
             assert!(
                 result.status.success(),
-                "{}",
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
                 String::from_utf8_lossy(&result.stderr)
             );
             let documents = String::from_utf8(result.stdout)

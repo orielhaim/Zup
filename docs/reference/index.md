@@ -2,13 +2,13 @@
 
 Use reference pages to look up exact public surfaces. Use the [Guide](/guide/) for workflows.
 
-| Reference | Covers |
-| --- | --- |
-| [`zup.toml`](./manifest) | manifest sections, fields and defaults |
-| [CLI](./cli) | developer commands and common flags |
-| [Preset API](./preset-api) | public preset concepts and commands |
-| [Plugin API](./plugin-api) | WIT planner contract |
-| [Automation output](./automation) | machine-readable CLI formats |
+| Reference                                    | Covers                                                  |
+| -------------------------------------------- | ------------------------------------------------------- |
+| [`zup.toml`](./manifest)                     | manifest sections, fields and defaults                  |
+| [CLI](./cli)                                 | developer commands and common flags                     |
+| [Preset API](./preset-api)                   | public preset concepts and commands                     |
+| [Plugin API](./plugin-api)                   | WIT planner contract                                    |
+| [Automation output](./automation)            | machine-readable CLI formats                            |
 | [Deployment contract](./deployment-contract) | planning, ownership, execution, and recovery invariants |
 
 The authoritative manifest schema is also available through:

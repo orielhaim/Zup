@@ -6,12 +6,12 @@ use rstest::rstest;
 use tempfile::TempDir;
 use zup_binary::{Executable, ProgramKind};
 #[cfg(windows)]
-use zup_build::TargetBuildPlan;
-#[cfg(windows)]
 use zup_bundle::{BundleWriter, PayloadSource};
 use zup_core::Frontend;
 #[cfg(windows)]
-use zup_manifest::TargetOverrides;
+use zup_core::TargetBuildPlan;
+#[cfg(windows)]
+use zup_core::TargetOverrides;
 use zup_windows::{BundleError, read_frontend, validate_frontend};
 #[cfg(windows)]
 use zup_windows::{EmbeddedBundle, build_self_contained_executable, embed_bundle_file};
@@ -36,8 +36,9 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/WindowsBundle"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#,
         target = zup_plugin_contract::HOST_TARGET
     );

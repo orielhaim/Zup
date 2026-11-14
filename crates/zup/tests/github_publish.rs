@@ -69,8 +69,9 @@ scope = "user"
 [install.directory]
 user = "${{location.programs}}/Github"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 {extra}
 "#
             ),
@@ -172,17 +173,17 @@ repository = "acme/acme"
         "the file says it is generated, so nobody reviews it as if it were written by hand"
     );
 
-    // One job per phase, driving the zup action by operation rather than
-    // recompiling it in every job - a shape that only ever worked inside the zup
-    // repository.
     for operation in ["build", "compose", "attest", "publish"] {
         assert!(
             original.contains(&format!("operation: {operation}")),
             "no `{operation}` phase in\n{original}"
         );
     }
-    assert!(!original.contains("cargo build"), "{original}");
-    assert!(!original.contains("dtolnay/rust-toolchain"), "{original}");
+    assert!(
+        original.contains("working-directory: .zup-toolchain"),
+        "{original}"
+    );
+    assert!(original.contains("repository: orielhaim/zup"), "{original}");
 
     // The credential is an action input, scoped to the step that publishes.
     assert!(
@@ -382,10 +383,7 @@ repository = "acme/acme"
 }
 
 #[test]
-fn a_dry_run_with_no_credential_prints_the_plan_and_publishes_nothing() {
-    // The property that makes `--dry-run` safe to run anywhere: it degrades to a
-    // plan rather than failing on a machine that has no token, and it says which
-    // of the two happened.
+fn a_dry_run_with_no_build_cannot_claim_a_verified_plan() {
     let project = Project::new(
         r#"
 [distribution]
@@ -399,9 +397,8 @@ repository = "acme/acme"
 
     let result = project.zup(&["publish", "github", "--repo", "acme/acme", "--dry-run"]);
     let message = stderr(&result);
-    assert!(message.contains("no credential"), "{message}");
-    assert!(message.contains("not attempted"), "{message}");
-    assert!(result.status.success(), "{message}");
+    assert!(message.contains("zup-release.json"), "{message}");
+    assert!(!result.status.success(), "{message}");
     // Nothing was created, anywhere, because nothing was attempted.
     assert!(
         !project.workflow().exists(),

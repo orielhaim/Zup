@@ -710,7 +710,10 @@ fn update_available() -> Machine {
     let mut machine = maintenance();
     machine.set_update(UpdateState::Available {
         current: "0.9.2".into(),
-        available: "1.0.0".into(),
+        candidate: zup_core::ReleaseCandidate {
+            version: "1.0.0".parse().unwrap(),
+            release: zup_core::Sha256Digest::from_bytes([0; 32]),
+        },
     });
     machine
 }
@@ -838,6 +841,10 @@ fn verification() -> Machine {
 
 fn recovery() -> Machine {
     let mut machine = progress();
-    machine.finish_with(&InstallOutcome::RecoveryRequired);
+    machine
+        .show_recovery(
+            "An interrupted transaction must be recovered before this application can be changed",
+        )
+        .expect("valid recovery simulation");
     machine
 }

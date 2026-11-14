@@ -130,7 +130,16 @@ impl Console {
         let mut items = operations
             .iter()
             .map(|operation| match operation {
+                Operation::Cleanup { .. } => (
+                    "Clean up storage",
+                    "Retire older rollback versions and collect unused owned payloads",
+                ),
                 Operation::Upgrade => ("Upgrade", "Install the newer version in this package"),
+                Operation::Downgrade => (
+                    "Downgrade",
+                    "Explicitly install this older release if its data format is compatible",
+                ),
+                Operation::Rollback { .. } => ("Rollback", "Activate a retained deployment"),
                 Operation::Modify => (
                     "Change components",
                     "Keep the current installation settings",
@@ -166,7 +175,10 @@ impl Console {
             });
         }
         Ok(match operations[selected] {
+            Operation::Cleanup { keep } => crate::terminal::Command::Cleanup { keep },
             Operation::Upgrade => crate::terminal::Command::Upgrade(Default::default()),
+            Operation::Downgrade => crate::terminal::Command::Downgrade(Default::default()),
+            Operation::Rollback { revision } => crate::terminal::Command::Rollback { revision },
             Operation::Modify => crate::terminal::Command::Modify(Default::default()),
             Operation::Repair { force } => crate::terminal::Command::Repair { force },
             Operation::Uninstall => crate::terminal::Command::Uninstall,
@@ -185,7 +197,10 @@ impl Console {
     ) -> miette::Result<()> {
         if matches!(
             action,
-            LifecycleAction::Repair { .. } | LifecycleAction::Uninstall
+            LifecycleAction::Repair { .. }
+                | LifecycleAction::Uninstall
+                | LifecycleAction::Rollback { .. }
+                | LifecycleAction::Cleanup { .. }
         ) {
             return Ok(());
         }

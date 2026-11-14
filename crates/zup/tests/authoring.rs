@@ -54,13 +54,12 @@ source = "configure.wasm"
     )
     .unwrap();
     fs::create_dir_all(root.path().join("dist")).unwrap();
-    fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/plugins/configure/dist/configure.wasm"),
+    fs::write(
         root.path().join("configure.wasm"),
+        zup_plugin_abi::test_fixture::component(),
     )
     .unwrap();
-    let plan = zup()
+    let plan = zup_with_toolchain(root.path())
         .args([
             "plan",
             "--manifest",
@@ -149,8 +148,8 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/Bad"
 [[files]]
+id = "application"
 source = "x"
-destination = "${{install}}/x"
 component = "missing"
 "#,
         ),
@@ -226,6 +225,53 @@ mod initialization {
             succeeds(init(&root, &[flag]));
         }
         let manifest = manifest(&root);
+        fs::write(root.join("dist/readme.txt"), b"application payload").unwrap();
+        succeeds(
+            zup_with_toolchain(&root)
+                .current_dir(&root)
+                .arg("check")
+                .output()
+                .unwrap(),
+        );
+        let preview = zup_with_toolchain(&root)
+            .current_dir(&root)
+            .args(["plan", "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            preview.status.success(),
+            "{}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        let preview: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+        let files: Vec<_> = preview["details"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|resource| resource["kind"] == "file")
+            .collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["placement"], "generation");
+        assert_eq!(files[0]["generated"], false);
+        let overrides = TargetOverrides::default();
+        let target = zup_manifest::select_targets(&manifest, &[], &overrides)
+            .unwrap()
+            .remove(0);
+        let installer = zup_manifest::compile(&manifest, &target, &overrides).unwrap();
+        let build = zup_build::materialize(
+            &root.join("zup.toml"),
+            &manifest,
+            [(target, installer)],
+            zup_build::Writes::None,
+        )
+        .unwrap();
+        assert_eq!(build.targets[0].files.len(), 1);
+        assert_eq!(
+            build.targets[0].files[0].sha256,
+            zup_core::hash_bytes(b"application payload")
+        );
+        assert!(matches!(&build.targets[0].files[0].placement,
+            zup_core::PayloadPlacement::Generation { path } if path.as_str() == "readme.txt"));
         assert_eq!(manifest.app.name.as_str(), "Acme Desktop");
         assert_eq!(manifest.app.id.as_str(), "com.example.acme-desktop");
         assert_eq!(manifest.app.version.to_string(), "0.1.0");
@@ -275,7 +321,10 @@ mod initialization {
         assert_eq!(manifest.app.name.as_str(), "Acme \"Desktop\"");
         assert_eq!(manifest.app.id.as_str(), "com.acme.desktop");
         assert_eq!(manifest.app.version.to_string(), "2.3.4");
-        assert_eq!(manifest.app.main.unwrap().as_literal(), Some("bin/launch"));
+        assert!(
+            matches!(manifest.app.main.unwrap(), zup_core::PayloadId::TreeMember { declaration, member }
+            if declaration.as_str() == "application" && member.as_str() == "bin/launch")
+        );
         assert_eq!(manifest.install.scope, InstallScope::Either);
         assert_eq!(manifest.frontend, Frontend::Console);
         assert_eq!(
@@ -330,7 +379,10 @@ mod initialization {
         fs::copy(env!("CARGO_BIN_EXE_zup"), source.join(name)).unwrap();
         succeeds(init(root.path(), &["-y"]));
         let first = manifest(root.path());
-        assert_eq!(first.app.main.unwrap().as_literal(), Some(name));
+        assert!(
+            matches!(first.app.main.unwrap(), zup_core::PayloadId::TreeMember { declaration, member }
+            if declaration.as_str() == "application" && member.as_str() == name)
+        );
         assert_eq!(
             first
                 .build

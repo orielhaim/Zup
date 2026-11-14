@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use zup_core::{AppId, ComponentId, InstallScope, Installer, SelectedScope, TargetBuildPlan};
-use zup_plan::InstallLedger;
+use zup_plan::InstallationRecord;
 use zup_preset_protocol::UpdateState;
 use zup_runtime::{InstallOutcome, OperationHost, PreparedOperation, RuntimeBackend, RuntimeEvent};
 
@@ -22,20 +22,25 @@ pub struct SessionLaunch {
 pub struct ScopedInstallation {
     pub scope: SelectedScope,
     pub state_root: PathBuf,
-    pub ledger: Option<InstallLedger>,
+    pub ledger: Option<InstallationRecord>,
 }
 
 #[derive(Debug, Clone)]
 pub struct OperationContext {
     pub scope: SelectedScope,
     pub state_root: PathBuf,
-    pub ledger: Option<InstallLedger>,
+    pub ledger: Option<InstallationRecord>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionDiscovery {
     pub build: Arc<TargetBuildPlan>,
     pub installations: Vec<ScopedInstallation>,
+    pub recoveries: std::collections::BTreeMap<
+        SelectedScope,
+        Result<Option<zup_core::RecoverySummary>, String>,
+    >,
+    pub observation_errors: std::collections::BTreeMap<SelectedScope, String>,
 }
 
 impl SessionDiscovery {
@@ -69,6 +74,10 @@ pub fn select_scope(
     declared: InstallScope,
     launch: &SessionLaunch,
     installations: &[ScopedInstallation],
+    recoveries: &std::collections::BTreeMap<
+        SelectedScope,
+        Result<Option<zup_core::RecoverySummary>, String>,
+    >,
 ) -> Result<SelectedScope, String> {
     if !launch.interactive {
         return declared
@@ -81,20 +90,35 @@ pub fn select_scope(
             .map_err(|error| error.to_string());
     }
     let permitted = declared.scopes();
+    if let Some(scope) = permitted.iter().find(|scope| {
+        recoveries
+            .get(scope)
+            .is_some_and(|result| matches!(result, Ok(Some(_))))
+    }) {
+        return Ok(*scope);
+    }
     let installed: Vec<SelectedScope> = permitted
         .iter()
         .copied()
         .filter(|scope| {
-            installations
-                .iter()
-                .any(|installation| installation.scope == *scope && installation.ledger.is_some())
+            installations.iter().any(|installation| {
+                installation.scope == *scope
+                    && installation
+                        .ledger
+                        .as_ref()
+                        .is_some_and(InstallationRecord::is_installed)
+            })
         })
         .collect();
     match installed.as_slice() {
         [scope, ..] => Ok(*scope),
-        [] => permitted
-            .first()
-            .copied()
+        [] => installations
+            .iter()
+            .find(|installation| {
+                installation.ledger.is_some() && permitted.contains(&installation.scope)
+            })
+            .map(|installation| installation.scope)
+            .or_else(|| permitted.first().copied())
             .ok_or_else(|| "this installer declares no installation scope".to_owned()),
     }
 }
@@ -110,9 +134,15 @@ pub struct PresetLaunch {
 
 pub enum UpdatePreparation {
     Cancelled,
-    UpToDate { version: String },
-    Available { version: String },
-    Ready { build: Arc<TargetBuildPlan> },
+    UpToDate {
+        version: String,
+    },
+    Available {
+        candidate: zup_core::ReleaseCandidate,
+    },
+    Ready {
+        build: Arc<TargetBuildPlan>,
+    },
 }
 
 pub trait SessionHost {
@@ -121,6 +151,86 @@ pub trait SessionHost {
         Self: 'a;
 
     fn describe(&mut self, executable: &Path) -> Result<Arc<TargetBuildPlan>, String>;
+
+    fn state_root(
+        &self,
+        installer: &Installer,
+        scope: SelectedScope,
+        hint: Option<&Path>,
+    ) -> Result<PathBuf, String>;
+
+    fn recovery_store(
+        &self,
+        context: &OperationContext,
+        _app: &AppId,
+    ) -> Result<zup_transaction::FilesystemTransactionStore, String> {
+        Ok(zup_transaction::FilesystemTransactionStore::private_at(
+            &context.state_root,
+        ))
+    }
+
+    fn pending_recovery(
+        &self,
+        context: &OperationContext,
+        app: &AppId,
+    ) -> Result<Option<zup_core::RecoverySummary>, String> {
+        self.recovery_store(context, app)?
+            .pending_recovery(app, context.scope)
+            .map(|target| target.map(|target| target.summary()))
+            .map_err(|error| error.to_string())
+    }
+
+    fn observe_recovery(
+        &self,
+        discovery: &SessionDiscovery,
+        context: &OperationContext,
+        state: &mut HostState,
+    ) {
+        match self.pending_recovery(context, discovery.app_id())
+        {
+            Ok(Some(target)) => {
+                state.set_recovery(target);
+            }
+            Ok(None) => {}
+            Err(error) => state.refresh_required(format!("Protected deployment state could not be inspected: {error}. Close other maintenance processes and refresh. Use an authorized administrator session for machine state.")),
+        }
+    }
+
+    fn active_launchers(
+        &self,
+        context: &OperationContext,
+        app: &AppId,
+    ) -> Result<Option<zup_core::ActiveLaunchers>, String> {
+        let Some(installation) = context.ledger.as_ref() else {
+            return Ok(None);
+        };
+        if installation.app_id != *app || installation.scope != context.scope {
+            return Err("launcher installation identity mismatch".into());
+        }
+        self.recovery_store(context, app)?
+            .active_launchers(installation)
+    }
+
+    fn open_state(
+        &self,
+        discovery: &SessionDiscovery,
+        context: &OperationContext,
+        preselected: Option<&[ComponentId]>,
+    ) -> HostState {
+        let mut state = initial_state(discovery, context, preselected);
+        match discovery.recoveries.get(&context.scope) {
+            Some(Ok(Some(target))) => state.set_recovery(target.clone()),
+            Some(Err(error)) => state.refresh_required(format!("Protected recovery inspection failed: {error}. Refresh with the required authority or use the source-free recovery console.")),
+            Some(Ok(None)) => {}
+            None => self.observe_recovery(discovery, context, &mut state),
+        }
+        if state.snapshot().recovery.is_none()
+            && let Some(error) = discovery.observation_errors.get(&context.scope)
+        {
+            state.refresh_required(format!("The installation ledger could not be observed: {error}. Protected journal recovery was inspected independently. Refresh or inspect the journal through the recovery console."));
+        }
+        state
+    }
 
     fn content_executable(&self, executable: &Path) -> PathBuf {
         executable.to_path_buf()
@@ -139,25 +249,48 @@ pub trait SessionHost {
         launch: &SessionLaunch,
     ) -> Result<SessionDiscovery, String> {
         let build = self.describe(executable)?;
+        if launch.state_root.is_some()
+            && launch.scope.is_none()
+            && build.installer.install.scope.scopes().len() > 1
+        {
+            return Err("a custom state root requires an explicit user or machine scope".into());
+        }
         let mut installations = Vec::new();
+        let mut recoveries = std::collections::BTreeMap::new();
+        let mut observation_errors = std::collections::BTreeMap::new();
         for scope in build.installer.install.scope.scopes() {
-            let context = self.observe(&build.installer, *scope, launch.state_root.as_deref())?;
+            let state_root = launch
+                .state_root
+                .as_deref()
+                .filter(|_| launch.scope.is_none_or(|selected| selected == *scope));
+            let context = match self.observe(&build.installer, *scope, state_root) {
+                Ok(context) => context,
+                Err(error) => {
+                    observation_errors.insert(*scope, error);
+                    OperationContext {
+                        scope: *scope,
+                        state_root: self.state_root(&build.installer, *scope, state_root)?,
+                        ledger: None,
+                    }
+                }
+            };
+            if launch.scope.is_none_or(|selected| selected == *scope) {
+                recoveries.insert(
+                    *scope,
+                    self.pending_recovery(&context, &build.installer.app.id),
+                );
+            }
             installations.push(ScopedInstallation {
                 scope: context.scope,
                 state_root: context.state_root,
                 ledger: context.ledger,
             });
         }
-        if launch.maintenance
-            && installations
-                .iter()
-                .all(|installation| installation.ledger.is_none())
-        {
-            return Err("the installed application was not found".into());
-        }
         Ok(SessionDiscovery {
             build,
             installations,
+            recoveries,
+            observation_errors,
         })
     }
 
@@ -209,7 +342,8 @@ pub trait SessionHost {
     fn recover<'a>(
         &'a self,
         _context: &'a OperationContext,
-        _transaction: &'a str,
+        _target: zup_core::RecoverySummary,
+        _request: zup_transaction::RecoveryRequest,
         _control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<'a, Result<InstallOutcome, zup_runtime::SessionError>> {
         Box::pin(async {
@@ -226,21 +360,17 @@ pub trait SessionHost {
         Ok(None)
     }
 
-    fn after_commit(
-        &self,
-        _context: &OperationContext,
-        _prepared: &PreparedOperation,
-    ) -> Result<(), String> {
+    fn after_commit(&self, _context: &OperationContext) -> Result<(), String> {
         Ok(())
     }
 
     fn update(
-        &self,
+        &mut self,
         _context: &OperationContext,
         _request: &zup_runtime::UpdateRequest,
         _control: &zup_runtime::OperationControl,
         _status: &mut (dyn FnMut(UpdateState) + Send),
-    ) -> Result<InstallOutcome, String> {
+    ) -> Result<crate::SessionOutcome, String> {
         Err("updates are not supported here".into())
     }
 
@@ -251,21 +381,73 @@ pub trait SessionHost {
     fn copy_diagnostics(&self, _text: &str) {}
 }
 
+pub fn session_capabilities(
+    installer: &Installer,
+    context: &OperationContext,
+) -> zup_preset_protocol::Capabilities {
+    let installed = context
+        .ledger
+        .as_ref()
+        .is_some_and(InstallationRecord::is_installed);
+    let capabilities = zup_preset_host::surface::capabilities(installer, installed);
+    if active_launchers(context).is_empty() {
+        capabilities
+    } else {
+        capabilities.with(zup_preset_protocol::Capability::Launch)
+    }
+}
+
+fn active_launchers(context: &OperationContext) -> Vec<zup_preset_host::Launchable> {
+    context
+        .ledger
+        .as_ref()
+        .filter(|record| record.is_installed())
+        .into_iter()
+        .flat_map(|record| {
+            record
+                .current
+                .requirements
+                .launchers
+                .iter()
+                .filter(|launcher| {
+                    matches!(
+                        record.current.resources.get(&launcher.key),
+                        Some(zup_plan::OwnedResource::Launcher {
+                            installed: zup_plan::LauncherState::Launcher { .. },
+                            ..
+                        })
+                    )
+                })
+                .map(|launcher| zup_preset_host::Launchable {
+                    target: zup_preset_protocol::LaunchTarget {
+                        name: launcher.name.to_string(),
+                    },
+                    component: None,
+                })
+        })
+        .collect()
+}
+
 pub fn initial_state(
     discovery: &SessionDiscovery,
     context: &OperationContext,
     preselected: Option<&[ComponentId]>,
 ) -> HostState {
     let installer = discovery.installer();
-    let launchers = zup_preset_host::surface::launchers(installer);
-    let state = match context.ledger.as_ref() {
+    let launchers = active_launchers(context);
+    let capabilities = session_capabilities(installer, context);
+    let state = match context
+        .ledger
+        .as_ref()
+        .filter(|record| record.is_installed())
+    {
         Some(ledger) => {
             let maintenance =
                 zup_preset_host::surface::maintenance_state(installer, ledger, context.scope);
             HostState::maintenance(
                 zup_preset_host::surface::product(installer),
                 maintenance,
-                zup_preset_host::surface::capabilities(installer, true),
+                capabilities,
             )
         }
         None => {
@@ -279,7 +461,7 @@ pub fn initial_state(
             HostState::install(
                 zup_preset_host::surface::product(installer),
                 options,
-                zup_preset_host::surface::capabilities(installer, false),
+                capabilities,
             )
         }
     };
@@ -327,6 +509,23 @@ pub fn state_name(state: zup_runtime::RuntimeState) -> &'static str {
 pub fn automation_events(event: &RuntimeEvent) -> Vec<zup_presentation::InstallerEvent> {
     use zup_presentation::InstallerEvent;
     match event {
+        RuntimeEvent::PlanPrepared { plan } => {
+            match zup_presentation::PlanPreview::from_transaction_plan(
+                plan,
+                plan.requirements.scope,
+                None,
+            ) {
+                Ok(preview) => vec![InstallerEvent::PlanPrepared {
+                    preview: Box::new(preview),
+                }],
+                Err(error) => vec![InstallerEvent::Failed {
+                    outcome: zup_presentation::ProcessOutcome::VerificationFailure,
+                    code: 1,
+                    message: error.to_string(),
+                    diagnostic: None,
+                }],
+            }
+        }
         RuntimeEvent::StateChanged { state } => {
             if *state == zup_runtime::RuntimeState::Cancelled {
                 vec![InstallerEvent::Cancelling {

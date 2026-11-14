@@ -2,7 +2,7 @@
 #![cfg(feature = "test-support")]
 
 use zup_core::{AppId, SelectedScope};
-use zup_linux::LinuxLedgerStore;
+use zup_linux::LinuxInstallationStore;
 
 use zup_linux::test_support::{
     IsolatedUser, compose_installer, genuine_template, mode_of, package_bytes,
@@ -42,14 +42,14 @@ fn the_produced_installer_installs_as_a_process() {
         "tool 1.0.0",
         "the installed executable runs"
     );
-    let ledger = LinuxLedgerStore::new(&user.state)
+    let ledger = LinuxInstallationStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
         )
         .expect("the ledger reads")
         .expect("an installation is recorded");
-    assert_eq!(ledger.version.to_string(), "1.0.0");
+    assert_eq!(ledger.current.version.to_string(), "1.0.0");
 }
 
 #[test]
@@ -100,13 +100,16 @@ fn the_produced_installer_uninstalls_as_a_process() {
         install.join("unrelated.txt").exists(),
         "an unrelated file survives"
     );
-    let ledger = LinuxLedgerStore::new(&user.state)
+    let ledger = LinuxInstallationStore::new(&user.state)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
         )
         .expect("the ledger reads");
-    assert!(ledger.is_none(), "the ledger is removed");
+    assert!(
+        ledger.is_some_and(|record| !record.is_installed() && record.current.resources.is_empty()),
+        "the tombstone holds no active ownership"
+    );
 }
 
 #[test]
@@ -120,8 +123,8 @@ fn concurrent_installers_serialize_on_the_installation_lock() {
     compose_installer(&genuine_template("headless"), &installer, &package);
 
     let app_id = AppId::new("com.example.tool").expect("an id");
-    let key = zup_transaction::InstallationLock::lock_key(app_id.as_str(), "user");
-    let _held = zup_transaction::InstallationLock::try_acquire(&user.state, &key)
+    let key = zup_transaction::ResourceLock::lock_key(app_id.as_str(), "user");
+    let _held = zup_transaction::ResourceLock::try_acquire(&user.state, &key)
         .expect("the lock acquires")
         .expect("nothing else holds it");
 

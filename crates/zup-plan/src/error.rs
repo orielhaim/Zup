@@ -9,6 +9,12 @@ pub use zup_core::SelectedScope;
 #[derive(Debug, Error, Diagnostic)]
 pub enum PlanError {
     #[error(transparent)]
+    #[diagnostic(code(zup_plan::generation))]
+    Generation(#[from] zup_core::GenerationError),
+    #[error(transparent)]
+    #[diagnostic(code(zup_plan::activation_revision))]
+    ActivationRevision(#[from] zup_core::DeploymentIdentityError),
+    #[error(transparent)]
     #[diagnostic(code(zup_plan::invalid_contract))]
     Contract(#[from] crate::ContractError),
     #[error("planning cancelled")]

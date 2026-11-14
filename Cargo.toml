@@ -4,7 +4,7 @@ members = ["crates/*"]
 # `fixtures/aurora` is deliberately not a member: it is a preset, and a preset
 # outside this workspace is the only shape a third-party author has, so packing
 # one from here has to go through a path dependency rather than a workspace edge.
-exclude = ["fixtures/aurora"]
+exclude = ["fixtures/aurora", "third-party/tough"]
 default-members = ["crates/zup"]
 
 [profile.installer]
@@ -62,7 +62,7 @@ uuid = { version = "1", features = ["v7", "serde"] }
 semver = { version = "1", features = ["serde"] }
 target-lexicon = { version = "0.13", features = ["std"] }
 bytes = "1"
-object = { version = "0.40", default-features = false, features = [
+object = { version = "0.41", default-features = false, features = [
   "read",
   "std",
 ] }
@@ -84,6 +84,7 @@ zup-acquire-http = { path = "crates/zup-acquire-http" }
 zup-artifact = { path = "crates/zup-artifact" }
 zup-plan = { path = "crates/zup-plan" }
 zup-transaction = { path = "crates/zup-transaction" }
+zup-storage = { path = "crates/zup-storage" }
 zup-bundle = { path = "crates/zup-bundle" }
 zup-publish = { path = "crates/zup-publish" }
 zup-publish-github = { path = "crates/zup-publish-github" }
@@ -137,10 +138,14 @@ walkdir = "2"
 directories = "6"
 globset = "0.4"
 sha2 = { version = "0.11", default-features = false }
-wasmtime = { version = "50.0", default-features = false, features = [
+wasmtime = { version = "=50.0.1", default-features = false, features = [
   "component-model",
+  "component-model-async",
   "runtime",
   "std",
+] }
+wasmtime-wasi = { version = "=50.0.1", default-features = false, features = [
+  "p3",
 ] }
 wit-component = { version = "0.263", features = ["dummy-module"] }
 wit-parser = "0.263"
@@ -177,7 +182,7 @@ reqwest = { version = "0.13", default-features = false, features = [
   "http2",
 ] }
 secrecy = "0.10"
-git-url-parse = "0.6"
+git-url-parse = { git = "https://github.com/goffrie/git-url-parse-rs", rev = "0c768bdda9f49199e34d95fba78cadea4cf31f82" }
 
 backon = { version = "1.6", default-features = false, features = [
   "std",
@@ -198,3 +203,6 @@ zbus_systemd = { version = "0.26201.0", default-features = false, features = [
   "systemd1",
   "zbus-async-tokio",
 ] }
+
+[patch.crates-io]
+tough = { path = "third-party/tough" }

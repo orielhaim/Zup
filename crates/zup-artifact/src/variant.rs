@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use zup_core::{PackagePlan, PayloadEntry, PluginArtifact};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use zup_bundle::{CompiledPluginArtifact, PayloadEntry, PluginArtifact, PortableBuildPlan};
+use zup_bundle::CompiledPluginArtifact;
 use zup_core::{
     App, Frontend, Install, PluginId, PrerequisiteId, Sha256Digest, Target, TargetProfileId,
 };
@@ -171,7 +172,7 @@ pub struct DistributionVariant {
     frontend: Frontend,
     install: Install,
     application: App,
-    plan: PortableBuildPlan,
+    plan: PackagePlan,
     requirements: VariantRequirements,
     runtime: Option<Descriptor>,
     preset: Option<Descriptor>,
@@ -180,6 +181,63 @@ pub struct DistributionVariant {
 }
 
 impl DistributionVariant {
+    pub fn from_manifest(
+        id: &str,
+        manifest: VariantManifest,
+        sources: VariantSources,
+    ) -> Result<Self, ArtifactError> {
+        manifest.validate()?;
+        let profile = TargetProfileId::new(id).map_err(|_| ArtifactError::Invalid)?;
+        Ok(Self {
+            id: id.to_owned(),
+            profile,
+            target: manifest.target,
+            platform: manifest.platform,
+            frontend: manifest.frontend,
+            install: manifest.plan.installer.install.clone(),
+            application: manifest.plan.installer.app.clone(),
+            plan: manifest.plan,
+            requirements: manifest.requirements,
+            runtime: manifest.runtime,
+            preset: manifest.preset,
+            sources,
+            logical_size: manifest.logical_size,
+        })
+    }
+
+    pub fn from_package(
+        id: &str,
+        package: &zup_bundle::Package,
+        sources: VariantSources,
+        natives: &[(MediaType, Vec<u8>)],
+    ) -> Result<Self, ArtifactError> {
+        let mut sources = sources;
+        let mut runtime = None;
+        let mut preset = None;
+        for (kind, bytes) in natives {
+            let descriptor = Descriptor::of(*kind, bytes);
+            sources = sources.with_bytes(descriptor.digest, bytes.clone());
+            match kind {
+                MediaType::Runtime => runtime = Some(descriptor),
+                MediaType::Preset => preset = Some(descriptor),
+                _ => return Err(ArtifactError::Invalid),
+            }
+        }
+        let plan = package.plan().clone();
+        let manifest = VariantManifest {
+            schema: VARIANT_MANIFEST_SCHEMA,
+            required_features: crate::index::FEATURE_VARIANT_MANIFESTS,
+            target: plan.installer.target,
+            platform: Platform::from_target(&plan.installer.target),
+            frontend: plan.installer.frontend,
+            logical_size: logical_size(&plan, runtime.as_ref(), preset.as_ref()),
+            plan,
+            runtime,
+            preset,
+            requirements: VariantRequirements::default(),
+        };
+        Self::from_manifest(id, manifest, sources)
+    }
     pub fn resolve(
         config: &zup_core::ResolvedTargetConfig,
         plan: &zup_core::TargetBuildPlan,
@@ -210,7 +268,8 @@ impl DistributionVariant {
         for file in &plan.files {
             entries.push(PayloadEntry {
                 path: file.source_relative.clone(),
-                destination: file.destination.clone(),
+                id: file.id.clone(),
+                placement: file.placement.clone(),
                 size: file.size,
                 sha256: file.sha256,
                 blob: file.sha256,
@@ -219,15 +278,12 @@ impl DistributionVariant {
                 executable: file.executable,
             });
         }
-        entries.sort_by(|left, right| {
-            left.destination
-                .to_string()
-                .cmp(&right.destination.to_string())
-                .then(left.path.cmp(&right.path))
-        });
+        entries.sort_by(|left, right| left.id.cmp(&right.id));
+        zup_bundle::validate_payload_entries(&plan.installer, &entries)
+            .map_err(|_| ArtifactError::Invalid)?;
         let mut prerequisite_artifacts = Vec::with_capacity(plan.prerequisites.len());
         for prerequisite in &plan.prerequisites {
-            prerequisite_artifacts.push(zup_bundle::PrerequisiteArtifact {
+            prerequisite_artifacts.push(zup_core::PrerequisiteArtifact {
                 prerequisite_id: prerequisite.id.clone(),
                 path: prerequisite.source_relative.clone(),
                 size: prerequisite.size,
@@ -242,7 +298,7 @@ impl DistributionVariant {
             .map(|artifact| artifact.metadata().clone())
             .collect();
         plugin_artifacts.sort_by(|left, right| left.plugin_id.cmp(&right.plugin_id));
-        let portable = PortableBuildPlan {
+        let portable = PackagePlan {
             installer: plan.installer.clone(),
             entries,
             prerequisite_artifacts,
@@ -349,7 +405,7 @@ impl DistributionVariant {
         &self.application.version
     }
 
-    pub fn plan(&self) -> &PortableBuildPlan {
+    pub fn plan(&self) -> &PackagePlan {
         &self.plan
     }
 
@@ -411,7 +467,7 @@ impl DistributionVariant {
 }
 
 fn logical_size(
-    plan: &PortableBuildPlan,
+    plan: &PackagePlan,
     runtime: Option<&Descriptor>,
     preset: Option<&Descriptor>,
 ) -> u64 {
@@ -425,9 +481,9 @@ fn logical_size(
                 .try_fold(sum, |sum, artifact| sum.checked_add(artifact.size))
         })
         .and_then(|sum| {
-            plan.plugins
-                .iter()
-                .try_fold(sum, |sum, artifact| sum.checked_add(artifact.aot_size))
+            plan.plugins.iter().try_fold(sum, |sum, artifact| {
+                sum.checked_add(artifact.component_size)
+            })
         })
         .unwrap_or(u64::MAX);
 
@@ -474,7 +530,7 @@ pub struct VariantManifest {
     pub runtime: Option<Descriptor>,
     pub preset: Option<Descriptor>,
     pub requirements: VariantRequirements,
-    pub plan: PortableBuildPlan,
+    pub plan: PackagePlan,
     pub logical_size: u64,
 }
 

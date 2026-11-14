@@ -24,34 +24,40 @@ Use this in CI to fail when the committed workflow no longer matches the manifes
 
 ## GitHub Action
 
-The repository also exposes `orielhaim/zup@action-v1`. A compact release step is:
-
-```yaml
-permissions:
-  contents: write
-
-steps:
-  - uses: actions/checkout@v7
-  - uses: orielhaim/zup@action-v1
-    with:
-      operation: release
-```
+Generated workflows pin actions and the publisher CLI to immutable revisions.
+The generator's default Zup revision comes from its own source checkout or packaged
+VCS metadata. A source archive without that evidence requires an explicit full SHA
+in `workflow.action` or `ZUP_ACTION_REVISION` when compiling the generator.
 
 The action supports separate `setup`, `build`, `compose`, `finalize`, `attest`, `publish`, and `release` operations when a pipeline needs explicit phases.
 
 Prefer the generated workflow when you want Zup to keep the target matrix and release steps synchronized with `zup.toml`.
 
-## Repository verification
+Each native matrix job uploads its installer and release manifest under one profile.
+Composition reads those installer bytes, then signs and finalizes once. Attestation
+and publication consume the same finalized workflow artifact. Without configured
+signing, composition explicitly finalizes as unsigned. With signing configured,
+missing signing evidence fails verification. Supply a signing command valid for
+the composition runner and its signing tools; Bash and PowerShell launches are
+selected by the actual runner OS.
 
-Pull requests run fast tests and doctests on Windows x64 and Linux x64,
-plus terminal lifecycle tests on both ARM64 hosts. Full Verification runs
-after pushes to `master`, weekly, or on manual dispatch. It runs only the
-staged-toolchain integration cases on the two x64 hosts. It reuses
-their tooling to compose a Linux installer on Windows and a Universal Windows
-installer on Linux, then runs each installer on its target host. Nextest stops
-individual tests after five minutes and publishes failure diagnostics.
+Manual dispatch requires a tag. The plan checks out that tag, resolves its peeled
+commit, and makes every later job use that exact commit. Dry-run dispatch skips
+remote attestation and release mutation. Only the publication job receives
+`contents: write`; build commands do not receive the publication token.
 
-Generated SDK project checks and release clean-room verification are opt-in
-through the Full Verification workflow's `sdk` and `release` inputs.
-Size measurements run locally. The Action workflow uses one cached debug
-Windows x64 CLI for its real-tool smoke test.
+Generated graph tests parse job dependencies, outputs, pinned tool installation,
+and artifact transfer paths, then run actionlint. Repository CI installs the pinned
+validator. Locally, set `ACTIONLINT` to its executable if it is outside `PATH`.
+
+## Repository checks
+
+Pull requests run formatting, Clippy, fast tests, and doctests on Windows and Linux. Rust, WIT, script, and workflow edits trigger the corresponding checks. Each OS uses one job to reuse Rust build artifacts. Documentation-only changes do not run Rust CI. The Action workflow runs when its wrapper, CLI, or dependencies change.
+
+**Full Verification** runs on master pushes, weekly, and on manual dispatch. It covers native service tests, staged-toolchain integration, and cross-built installers. Manual `sdk` and `release` inputs enable generated-project and release checks. ARM64 terminal tests run in standard CI. **Linux musl** and **Native service VMs** remain separate manual workflows and are not PR gates.
+
+The VM workflow installs Rust 1.100, Zig 0.15.2, and cargo-zigbuild 0.24.0. Its self-hosted runner must provide Python 3, OpenSSH, and dedicated Alpine guests through `ZUP_SERVICE_VM_ROOT`. That directory contains `guest-key`, a prepopulated `known-hosts` file, and `alpine-x64/qmp.sock` and `alpine-arm64/qmp.sock`. Forward guest SSH to localhost ports 22342 and 22343 respectively. Use qcow2 for every writable device, including the ARM64 UEFI variable store, so internal QEMU snapshots can restore both disk and VM state. Enable the guest cgroups boot service with cgroup v2 mounted at `/sys/fs/cgroup`. Host keys must match the inventory before any guest mutation.
+
+Each guest needs Python 3, stock OpenRC, kernel pidfds, and cgroup v2 with `cgroup.kill`. Configure unified cgroups and enable the native cgroups boot service. No supervisor patch or build receipt is required.
+
+The workflow runs installer lifecycle, external-interference, and process-crash suites serially for each architecture. Disposable x64 Alpine overlays can also run `scripts/verify-stock-openrc.py` against the musl library-test artifact, and `scripts/verify-linux-deployment.py` against a composed installer runtime. The latter covers generation and fixed payloads, persistent data, source-independent retained rollback, native service startup after a real reboot, and uninstall. These checks do not establish power-loss durability.

@@ -23,7 +23,7 @@
 //! directory. A digest and a byte count are stable; a path is not, and a
 //! consumer that parsed one would break on the first maintenance run.
 
-use tokio::sync::mpsc::Receiver;
+use zup_acquire::ProgressReceiver;
 
 use zup_acquire::{AcquisitionEvent, format_bytes};
 
@@ -40,7 +40,7 @@ pub struct AcquisitionThread {
 
 impl AcquisitionThread {
     /// Consume `events`, printing them as JSONL on stdout.
-    pub fn jsonl(events: Receiver<AcquisitionEvent>) -> Self {
+    pub fn jsonl(events: ProgressReceiver) -> Self {
         Self::spawn(events, |event| {
             let mapped = automation_events(&event);
             if mapped.is_empty() {
@@ -60,7 +60,7 @@ impl AcquisitionThread {
 
     /// Consume `events`, writing each rendered line through `emit`.
     pub fn spawn(
-        mut events: Receiver<AcquisitionEvent>,
+        mut events: ProgressReceiver,
         emit: impl Fn(AcquisitionEvent) + Send + 'static,
     ) -> Self {
         Self {
@@ -89,7 +89,7 @@ impl Drop for AcquisitionThread {
 }
 
 /// Consume `events` as JSONL on stdout.
-pub fn acquisition_thread(events: Receiver<AcquisitionEvent>) -> AcquisitionThread {
+pub fn acquisition_thread(events: ProgressReceiver) -> AcquisitionThread {
     AcquisitionThread::jsonl(events)
 }
 
@@ -147,14 +147,8 @@ pub fn automation_events(event: &AcquisitionEvent) -> Vec<InstallerEvent> {
             state: "acquisition".to_owned(),
         }],
         AcquisitionEvent::Failed {
-            message,
-            reasons,
-            machine_unchanged,
-            ..
+            message, reasons, ..
         } => {
-            // A failure before the barrier is reported as a failure, and the
-            // guarantee that nothing was touched is stated rather than inferred -
-            // a consumer can assert it, and a human reading the log can trust it.
             let mut detail = message.clone();
             if !reasons.is_empty() {
                 detail.push_str(" · ");
@@ -162,7 +156,7 @@ pub fn automation_events(event: &AcquisitionEvent) -> Vec<InstallerEvent> {
             }
             vec![InstallerEvent::Failed {
                 outcome: ProcessOutcome::Failure,
-                code: i32::from(*machine_unchanged),
+                code: 1,
                 message: detail,
                 diagnostic: None,
             }]
@@ -200,6 +194,8 @@ mod tests {
 
     fn progress(completed: u64, total: u64) -> Box<AcquisitionProgress> {
         let mut progress = AcquisitionProgress {
+            acquired_bytes: 0,
+            acquired_items: 0,
             phase: AcquisitionPhase::Downloading,
             completed_bytes: completed,
             total_bytes: total,
@@ -253,13 +249,12 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_states_that_nothing_was_touched() {
+    fn a_failure_includes_source_diagnostics() {
         let events = automation_events(&AcquisitionEvent::Failed {
             kind: "unavailable",
             digest: None,
             message: "no source could acquire payload blob".to_owned(),
             reasons: vec!["the CDN reset twice".to_owned()],
-            machine_unchanged: true,
         });
         assert!(matches!(
             events.as_slice(),

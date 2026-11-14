@@ -17,6 +17,7 @@ pub fn accept(
     cache_root: &Path,
     handoff_path: &Path,
     expected_digest: Option<&str>,
+    state_root: Option<&Path>,
 ) -> Result<Accepted, Rejection> {
     let expected = expected_digest
         .map(str::parse::<zup_core::Sha256Digest>)
@@ -28,29 +29,31 @@ pub fn accept(
         })?;
     let handoff = zup_windows::accept_handoff(handoff_path, expected)
         .map_err(|error| Rejection::Unverified(error.to_string()))?;
-    let cache = zup_windows::open_cache(cache_root, CachePolicy::Auto)
+    let cache = zup_acquire::ContentCache::open(cache_root, CachePolicy::Auto)
         .map_err(|error| Rejection::Unverified(error.to_string()))?;
-    let verified = zup_windows::verify(executable, &cache, &handoff)
+    let verified = zup_windows::verify_handoff_content(executable, &cache, &handoff)
         .map_err(|error| Rejection::Unverified(error.to_string()))?;
-    zup_windows::AcquiredBundle::open(executable, &cache, &verified)
+    let bundle = zup_windows::AcquiredBundle::open(executable, &verified)
         .map_err(|error| Rejection::Unverified(error.to_string()))?;
 
-    let resolved = zup_update::ResolvedRelease {
-        descriptor: verified.release.clone(),
-        descriptor_digest: handoff.document,
-        descriptor_bytes: Vec::new(),
-        variant: verified
-            .release
-            .variant(&handoff.variant)
-            .cloned()
-            .ok_or_else(|| {
-                Rejection::Unverified("the release no longer names the variant".into())
-            })?,
-        catalog: verified.catalog.clone(),
-        manifest: verified.manifest.clone(),
-        document: String::new(),
-        pinned: handoff.mode == HandoffMode::Install,
+    let scope = match handoff.scope.as_str() {
+        "machine" => SelectedScope::Machine,
+        "user" => SelectedScope::User,
+        _ => return Err(Rejection::Unverified("unsupported handoff scope".into())),
     };
+    let state_root = crate::maintenance::resolve_state_root(
+        &handoff.app_id,
+        state_root.map(Path::to_path_buf),
+        scope,
+    )
+    .map_err(|error| Rejection::Unverified(error.to_string()))?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let resolved = runtime
+        .block_on(bundle.authenticate(&handoff, &state_root))
+        .map_err(|error| Rejection::Unverified(error.to_string()))?;
     let manifest = acquire::parse_manifest(&resolved)?;
     let plan =
         acquire::component_closure(&resolved, &manifest, zup_update::ComponentSelection::All)?;
@@ -74,36 +77,20 @@ pub fn accept(
             manifest,
             plan,
             cache: std::sync::Arc::new(cache),
-            channel: verified.release.channel.clone(),
-            trust_anchor: zup_core::Sha256Digest::from_bytes([0; 32]),
             outcome,
         },
         session: handoff.session,
-        scope: match handoff.scope.as_str() {
-            "machine" => SelectedScope::Machine,
-            "user" => SelectedScope::User,
-            _ => {
-                return Err(Rejection::Unverified(
-                    "the handoff names an unsupported scope".into(),
-                ));
-            }
-        },
+        scope,
         mode: handoff.mode,
     })
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum Rejection {
-    #[error("this runtime was not what the authenticated release names: {0}")]
+    #[error("runtime handoff could not be authenticated: {0}")]
     Unverified(String),
     #[error("the handoff names a release this build cannot read: {0}")]
     Graph(#[from] acquire::GraphError),
     #[error("handoff I/O: {0}")]
     Io(#[from] std::io::Error),
-}
-
-impl Rejection {
-    pub const fn left_machine_unchanged(&self) -> bool {
-        true
-    }
 }

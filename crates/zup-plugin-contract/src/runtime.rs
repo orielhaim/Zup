@@ -1,5 +1,4 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -58,8 +57,8 @@ impl InvocationError {
     }
 }
 
-pub(crate) fn sandbox_store(engine: &Engine) -> wasmtime::Result<wasmtime::Store<SandboxLimits>> {
-    let mut store = wasmtime::Store::new(engine, SandboxLimits::new());
+pub(crate) fn sandbox_store(engine: &Engine) -> wasmtime::Result<wasmtime::Store<Sandbox>> {
+    let mut store = wasmtime::Store::new(engine, Sandbox::new());
     store.limiter(|limits| limits);
     store.set_fuel(MAX_FUEL_PER_CALL)?;
     store.set_hostcall_fuel(MAX_PLAN_OUTPUT_BYTES);
@@ -71,14 +70,17 @@ pub(crate) fn sandbox_store(engine: &Engine) -> wasmtime::Result<wasmtime::Store
     Ok(store)
 }
 
-#[derive(Debug)]
-pub(crate) struct SandboxLimits {
+pub(crate) struct Sandbox {
     limits: StoreLimits,
     pub(crate) growth_rejected: bool,
+    pub(crate) cli: wasmtime_wasi::cli::WasiCliCtx,
+    pub(crate) table: wasmtime::component::ResourceTable,
 }
 
-impl SandboxLimits {
+impl Sandbox {
     fn new() -> Self {
+        let mut table = wasmtime::component::ResourceTable::new();
+        table.set_max_capacity(crate::MAX_WASI_RESOURCES);
         Self {
             limits: StoreLimitsBuilder::new()
                 .memory_size(MAX_MEMORY_BYTES)
@@ -89,11 +91,13 @@ impl SandboxLimits {
                 .trap_on_grow_failure(true)
                 .build(),
             growth_rejected: false,
+            cli: wasmtime_wasi::cli::WasiCliCtx::default(),
+            table,
         }
     }
 }
 
-impl ResourceLimiter for SandboxLimits {
+impl ResourceLimiter for Sandbox {
     fn memory_growing(
         &mut self,
         current: usize,
@@ -151,108 +155,82 @@ pub(crate) enum WatchdogCause {
     Internal,
 }
 
-pub(crate) fn run_with_watchdog<T>(
+pub(crate) fn run_with_watchdog<T: Send>(
     engine: &Engine,
     cancellation: &(dyn Fn() -> bool + Send + Sync),
-    operation: impl FnOnce() -> wasmtime::Result<T>,
+    operation: impl std::future::Future<Output = wasmtime::Result<T>> + Send,
 ) -> Result<T, InvocationError> {
-    match catch_unwind(AssertUnwindSafe(cancellation)) {
-        Ok(true) => return Err(InvocationError::Cancelled),
-        Ok(false) => {}
-        Err(_) => return Err(InvocationError::internal("cancellation query panicked")),
+    let query_cancellation = || match catch_unwind(AssertUnwindSafe(cancellation)) {
+        Ok(true) => WatchdogCause::Cancelled,
+        Ok(false) => WatchdogCause::None,
+        Err(_) => WatchdogCause::Internal,
+    };
+    match query_cancellation() {
+        WatchdogCause::Cancelled => return Err(InvocationError::Cancelled),
+        WatchdogCause::Internal => {
+            return Err(InvocationError::internal("cancellation query panicked"));
+        }
+        _ => {}
     }
 
-    let cause = AtomicU8::new(0);
-    let (stop_sender, stop_receiver) = mpsc::channel();
     let deadline = Instant::now() + INVOCATION_DEADLINE;
-    let operation_result = thread::scope(|scope| {
-        let handle = thread::Builder::new()
-            .name("zup-plugin-watchdog".to_owned())
-            .spawn_scoped(scope, || {
-                watchdog(engine, cancellation, &cause, stop_receiver, deadline)
+    let (interrupt, mut interrupted) = tokio::sync::watch::channel(WatchdogCause::None);
+    let (completed, completion) = mpsc::channel();
+    let (result, cause) = thread::scope(|scope| {
+        // The synchronous planning API can also be called inside a Tokio runtime.
+        let worker = thread::Builder::new()
+            .name("zup-plugin".to_owned())
+            .spawn_scoped(scope, move || {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_time()
+                        .build()?;
+                    runtime.block_on(async {
+                        tokio::select! {
+                            result = operation => result,
+                            _ = interrupted.changed() => Err(Trap::Interrupt.into()),
+                        }
+                    })
+                }));
+                let _ = completed.send(());
+                result
             })
             .map_err(|error| {
-                InvocationError::internal(format!("could not start invocation watchdog: {error}"))
+                InvocationError::internal(format!("could not start plugin: {error}"))
             })?;
-        let result = catch_unwind(AssertUnwindSafe(operation));
-        let _ = stop_sender.send(());
-        handle
-            .join()
-            .map_err(|_| InvocationError::internal("invocation watchdog panicked"))?;
-        Ok(result)
-    })?;
-    let operation_result = match operation_result {
-        Ok(result) => result,
-        Err(_) => return Err(InvocationError::internal("plugin invocation panicked")),
-    };
-    let cause = match cause.load(Ordering::Acquire) {
-        1 => WatchdogCause::Cancelled,
-        2 => WatchdogCause::Timeout,
-        3 => WatchdogCause::Internal,
-        _ => WatchdogCause::None,
-    };
-    match operation_result {
-        Ok(value) => match cause {
-            WatchdogCause::Cancelled => Err(InvocationError::Cancelled),
-            WatchdogCause::Timeout => Err(InvocationError::Timeout),
-            WatchdogCause::Internal => Err(InvocationError::internal("invocation watchdog failed")),
-            WatchdogCause::None => Ok(value),
-        },
-        Err(error) => {
-            let cause =
-                if matches!(cause, WatchdogCause::None) && cancellation_requested(cancellation) {
-                    WatchdogCause::Cancelled
-                } else {
-                    cause
-                };
-            Err(classify_error(&error, cause))
-        }
-    }
-}
-
-fn cancellation_requested(cancellation: &(dyn Fn() -> bool + Send + Sync)) -> bool {
-    catch_unwind(AssertUnwindSafe(cancellation)).is_ok_and(|value| value)
-}
-
-fn watchdog(
-    engine: &Engine,
-    cancellation: &(dyn Fn() -> bool + Send + Sync),
-    cause: &AtomicU8,
-    stop_receiver: mpsc::Receiver<()>,
-    deadline: Instant,
-) {
-    loop {
-        if stop_receiver.try_recv().is_ok() {
-            return;
-        }
-        let cancelled = match catch_unwind(AssertUnwindSafe(cancellation)) {
-            Ok(value) => value,
-            Err(_) => {
-                set_cause(cause, 3);
-                interrupt_engine(engine);
-                return;
+        let cause = loop {
+            let cause = query_cancellation();
+            if cause != WatchdogCause::None {
+                break cause;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break WatchdogCause::Timeout;
+            }
+            match completion.recv_timeout((deadline - now).min(WATCHDOG_POLL_INTERVAL)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break WatchdogCause::None,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         };
-        if cancelled {
-            set_cause(cause, 1);
+        if cause != WatchdogCause::None {
             interrupt_engine(engine);
-            return;
+            let _ = interrupt.send(cause);
         }
-        let now = Instant::now();
-        if now >= deadline {
-            set_cause(cause, 2);
-            interrupt_engine(engine);
-            return;
+        let result = worker
+            .join()
+            .map_err(|_| InvocationError::internal("plugin thread panicked"))?;
+        Ok((result, cause))
+    })?;
+    let result = result.map_err(|_| InvocationError::internal("plugin invocation panicked"))?;
+    match cause {
+        WatchdogCause::Cancelled => return Err(InvocationError::Cancelled),
+        WatchdogCause::Timeout => return Err(InvocationError::Timeout),
+        WatchdogCause::Internal => {
+            return Err(InvocationError::internal("cancellation query panicked"));
         }
-        let wait = (deadline - now).min(WATCHDOG_POLL_INTERVAL);
-        if stop_receiver.recv_timeout(wait).is_ok() {
-            return;
-        }
+        WatchdogCause::None => {}
     }
-}
-
-fn set_cause(cause: &AtomicU8, value: u8) {
-    let _ = cause.compare_exchange(0, value, Ordering::AcqRel, Ordering::Acquire);
+    result.map_err(|error| classify_error(&error, query_cancellation()))
 }
 
 #[cfg(target_has_atomic = "64")]
@@ -322,28 +300,63 @@ pub(crate) fn sanitize_error(message: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn watchdog_stops_a_synchronous_call_at_the_deadline() {
         let engine = Engine::default();
-        let result = run_with_watchdog(&engine, &|| false, || {
+        let result = run_with_watchdog(&engine, &|| false, async {
             std::thread::sleep(Duration::from_millis(300));
             Ok(())
         });
         assert_eq!(result, Err(InvocationError::Timeout));
     }
 
+    #[rstest::rstest]
+    #[case::deadline(false)]
+    #[case::cancelled(true)]
+    fn suspended_execution_is_interrupted_and_dropped(#[case] cancel: bool) {
+        let engine = Engine::default();
+        let started = Instant::now();
+        let dropped = std::sync::atomic::AtomicBool::new(false);
+        struct OnDrop<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for OnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let pending = async {
+            let _guard = OnDrop(&dropped);
+            std::future::pending::<()>().await;
+            Ok(())
+        };
+        let result = run_with_watchdog(
+            &engine,
+            &|| cancel && started.elapsed() > Duration::from_millis(20),
+            pending,
+        );
+        assert_eq!(
+            result,
+            Err(if cancel {
+                InvocationError::Cancelled
+            } else {
+                InvocationError::Timeout
+            })
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn interrupt_is_classified_from_control_state() {
         let engine = Engine::default();
-        let timeout =
-            run_with_watchdog(&engine, &|| false, || Err::<(), _>(Trap::Interrupt.into()));
+        let timeout = run_with_watchdog(&engine, &|| false, async {
+            Err::<(), _>(Trap::Interrupt.into())
+        });
         assert_eq!(timeout, Err(InvocationError::Timeout));
 
         let calls = AtomicUsize::new(0);
         let cancellation = || calls.fetch_add(1, Ordering::Relaxed) > 0;
-        let cancelled = run_with_watchdog(&engine, &cancellation, || {
+        let cancelled = run_with_watchdog(&engine, &cancellation, async {
             Err::<(), _>(Trap::Interrupt.into())
         });
         assert_eq!(cancelled, Err(InvocationError::Cancelled));

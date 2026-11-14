@@ -1,0 +1,202 @@
+{
+  "environment": {
+    "os": "Windows x64",
+    "filesystem": "NTFS",
+    "rust": "1.100.0",
+    "profile": "release",
+    "journal_location": "fresh C: temporary directories",
+    "baseline_commit": "1447e0e2f4e254f45e67775abde15a87ee461016",
+    "logical_io": "store transfers including initial intent write; excludes F11 initialization, seals, filesystem metadata and physical device writes",
+    "timing": "single observations, noisy developer host; no CPU or peak memory claim"
+  },
+  "baseline": [
+    {
+      "files": 1,
+      "nodes": 8,
+      "revision": 19,
+      "io": {
+        "reads": 40,
+        "writes": 20,
+        "bytes_read": 578820,
+        "bytes_written": 291721,
+        "largest_write": 15720,
+        "peak_file_bytes": 15720
+      },
+      "disk_bytes": 16114,
+      "wall_ms": 434,
+      "cold_recovery_us": 3000
+    },
+    {
+      "files": 16,
+      "nodes": 38,
+      "revision": 94,
+      "io": {
+        "reads": 190,
+        "writes": 95,
+        "bytes_read": 25477988,
+        "bytes_written": 12763931,
+        "largest_write": 146585,
+        "peak_file_bytes": 146585
+      },
+      "disk_bytes": 146977,
+      "wall_ms": 2141,
+      "cold_recovery_us": 4362
+    },
+    {
+      "files": 128,
+      "nodes": 262,
+      "revision": 654,
+      "io": {
+        "reads": 1310,
+        "writes": 655,
+        "bytes_read": 1349917268,
+        "bytes_written": 675152609,
+        "largest_write": 1125881,
+        "peak_file_bytes": 1125881
+      },
+      "disk_bytes": 1126272,
+      "wall_ms": 25832,
+      "cold_recovery_us": 11849
+    },
+    {
+      "files": 512,
+      "nodes": 1030,
+      "revision": 2574,
+      "io": {
+        "reads": 5150,
+        "writes": 2575,
+        "bytes_read": 21166339326,
+        "bytes_written": 10583943478,
+        "largest_write": 4489753,
+        "peak_file_bytes": 4489753
+      },
+      "disk_bytes": 4490145,
+      "wall_ms": 300894,
+      "cold_recovery_us": 69349
+    }
+  ],
+  "after": [
+    {
+      "cold_recovery_us": 5956,
+      "disk_bytes": 19739,
+      "files": 1,
+      "io": {
+        "bytes_read": 21431,
+        "bytes_written": 26299,
+        "largest_write": 13325,
+        "peak_file_bytes": 13325,
+        "reads": 22,
+        "writes": 39
+      },
+      "nodes": 8,
+      "revision": 19,
+      "wall_ms": 773
+    },
+    {
+      "cold_recovery_us": 12853,
+      "disk_bytes": 174012,
+      "files": 16,
+      "io": {
+        "bytes_read": 158766,
+        "bytes_written": 209668,
+        "largest_write": 121564,
+        "peak_file_bytes": 121564,
+        "reads": 97,
+        "writes": 189
+      },
+      "nodes": 38,
+      "revision": 94,
+      "wall_ms": 3104
+    },
+    {
+      "cold_recovery_us": 76753,
+      "disk_bytes": 1329260,
+      "files": 128,
+      "io": {
+        "bytes_read": 1187312,
+        "bytes_written": 1583203,
+        "largest_write": 931823,
+        "peak_file_bytes": 931823,
+        "reads": 657,
+        "writes": 1309
+      },
+      "nodes": 262,
+      "revision": 654,
+      "wall_ms": 18984
+    },
+    {
+      "cold_recovery_us": 1113134,
+      "disk_bytes": 5299700,
+      "files": 512,
+      "io": {
+        "bytes_read": 4719986,
+        "bytes_written": 6302289,
+        "largest_write": 3715854,
+        "peak_file_bytes": 3715854,
+        "reads": 2577,
+        "writes": 5149
+      },
+      "nodes": 1030,
+      "revision": 2574,
+      "wall_ms": 74426
+    }
+  ],
+  "repeated_recovery": [
+    {
+      "cold_recovery_us": 4694,
+      "disk_bytes": 188888,
+      "io": {
+        "bytes_read": 257758,
+        "bytes_written": 2543137,
+        "largest_write": 17492,
+        "peak_file_bytes": 128268,
+        "reads": 542,
+        "writes": 584
+      },
+      "recovery_attempts": 256,
+      "wall_ms": 5329
+    },
+    {
+      "cold_recovery_us": 9528,
+      "disk_bytes": 198047,
+      "io": {
+        "bytes_read": 488943,
+        "bytes_written": 5052078,
+        "largest_write": 17492,
+        "peak_file_bytes": 128268,
+        "reads": 1054,
+        "writes": 1113
+      },
+      "recovery_attempts": 512,
+      "wall_ms": 10612
+    },
+    {
+      "cold_recovery_us": 5522,
+      "disk_bytes": 207208,
+      "io": {
+        "bytes_read": 720153,
+        "bytes_written": 7561026,
+        "largest_write": 17492,
+        "peak_file_bytes": 128268,
+        "reads": 1566,
+        "writes": 1642
+      },
+      "recovery_attempts": 768,
+      "wall_ms": 18745
+    },
+    {
+      "cold_recovery_us": 7700,
+      "disk_bytes": 216419,
+      "io": {
+        "bytes_read": 951859,
+        "bytes_written": 10070305,
+        "largest_write": 17492,
+        "peak_file_bytes": 128294,
+        "reads": 2078,
+        "writes": 2171
+      },
+      "recovery_attempts": 1024,
+      "wall_ms": 27820
+    }
+  ]
+}

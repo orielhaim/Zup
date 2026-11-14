@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use zup_core::{AppId, Frontend, ResourceKey, SelectedScope};
-use zup_plan::{DesiredState, InstallLedger, PlanRequest, PlannedInstallation};
+use zup_plan::{DesiredState, InstallationRecord, PlanRequest, PlannedInstallation};
 
+use zup_plan::DeploymentEffects;
 use zup_runtime::{BootstrapRequest, ContentAccess, OperationHost, attach_maintenance_copy};
-use zup_transaction::TransactionInput;
 
 use crate::bundle_packager::EmbeddedBundle;
 
@@ -27,6 +27,93 @@ pub struct WindowsOperationHost<'a> {
 }
 
 impl OperationHost for WindowsOperationHost<'_> {
+    fn collected_deployments(
+        &self,
+        input: &zup_runtime::OperationInput,
+        record: &InstallationRecord,
+    ) -> Result<Vec<zup_plan::RetiredDeploymentSelection>, String> {
+        let remaining = self.cleanup_candidates(input, record, None)?;
+        if self.scope == SelectedScope::Machine
+            && !crate::transport::is_process_elevated().map_err(|error| error.to_string())?
+        {
+            return Ok(Vec::new());
+        }
+        Ok(zup_transaction::collected_deployments(record, &remaining))
+    }
+
+    fn cleanup_candidates(
+        &self,
+        input: &zup_runtime::OperationInput,
+        record: &InstallationRecord,
+        retiring: Option<&zup_plan::RetentionChange>,
+    ) -> Result<Vec<zup_plan::CleanupOperation>, String> {
+        let store = if self.scope == SelectedScope::Machine {
+            if !crate::transport::is_process_elevated().map_err(|error| error.to_string())? {
+                return Ok(Vec::new());
+            }
+            let machine = crate::machine_authority::MachineRoot::acquire(&self.app_id)
+                .map_err(|error| error.to_string())?;
+            if machine.path() != input.state_root {
+                return Err("cleanup state root differs from machine authority".into());
+            }
+            machine.transaction_store()
+        } else {
+            zup_transaction::FilesystemTransactionStore::private_at(input.state_root)
+        };
+        let mut operations = zup_transaction::cleanup_candidates(&store, record, retiring)?;
+        let state = crate::machine_state::StateAuthority {
+            root: input.state_root.to_owned(),
+            app: record.app_id.clone(),
+            scope: record.scope,
+        };
+        operations.extend(
+            zup_transaction::HistoryStorage(crate::filesystem::history::WindowsHistoryFilesystem(
+                state,
+            ))
+            .candidates(&store, record, retiring)?
+            .into_iter()
+            .map(|history| zup_plan::CleanupOperation {
+                candidate: zup_plan::CleanupCandidate::History(history),
+                privilege: record.scope.authorization(),
+            }),
+        );
+        Ok(operations)
+    }
+
+    fn data_bindings(
+        &self,
+        target: &zup_plan::BoundDeployment,
+    ) -> Result<BTreeMap<zup_core::ResourceId, zup_plan::PersistentBinding>, String> {
+        crate::resolve::resolve_persistent_bindings(
+            target,
+            &crate::host_dirs::WindowsInstallLocationResolver,
+        )
+    }
+
+    fn persistent_claims(
+        &self,
+        input: &zup_runtime::OperationInput,
+    ) -> Result<Option<zup_plan::PersistentClaimSelection>, zup_runtime::OperationError> {
+        if self.scope == SelectedScope::Machine
+            && !crate::transport::is_process_elevated()
+                .map_err(|error| zup_runtime::OperationError::refused("authority", error))?
+        {
+            return Ok(None);
+        }
+        crate::ledger::InstallationRecordStore::new(input.state_root)
+            .persistent_claims(
+                &input.build.installer.app.id,
+                self.scope,
+                input.build.installer.target,
+            )
+            .map_err(|error| match error {
+                crate::ledger::LedgerError::RecoveryRequired(transaction) => {
+                    zup_runtime::OperationError::RecoveryRequired(transaction)
+                }
+                error => zup_runtime::OperationError::refused("persistent data", error),
+            })
+    }
+
     fn plan_build(
         &self,
         build: &zup_core::TargetBuildPlan,
@@ -36,7 +123,7 @@ impl OperationHost for WindowsOperationHost<'_> {
         let planning = zup_core::BuildPlan {
             targets: vec![build.clone()],
         };
-        let mut executor = match &self.content {
+        let executor = match &self.content {
             WindowsContent::Embedded(bundle) => zup_plugin_runtime::WasmtimePluginExecutor::load(
                 bundle.package().clone(),
                 &build.installer.target,
@@ -50,14 +137,15 @@ impl OperationHost for WindowsOperationHost<'_> {
             }
         }
         .map_err(|error| zup_runtime::OperationError::refused("plugin", error))?;
+        let mut executor = zup_plugin_runtime::NativePluginExecutor {
+            executor,
+            locations: crate::WindowsInstallLocationResolver,
+        };
         zup_plan::plan(&planning, request, Some(&mut executor), cancellation)
             .map_err(zup_runtime::OperationError::from)
     }
 
-    fn resolve_target(
-        &self,
-        install: &DesiredState,
-    ) -> Result<DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>, String> {
+    fn resolve_target(&self, install: &DesiredState) -> Result<zup_plan::BoundDeployment, String> {
         crate::resolve::resolve_target(
             install,
             &crate::resolve::WindowsTargetContext::new(self.scope),
@@ -67,8 +155,8 @@ impl OperationHost for WindowsOperationHost<'_> {
 
     fn observe(
         &self,
-        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-        ledger: Option<&InstallLedger>,
+        target: Option<&zup_plan::BoundDeployment>,
+        ledger: Option<&InstallationRecord>,
     ) -> Result<(Option<zup_plan::HostSnapshot>, BTreeMap<ResourceKey, bool>), String> {
         crate::planning::observe_target(target, ledger).map_err(|error| error.to_string())
     }
@@ -76,9 +164,9 @@ impl OperationHost for WindowsOperationHost<'_> {
     fn compile(
         &self,
         execution: &zup_plan::ExecutionPlan,
-        target: Option<&DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
-        ledger: Option<&InstallLedger>,
-    ) -> Result<TransactionInput, String> {
+        target: Option<&zup_plan::BoundDeployment>,
+        ledger: Option<&InstallationRecord>,
+    ) -> Result<DeploymentEffects, String> {
         crate::planning::transaction_input(
             execution,
             target,
@@ -93,34 +181,21 @@ impl OperationHost for WindowsOperationHost<'_> {
 
     fn attach_content(
         &self,
-        target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+        target: &mut zup_plan::BoundDeployment,
         content: &ContentAccess,
         preset: Option<&zup_core::PresetRuntime>,
     ) -> Result<(), String> {
-        let state_root = PathBuf::from(crate::plain_path_text(content.state_root));
-        let content = ContentAccess {
-            installer: content.installer,
-            state_root: &state_root,
-            scope: content.scope,
-        };
-        attach_maintenance_copy(
-            target,
-            content.installer,
-            content.state_root,
-            content.scope,
-            "__zup_maintenance__.exe",
-        )
-        .map_err(|error| error.to_string())?;
+        let preparation = attach_maintenance_copy(target, content, "__zup_maintenance__.exe")
+            .map_err(|error| error.to_string())?;
+        if preparation == zup_plan::GenerationPreparation::ReuseVerified {
+            if target.preset.as_ref().map(|installed| &installed.preset) != preset {
+                return Err("repair requires the installed preset declaration".into());
+            }
+            return Ok(());
+        }
         if let Some(preset) = preset {
-            let runtime_directory = zup_transaction::maintenance_directory(
-                content.state_root,
-                &self.app_id,
-                content.scope,
-                &target.app.version,
-            );
-            attach_ui_runtime(target, &runtime_directory, content.scope, preset, &|name| {
-                self.preset_bytes(name)
-            })?;
+            zup_runtime::attach_preset_content(target, preset, &|name| self.preset_bytes(name))
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -188,71 +263,6 @@ fn ui_asset_name(source: &str) -> Option<&str> {
         .and_then(|rest| rest.strip_prefix('/'))
 }
 
-fn attach_ui_runtime(
-    target: &mut DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-    runtime_directory: &std::path::Path,
-    scope: SelectedScope,
-    preset: &zup_core::PresetRuntime,
-    bytes: &impl Fn(&str) -> Result<Vec<u8>, String>,
-) -> Result<(), String> {
-    let executable = bytes(zup_bundle::PRESET_SOURCE).map_err(|error| {
-        format!(
-            "this application presents the preset `{}`, and its executable could not be read: {error}",
-            preset.name
-        )
-    })?;
-    let executable_digest = zup_core::hash_bytes(&executable);
-    let mut files = vec![(
-        zup_bundle::preset_path(
-            runtime_directory,
-            &executable_digest,
-            target.target.executable_suffix(),
-        ),
-        executable_digest,
-        executable.len() as u64,
-        zup_core::RelativePath::new(zup_bundle::PRESET_SOURCE)
-            .expect("a reserved source name is always relative"),
-        true,
-    )];
-    for asset in &preset.assets {
-        let content = bytes(zup_bundle::asset_source_name(asset.name.as_str()).as_str())
-            .map_err(|error| format!("the asset `{}` could not be read: {error}", asset.name))?;
-        if content.len() as u64 != asset.size || zup_core::hash_bytes(&content) != asset.sha256 {
-            return Err(format!(
-                "the asset `{}` is not the content this application configured",
-                asset.name
-            ));
-        }
-        files.push((
-            zup_bundle::asset_path(runtime_directory, asset.name.as_str(), &asset.sha256),
-            asset.sha256,
-            asset.size,
-            zup_bundle::asset_source_name(asset.name.as_str()),
-            false,
-        ));
-    }
-
-    for (path, digest, size, source, executable) in files {
-        let destination = zup_plan::TargetPath::new(target.target, crate::plain_path_text(&path))
-            .map_err(|error| format!("preset runtime destination: {error}"))?;
-        let text = destination.to_string();
-        target.files.push(zup_plan::DesiredFile {
-            key: zup_core::ResourceKey::File { destination: text },
-            source_relative: source,
-            destination,
-            size,
-            sha256: digest,
-            privilege: scope.authorization(),
-            executable,
-        });
-    }
-    target.preset = Some(zup_core::InstalledPreset {
-        preset: preset.clone(),
-        executable: executable_digest,
-    });
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,12 +271,15 @@ mod tests {
         PresetAsset, PresetRuntime, SelectedScope, Target, Template,
     };
 
-    fn empty_target(
-        scope: SelectedScope,
-        id: &str,
-    ) -> DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> {
+    fn empty_target(scope: SelectedScope, id: &str) -> zup_plan::BoundDeployment {
         let target = Target::parse("windows-x64").expect("a target");
         DesiredState {
+            generation_readers: Default::default(),
+            data: Vec::new(),
+            requirements: (),
+            maintenance: None,
+            installation: "00000000-0000-7000-8000-000000000001".parse().unwrap(),
+            generation: None,
             app: App {
                 id: AppId::new(id).expect("an app id"),
                 name: NonEmptyString::new("Window").expect("a name"),
@@ -277,7 +290,7 @@ mod tests {
             },
             target,
             scope,
-            install_directory: zup_plan::TargetPath::new(target, r"C:\Windows\Temp\app")
+            install_directory: zup_core::TargetPath::new(target, r"C:\Windows\Temp\app")
                 .expect("a target path"),
             selected_components: Vec::new(),
             prerequisites: Vec::new(),
@@ -290,6 +303,8 @@ mod tests {
 
             preset: None,
         }
+        .bind_fixed()
+        .expect("fixed deployment requirements")
     }
 
     fn preset() -> PresetRuntime {
@@ -310,269 +325,112 @@ mod tests {
     const LOGO: &[u8] = b"<svg/>";
     const PRESET_EXECUTABLE: &[u8] = b"the preset executable";
 
-    #[test]
-    fn a_window_is_attached_as_scope_aware_installed_content() {
-        let root = tempfile::tempdir().expect("a scratch directory");
-        let app = AppId::new("com.example.window").expect("an app id");
-        let version = semver::Version::parse("1.0.0").expect("a version");
-        let source = |name: &str| -> Result<Vec<u8>, String> {
-            Ok(if name == zup_bundle::PRESET_SOURCE {
-                PRESET_EXECUTABLE.to_vec()
-            } else {
-                LOGO.to_vec()
-            })
-        };
-
-        let mut seen = Vec::new();
-        for scope in [SelectedScope::User, SelectedScope::Machine] {
-            let state_root = root.path().join(match scope {
-                SelectedScope::User => "user",
-                SelectedScope::Machine => "machine",
-            });
-            let directory =
-                zup_transaction::maintenance_directory(&state_root, &app, scope, &version);
-            let mut target = empty_target(scope, "com.example.window");
-            attach_ui_runtime(&mut target, &directory, scope, &preset(), &source)
-                .expect("the window is attached");
-
-            let runtime = target.preset.as_ref().expect("the plan records the window");
-            assert_eq!(
-                runtime.preset,
-                preset(),
-                "the settings and the asset are the ones the application configured, verbatim"
-            );
-            assert_eq!(
-                runtime.executable,
-                zup_core::hash_bytes(PRESET_EXECUTABLE),
-                "and the executable is named by content"
-            );
-
-            let executable = zup_bundle::preset_path(
-                &directory,
-                &runtime.executable,
-                Target::parse("windows-x64")
-                    .expect("a target")
-                    .executable_suffix(),
-            );
-            let asset = zup_bundle::asset_path(
-                &directory,
-                "branding/logo.svg",
-                &zup_core::hash_bytes(LOGO),
-            );
-            assert_eq!(
-                target.files.len(),
-                2,
-                "the executable and the asset, and nothing else"
-            );
-            let destinations: Vec<String> = target
-                .files
-                .iter()
-                .map(|file| file.destination.as_str().to_owned())
-                .collect();
-            assert!(
-                destinations.contains(&crate::plain_path_text(&executable)),
-                "the preset executable is at {}",
-                executable.display()
-            );
-            assert!(
-                destinations.contains(&crate::plain_path_text(&asset)),
-                "the asset is at {}",
-                asset.display()
-            );
-            for file in &target.files {
-                assert_eq!(
-                    file.privilege,
-                    scope.authorization(),
-                    "a {scope} window's content is installed content of that scope"
-                );
-            }
-            assert_eq!(
-                target.files[0].source_relative.as_str(),
-                zup_bundle::PRESET_SOURCE,
-                "and the plan names where the bytes come from rather than a file to copy"
-            );
-            assert_eq!(target.summary().unwrap().file_count, 2);
-            seen.push(executable);
-        }
-        assert_ne!(seen[0], seen[1], "two scopes are two storages");
-    }
-
-    #[test]
-    fn a_window_whose_executable_cannot_be_read_is_refused() {
-        let root = tempfile::tempdir().expect("a scratch directory");
-        let mut target = empty_target(SelectedScope::User, "com.example.unreadable");
-        let unreadable = |_: &str| -> Result<Vec<u8>, String> {
-            Err("this payload carries no preset".to_owned())
-        };
-        let error = attach_ui_runtime(
+    fn prepared_target(root: &std::path::Path, scope: SelectedScope) -> zup_plan::BoundDeployment {
+        let mut target = empty_target(scope, "com.example.acquired");
+        let installer = root.join("runtime");
+        std::fs::write(&installer, b"maintenance runtime").unwrap();
+        attach_maintenance_copy(
             &mut target,
-            &root.path().join("maintenance"),
-            SelectedScope::User,
-            &preset(),
-            &unreadable,
+            &ContentAccess {
+                installer: &installer,
+                state_root: root,
+                scope,
+                action: zup_plan::LifecycleAction::Install,
+                prior: None,
+                maintenance: None,
+            },
+            "__zup_maintenance__.exe",
         )
-        .expect_err("a window with no executable cannot be installed");
-        assert!(error.contains("could not be read"), "{error}");
-        assert!(
-            target.preset.is_none(),
-            "and the plan records no window rather than one it cannot honour"
-        );
-        assert!(target.files.is_empty(), "and no half-installed content");
-    }
-
-    #[test]
-    fn an_asset_that_is_not_the_configured_content_is_refused() {
-        let root = tempfile::tempdir().expect("a scratch directory");
-        let mut target = empty_target(SelectedScope::User, "com.example.mismatch");
-        let source = |name: &str| -> Result<Vec<u8>, String> {
-            Ok(if name == zup_bundle::PRESET_SOURCE {
-                PRESET_EXECUTABLE.to_vec()
-            } else {
-                b"something else".to_vec()
-            })
-        };
-        let error = attach_ui_runtime(
-            &mut target,
-            &root.path().join("maintenance"),
-            SelectedScope::User,
-            &preset(),
-            &source,
-        )
-        .expect_err("an asset that is not what the application configured");
-        assert!(
-            error.contains("branding/logo.svg"),
-            "and it names the asset: {error}"
-        );
-        assert!(target.preset.is_none(), "and records no window");
-    }
-
-    #[test]
-    fn a_windows_bytes_come_from_verified_acquired_content() {
-        let root = tempfile::tempdir().expect("a scratch directory");
-        let (manifest, payload) = acquired_release(root.path(), zup_core::hash_bytes(LOGO));
-        let mut target = empty_target(SelectedScope::User, "com.example.acquired");
-        let directory = zup_transaction::maintenance_directory(
-            &root.path().join("state"),
-            &AppId::new("com.example.acquired").expect("a valid id"),
-            SelectedScope::User,
-            &target.app.version,
-        );
-        let host = WindowsOperationHost {
-            app_id: AppId::new("com.example.acquired").expect("a valid id"),
-            scope: SelectedScope::User,
-            frontend: Frontend::Gui,
-            state_root: root.path().join("state"),
-            content: WindowsContent::Acquired(&manifest, &payload),
-            acquire_prerequisites: false,
-        };
-
-        attach_ui_runtime(
-            &mut target,
-            &directory,
-            SelectedScope::User,
-            &preset(),
-            &|name| host.preset_bytes(name),
-        )
-        .expect("a release that carries the window can install it");
-
-        let recorded = target.preset.as_ref().expect("the plan records the window");
-        assert_eq!(
-            recorded.executable,
-            zup_core::hash_bytes(PRESET_EXECUTABLE),
-            "named by the digest the release authenticated, not discovered by hashing"
-        );
-        assert_eq!(
-            recorded.preset,
-            preset(),
-            "and the same window the build configured"
-        );
-
-        let mut destinations: Vec<String> = target
-            .files
-            .iter()
-            .map(|file| file.destination.as_str().to_owned())
-            .collect();
-        destinations.sort();
-        let mut expected = vec![
-            crate::plain_path_text(&zup_bundle::asset_path(
-                &directory,
-                "branding/logo.svg",
-                &recorded.preset.assets[0].sha256,
-            )),
-            crate::plain_path_text(&zup_bundle::preset_path(
-                &directory,
-                &recorded.executable,
-                Target::parse("windows-x64")
-                    .expect("a target")
-                    .executable_suffix(),
-            )),
-        ];
-        expected.sort();
-        assert_eq!(
-            destinations, expected,
-            "installed as content-addressed files beside the maintenance runtime, the same \
-             layout a composed install produces"
-        );
-        let mut sources: Vec<&str> = target
-            .files
-            .iter()
-            .map(|file| file.source_relative.as_str())
-            .collect();
-        sources.sort();
-        assert_eq!(
-            sources,
-            [
-                zup_bundle::PRESET_SOURCE,
-                "__zup_preset_asset__/branding/logo.svg",
-            ],
-            "and the plan names where the bytes come from, rather than a build-machine path"
-        );
+        .unwrap();
+        target
     }
 
     #[rstest::rstest]
-    #[case::an_executable_the_cache_does_not_hold(true)]
-    #[case::an_asset_the_cache_does_not_hold(false)]
-    fn a_window_the_release_does_not_carry_is_refused(#[case] absent_executable: bool) {
-        let root = tempfile::tempdir().expect("a scratch directory");
-        let named = if absent_executable {
-            zup_core::hash_bytes(LOGO)
-        } else {
-            zup_core::hash_bytes(b"never acquired")
+    #[case(SelectedScope::User)]
+    #[case(SelectedScope::Machine)]
+    fn acquired_preset_joins_the_verified_maintenance_generation(#[case] scope: SelectedScope) {
+        let root = tempfile::tempdir().unwrap();
+        let (manifest, payload) = acquired_release(root.path(), zup_core::hash_bytes(LOGO));
+        let host = WindowsOperationHost {
+            app_id: AppId::new("com.example.acquired").unwrap(),
+            scope,
+            frontend: Frontend::Gui,
+            state_root: root.path().join("state"),
+            content: WindowsContent::Acquired(&manifest, &payload),
+            acquire_prerequisites: false,
         };
-        let (mut manifest, payload) = acquired_release(root.path(), named);
-        if absent_executable {
-            let mut wrong = PRESET_EXECUTABLE.to_vec();
-            wrong.push(b'!');
+        let mut target = prepared_target(root.path(), scope);
+        zup_runtime::attach_preset_content(&mut target, &preset(), &|name| host.preset_bytes(name))
+            .unwrap();
+        target.validate_resolved().unwrap();
+        assert!(target.files.is_empty());
+        let generation = target.maintenance.unwrap();
+        assert_eq!(generation.descriptor.files().len(), 3);
+        for (artifact, bytes) in [
+            (zup_core::MaintenanceArtifact::Preset, PRESET_EXECUTABLE),
+            (
+                zup_core::MaintenanceArtifact::Asset {
+                    name: zup_core::RelativePath::new("branding/logo.svg").unwrap(),
+                },
+                LOGO,
+            ),
+        ] {
+            let digest = zup_core::hash_bytes(bytes);
+            let path = artifact.member_path(target.target, digest);
+            assert!(
+                generation
+                    .descriptor
+                    .files()
+                    .iter()
+                    .any(|file| file.path == path
+                        && file.sha256 == digest
+                        && file.size == bytes.len() as u64)
+            );
+            assert_eq!(
+                generation.sources[&path].key,
+                ResourceKey::File {
+                    id: zup_core::FileResourceId::Maintenance { artifact }
+                }
+            );
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::missing_executable(true)]
+    #[case::missing_asset(false)]
+    fn unavailable_authenticated_preset_content_is_refused(#[case] executable: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let (mut manifest, payload) = acquired_release(
+            root.path(),
+            if executable {
+                zup_core::hash_bytes(LOGO)
+            } else {
+                zup_core::hash_bytes(b"never acquired")
+            },
+        );
+        if executable {
             manifest.preset = Some(zup_artifact::Descriptor::of(
                 zup_artifact::MediaType::PRESET,
-                &wrong,
+                b"missing executable",
             ));
         }
-        let mut target = empty_target(SelectedScope::User, "com.example.absent");
-        let directory = root.path().join("maintenance");
         let host = WindowsOperationHost {
-            app_id: AppId::new("com.example.absent").expect("a valid id"),
+            app_id: AppId::new("com.example.acquired").unwrap(),
             scope: SelectedScope::User,
             frontend: Frontend::Gui,
             state_root: root.path().join("state"),
             content: WindowsContent::Acquired(&manifest, &payload),
             acquire_prerequisites: false,
         };
-
-        let error = attach_ui_runtime(
-            &mut target,
-            &directory,
-            SelectedScope::User,
-            &preset(),
-            &|name| host.preset_bytes(name),
-        )
-        .expect_err("a release that does not carry the window cannot install one");
+        let mut target = prepared_target(root.path(), SelectedScope::User);
+        let before = target.maintenance.clone();
         assert!(
-            !error.is_empty(),
-            "and the refusal says what is wrong: {error}"
+            zup_runtime::attach_preset_content(&mut target, &preset(), &|name| host
+                .preset_bytes(name))
+            .is_err()
         );
-        assert!(target.preset.is_none(), "and the plan records no window");
-        assert!(target.files.is_empty(), "and no half-installed content");
+        assert_eq!(target.maintenance, before);
+        assert!(target.preset.is_none());
     }
 
     fn acquired_release(
@@ -590,7 +448,7 @@ mod tests {
             }],
             ..preset()
         };
-        let plan = zup_bundle::PortableBuildPlan {
+        let plan = zup_core::PackagePlan {
             installer: Installer {
                 app: App {
                     id: AppId::new("com.example.acquired").expect("a valid id"),
@@ -605,6 +463,8 @@ mod tests {
                 preset: Some(preset.clone()),
                 updates: None,
                 install: Install {
+                    generation_readers: Default::default(),
+                    data: Vec::new(),
                     scope: InstallScope::User,
                     directory: InstallDirectory {
                         user: Some(Template::parse("${install}").expect("a dir")),

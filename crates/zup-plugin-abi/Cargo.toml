@@ -11,5 +11,8 @@ publish = true
 links = "zup_plugin_abi"
 build = "build.rs"
 
+[features]
+test-fixture = []
+
 [dependencies]
 sha2.workspace = true

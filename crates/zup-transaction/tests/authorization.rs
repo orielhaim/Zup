@@ -9,16 +9,22 @@ mod common;
 
 use zup_core::{BackendResourceId, Privilege, RelativePath, ResourceKey};
 use zup_plan::RemovalKind;
+use zup_plan::{BackendOperation, NodeKind, compile_deployment};
 use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
-use zup_transaction::{BackendOperation, NodeKind, TransactionInput, compile_transaction};
 
-use common::{digest, target, tpath};
+use common::{digest, tpath};
 
 fn file_work(name: &str, privilege: Privilege) -> FileOperation {
     let contents = b"payload";
     FileOperation {
+        replacement: zup_core::FixedReplacement::Atomic,
         key: ResourceKey::File {
-            destination: format!(r"C:\PF\Acme\{name}"),
+            id: zup_core::FileResourceId::Payload {
+                id: zup_core::PayloadId::TreeMember {
+                    declaration: zup_core::ResourceId::new("fixture").unwrap(),
+                    member: zup_core::RelativePath::new(name).unwrap(),
+                },
+            },
         },
         source_relative: RelativePath::new(name).unwrap(),
         destination: tpath(&format!(r"C:\PF\Acme\{name}")),
@@ -47,14 +53,14 @@ fn backend_apply(name: &str, privilege: Privilege) -> BackendOperation {
 /// that owns a host-wide file still asks for system.
 #[test]
 fn privileges_are_carried_per_operation_and_set_the_authorization_answer() {
-    let mut input = TransactionInput::new(target());
+    let mut input = common::effects();
     input.files = vec![
         file_work("per-user.exe", Privilege::User),
         file_work("host-wide.exe", Privilege::System),
     ];
     input.backend_operations = vec![backend_apply("agent", Privilege::System)];
 
-    let plan = compile_transaction(&input).unwrap();
+    let plan = compile_deployment(&input).unwrap();
     assert!(plan.requires_authorization());
 
     let by_key: Vec<(&ResourceKey, Privilege)> = plan
@@ -88,12 +94,17 @@ fn privileges_are_carried_per_operation_and_set_the_authorization_answer() {
 
 #[test]
 fn removal_authorization_comes_from_the_removal_not_the_scope() {
-    let mut input = TransactionInput::new(target());
+    let mut input = common::effects();
     let key = ResourceKey::File {
-        destination: r"C:\PF\Acme\host-wide.exe".into(),
+        id: zup_core::FileResourceId::Payload {
+            id: zup_core::PayloadId::File {
+                declaration: zup_core::ResourceId::new("fixture-1").unwrap(),
+            },
+        },
     };
     input.retired_keys.push(key.clone());
-    input.removals.push(zup_transaction::FileRemoval {
+    input.removals.push(zup_plan::FileRemoval {
+        instance: common::owned_instance(),
         key,
         kind: RemovalKind::RemoveOwned,
         scope: zup_core::SelectedScope::User,
@@ -103,7 +114,7 @@ fn removal_authorization_comes_from_the_removal_not_the_scope() {
         size: 3,
         created_directories: Vec::new(),
     });
-    let plan = compile_transaction(&input).unwrap();
+    let plan = compile_deployment(&input).unwrap();
     assert!(plan.requires_authorization());
     let removal = plan
         .nodes
@@ -115,26 +126,22 @@ fn removal_authorization_comes_from_the_removal_not_the_scope() {
 
 #[test]
 fn all_user_operations_need_no_system_authorization() {
-    let mut input = TransactionInput::new(target());
+    let mut input = common::effects();
     input.files = vec![file_work("a.exe", Privilege::User)];
     input.backend_operations = vec![backend_apply("hook", Privilege::User)];
-    assert!(
-        !compile_transaction(&input)
-            .unwrap()
-            .requires_authorization()
-    );
+    assert!(!compile_deployment(&input).unwrap().requires_authorization());
 }
 
 /// Two plans that differ only in authority are different plans: a fingerprint
 /// that ignored privilege would let one install satisfy the other's journal.
 #[test]
 fn node_privilege_is_part_of_the_plan_fingerprint() {
-    let mut input = TransactionInput::new(target());
+    let mut input = common::effects();
     input.files = vec![file_work("a.exe", Privilege::User)];
-    let user_plan = compile_transaction(&input).unwrap();
+    let user_plan = compile_deployment(&input).unwrap();
 
     input.files = vec![file_work("a.exe", Privilege::System)];
-    let system_plan = compile_transaction(&input).unwrap();
+    let system_plan = compile_deployment(&input).unwrap();
 
     assert_ne!(user_plan.fingerprint(), system_plan.fingerprint());
 }

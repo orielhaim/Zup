@@ -24,11 +24,7 @@ The developer CLI, tests, preview, and preset development keep their ordinary
 profiles. `zup build` composes cached templates without compiling the engine.
 
 Use `cargo xtask toolchain build --profile dev` when changing the runtime itself.
-For a reproducible size breakdown, run `scripts/ci/installer-size.py` with
-`--cli`, `--toolchain`, and `--output`. The size-only mode in Full Verification
-can measure a selected revision on native Windows and Linux runners.
-
-See [measured installer sizes](installer-size.md) for the frontend and component breakdown.
+See [installer size](installer-size.md) for reproducible measurements.
 
 ## Declare an artifact
 
@@ -48,13 +44,13 @@ installer covering both architectures; each target still builds on its own too.
 
 Fields:
 
-| Field | Values | Meaning |
-| --- | --- | --- |
-| `kind` | `single`, `universal` | one target or target selection at launch |
-| `mode` | `offline`, `thin` | carries content or acquires release content |
-| `targets` | profile IDs | variants included by the artifact |
-| `channel` | string | follow a release channel instead of a fixed version |
-| `output` | path | explicit output name |
+| Field     | Values                | Meaning                                             |
+| --------- | --------------------- | --------------------------------------------------- |
+| `kind`    | `single`, `universal` | one target or target selection at launch            |
+| `mode`    | `offline`, `thin`     | carries content or acquires release content         |
+| `targets` | profile IDs           | variants included by the artifact                   |
+| `channel` | string                | follow a release channel instead of a fixed version |
+| `output`  | path                  | explicit output name                                |
 
 ## Offline
 

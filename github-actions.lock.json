@@ -1,22 +1,10 @@
 {
-  "schema": 2,
+  "schema": 1,
   "$comment": [
-    "The GitHub Actions zup's own workflows depend on, tracked by release series.",
-    "",
-    "`version` is the exact ref a workflow uses after `@`: a major series like",
-    "`v7`, or a moving channel like `stable`. Workflows read these refs rather",
-    "than full commit SHAs, so the file is readable and dependabot can advance",
-    "them, and so the ref a project writes is the ref the ecosystem uses.",
-    "",
-    "`sha` is what that ref resolved to on `checkedAt`. It is a record, not a",
-    "constraint: its job is to make a *moved tag* visible. A ref that pointed at a",
-    "different commit than the one recorded here is the one failure mode a",
-    "version ref cannot show you on its own, so it is checked.",
-    "",
-    "Read manually. `zup build` and",
-    "`zup ci github generate` never touch this file: generating a workflow is",
-    "offline and byte-reproducible, and a pin that moved under a developer who",
-    "was only regenerating a matrix is a supply-chain change they did not make."
+    "Actions and resolved revisions used by repository CI and generated workflows.",
+    "Generated release workflows use the recorded immutable SHA pins.",
+    "Repository CI may use version refs; checkedAt records when those refs were verified.",
+    "Generation is offline and never updates this registry."
   ],
   "actions": {
     "Swatinem/rust-cache": {
@@ -73,6 +61,11 @@
       "version": "v1",
       "sha": "10ca16bf91dc22e05ebdc935cad9c75ea248f621",
       "checkedAt": "2026-10-08"
+    },
+    "ilammy/setup-nasm": {
+      "version": "v1",
+      "sha": "e77cc62a22a374a4d0668286007cc3e3b4c17760",
+      "checkedAt": "2026-11-14"
     }
   }
 }

@@ -29,11 +29,11 @@ accent = "#695cff"
 
 Three changes have different loops:
 
-| Change | What happens |
-| --- | --- |
-| A `.rs` file | Rebuild and replace the preset |
-| `zup.preset.dev.toml` settings | Revalidate and republish |
-| An asset file | Rematerialize, no recompile |
+| Change                         | What happens                   |
+| ------------------------------ | ------------------------------ |
+| A `.rs` file                   | Rebuild and replace the preset |
+| `zup.preset.dev.toml` settings | Revalidate and republish       |
+| An asset file                  | Rematerialize, no recompile    |
 
 A failed build leaves the previous preset running.
 

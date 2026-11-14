@@ -105,6 +105,14 @@ fn elf64(machine: u16, os_abi: u8, kind: ElfKind) -> Vec<u8> {
         put(&mut bytes, 54, &(PROGRAM_HEADER as u16).to_le_bytes());
         put(&mut bytes, 56, &1u16.to_le_bytes());
         put(&mut bytes, 64, &object::elf::PT_INTERP.0.to_le_bytes());
+        let loader = b"/lib64/ld-linux-x86-64.so.2\0";
+        put(
+            &mut bytes,
+            72,
+            &((HEADER + PROGRAM_HEADER) as u64).to_le_bytes(),
+        );
+        put(&mut bytes, 96, &(loader.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(loader);
     }
     bytes
 }
@@ -508,4 +516,50 @@ fn reading_from_a_path_and_from_bytes_agree() {
         Executable::read(&directory.path().join("absent.exe")),
         Err(InspectError::Io(_))
     ));
+}
+
+#[test]
+fn dynamic_linux_loaders_distinguish_gnu_and_musl() {
+    let gnu = inspect(&elf64(EM_X86_64, 0, ElfKind::PositionIndependent)).unwrap();
+    assert!(gnu.matches_target(&target("linux-x64")));
+    assert!(!gnu.matches_target(&target("linux-x64-musl")));
+    let mut bytes = elf64(EM_X86_64, 0, ElfKind::PositionIndependent);
+    bytes.truncate(120);
+    let loader = b"/lib/ld-musl-x86_64.so.1\0";
+    put(&mut bytes, 96, &(loader.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(loader);
+    let musl = inspect(&bytes).unwrap();
+    assert!(musl.matches_target(&target("linux-x64-musl")));
+    assert!(!musl.matches_target(&target("linux-x64")));
+}
+
+#[test]
+fn static_pie_with_an_entrypoint_is_an_executable() {
+    let mut bytes = elf64(EM_X86_64, 0, ElfKind::Shared);
+    put(&mut bytes, 24, &4096u64.to_le_bytes());
+    assert!(
+        inspect(&bytes)
+            .unwrap()
+            .matches_target(&target("linux-x64-musl"))
+    );
+}
+
+#[cfg(any(windows, all(target_os = "linux", target_env = "gnu")))]
+#[test]
+fn native_imports_report_the_platform_library() {
+    let executable = Executable::read(&std::env::current_exe().unwrap()).unwrap();
+    #[cfg(windows)]
+    assert!(
+        executable
+            .libraries()
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("kernel32.dll"))
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        executable
+            .libraries()
+            .iter()
+            .any(|name| name == "libc.so.6")
+    );
 }

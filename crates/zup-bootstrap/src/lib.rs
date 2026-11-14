@@ -10,7 +10,7 @@ pub use model::{
     BootstrapOperation, BootstrapOperationState, BootstrapOperationStateRecord, BootstrapOutcome,
     BootstrapPhase, BootstrapPlan, BootstrapState, BoundBootstrapOperation, BoundBootstrapPlan,
     DetectionResult, MAX_BOOTSTRAP_OPERATIONS, MAX_BOOTSTRAP_PLAN_BYTES, MAX_BOOTSTRAP_STATE_BYTES,
-    PackageIdentity, PrerequisiteProvider, PrerequisiteSatisfier, ProviderOutcome, ProviderRequest,
+    PrerequisiteProvider, PrerequisiteSatisfier, ProviderOutcome, ProviderRequest,
     QuarantinedArtifact,
 };
 pub use quarantine::{ArtifactReservation, Quarantine, QuarantineError, validate_filename};

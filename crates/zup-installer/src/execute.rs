@@ -102,6 +102,31 @@ pub fn already_reported(error: &miette::Report) -> bool {
         .is_some_and(ExecutionError::was_reported)
 }
 
+struct ResultIdentity {
+    version: String,
+    directory: Option<String>,
+}
+
+impl ResultIdentity {
+    fn from_request(request: &RuntimeRequest) -> Self {
+        Self {
+            version: request.app_version.to_string(),
+            directory: request
+                .operation
+                .deployment()
+                .and_then(|deployment| deployment.plan.install_directory.as_ref())
+                .map(ToString::to_string),
+        }
+    }
+
+    fn observe(&mut self, event: &RuntimeEvent) {
+        if let RuntimeEvent::PlanPrepared { plan } = event {
+            self.version = plan.requirements.app.version.to_string();
+            self.directory = plan.install_directory.as_ref().map(ToString::to_string);
+        }
+    }
+}
+
 pub fn execute(prepared: PreparedRuntime) -> miette::Result<()> {
     execute_with_policy(prepared, ExecutionPolicy::NonInteractive).map_err(Into::into)
 }
@@ -111,26 +136,21 @@ pub fn execute_with_policy(
     policy: ExecutionPolicy,
 ) -> Result<(), ExecutionError> {
     let drifted = drifted_keys(&prepared.request);
+    let application = prepared.request.app_id.to_string();
+    let scope = prepared.request.scope;
+    let mut identity = ResultIdentity::from_request(&prepared.request);
     let control = OperationControl::new(policy);
-    match execute_with_control_signal(prepared, &control)? {
-        InstallOutcome::Committed => {
-            println!("committed");
-            for key in drifted {
-                eprintln!("left drifted resource untouched: {key}");
-            }
-            Ok(())
-        }
-        other => Err(ExecutionError::silent(miette::miette!(
-            "transaction: {other:?}"
-        ))),
-    }
-}
-
-pub fn execute_with_control_signal(
-    prepared: PreparedRuntime,
-    control: &OperationControl,
-) -> miette::Result<InstallOutcome> {
-    execute_observing(prepared, control, |_| {})
+    let outcome = execute_observing(prepared, &control, |event| identity.observe(event));
+    publish_outcome(
+        OutputFormat::Human,
+        &application,
+        &identity.version,
+        Some(scope),
+        identity.directory,
+        None,
+        &drifted,
+        outcome,
+    )
 }
 
 pub fn execute_observing(
@@ -202,9 +222,32 @@ async fn observe_execution<T>(
 
 fn drifted_keys(request: &RuntimeRequest) -> Vec<String> {
     request
-        .transaction_plan
-        .retired_keys
-        .iter()
+        .operation
+        .deployment()
+        .map(|deployment| &deployment.plan)
+        .into_iter()
+        .flat_map(|plan| {
+            plan.retired_keys.iter().filter(|key| {
+                !plan.nodes.iter().any(|node| match &node.kind {
+                    zup_plan::NodeKind::FileRemoval { key: removed }
+                    | zup_plan::NodeKind::BackendRemoval { key: removed } => removed == *key,
+                    zup_plan::NodeKind::BackendOperation { key: removed, .. } => {
+                        removed == *key
+                            && node.meta.backend.as_ref().is_some_and(|operation| {
+                                operation.intent == zup_plan::BackendOperationIntent::Remove
+                            })
+                    }
+                    zup_plan::NodeKind::NativeService { operation } => {
+                        operation.key() == *key
+                            && matches!(
+                                operation.as_ref(),
+                                zup_plan::NativeServiceOperation::Remove { .. }
+                            )
+                    }
+                    _ => false,
+                })
+            })
+        })
         .map(|key| format!("{key:?}"))
         .collect()
 }
@@ -216,19 +259,14 @@ pub fn execute_frontend(
 ) -> Result<(), ExecutionError> {
     let request = prepared.request.clone();
     let application = request.app_id.to_string();
-    let version = request.app_version.to_string();
+    let mut identity = ResultIdentity::from_request(&request);
     let scope = Some(request.scope);
-    let install_directory = request
-        .transaction_plan
-        .install_directory
-        .as_ref()
-        .map(ToString::to_string);
     let drifted = drifted_keys(&request);
     let control = OperationControl::new(ExecutionPolicy::NonInteractive);
     if output == OutputFormat::Jsonl {
         let started = InstallerEvent::started(
             &application,
-            &version,
+            &identity.version,
             crate::maintenance::action_name(action),
         );
         emit_line(
@@ -239,14 +277,15 @@ pub fn execute_frontend(
     let observed_log = log_path.clone();
     let jsonl = output == OutputFormat::Jsonl;
     let outcome = execute_observing(prepared, &control, |event| {
+        identity.observe(event);
         note_progress(jsonl, &observed_log, event);
     });
     publish_outcome(
         output,
         &application,
-        &version,
+        &identity.version,
         scope,
-        install_directory,
+        identity.directory,
         log_path.lock().expect("log path state").clone(),
         &drifted,
         outcome,
@@ -280,27 +319,25 @@ fn publish_outcome(
         }
     };
     let process = ProcessOutcome::from(&outcome);
+    let mut result = InstallerResult::new(process, application, version);
+    result.scope = scope;
+    result.install_directory = install_directory;
+    result.log_path = log_path;
+    result.drift = drifted.to_vec();
+    result.apply_outcome(&outcome);
     match output {
         OutputFormat::Human => {
-            if outcome == InstallOutcome::Committed {
-                println!("committed");
+            if process == ProcessOutcome::Success {
+                println!("{}", result.message.as_deref().unwrap_or("Committed"));
                 for key in drifted {
                     eprintln!("left drifted resource untouched: {key}");
                 }
                 Ok(())
             } else {
-                Err(ExecutionError::silent(outcome_error(&outcome)))
+                Err(ExecutionError::silent(outcome_error(&result)))
             }
         }
         OutputFormat::Json => {
-            let mut result = InstallerResult::new(process, application, version);
-            result.scope = scope;
-            result.install_directory = install_directory;
-            result.log_path = log_path;
-            result.drift = drifted.to_vec();
-            if process != ProcessOutcome::Success {
-                result.message = Some(format!("{outcome:?}"));
-            }
             emit_line(
                 &result
                     .to_json()
@@ -309,14 +346,17 @@ fn publish_outcome(
             if process == ProcessOutcome::Success {
                 Ok(())
             } else {
-                Err(ExecutionError::reported(outcome_error(&outcome)))
+                Err(ExecutionError::reported(outcome_error(&result)))
             }
         }
         OutputFormat::Jsonl => {
             let event = if process == ProcessOutcome::Success {
                 InstallerEvent::Completed { outcome: process }
             } else {
-                let message = format!("{outcome:?}");
+                let message = result
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "The operation failed".into());
                 InstallerEvent::Failed {
                     outcome: process,
                     code: process.code(),
@@ -330,18 +370,21 @@ fn publish_outcome(
                 &serde_json::to_string(&event)
                     .map_err(|error| ExecutionError::silent(miette::miette!("output: {error}")))?,
             );
-            if !matches!(outcome, InstallOutcome::Committed) {
-                return Err(ExecutionError::reported(outcome_error(&outcome)));
+            if process != ProcessOutcome::Success {
+                return Err(ExecutionError::reported(outcome_error(&result)));
             }
             Ok(())
         }
     }
 }
 
-fn outcome_error(outcome: &InstallOutcome) -> miette::Report {
+fn outcome_error(result: &InstallerResult) -> miette::Report {
     crate::terminal::Failure {
-        outcome: ProcessOutcome::from(outcome),
-        message: format!("transaction: {outcome:?}"),
+        outcome: result.outcome,
+        message: result
+            .message
+            .clone()
+            .unwrap_or_else(|| "The operation failed".into()),
     }
     .into()
 }
@@ -554,7 +597,7 @@ mod tests {
                     }
                     Sample::Failed => Err(zup_runtime::SessionError::Transaction("disk".into())),
                     Sample::Reconciliation => Ok(InstallOutcome::CommittedPendingReconciliation {
-                        transaction: Some(uuid::Uuid::now_v7()),
+                        transaction: zup_core::TransactionId::new_v7(),
                         detail: "ledger publish failed".into(),
                     }),
                     Sample::Committed => {

@@ -1,41 +1,129 @@
-use zup_transaction::{
-    CancellationProbe, NodeKind, OperationExecutor, OperationReceipt, ReconcileResult,
-};
+use zup_plan::NodeKind;
+use zup_transaction::{CancellationProbe, OperationExecutor, OperationReceipt, ReconcileResult};
 
 use crate::{CancellationHandle, RuntimeEvent, TokenProbe};
 
-pub fn operation_work(node: &zup_transaction::TransactionNode) -> u64 {
-    if matches!(
-        node.kind,
-        NodeKind::StageFile { .. } | NodeKind::FileMutation { .. }
-    ) {
-        node.meta.expected_size.unwrap_or(1).max(1)
-    } else {
-        1
-    }
-}
-
-pub fn operation_phase(node: &zup_transaction::TransactionNode) -> zup_core::OperationPhase {
+pub fn operation_phase(node: &zup_plan::DeploymentNode) -> zup_core::OperationPhase {
     use zup_core::OperationPhase;
     match node.kind {
+        NodeKind::Cleanup { .. } | NodeKind::Retention { .. } => OperationPhase::Cleanup,
+        NodeKind::PersistentDirectory { .. } => OperationPhase::Files,
+        NodeKind::Generation { operation, .. } => match operation {
+            zup_plan::GenerationOperation::Materialize => OperationPhase::Stage,
+            zup_plan::GenerationOperation::Seal | zup_plan::GenerationOperation::Verify => {
+                OperationPhase::Verify
+            }
+            zup_plan::GenerationOperation::Activate => OperationPhase::Activate,
+        },
         NodeKind::StageFile { .. }
         | NodeKind::FileMutation { .. }
         | NodeKind::FileRemoval { .. } => OperationPhase::Files,
-        NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
-            OperationPhase::System
-        }
-        NodeKind::Barrier => OperationPhase::Finish,
+        NodeKind::RetainFile { .. } => OperationPhase::Verify,
+        NodeKind::ServiceControl { .. }
+        | NodeKind::NativeService { .. }
+        | NodeKind::NativeCache { .. }
+        | NodeKind::BackendOperation { .. }
+        | NodeKind::BackendRemoval { .. } => OperationPhase::System,
+        NodeKind::ReserveInstallation => OperationPhase::Stage,
+        NodeKind::Barrier | NodeKind::PublishInstallation => OperationPhase::Finish,
     }
 }
 
-pub fn operation_action(node: &zup_transaction::TransactionNode) -> &'static str {
+pub fn operation_action(node: &zup_plan::DeploymentNode) -> &'static str {
     match &node.kind {
+        NodeKind::Cleanup { operation }
+            if matches!(operation.candidate, zup_plan::CleanupCandidate::History(_)) =>
+        {
+            "Cleaning unreferenced deployment history..."
+        }
+        NodeKind::Cleanup { .. } => "Cleaning retired payload...",
+        NodeKind::Retention { .. } => "Retiring rollback references...",
+        NodeKind::PersistentDirectory { operation } => {
+            if operation.intent.previous.is_some() {
+                "Preserving application data..."
+            } else {
+                "Preparing application data..."
+            }
+        }
+        NodeKind::NativeCache { .. } => "Updating native integration cache...",
+        NodeKind::RetainFile { .. } => "Verifying retained file...",
+        NodeKind::Generation { operation, .. } => match operation {
+            zup_plan::GenerationOperation::Materialize => "Preparing application...",
+            zup_plan::GenerationOperation::Seal | zup_plan::GenerationOperation::Verify => {
+                "Verifying application..."
+            }
+            zup_plan::GenerationOperation::Activate => "Activating application...",
+        },
+        NodeKind::ServiceControl { operation } => match operation.stage {
+            zup_plan::ServiceControlStage::Quiesce => "Stopping service…",
+            zup_plan::ServiceControlStage::Restore => "Starting service…",
+        },
+        NodeKind::NativeService { operation } => match operation.as_ref() {
+            zup_plan::NativeServiceOperation::Configure { service, .. }
+                if service.kind == zup_plan::IntegrationChangeKind::NoOp =>
+            {
+                "Verifying service registration..."
+            }
+            zup_plan::NativeServiceOperation::Configure { .. } => "Configuring native service...",
+            zup_plan::NativeServiceOperation::Remove { .. } => "Removing native service...",
+        },
         NodeKind::StageFile { .. } | NodeKind::FileMutation { .. } => "Installing files…",
         NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
             "Updating application settings…"
         }
         NodeKind::FileRemoval { .. } => "Removing files…",
+        NodeKind::ReserveInstallation => "Reserving installation ownership...",
+        NodeKind::PublishInstallation => "Publishing installation record...",
         NodeKind::Barrier => "Finishing…",
+    }
+}
+
+pub fn operation_result_action(
+    node: &zup_plan::DeploymentNode,
+    receipt: &OperationReceipt,
+) -> &'static str {
+    match receipt {
+        OperationReceipt::Cleanup {
+            completion: zup_transaction::CleanupCompletion::Removed,
+            ..
+        } if matches!(&node.kind, NodeKind::Cleanup { operation } if matches!(operation.candidate, zup_plan::CleanupCandidate::History(_))) => {
+            "Collected unreferenced deployment history"
+        }
+        OperationReceipt::Cleanup {
+            completion: zup_transaction::CleanupCompletion::AlreadyAbsent,
+            ..
+        } if matches!(&node.kind, NodeKind::Cleanup { operation } if matches!(operation.candidate, zup_plan::CleanupCandidate::History(_))) => {
+            "Deployment history was already absent"
+        }
+        OperationReceipt::Cleanup {
+            completion: zup_transaction::CleanupCompletion::Removed,
+            ..
+        } => "Collected unused owned payload",
+        OperationReceipt::Cleanup {
+            completion: zup_transaction::CleanupCompletion::AlreadyAbsent,
+            ..
+        } => "Retired payload was already absent",
+        OperationReceipt::Cleanup {
+            completion: zup_transaction::CleanupCompletion::Deferred { reason },
+            ..
+        } => match reason {
+            zup_transaction::CleanupDeferral::InUse => {
+                "Retained payload because a native consumer is using it"
+            }
+            zup_transaction::CleanupDeferral::UntrackedReaders => {
+                "Retained generation because its reader lifetime is not declared"
+            }
+            zup_transaction::CleanupDeferral::UnsupportedFilesystem => {
+                "Retained payload because this filesystem cannot prove safe collection"
+            }
+            zup_transaction::CleanupDeferral::FenceUnavailable => {
+                "Retained payload because a native consumer fence is unavailable"
+            }
+            zup_transaction::CleanupDeferral::ReferencedMetadata => {
+                "Retained transaction history until its metadata collection completes"
+            }
+        },
+        _ => operation_action(node),
     }
 }
 
@@ -79,7 +167,15 @@ where
 {
     type Error = E::Error;
 
-    fn prepare(&mut self, operation: &zup_transaction::TransactionNode) -> Result<(), Self::Error> {
+    fn prepare_compensation(
+        &mut self,
+        operation: &zup_plan::DeploymentNode,
+        receipt: &OperationReceipt,
+    ) -> Result<OperationReceipt, Self::Error> {
+        self.inner.prepare_compensation(operation, receipt)
+    }
+
+    fn prepare(&mut self, operation: &zup_plan::DeploymentNode) -> Result<(), Self::Error> {
         if self.cancel.is_cancelled() {
             return Err((self.cancelled)());
         }
@@ -88,7 +184,8 @@ where
 
     fn apply(
         &mut self,
-        operation: &zup_transaction::TransactionNode,
+        operation: &zup_plan::DeploymentNode,
+        transaction: &zup_transaction::TransactionRecord,
     ) -> Result<OperationReceipt, Self::Error> {
         if self.cancel.is_cancelled() {
             return Err((self.cancelled)());
@@ -96,22 +193,20 @@ where
         (self.emit)(RuntimeEvent::OperationStarted {
             id: operation.id.to_string(),
         });
-        let receipt = self.inner.apply(operation)?;
-        self.completed_work = self
-            .completed_work
-            .saturating_add(operation_work(operation));
+        let receipt = self.inner.apply(operation, transaction)?;
+        self.completed_work = self.completed_work.saturating_add(operation.work());
         (self.emit)(RuntimeEvent::Progress {
             phase: operation_phase(operation),
             completed: self.completed_work.min(self.total_work),
             total: self.total_work,
-            action: operation_action(operation).into(),
+            action: operation_result_action(operation, &receipt).into(),
         });
         Ok(receipt)
     }
 
     fn verify(
         &mut self,
-        operation: &zup_transaction::TransactionNode,
+        operation: &zup_plan::DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         self.inner.verify(operation, receipt)
@@ -119,7 +214,7 @@ where
 
     fn rollback(
         &mut self,
-        operation: &zup_transaction::TransactionNode,
+        operation: &zup_plan::DeploymentNode,
         receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         self.inner.rollback(operation, receipt)
@@ -127,10 +222,11 @@ where
 
     fn reconcile(
         &mut self,
-        operation: &zup_transaction::TransactionNode,
+        operation: &zup_plan::DeploymentNode,
         receipt: Option<&OperationReceipt>,
+        transaction: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, Self::Error> {
-        self.inner.reconcile(operation, receipt)
+        self.inner.reconcile(operation, receipt, transaction)
     }
 }
 
@@ -159,16 +255,14 @@ mod tests {
     impl OperationExecutor for RecordingExecutor {
         type Error = Refused;
 
-        fn prepare(
-            &mut self,
-            _operation: &zup_transaction::TransactionNode,
-        ) -> Result<(), Self::Error> {
+        fn prepare(&mut self, _operation: &zup_plan::DeploymentNode) -> Result<(), Self::Error> {
             Ok(())
         }
 
         fn apply(
             &mut self,
-            operation: &zup_transaction::TransactionNode,
+            operation: &zup_plan::DeploymentNode,
+            _transaction: &zup_transaction::TransactionRecord,
         ) -> Result<OperationReceipt, Self::Error> {
             self.events.push(operation.id.to_string());
             Ok(OperationReceipt::Control)
@@ -176,7 +270,7 @@ mod tests {
 
         fn verify(
             &mut self,
-            _operation: &zup_transaction::TransactionNode,
+            _operation: &zup_plan::DeploymentNode,
             _receipt: &OperationReceipt,
         ) -> Result<(), Self::Error> {
             Ok(())
@@ -184,7 +278,7 @@ mod tests {
 
         fn rollback(
             &mut self,
-            _operation: &zup_transaction::TransactionNode,
+            _operation: &zup_plan::DeploymentNode,
             _receipt: &OperationReceipt,
         ) -> Result<(), Self::Error> {
             Ok(())
@@ -192,17 +286,39 @@ mod tests {
 
         fn reconcile(
             &mut self,
-            _operation: &zup_transaction::TransactionNode,
+            _operation: &zup_plan::DeploymentNode,
             _receipt: Option<&OperationReceipt>,
+            _transaction: &zup_transaction::TransactionRecord,
         ) -> Result<ReconcileResult, Self::Error> {
             Ok(ReconcileResult::Applied)
         }
     }
 
-    fn node(id: &str) -> zup_transaction::TransactionNode {
-        zup_transaction::TransactionNode {
-            id: zup_transaction::OperationId::new(id),
-            phase: zup_transaction::Phase::FileMutation,
+    fn transaction() -> zup_transaction::TransactionRecord {
+        let mut effects = zup_plan::DeploymentEffects::new(
+            zup_core::InstallationId::new_v7(),
+            crate::requirements_fixture::requirements(
+                zup_core::Target::LINUX_X64,
+                zup_core::SelectedScope::User,
+                "example.application",
+                "1.0.0",
+            ),
+        );
+        effects.install_directory =
+            Some(zup_core::TargetPath::new(zup_core::Target::LINUX_X64, "/opt/test").unwrap());
+        zup_transaction::TransactionRecord::new(
+            zup_core::TransactionId::new_v7(),
+            zup_core::AppId::new("example.events").unwrap(),
+            zup_core::SelectedScope::User,
+            "1.0.0".parse().unwrap(),
+            zup_plan::compile_deployment(&effects).unwrap(),
+        )
+    }
+
+    fn node(id: &str) -> zup_plan::DeploymentNode {
+        zup_plan::DeploymentNode {
+            id: zup_plan::OperationId::new(id),
+            phase: zup_plan::Phase::FileMutation,
             kind: NodeKind::Barrier,
             declaration_order: 0,
             meta: Default::default(),
@@ -223,8 +339,8 @@ mod tests {
             },
             || Refused("cancelled".into()),
         );
-        executor.apply(&node("a")).expect("applies");
-        executor.apply(&node("b")).expect("applies");
+        executor.apply(&node("a"), &transaction()).expect("applies");
+        executor.apply(&node("b"), &transaction()).expect("applies");
         let reported = reported.lock().expect("sink");
         let progress: Vec<_> = reported
             .iter()
@@ -256,7 +372,9 @@ mod tests {
             |_| {},
             || Refused("cancelled".into()),
         );
-        let error = executor.apply(&node("a")).expect_err("cancelled");
+        let error = executor
+            .apply(&node("a"), &transaction())
+            .expect_err("cancelled");
         assert_eq!(error.to_string(), "cancelled");
         assert!(executor.into_inner().events.is_empty());
     }

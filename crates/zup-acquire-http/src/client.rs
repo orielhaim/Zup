@@ -1,6 +1,9 @@
 //! One HTTP client, one connection pool, sensible timeouts.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use futures_util::StreamExt;
 use url::Url;
@@ -39,6 +42,8 @@ impl Default for TimeoutPolicy {
 #[derive(Debug, Clone)]
 pub struct HttpClientConfig {
     pub timeouts: TimeoutPolicy,
+    pub total: usize,
+    pub per_origin: usize,
     /// Whether the platform's proxy configuration is used.
     pub use_platform_proxy: bool,
 }
@@ -69,6 +74,8 @@ impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
             timeouts: TimeoutPolicy::default(),
+            total: 12,
+            per_origin: 6,
             use_platform_proxy: true,
         }
     }
@@ -78,17 +85,38 @@ impl Default for HttpClientConfig {
 #[derive(Clone)]
 pub struct HttpClient {
     inner: reqwest::Client,
+    limits: Arc<Limits>,
     timeouts: TimeoutPolicy,
     credentials: Vec<(url::Origin, SecretHeader)>,
+}
+
+struct Limits {
+    total: Arc<Semaphore>,
+    origins: Mutex<HashMap<url::Origin, Weak<Semaphore>>>,
+    per_origin: usize,
 }
 
 impl HttpClient {
     /// Build a client.
     pub fn new(config: &HttpClientConfig) -> Result<Self, HttpError> {
+        let policy = config.timeouts;
+        if config.total == 0
+            || config.per_origin == 0
+            || [policy.connect, policy.headers, policy.idle, policy.per_blob]
+                .iter()
+                .any(Duration::is_zero)
+            || policy.connect > policy.per_blob
+            || policy.headers > policy.per_blob
+            || policy.idle > policy.per_blob
+        {
+            return Err(HttpError::Transport {
+                origin: "client".into(),
+                reason: "invalid HTTP limits or timeout policy".into(),
+            });
+        }
         let mut builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(config.timeouts.connect)
-            .timeout(config.timeouts.per_blob)
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(16)
             .http2_adaptive_window(true)
@@ -102,6 +130,11 @@ impl HttpClient {
         })?;
         Ok(Self {
             inner,
+            limits: Arc::new(Limits {
+                total: Arc::new(Semaphore::new(config.total)),
+                origins: Mutex::new(HashMap::new()),
+                per_origin: config.per_origin,
+            }),
             timeouts: config.timeouts,
             credentials: Vec::new(),
         })
@@ -191,14 +224,49 @@ impl HttpClient {
         request: Request<'_>,
         max_redirects: usize,
     ) -> Result<Response, HttpError> {
+        let deadline = request
+            .deadline
+            .unwrap_or_else(|| tokio::time::Instant::now() + self.timeouts.per_blob);
         let mut current = request.url.clone();
         let mut hops = 0usize;
         loop {
+            let origin_limit = {
+                let mut origins = self.limits.origins.lock().expect("origin limits poisoned");
+                origins.retain(|_, limit| limit.strong_count() > 0);
+                let entry = origins.entry(current.origin()).or_default();
+                match entry.upgrade() {
+                    Some(limit) => limit,
+                    None => {
+                        let limit = Arc::new(Semaphore::new(self.limits.per_origin));
+                        *entry = Arc::downgrade(&limit);
+                        limit
+                    }
+                }
+            };
+            let permits = tokio::time::timeout_at(deadline, async {
+                let origin = origin_limit
+                    .acquire_owned()
+                    .await
+                    .expect("origin semaphore open");
+                let total = self
+                    .limits
+                    .total
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("total semaphore open");
+                (origin, total)
+            })
+            .await
+            .map_err(|_| HttpError::Timeout { phase: "capacity" })?;
             let mut builder = self
                 .inner
                 .request(request.method.clone(), current.clone())
-                .timeout(self.timeouts.per_blob);
+                .timeout(deadline.saturating_duration_since(tokio::time::Instant::now()));
             for (name, value) in &request.headers {
+                if current.origin() != request.url.origin() {
+                    continue;
+                }
                 builder = builder.header(*name, value.clone());
             }
             if let Some(range) = request.range {
@@ -225,10 +293,12 @@ impl HttpClient {
                     }
                 }
             }
-            let response = builder.send().await.map_err(|error| HttpError::Transport {
-                origin: origin.to_string(),
-                reason: classify(&error),
-            })?;
+            let headers_deadline =
+                deadline.min(tokio::time::Instant::now() + self.timeouts.headers);
+            let response = tokio::time::timeout_at(headers_deadline, builder.send())
+                .await
+                .map_err(|_| HttpError::Timeout { phase: "headers" })?
+                .map_err(|error| transport_error(origin.to_string(), &error))?;
             let status = response.status();
             if status.is_redirection() {
                 // Replaying a mutation or resuming another origin's representation is unsafe.
@@ -270,6 +340,9 @@ impl HttpClient {
             return Ok(Response {
                 origin: origin.clone(),
                 inner: response,
+                permits,
+                deadline,
+                idle: self.timeouts.idle,
             });
         }
     }
@@ -336,6 +409,7 @@ impl From<Vec<u8>> for Body {
 /// One request, in the parts the policy does not decide.
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
+    deadline: Option<tokio::time::Instant>,
     method: reqwest::Method,
     url: &'a Url,
     headers: Vec<(&'a str, String)>,
@@ -347,6 +421,7 @@ impl<'a> Request<'a> {
     /// A request with no headers, no body, and no range.
     pub fn new(method: reqwest::Method, url: &'a Url) -> Self {
         Self {
+            deadline: None,
             method,
             url,
             headers: Vec::new(),
@@ -370,6 +445,12 @@ impl<'a> Request<'a> {
         Self::new(reqwest::Method::DELETE, url)
     }
 
+    /// Bound all redirects, capacity waits, headers and body by the blob budget.
+    pub fn deadline(mut self, deadline: tokio::time::Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
     /// Attach a body.
     pub fn with_body(mut self, body: impl Into<Body>) -> Self {
         self.body = Some(body.into());
@@ -390,7 +471,7 @@ impl<'a> Request<'a> {
 }
 
 fn check_redirect(origin: &Origin, from: &Url, to: &Url) -> Result<(), HttpError> {
-    if to.scheme() != "https" && to.scheme() != "file" {
+    if to.scheme() != "https" {
         return Err(HttpError::Redirect {
             origin: origin.to_string(),
             reason: format!("downgrade to `{}`", to.scheme()),
@@ -415,6 +496,9 @@ fn check_redirect(origin: &Origin, from: &Url, to: &Url) -> Result<(), HttpError
 pub struct Response {
     origin: Origin,
     inner: reqwest::Response,
+    permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+    deadline: tokio::time::Instant,
+    idle: Duration,
 }
 
 impl Response {
@@ -452,9 +536,52 @@ impl Response {
             .is_some_and(|value| value.eq_ignore_ascii_case("bytes"))
     }
 
-    /// Consume the response and return the body stream.
-    pub fn into_body(self) -> reqwest::Response {
-        self.inner
+    /// Consume the response, retaining request permits until the stream is dropped.
+    pub fn bytes_stream(
+        self,
+    ) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes, HttpError>> {
+        let stream = self.inner.bytes_stream().boxed();
+        let origin = self.origin.to_string();
+        futures_util::stream::unfold(
+            Some((stream, self.permits, self.deadline, self.idle, origin)),
+            |state| async move {
+                let (mut stream, permits, deadline, idle, origin) = state?;
+                let result = tokio::time::timeout_at(
+                    deadline.min(tokio::time::Instant::now() + idle),
+                    stream.next(),
+                )
+                .await;
+                let chunk = match result {
+                    Ok(Some(chunk)) => {
+                        chunk.map_err(|error| transport_error(origin.clone(), &error))
+                    }
+                    Ok(None) => return None,
+                    Err(_) => Err(HttpError::Timeout {
+                        phase: if tokio::time::Instant::now() >= deadline {
+                            "blob"
+                        } else {
+                            "idle"
+                        },
+                    }),
+                };
+                let next = if chunk.is_ok() {
+                    Some((stream, permits, deadline, idle, origin))
+                } else {
+                    None
+                };
+                Some((chunk, next))
+            },
+        )
+        .boxed()
+    }
+
+    pub async fn bytes(self) -> Result<Vec<u8>, HttpError> {
+        let mut body = Vec::new();
+        let mut stream = self.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            body.extend_from_slice(&chunk?);
+        }
+        Ok(body)
     }
 
     /// Read the whole body, bounded by `limit`.
@@ -480,13 +607,10 @@ impl Response {
             });
         }
         let origin = self.origin.clone();
-        let mut stream = self.inner.bytes_stream();
+        let mut stream = std::pin::pin!(self.bytes_stream());
         let mut produced = 0u64;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| HttpError::Transport {
-                origin: origin.to_string(),
-                reason: classify(&error),
-            })?;
+            let chunk = chunk?;
             produced = produced.saturating_add(chunk.len() as u64);
             if produced > limit {
                 return Err(HttpError::TooLarge {
@@ -521,4 +645,21 @@ pub(crate) fn classify(error: &reqwest::Error) -> String {
         return "a redirect was refused".to_owned();
     }
     "the connection failed".to_owned()
+}
+
+fn transport_error(origin: String, error: &reqwest::Error) -> HttpError {
+    if error.is_timeout() {
+        HttpError::Timeout {
+            phase: if error.is_connect() {
+                "connect"
+            } else {
+                "blob"
+            },
+        }
+    } else {
+        HttpError::Transport {
+            origin,
+            reason: classify(error),
+        }
+    }
 }

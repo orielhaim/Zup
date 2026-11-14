@@ -4,15 +4,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ComponentId, Condition, Installer, NonEmptyString, PluginId, PrerequisiteId, RelativePath,
-    Sha256Digest, Target, Template,
+    Sha256Digest, Target,
 };
 
 /// `source` is a **build-machine** path and must never become portable bundle
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedFile {
+    pub id: crate::PayloadId,
     pub source: PathBuf,
     pub source_relative: RelativePath,
-    pub destination: Template,
+    pub placement: crate::PayloadPlacement,
     pub size: u64,
     pub sha256: Sha256Digest,
     pub component: Option<ComponentId>,
@@ -112,7 +113,7 @@ pub struct BuildPlan {
 impl TargetBuildPlan {
     pub fn sort_key(file: &ResolvedFile) -> (String, String) {
         (
-            file.destination.to_string(),
+            file.placement.to_string(),
             file.source_relative.as_str().to_owned(),
         )
     }

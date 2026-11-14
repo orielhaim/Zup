@@ -394,7 +394,7 @@ impl Runtime {
             HostDecision::Refused(refusal) => {
                 println!("  refused  {refusal}");
             }
-            HostDecision::Run { .. } => self.start_engine(),
+            HostDecision::Run { .. } | HostDecision::Recover { .. } => self.start_engine(),
             HostDecision::Cancel => self.cancel_engine(),
             _ => {}
         }
@@ -418,7 +418,11 @@ impl Runtime {
     fn start_engine(&mut self) {
         self.stop_engine();
         let lifecycle = match self.simulator.snapshot().operation {
+            Some(OperationKind::Recover) => SimulatedLifecycle::Recover,
             Some(OperationKind::Upgrade) => SimulatedLifecycle::Upgrade,
+            Some(OperationKind::Downgrade) => SimulatedLifecycle::Downgrade,
+            Some(OperationKind::Rollback) => SimulatedLifecycle::Rollback,
+            Some(OperationKind::Cleanup) => SimulatedLifecycle::Cleanup,
             Some(OperationKind::Modify) => SimulatedLifecycle::Modify,
             Some(OperationKind::Repair) => SimulatedLifecycle::Repair,
             Some(OperationKind::Uninstall) => SimulatedLifecycle::Uninstall,

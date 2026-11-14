@@ -28,6 +28,7 @@
     "resources": [
       {
         "kind": "file",
+        "placement": "generation",
         "destination": "${location.user_data}/Acme/app.exe",
         "size": 248512832,
         "digest": {
@@ -38,6 +39,7 @@
       },
       {
         "kind": "file",
+        "placement": "fixed_atomic",
         "destination": "${location.user_data}/Acme/configure.txt",
         "size": 64,
         "digest": {

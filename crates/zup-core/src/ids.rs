@@ -4,6 +4,29 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "platform", deny_unknown_fields)]
+pub enum NativeObjectIdentity {
+    Windows { volume: u64, file: [u8; 16] },
+    Linux { device: u64, inode: u64 },
+}
+
+impl NativeObjectIdentity {
+    pub const fn operating_system(self) -> crate::TargetOperatingSystem {
+        match self {
+            Self::Windows { .. } => crate::TargetOperatingSystem::Windows,
+            Self::Linux { .. } => crate::TargetOperatingSystem::Linux,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FixedFileInstance {
+    pub origin: TransactionId,
+    pub object: NativeObjectIdentity,
+}
+
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident, $kind:literal) => {
         $(#[$meta])*
@@ -70,6 +93,16 @@ macro_rules! id_type {
 }
 
 id_type!(AppId, "app id");
+
+impl AppId {
+    pub fn state_key(&self) -> crate::Sha256Digest {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"zup:application-state:1\0");
+        hash.update(self.as_str().as_bytes());
+        crate::Sha256Digest::from_hasher(hash)
+    }
+}
 id_type!(ComponentId, "component id");
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -303,40 +336,90 @@ pub enum ValueError {
 
 use crate::model::{FileExtension, LauncherLocation};
 
-/// matching. Never use runtime UUIDs here.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResourceKey {
+#[serde(tag = "origin", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeclaredResourceId {
+    Application {
+        id: crate::ResourceId,
+    },
+    Plugin {
+        plugin: crate::PluginId,
+        id: crate::ResourceId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MaintenanceArtifact {
+    Runtime,
+    Preset,
+    Asset { name: crate::RelativePath },
+}
+
+impl MaintenanceArtifact {
+    pub fn member_path(
+        &self,
+        target: crate::Target,
+        digest: crate::Sha256Digest,
+    ) -> crate::RelativePath {
+        let path = match self {
+            Self::Runtime => format!("maintenance{}", target.executable_suffix()),
+            Self::Preset => format!(
+                "ui/preset/{}{}",
+                digest.to_hex(),
+                target.executable_suffix()
+            ),
+            Self::Asset { name } => format!("ui/assets/{name}/{}", digest.to_hex()),
+        };
+        crate::RelativePath::new(path).expect("typed maintenance artifact paths are relative")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum FileResourceId {
+    Plugin {
+        plugin: crate::PluginId,
+        id: crate::ResourceId,
+    },
+    Payload {
+        id: crate::PayloadId,
+    },
     Maintenance {
-        app_id: String,
-        version: String,
-        destination: String,
+        artifact: MaintenanceArtifact,
     },
-    Backend {
-        id: BackendResourceId,
+    Native {
+        id: NativeFileId,
     },
-    File {
-        destination: String,
-    },
-    Launcher {
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeFileId {
+    DesktopEntry {
+        id: DeclaredResourceId,
         location: LauncherLocation,
-        name: String,
     },
-    PathEntry {
-        value: String,
-    },
-    Service {
+    ProtocolHandler,
+    MimeDefinitions,
+    FileAssociationHandler,
+    Environment,
+    ServiceSource {
         id: ServiceId,
     },
-    Protocol {
-        scheme: ProtocolScheme,
-    },
-    FileAssociation {
-        id: FileAssociationId,
-    },
-    FileAssociationExtension {
-        extension: FileExtension,
-    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResourceKey {
+    Backend { id: BackendResourceId },
+    File { id: FileResourceId },
+    Launcher { id: DeclaredResourceId },
+    PathEntry { id: DeclaredResourceId },
+    Service { id: ServiceId },
+    Protocol { scheme: ProtocolScheme },
+    FileAssociation { id: FileAssociationId },
+    FileAssociationExtension { extension: FileExtension },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -467,25 +550,9 @@ impl ResourceKey {
         if target.operating_system() != crate::TargetOperatingSystem::Windows {
             return self.clone();
         }
-        let path = |value: &str| target.path_identity(value);
         match self {
-            Self::File { destination } => Self::File {
-                destination: path(destination),
-            },
-            Self::Maintenance {
-                app_id,
-                version,
-                destination,
-            } => Self::Maintenance {
-                app_id: app_id.clone(),
-                version: version.clone(),
-                destination: path(destination),
-            },
-            Self::Launcher { location, name } => Self::Launcher {
-                location: *location,
-                name: name.to_lowercase(),
-            },
-            Self::PathEntry { value } => Self::PathEntry { value: path(value) },
+            Self::Launcher { .. } => self.clone(),
+            Self::PathEntry { .. } | Self::File { .. } => self.clone(),
             Self::Service { id } => Self::Service {
                 id: ServiceId::new(id.as_str().to_lowercase())
                     .expect("case folding preserves service IDs"),

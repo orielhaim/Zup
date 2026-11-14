@@ -61,8 +61,9 @@ scope = "user"
 [install.directory]
 user = "${location.user_data}/Build"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#
             .replace("windows-x64", HOST_TARGET)
             .as_str(),
@@ -119,11 +120,6 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// This test binary, which is where the staged toolchain was built beside.
-fn test_executable() -> PathBuf {
-    std::env::current_exe().expect("a test executable")
-}
-
 #[test]
 fn a_build_composes_an_installer_from_the_staged_toolchain() {
     let project = Project::new();
@@ -148,7 +144,7 @@ fn a_build_composes_an_installer_from_the_staged_toolchain() {
 #[test]
 fn a_frontend_flag_selects_the_matching_template() {
     let project = Project::new();
-    let console = staged::host_runtime(&test_executable(), Frontend::Console);
+    let console = staged::host_runtime(Frontend::Console);
     let result = project.build(&[
         "--runtime",
         console.to_str().expect("a path"),
@@ -311,7 +307,7 @@ fn a_build_compiles_and_embeds_a_declared_plugin() {
     fs::write(project.path().join("dist/app.exe"), b"payload").expect("a payload file");
     fs::write(
         project.path().join("plugins/helper.wasm"),
-        include_bytes!("../../../examples/plugins/configure/dist/configure.wasm"),
+        zup_plugin_abi::test_fixture::component(),
     )
     .expect("a plugin component");
     fs::write(
@@ -333,8 +329,9 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/Plugin"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 [[plugins]]
 id = "helper"
 source = "plugins/helper.wasm"
@@ -365,7 +362,7 @@ source = "plugins/helper.wasm"
     );
     assert!(
         !package
-            .plugin_aot(&id)
+            .plugin_component(&id)
             .expect("the artifact is readable")
             .is_empty()
     );

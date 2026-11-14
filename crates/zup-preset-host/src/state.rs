@@ -28,7 +28,10 @@ impl Selection {
                 .map(|component| zup_core::ComponentId::new(component.id.as_str()))
                 .collect::<Result<Vec<_>, _>>()
                 .expect("a protocol component id came from an engine component id"),
-            install_directory: surface.install_directory().map(str::to_owned),
+            install_directory: surface
+                .allows_directory_override()
+                .then(|| surface.install_directory().map(str::to_owned))
+                .flatten(),
         }
     }
 }
@@ -41,6 +44,9 @@ pub struct Launchable {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostDecision {
+    Recover {
+        transaction: zup_core::TransactionId,
+    },
     Run {
         action: LifecycleAction,
         selection: Selection,
@@ -48,6 +54,7 @@ pub enum HostDecision {
     Plan(Selection),
     Update(zup_runtime::UpdateRequest),
     Cancel,
+    Refresh,
     OpenLog,
     CopyDiagnostics,
     Launch(LaunchTarget),
@@ -57,6 +64,10 @@ pub enum HostDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActionRefusal {
+    #[error("recover the pending transaction before requesting another operation")]
+    RecoveryRequired,
+    #[error("there is no known transaction requiring recovery")]
+    NoRecovery,
     #[error("this surface does not offer that operation")]
     UnsupportedSurface,
     #[error("an operation is already running")]
@@ -77,6 +88,8 @@ pub enum ActionRefusal {
     NothingToConfirm,
     #[error("there is no session log to open yet")]
     NoLog,
+    #[error("saved deployment {0} is not available in this installation")]
+    RetainedDeploymentNotFound(zup_core::ActivationRevision),
     #[error("there is nothing installed to start")]
     NothingToLaunch,
 }
@@ -91,6 +104,14 @@ pub struct HostState {
 }
 
 impl HostState {
+    pub fn refresh_installation(&mut self, fresh: Self) {
+        self.snapshot.product = fresh.snapshot.product;
+        self.snapshot.surface = fresh.snapshot.surface;
+        self.snapshot.plan = fresh.snapshot.plan;
+        self.capabilities = fresh.capabilities;
+        self.launchers = fresh.launchers;
+    }
+
     pub fn install(
         product: ProductIdentity,
         options: zup_preset_protocol::InstallOptions,
@@ -126,6 +147,8 @@ impl HostState {
                 progress: None,
                 plan,
                 diagnostic: None,
+                recovery: None,
+                settlement: None,
                 update: None,
                 repair_drift: Vec::new(),
                 launch: None,
@@ -163,6 +186,19 @@ impl HostState {
     }
 
     pub fn accept(&mut self, action: Action) -> HostDecision {
+        if self.snapshot.state == InstallerState::RecoveryRequired
+            && !matches!(
+                action,
+                Action::Recover { .. }
+                    | Action::OpenLog
+                    | Action::CopyDiagnostics
+                    | Action::Close
+                    | Action::Retry
+                    | Action::Launch
+            )
+        {
+            return HostDecision::Refused(ActionRefusal::RecoveryRequired);
+        }
         match action {
             Action::SetScope { scope } => self.set_scope(scope),
             Action::SetComponent {
@@ -176,7 +212,29 @@ impl HostState {
             Action::Install => self.start(LifecycleAction::Install),
             Action::Update => self.update(),
             Action::Modify => self.maintenance_op(LifecycleAction::Modify),
+            Action::Downgrade => self.maintenance_op(LifecycleAction::Downgrade),
+            Action::Cleanup { keep } => self.maintenance_op(LifecycleAction::Cleanup { keep }),
+            Action::Rollback { revision } => {
+                self.maintenance_op(LifecycleAction::Rollback { revision })
+            }
             Action::Repair => self.maintenance_op(LifecycleAction::Repair { force: false }),
+            Action::Recover { transaction } => {
+                if self.running {
+                    HostDecision::Refused(ActionRefusal::Busy)
+                } else if self
+                    .snapshot
+                    .recovery
+                    .as_ref()
+                    .map(|target| target.transaction)
+                    != Some(transaction)
+                {
+                    HostDecision::Refused(ActionRefusal::NoRecovery)
+                } else {
+                    self.snapshot.operation = Some(OperationKind::Recover);
+                    self.begin();
+                    HostDecision::Recover { transaction }
+                }
+            }
             Action::RequestUninstall => self.request_uninstall(),
             Action::ConfirmUninstall => self.confirm_uninstall(),
             Action::DismissUninstall => self.dismiss_uninstall(),
@@ -199,6 +257,11 @@ impl HostState {
     }
 
     pub fn plan_request(&mut self) -> Option<Selection> {
+        if self.snapshot.recovery.is_some()
+            || self.snapshot.state == InstallerState::RefreshRequired
+        {
+            return None;
+        }
         if !self.capabilities.contains(Capability::PlanPreview) {
             return None;
         }
@@ -265,6 +328,9 @@ impl HostState {
         match action {
             LifecycleAction::Uninstall => OperationKind::Uninstall,
             LifecycleAction::Modify => OperationKind::Modify,
+            LifecycleAction::Downgrade => OperationKind::Downgrade,
+            LifecycleAction::Rollback { .. } => OperationKind::Rollback,
+            LifecycleAction::Cleanup { .. } => OperationKind::Cleanup,
             LifecycleAction::Repair { .. } => OperationKind::Repair,
             _ => match &self.snapshot.surface {
                 Surface::Install(options) if options.existing_version.is_some() => {
@@ -290,6 +356,11 @@ impl HostState {
         if !self.capabilities.contains(Capability::Maintenance) {
             return HostDecision::Refused(ActionRefusal::UnsupportedSurface);
         }
+        if let LifecycleAction::Rollback { revision } = action
+            && !matches!(&self.snapshot.surface, Surface::Maintenance(state) if state.retained.iter().any(|snapshot| snapshot.revision == revision))
+        {
+            return HostDecision::Refused(ActionRefusal::RetainedDeploymentNotFound(revision));
+        }
         self.start(action)
     }
 
@@ -301,8 +372,8 @@ impl HostState {
             return HostDecision::Refused(ActionRefusal::Busy);
         }
         let request = match self.snapshot.update.as_ref().map(|update| &update.state) {
-            Some(UpdateState::Available { available, .. }) => zup_runtime::UpdateRequest::Install {
-                version: Some(available.clone()),
+            Some(UpdateState::Available { candidate, .. }) => zup_runtime::UpdateRequest::Install {
+                expected: Some(candidate.clone()),
             },
             _ => zup_runtime::UpdateRequest::Check,
         };
@@ -348,6 +419,14 @@ impl HostState {
     }
 
     fn retry(&mut self) -> HostDecision {
+        if self.snapshot.state == InstallerState::RefreshRequired {
+            return HostDecision::Refresh;
+        }
+        if let Some(target) = &self.snapshot.recovery {
+            return self.accept(Action::Recover {
+                transaction: target.transaction,
+            });
+        }
         let Some((action, selection)) = self.retry.clone() else {
             return HostDecision::Refused(ActionRefusal::NothingToRetry);
         };
@@ -421,16 +500,139 @@ impl HostState {
     pub fn fail(&mut self, message: String, outcome: zup_presentation::ProcessOutcome) {
         let diagnostic = zup_presentation::DiagnosticPresentation::for_outcome(outcome, &message);
         self.snapshot.diagnostic = Some(convert::diagnostic(&diagnostic));
-        self.snapshot.state = if outcome == zup_presentation::ProcessOutcome::RecoveryRequired {
-            InstallerState::RecoveryRequired
-        } else {
-            InstallerState::Failed
+        self.snapshot.state = InstallerState::Failed;
+        if outcome == zup_presentation::ProcessOutcome::RecoveryRequired {
+            self.snapshot.state = InstallerState::RefreshRequired;
+        }
+        self.finish();
+    }
+
+    pub fn set_recovery(&mut self, target: zup_core::RecoverySummary) {
+        if target.scope != convert::engine_scope(self.snapshot.surface.scope()) {
+            self.refresh_required("The protected transaction belongs to a different installation scope. Refresh deployment state.".into());
+            return;
+        }
+        let detail = format!(
+            "{} {}\nApplication: {}\nScope: {}\nPlatform: {}\nInstallation: {}\nDirectory: {}\nRecovery: {:?}\nTransaction: {}",
+            target.version,
+            target.detail,
+            target.app,
+            target.scope,
+            target.target,
+            target.installation,
+            target
+                .directory
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "No active deployment directory".into()),
+            target.kind,
+            target.transaction
+        );
+        self.snapshot.settlement = match target.kind {
+            zup_core::RecoveryKind::CommittedCleanup
+            | zup_core::RecoveryKind::CommittedReconciliation => {
+                Some(zup_core::DeploymentSettlement::Committed)
+            }
+            _ => None,
         };
+        let locations = target
+            .cleanup
+            .iter()
+            .map(|cleanup| match cleanup {
+                zup_core::RecoveryCleanup::Generation { directory } => {
+                    format!("Retired generation: {directory}")
+                }
+                zup_core::RecoveryCleanup::FixedFile { path } => {
+                    format!("Unreferenced file: {path}")
+                }
+                zup_core::RecoveryCleanup::Metadata { transaction } => {
+                    format!("Unreferenced transaction metadata: {transaction}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.fail(
+            format!("{detail}\n{locations}"),
+            zup_presentation::ProcessOutcome::RecoveryRequired,
+        );
+        if let Some(diagnostic) = &mut self.snapshot.diagnostic {
+            let (title, meaning, recovery) = match target.kind {
+                zup_core::RecoveryKind::CommittedCleanup => (
+                    "Deployment committed; cleanup pending",
+                    "The deployment is committed. Remaining native cleanup is incomplete.",
+                    "Close applications using retired files, then choose Recover. Recovery resumes only the remaining cleanup.",
+                ),
+                zup_core::RecoveryKind::CommittedReconciliation => (
+                    "Deployment committed; reconciliation pending",
+                    "The deployment is committed. Its protected ownership metadata needs reconciliation.",
+                    "Choose Recover to reconcile the original protected transaction.",
+                ),
+                zup_core::RecoveryKind::Interrupted => (
+                    "Interrupted deployment",
+                    "A protected transaction has unfinished native effects.",
+                    "Choose Recover to reconcile the recorded effects before another change.",
+                ),
+                zup_core::RecoveryKind::PublicationUncertain => (
+                    "Deployment publication needs verification",
+                    "The journal cannot yet confirm whether publication completed.",
+                    "Choose Recover to verify protected publication evidence. Setup will preserve any committed deployment.",
+                ),
+                zup_core::RecoveryKind::OperatorRequired => (
+                    "Recovery needs an operator",
+                    "Automatic rollback cannot safely restore the previous deployment.",
+                    "Use the recovery assessment and explicit decision commands shown in the details. The GUI cannot approve a forward decision.",
+                ),
+            };
+            diagnostic.title = title.into();
+            diagnostic.meaning = format!("{} {}: {meaning}", target.app, target.version);
+            diagnostic.recovery = recovery.into();
+        }
+        self.snapshot.product.version = target.version.to_string();
+        self.snapshot.plan = PlanStatus::Unsupported;
+        self.snapshot.recovery = Some(target);
+        self.snapshot.state = InstallerState::RecoveryRequired;
+        self.snapshot.launch = self.launch_target().filter(|_| {
+            self.snapshot.settlement == Some(zup_core::DeploymentSettlement::Committed)
+        });
+    }
+
+    pub fn refresh_required(&mut self, detail: String) {
+        let meaning = match self.snapshot.settlement {
+            Some(zup_core::DeploymentSettlement::Committed) => {
+                "The deployment committed. Setup needs to refresh its state or finish housekeeping."
+            }
+            Some(zup_core::DeploymentSettlement::RolledBack) => {
+                "Recovery restored the previous deployment. Setup needs to refresh its state."
+            }
+            None => "Setup could not inspect the protected deployment state.",
+        };
+        self.snapshot.diagnostic = Some(DiagnosticPresentation {
+            kind: DiagnosticKind::Unknown,
+            title: "Refresh deployment state".into(),
+            meaning: meaning.into(),
+            recovery: "Refresh to inspect the protected journal and retry housekeeping. If unavailable, close setup and reopen a trusted maintenance carrier.".into(),
+            technical_details: Some(detail),
+        });
+        self.snapshot.recovery = None;
+        self.snapshot.state = InstallerState::RefreshRequired;
+        self.snapshot.launch = self.launch_target().filter(|_| {
+            self.snapshot.settlement == Some(zup_core::DeploymentSettlement::Committed)
+        });
         self.finish();
     }
 
     pub fn observe(&mut self, event: &RuntimeEvent) {
         match event {
+            RuntimeEvent::PlanPrepared { plan } => {
+                match zup_presentation::PlanPreview::from_transaction_plan(
+                    plan,
+                    plan.requirements.scope,
+                    None,
+                ) {
+                    Ok(preview) => self.set_plan(preview),
+                    Err(error) => self.plan_failed(error.to_string()),
+                }
+            }
             RuntimeEvent::WaitingForAuthorization => {
                 self.advance(OperationPhase::Prepare, "Waiting for approval…")
             }
@@ -492,7 +694,8 @@ impl HostState {
                 self.advance(OperationPhase::System, "Restoring the previous state…")
             }
             RuntimeEvent::Completed { outcome } => match outcome {
-                zup_runtime::CompletionOutcome::Committed => self.succeed(),
+                zup_runtime::CompletionOutcome::Committed
+                | zup_runtime::CompletionOutcome::Recovered { .. } => self.succeed(),
                 zup_runtime::CompletionOutcome::RebootRequired => {
                     self.snapshot.state = InstallerState::RebootRequired;
                     self.finish();
@@ -546,9 +749,30 @@ impl HostState {
     }
 
     pub fn finish_with(&mut self, outcome: &InstallOutcome) {
+        self.snapshot.settlement = match outcome {
+            InstallOutcome::Committed
+            | InstallOutcome::CommittedWithWarning { .. }
+            | InstallOutcome::CommittedPendingReconciliation { .. }
+            | InstallOutcome::Recovered {
+                settlement: zup_runtime::RecoverySettlement::Committed,
+            } => Some(zup_core::DeploymentSettlement::Committed),
+            InstallOutcome::RolledBack
+            | InstallOutcome::Recovered {
+                settlement: zup_runtime::RecoverySettlement::RolledBack,
+            } => Some(zup_core::DeploymentSettlement::RolledBack),
+            _ => self.snapshot.settlement,
+        };
         match outcome {
-            InstallOutcome::Committed => {
-                self.retry = None;
+            InstallOutcome::RecoveryInspected { target, .. } => {
+                if let Some(target) = target { self.set_recovery(target.clone()); }
+                else { self.snapshot.recovery = None; self.snapshot.state = self.resting_state();  self.finish(); }
+            }
+            InstallOutcome::RecoveryAssessed { assessment } => self.refresh_required(
+                format!("Assessment complete; deployment remains blocked. {} Use recover --transaction {} --assess --output json to review evidence and --decision FILE for an admissible forward decision.",
+                    assessment.blockers.iter().map(|blocker| blocker.detail.as_str()).collect::<Vec<_>>().join(" "), assessment.transaction)),
+            InstallOutcome::Committed | InstallOutcome::Recovered { .. } => {
+                self.snapshot.recovery = None;
+                        self.retry = None;
                 self.succeed();
             }
             InstallOutcome::RebootRequired {
@@ -570,16 +794,9 @@ impl HostState {
                 self.snapshot.diagnostic = None;
                 self.finish();
             }
-            InstallOutcome::RecoveryRequired => self.fail(
-                "recovery required".into(),
-                zup_presentation::ProcessOutcome::RecoveryRequired,
-            ),
-            InstallOutcome::CommittedPendingReconciliation { detail, .. } => {
-                self.fail(
-                    detail.clone(),
-                    zup_presentation::ProcessOutcome::RecoveryRequired,
-                );
-            }
+            InstallOutcome::RecoveryRequired { detail, .. }
+            | InstallOutcome::CommittedPendingReconciliation { detail, .. }
+            | InstallOutcome::CommittedWithWarning { detail } => self.refresh_required(detail.clone()),
             InstallOutcome::AuthorizationRequired => {
                 self.fail(
                     "authorization required".into(),
@@ -615,6 +832,12 @@ impl HostState {
                 self.fail(message.clone(), zup_presentation::ProcessOutcome::Failure);
             }
         }
+    }
+
+    pub fn finish_update_check(&mut self) {
+        self.snapshot.state = self.resting_state();
+        self.snapshot.diagnostic = None;
+        self.finish();
     }
 
     fn succeed(&mut self) {

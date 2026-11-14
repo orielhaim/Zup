@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Serialize;
 use zup_publish::{
     AssetAction, AssetState, Notice, ProductRole, ProductState, PublicationState, ReleasePlan,
-    ReleaseProduct, RemoteAsset, ReportBuilder, StepStatus, classify, describe_conflict,
+    ReleaseProduct, ReportBuilder, StepStatus, classify, describe_conflict,
 };
 
 use crate::api::{Asset, GithubClient, Release};
@@ -101,6 +101,9 @@ pub async fn publish(
 ) -> Result<zup_publish::PublishReport, GithubError> {
     let plan = &request.plan;
     let products = plan.preflight(&crate::limits::LIMITS)?;
+    let (_snapshot, verified) = snapshot_sources(request, &products)?;
+    let request = &verified;
+    let plan = &request.plan;
     let client = match &request.endpoints {
         Some(endpoints) => GithubClient::at(repository, token, endpoints)?,
         None => GithubClient::new(repository, token)?,
@@ -118,9 +121,55 @@ pub async fn publish(
 
     report.phase("Preparing release");
     prepare(&client, plan, request, &products, &mut report).await?;
+    if let Some(path) = &request.receipt
+        && path.exists()
+    {
+        let previous = GithubReceipt::parse(
+            &std::fs::read(path).map_err(|e| source_error(&format!("receipt: {e}")))?,
+        )
+        .map_err(|e| source_error(&e))?;
+        if previous.host != repository.host.host
+            || previous.repository != repository.to_string()
+            || previous.tag != plan.tag.tag
+            || previous.claimed_commit != plan.source.commit
+            || previous.source.as_ref().is_some_and(|source| {
+                plan.source
+                    .commit
+                    .as_ref()
+                    .is_some_and(|commit| &source.commit != commit)
+            })
+        {
+            return Err(source_error(
+                "previous receipt names a different source, repository, or tag; inspect it before retrying",
+            ));
+        }
+        if let Some(source) = &previous.source {
+            check_source(&client, plan, Some(source), false).await?;
+        }
+    }
+    let resolved = resolve_source(&client, plan, request.dry_run).await?;
+    receipt.source = resolved.clone();
+    receipt.claimed_commit.clone_from(&plan.source.commit);
+    receipt.notices.push(Notice::info("build source", if plan.source.commit.is_some() {
+        "recorded checkout commit matches the remote tag; this is not source signature authentication"
+    } else { "no build commit was recorded; the resolved tag is not proof of the artifact's build source" }));
 
     report.phase("Resolving release");
     let release = locate(&client, plan, request, &mut report).await?;
+    if release.tag_name != plan.tag.tag {
+        return Err(source_error("release returned a different tag"));
+    }
+    if release
+        .target_commitish
+        .as_deref()
+        .filter(|sha| zup_publish::valid_commit(sha))
+        .is_some_and(|sha| resolved.as_ref().is_some_and(|source| sha != source.commit))
+    {
+        return Err(source_error(
+            "release commit metadata contradicts the resolved tag",
+        ));
+    }
+    check_source(&client, plan, resolved.as_ref(), request.dry_run).await?;
     receipt.release_id = release.id;
     receipt.url = Some(release.url().to_owned());
     receipt
@@ -136,12 +185,18 @@ pub async fn publish(
         );
         BTreeMap::new()
     } else {
-        client
-            .assets(release.id)
-            .await?
-            .into_iter()
-            .map(|asset| (asset.name.clone(), asset))
-            .collect()
+        let assets = client.assets(release.id).await?;
+        let mut names = BTreeMap::new();
+        for asset in assets {
+            if !products.iter().any(|product| product.name == asset.name)
+                || names.insert(asset.name.clone(), asset).is_some()
+            {
+                return Err(source_error(
+                    "remote release contains extra or duplicate assets; inspect the draft before retrying",
+                ));
+            }
+        }
+        names
     };
     upload(
         &client,
@@ -162,6 +217,7 @@ pub async fn publish(
     }
 
     report.phase("Publishing");
+    check_source(&client, plan, resolved.as_ref(), request.dry_run).await?;
     let mut final_release = release.clone();
     if request.dry_run {
         report.info(
@@ -196,6 +252,12 @@ pub async fn publish(
         }
     }
     integrity(&final_release, &mut receipt, &mut report);
+    if final_release.id != release.id || final_release.tag_name != plan.tag.tag {
+        return Err(source_error(
+            "publication acknowledgment names a different release",
+        ));
+    }
+    check_source(&client, plan, resolved.as_ref(), request.dry_run).await?;
 
     if let Some(path) = &request.receipt {
         let bytes = receipt
@@ -218,34 +280,137 @@ pub async fn publish(
 }
 
 fn write_receipt(path: &Path, bytes: &[u8]) -> Result<(), GithubError> {
-    let mut temporary = path.to_path_buf();
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "github-publish.json".to_owned());
-    temporary.set_file_name(format!(".{name}.partial"));
-    let _ = std::fs::remove_file(&temporary);
-    let written = (|| -> std::io::Result<()> {
-        use std::io::Write as _;
-        let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()
-    })();
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(GithubError::Io {
+    use std::io::Write as _;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let io = |error: std::io::Error| GithubError::Io {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    };
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(io)?;
+    temporary.write_all(bytes).map_err(io)?;
+    temporary.as_file().sync_all().map_err(io)?;
+    temporary.persist(path).map_err(|error| io(error.error))?;
+    Ok(())
+}
+
+fn source_error(reason: &str) -> GithubError {
+    GithubError::Source {
+        reason: reason.to_owned(),
+    }
+}
+
+async fn resolve_source(
+    client: &GithubClient,
+    plan: &ReleasePlan,
+    dry_run: bool,
+) -> Result<Option<crate::api::ResolvedTag>, GithubError> {
+    match client.tag(&plan.tag.tag).await? {
+        Some(resolved) => {
+            if plan
+                .source
+                .commit
+                .as_ref()
+                .is_some_and(|expected| expected != &resolved.commit)
+            {
+                return Err(source_error(
+                    "remote tag differs from the build commit; use the correct tag or rebuild",
+                ));
+            }
+            Ok(Some(resolved))
+        }
+        None if plan.tag.create => {
+            let commit = plan
+                .source
+                .commit
+                .as_deref()
+                .ok_or_else(|| source_error("creating a tag requires a proven build commit"))?;
+            client.prove_commit(commit).await?;
+            if dry_run {
+                Ok(None)
+            } else {
+                client.create_tag(&plan.tag.tag, commit).await.map(Some)
+            }
+        }
+        None => Err(GithubError::MissingTag {
+            tag: plan.tag.tag.clone(),
+        }),
+    }
+}
+
+async fn check_source(
+    client: &GithubClient,
+    plan: &ReleasePlan,
+    resolved: Option<&crate::api::ResolvedTag>,
+    dry_run: bool,
+) -> Result<(), GithubError> {
+    if dry_run && resolved.is_none() {
+        return Ok(());
+    }
+    if client.tag(&plan.tag.tag).await?.as_ref() != resolved {
+        return Err(source_error(
+            "tag moved during publication; inspect the remote ref and rebuild before retrying",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_local(path: &Path, product: &ReleaseProduct) -> Result<(), GithubError> {
+    let file = std::fs::File::open(path).map_err(|e| GithubError::Io {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
+    let (size, digest) =
+        zup_core::hash_reader(std::io::BufReader::new(file)).map_err(|e| GithubError::Io {
             path: path.display().to_string(),
-            reason: error.to_string(),
+            reason: e.to_string(),
+        })?;
+    if size != product.size {
+        return Err(GithubError::Size {
+            name: product.name.clone(),
+            expected: product.size,
+            found: size,
         });
     }
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(GithubError::Io {
-            path: path.display().to_string(),
-            reason: error.to_string(),
+    if digest != product.digest {
+        return Err(GithubError::Digest {
+            name: product.name.clone(),
+            expected: product.digest.to_hex(),
+            found: digest.to_hex(),
         });
     }
     Ok(())
+}
+
+fn snapshot_sources(
+    request: &PublishRequest,
+    products: &[ReleaseProduct],
+) -> Result<(tempfile::TempDir, PublishRequest), GithubError> {
+    let root =
+        tempfile::tempdir().map_err(|e| source_error(&format!("cannot snapshot release: {e}")))?;
+    let mut verified = request.clone();
+    verified.sources.clear();
+    for product in products {
+        let original = staged(request, product)?;
+        let metadata = std::fs::symlink_metadata(original)
+            .map_err(|e| source_error(&format!("staged file: {e}")))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(source_error("staged assets must be regular files"));
+        }
+        let destination = root.path().join(&product.name);
+        std::fs::copy(original, &destination)
+            .map_err(|e| source_error(&format!("snapshot: {e}")))?;
+        verify_local(&destination, product)?;
+        verified.sources.insert(product.name.clone(), destination);
+    }
+    if request.sources.len() != verified.sources.len() {
+        return Err(source_error(
+            "staged files differ from the finite plan inventory",
+        ));
+    }
+    Ok((root, verified))
 }
 
 async fn prepare(
@@ -255,6 +420,9 @@ async fn prepare(
     products: &[ReleaseProduct],
     report: &mut ReportBuilder,
 ) -> Result<(), GithubError> {
+    for product in products {
+        verify_local(staged(request, product)?, product)?;
+    }
     if let Some(commit) = &plan.source.commit {
         report.ok(format!("commit {commit}"));
     }
@@ -265,6 +433,9 @@ async fn prepare(
     let info = client.repository_info().await.inspect_err(|error| {
         report.failed("repository", error.to_string());
     })?;
+    if !info.full_name.eq_ignore_ascii_case(client.repository()) {
+        return Err(source_error("GitHub returned a different repository"));
+    }
     if info.archived {
         return Err(GithubError::DraftState {
             state: "archived".to_owned(),
@@ -311,6 +482,15 @@ async fn locate(
         }
         None => {
             let mut create = CreateRelease::draft(&plan.tag.tag, request.prerelease);
+            create.target_commitish = Some(
+                client
+                    .tag(&plan.tag.tag)
+                    .await?
+                    .ok_or_else(|| GithubError::MissingTag {
+                        tag: plan.tag.tag.clone(),
+                    })?
+                    .commit,
+            );
             create.generate_release_notes =
                 matches!(request.notes, NotesPolicy::Generated).then_some(true);
             let release = client.create_draft(&create).await?;
@@ -348,6 +528,17 @@ async fn upload(
     if request.dry_run {
         report.info("nothing to upload", "a dry run sends no bytes");
         return Ok(());
+    }
+    for product in products {
+        if let AssetAction::Conflict(_) | AssetAction::Replace(_) = classify(
+            product,
+            by_name.get(&product.name).map(Asset::remote).as_ref(),
+        ) && (!request.replace_conflicts || !release.draft)
+        {
+            return Err(GithubError::PublishedConflict {
+                tag: release.tag_name.clone(),
+            });
+        }
     }
     if !release.draft {
         let before = report_failures(report);
@@ -404,6 +595,11 @@ async fn upload(
                     .push(record(&asset, product, ProductState::Uploaded));
             }
             AssetAction::Replace(conflict) => {
+                if !request.replace_conflicts || !release.draft {
+                    return Err(source_error(
+                        "draft asset replacement requires replace_conflicts",
+                    ));
+                }
                 let asset = remote.expect("a replacement came from the remote");
                 report.warn(
                     format!("{} re-uploading", product.name),
@@ -475,6 +671,7 @@ async fn upload_one(
     let mut attempt = 1u32;
     let mut delay = Duration::from_millis(750);
     loop {
+        verify_local(path, product)?;
         match client
             .upload_asset(release.id, &product.name, path, product.size)
             .await
@@ -483,7 +680,6 @@ async fn upload_one(
                 if let Some(remote) = asset.sha256()
                     && remote != product.digest
                 {
-                    let _ = client.delete_asset(asset.id).await;
                     report.failed(
                         format!("{} digest mismatch", product.name),
                         format!("expected sha256:{}", product.digest.to_hex()),
@@ -495,7 +691,6 @@ async fn upload_one(
                     });
                 }
                 if asset.size != product.size {
-                    let _ = client.delete_asset(asset.id).await;
                     return Err(GithubError::Size {
                         name: product.name.clone(),
                         expected: product.size,
@@ -503,7 +698,6 @@ async fn upload_one(
                     });
                 }
                 if asset.name != product.name {
-                    let _ = client.delete_asset(asset.id).await;
                     return Err(GithubError::Renamed {
                         expected: product.name.clone(),
                         found: asset.name.clone(),
@@ -521,11 +715,27 @@ async fn upload_one(
                     } | GithubError::RateLimited { .. }
                         | GithubError::Transport { .. }
                 );
-                let removed = reconcile(client, release, &product.name, report).await?;
-                if !retryable || attempt >= MAX_UPLOAD_ATTEMPTS {
-                    if !removed {
-                        report.failed(format!("{} not uploaded", product.name), error.to_string());
+                let found = client
+                    .assets(release.id)
+                    .await?
+                    .into_iter()
+                    .filter(|a| a.name == product.name)
+                    .collect::<Vec<_>>();
+                if !found.is_empty() {
+                    if found.len() == 1
+                        && matches!(
+                            classify(product, Some(&found[0].remote())),
+                            AssetAction::Present
+                        )
+                    {
+                        return Ok(found[0].clone());
                     }
+                    return Err(source_error(
+                        "upload outcome is ambiguous or conflicting; inspect the draft and explicitly authorize replacement before retrying",
+                    ));
+                }
+                if !retryable || attempt >= MAX_UPLOAD_ATTEMPTS {
+                    report.failed(format!("{} not uploaded", product.name), error.to_string());
                     return Err(error);
                 }
                 report.info(
@@ -540,28 +750,6 @@ async fn upload_one(
     }
 }
 
-async fn reconcile(
-    client: &GithubClient,
-    release: &Release,
-    name: &str,
-    report: &mut ReportBuilder,
-) -> Result<bool, GithubError> {
-    let assets = client.assets(release.id).await?;
-    let Some(asset) = assets.into_iter().find(|asset| asset.name == name) else {
-        return Ok(false);
-    };
-    let remote: RemoteAsset = asset.remote();
-    if remote.is_starter() {
-        report.info(
-            format!("{} removing a failed upload", name),
-            "an empty asset was left behind and its name is taken",
-        );
-        client.delete_asset(asset.id).await?;
-        return Ok(true);
-    }
-    Ok(false)
-}
-
 async fn verify(
     client: &GithubClient,
     release: &Release,
@@ -573,6 +761,11 @@ async fn verify(
         .iter()
         .map(|asset| (asset.name.as_str(), asset))
         .collect();
+    if assets.len() != products.len() || by_name.len() != assets.len() {
+        return Err(source_error(
+            "final remote asset inventory differs from the finite release plan",
+        ));
+    }
     let mut compared = 0usize;
     for product in products {
         let Some(asset) = by_name.get(product.name.as_str()) else {
@@ -684,6 +877,7 @@ fn record(asset: &Asset, product: &ReleaseProduct, state: ProductState) -> Githu
         size: asset.size,
         state,
         digest: product.digest,
+        remote_digest: asset.sha256(),
         download_url: Some(asset.browser_download_url.clone()),
     }
 }

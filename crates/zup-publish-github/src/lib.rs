@@ -40,6 +40,7 @@ pub use runner::{
 pub use token::{Token, discover, discover_with, supplied};
 pub use workflow::{
     Freshness, MatrixTarget, Signing, WORKFLOW_PATH, WorkflowPolicy, check, generate,
+    validate_policy,
 };
 
 pub const PROVIDER: &str = "github";

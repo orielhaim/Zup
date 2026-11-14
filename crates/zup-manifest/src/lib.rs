@@ -21,12 +21,3 @@ pub use parse::{parse, parse_named};
 pub use plugin::Plugin;
 pub use schema::{schema, schema_json};
 pub use target::{ResourceKind, TargetOverrideSet, select_targets, select_targets_with};
-
-pub use zup_core::{
-    App, AppId, Component, ComponentId, Condition, FileAssociation, FileAssociationId,
-    FileExtension, FileMapping, Frontend, Install, InstallDirectory, InstallLocation, InstallScope,
-    Installer, Launcher, LauncherLocation, NonEmptyString, PathEntry, PluginBinding, PluginId,
-    Privilege, Protocol, ProtocolScheme, ResolvedTargetConfig, Service, ServiceId, ServiceStart,
-    Source, Target, TargetOverrides, TargetProfile, TargetProfileId, Template, TemplateError,
-    TemplatePart, ValueError, Variable,
-};

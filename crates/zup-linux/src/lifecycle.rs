@@ -2,12 +2,14 @@ use zup_runtime::InstallOutcome;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinuxOutcome {
+    Assessed(Box<zup_transaction::RecoveryAssessment>),
     Committed {
         version: semver::Version,
     },
     RolledBack,
     RecoveryRequired {
-        transaction: String,
+        transaction: Option<uuid::Uuid>,
+        detail: String,
     },
     CommittedPendingReconciliation {
         transaction: uuid::Uuid,
@@ -19,14 +21,23 @@ pub enum LinuxOutcome {
 impl LinuxOutcome {
     pub fn as_install_outcome(&self) -> InstallOutcome {
         match self {
+            Self::Assessed(assessment) => InstallOutcome::RecoveryAssessed {
+                assessment: assessment.clone(),
+            },
             Self::Committed { .. } => InstallOutcome::Committed,
             Self::RolledBack => InstallOutcome::RolledBack,
-            Self::RecoveryRequired { .. } => InstallOutcome::RecoveryRequired,
+            Self::RecoveryRequired {
+                transaction,
+                detail,
+            } => InstallOutcome::RecoveryRequired {
+                transaction: *transaction,
+                detail: detail.clone(),
+            },
             Self::CommittedPendingReconciliation {
                 transaction,
                 detail,
             } => InstallOutcome::CommittedPendingReconciliation {
-                transaction: Some(*transaction),
+                transaction: zup_core::TransactionId::from_uuid(*transaction),
                 detail: detail.clone(),
             },
             Self::Busy => InstallOutcome::Busy {
@@ -55,10 +66,14 @@ mod tests {
         );
         assert_eq!(
             LinuxOutcome::RecoveryRequired {
-                transaction: "id".to_owned()
+                transaction: None,
+                detail: "Recover the interrupted transaction".into(),
             }
             .as_install_outcome(),
-            InstallOutcome::RecoveryRequired,
+            InstallOutcome::RecoveryRequired {
+                transaction: None,
+                detail: "Recover the interrupted transaction".into(),
+            },
         );
         assert!(matches!(
             LinuxOutcome::Busy.as_install_outcome(),

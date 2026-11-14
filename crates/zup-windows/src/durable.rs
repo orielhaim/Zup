@@ -8,8 +8,7 @@ use typed_path::{
 
 use crate::bindings::{
     self, CREATE_NEW, CloseHandle, CreateFileW, FlushFileBuffers, GENERIC_WRITE, GetLastError,
-    GetVolumePathNameW, HANDLE, INVALID_HANDLE_VALUE, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    HANDLE, INVALID_HANDLE_VALUE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 
 static DURABLE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -47,29 +46,7 @@ pub fn move_durable(from: &Path, to: &Path) -> Result<(), DurableError> {
     publish_replace(from, to)
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum StagedPublication {
-    CreateNew,
-    Replace,
-}
-
-pub(crate) fn publish_staged(
-    source: &Path,
-    destination: &Path,
-    policy: StagedPublication,
-) -> Result<(), DurableError> {
-    copy_durable(source, destination, policy)
-}
-
 pub fn copy_new_durable(source: &Path, destination: &Path) -> Result<(), DurableError> {
-    copy_durable(source, destination, StagedPublication::CreateNew)
-}
-
-fn copy_durable(
-    source: &Path,
-    destination: &Path,
-    policy: StagedPublication,
-) -> Result<(), DurableError> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DurableError::Io {
             path: parent.display().to_string(),
@@ -99,10 +76,7 @@ fn copy_durable(
             source,
         })?;
         drop(output);
-        match policy {
-            StagedPublication::CreateNew => publish_new(&temp, destination),
-            StagedPublication::Replace => publish_replace(&temp, destination),
-        }
+        publish_new(&temp, destination)
     })();
     if result.is_err()
         && let Err(error) = std::fs::remove_file(&temp)
@@ -212,28 +186,6 @@ fn publish_new(from: &Path, to: &Path) -> Result<(), DurableError> {
         });
     }
     Ok(())
-}
-
-pub fn volume_root(path: &Path) -> Result<PathBuf, DurableError> {
-    let wide_in = to_wide(&path.display().to_string());
-    let mut wide_out = vec![0u16; 512];
-    // SAFETY: buffers are valid.
-    let ok = unsafe {
-        GetVolumePathNameW(
-            wide_in.as_ptr(),
-            wide_out.as_mut_ptr(),
-            wide_out.len() as u32,
-        )
-    };
-    if ok == 0 {
-        return Err(DurableError::Win32 {
-            path: path.display().to_string(),
-            message: format!("GetVolumePathNameW failed ({})", unsafe { GetLastError() }),
-        });
-    }
-    let len = wide_out.iter().position(|&c| c == 0).unwrap_or(0);
-    let s = String::from_utf16_lossy(&wide_out[..len]);
-    Ok(PathBuf::from(s))
 }
 
 fn to_wide(s: &str) -> Vec<u16> {

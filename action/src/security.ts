@@ -15,26 +15,26 @@
  */
 
 /** The events where base-repository privileges meet foreign code. */
-const UNSAFE_EVENTS = new Set(['pull_request_target', 'workflow_run'])
+const UNSAFE_EVENTS = new Set(["pull_request_target", "workflow_run"]);
 
 /** The operations that write to the repository. */
-const MUTATING = new Set(['publish', 'release'])
+const MUTATING = new Set(["publish", "release"]);
 
 /** What the check decided. */
 export interface SafetyVerdict {
   /** Whether the operation may proceed. */
-  allowed: boolean
+  allowed: boolean;
   /** Why, for the log and for a warning annotation. */
-  reason: string
+  reason: string;
   /** Whether the developer opted in explicitly. */
-  overridden: boolean
+  overridden: boolean;
 }
 
 /** What the check needs to know. */
 export interface SafetyContext {
-  eventName: string
-  operation: string
-  allowUnsafe: boolean
+  eventName: string;
+  operation: string;
+  allowUnsafe: boolean;
   /**
    * Whether the checkout this job runs came from a fork.
    *
@@ -43,35 +43,38 @@ export interface SafetyContext {
    * triggered by a branch push. When the two signals disagree, this errs toward
    * refusal.
    */
-  fromFork: boolean
+  fromFork: boolean;
 }
 
 /** Decide whether a mutating operation may proceed. */
 export function checkSafety(context: SafetyContext): SafetyVerdict {
-  if (!UNSAFE_EVENTS.has(context.eventName) || !MUTATING.has(context.operation)) {
-    return { allowed: true, reason: '', overridden: false }
+  if (
+    !UNSAFE_EVENTS.has(context.eventName) ||
+    !MUTATING.has(context.operation)
+  ) {
+    return { allowed: true, reason: "", overridden: false };
   }
   const risk =
     `\`${context.operation}\` cannot run on \`${context.eventName}\`: that event gives this job ` +
     "the base repository's secrets and write token while running code that may have come from a " +
-    'fork.'
+    "fork.";
   if (context.fromFork) {
     return {
       allowed: false,
       reason: `${risk} This run's checkout came from a fork.`,
       overridden: false,
-    }
+    };
   }
   if (!context.allowUnsafe) {
     return {
       allowed: false,
       reason: `${risk} Set \`allow-unsafe-publish: true\` only if you have decided this is safe here.`,
       overridden: false,
-    }
+    };
   }
   return {
     allowed: true,
     reason: `${risk} Continuing because \`allow-unsafe-publish: true\` was set.`,
     overridden: true,
-  }
+  };
 }

@@ -1,10 +1,9 @@
 use rstest::rstest;
 use std::fs;
 
+use zup_core::TargetOverrides;
 use zup_core::{InstallScope, Installer};
-use zup_manifest::{
-    Manifest, ManifestError, TargetOverrides, compile, parse, parse_and_compile, select_targets,
-};
+use zup_manifest::{Manifest, ManifestError, compile, parse, parse_and_compile, select_targets};
 
 fn fixture() -> String {
     fs::read_to_string(concat!(
@@ -41,6 +40,40 @@ machine = "${location.programs}/Acme"
 
 fn with(src: &str) -> String {
     format!("{}\n{}", base(), src.trim_start())
+}
+
+#[rstest]
+#[case::windows("windows-x64", false)]
+#[case::linux("linux-x64", true)]
+fn notify_readiness_is_validated_for_the_target(#[case] target: &str, #[case] supported: bool) {
+    let text = with(
+        r#"
+[[services]]
+execution = { type = "windows_job", account = "local_service" }
+id = "worker"
+display_name = "Worker"
+binary = "${install}/worker"
+start = "manual"
+readiness = "notify"
+"#,
+    )
+    .replace("windows-x64", target);
+    let text = if target.starts_with("linux-") {
+        text.replace(
+            r#"execution = { type = "windows_job", account = "local_service" }"#,
+            r#"execution = { type = "systemd_dynamic_user" }"#,
+        )
+    } else {
+        text
+    };
+    let result = parse_and_compile(&text, target);
+    assert_eq!(result.is_ok(), supported);
+    if let Ok(installer) = result {
+        assert_eq!(
+            installer.services[0].readiness,
+            zup_core::ServiceReadiness::Notify
+        );
+    }
 }
 
 fn compile_selected(manifest: &Manifest) -> Result<Installer, ManifestError> {
@@ -90,14 +123,16 @@ name = "Also core"
 #[case::service(
     r#"
 [[services]]
+execution = { type = "windows_job", account = "local_service" }
 id = "svc"
-name = "svc"
+display_name = "svc"
 binary = "${install}/svc.exe"
 start = "manual"
 
 [[services]]
+execution = { type = "windows_job", account = "local_service" }
 id = "svc"
-name = "svc2"
+display_name = "svc2"
 binary = "${install}/svc2.exe"
 start = "manual"
 "#,
@@ -243,8 +278,9 @@ fn unknown_component_reference_names_the_offending_resource() {
         (
             r#"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 component = "tools"
 "#,
             "tools",
@@ -253,6 +289,7 @@ component = "tools"
         (
             r#"
 [[launchers]]
+id = "main"
 location = "desktop"
 name = "App"
 target = "${install}/a.exe"
@@ -264,6 +301,7 @@ component = "tools"
         (
             r#"
 [[path]]
+id = "cli-1"
 value = "${install}/bin"
 component = "tools"
 "#,
@@ -273,8 +311,9 @@ component = "tools"
         (
             r#"
 [[services]]
+execution = { type = "windows_job", account = "local_service" }
 id = "s"
-name = "s"
+display_name = "s"
 binary = "${install}/s.exe"
 start = "manual"
 component = "tools"
@@ -285,6 +324,7 @@ component = "tools"
         (
             r#"
 [[path]]
+id = "cli-2"
 value = "${install}/bin"
 when = 'component("tools")'
 "#,
@@ -432,8 +472,9 @@ fn non_existing_source_directory_still_compiles() {
     let src = with(
         r#"
 [[files]]
+id = "application"
 source = "**/*.exe"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#,
     )
     .replace(

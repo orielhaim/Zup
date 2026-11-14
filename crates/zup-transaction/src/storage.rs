@@ -1,12 +1,14 @@
-use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use zup_storage::PublishError;
 
-use private_fs::Publication;
+use crate::{JournalDirectory, JournalFiles};
+#[path = "private_journals.rs"]
+mod private_journals;
+use private_journals::PrivateJournalDirectory;
 
-use crate::id::TransactionId;
-use crate::private;
-use crate::record::{CorruptReason, PublishError, StoreError, TransactionRecord};
+use crate::record::{CorruptReason, StoreError, TransactionRecord};
+use zup_core::TransactionId;
 
 /// Directory capability that already carries its security policy.
 ///
@@ -14,20 +16,28 @@ use crate::record::{CorruptReason, PublishError, StoreError, TransactionRecord};
 /// itself. Callers at the trust boundary choose a private volume or a
 /// platform machine volume.
 pub trait JournalVolume: Send + Sync {
-    fn read_journal(&self, id: &TransactionId) -> Result<Option<Vec<u8>>, StoreError>;
-    fn publish_journal(
+    fn read_reservation(&self, id: zup_core::InstallationId)
+    -> Result<Option<Vec<u8>>, StoreError>;
+    fn create_reservation(
+        &self,
+        id: zup_core::InstallationId,
+        bytes: &[u8],
+    ) -> Result<(), StoreError>;
+    fn open_journal(
         &self,
         id: &TransactionId,
-        bytes: &[u8],
-        create_new: bool,
-    ) -> Result<(), StoreError>;
-    fn lock_journal(&self, id: &TransactionId) -> Result<File, StoreError>;
+    ) -> Result<Option<Box<dyn crate::LockedJournal>>, StoreError>;
+    fn create_journal(&self, id: &TransactionId, bytes: &[u8]) -> Result<(), StoreError>;
     fn list_journals(&self) -> Result<Vec<TransactionId>, StoreError>;
 }
 
 const MAX_UPDATE_ATTEMPTS: u32 = 8;
 
 pub trait TransactionStore {
+    fn reserve_installation(
+        &self,
+        record: &TransactionRecord,
+    ) -> Result<crate::InstallationReservation, StoreError>;
     fn create(&self, record: &TransactionRecord) -> Result<(), StoreError>;
     fn load(&self, id: &TransactionId) -> Result<TransactionRecord, StoreError>;
     fn compare_and_swap(
@@ -35,6 +45,35 @@ pub trait TransactionStore {
         expected_revision: u64,
         updated: &TransactionRecord,
     ) -> Result<(), StoreError>;
+
+    fn commit_changes(
+        &self,
+        id: &TransactionId,
+        expected: u64,
+        changes: &[crate::TransactionChange],
+    ) -> Result<crate::JournalRevision, StoreError> {
+        let mut next = self.load(id)?;
+        check_revision(&next, expected)?;
+        for change in changes {
+            change.apply(&mut next)?;
+        }
+        next.touch();
+        self.compare_and_swap(expected, &next)?;
+        Ok(crate::JournalRevision {
+            revision: next.revision,
+            updated_at: next.updated_at,
+        })
+    }
+
+    fn transition(
+        &self,
+        id: &TransactionId,
+        expected: u64,
+        changes: &[crate::TransactionChange],
+    ) -> Result<TransactionRecord, StoreError> {
+        self.commit_changes(id, expected, changes)?;
+        self.load(id)
+    }
 
     fn update(
         &self,
@@ -63,6 +102,8 @@ pub trait TransactionStore {
 #[derive(Clone)]
 pub struct FilesystemTransactionStore {
     volume: Arc<dyn JournalVolume>,
+    io: Arc<crate::journal_io::Counters>,
+    cache: Arc<Mutex<Option<crate::journal_format::Loaded>>>,
 }
 
 impl FilesystemTransactionStore {
@@ -72,15 +113,29 @@ impl FilesystemTransactionStore {
     pub fn private_at(root: impl Into<PathBuf>) -> Self {
         Self {
             volume: Arc::new(PrivateJournals::new(root.into())),
+            io: Arc::default(),
+            cache: Arc::default(),
         }
     }
 
     pub fn from_volume(volume: Arc<dyn JournalVolume>) -> Self {
-        Self { volume }
+        Self {
+            volume,
+            io: Arc::default(),
+            cache: Arc::default(),
+        }
+    }
+
+    pub fn io_stats(&self) -> crate::JournalIo {
+        self.io.snapshot()
     }
 
     pub fn list_ids(&self) -> Result<Vec<TransactionId>, StoreError> {
-        self.volume.list_journals()
+        let ids = self.volume.list_journals()?;
+        for id in &ids {
+            self.load(id)?;
+        }
+        Ok(ids)
     }
 }
 
@@ -93,100 +148,93 @@ impl PrivateJournals {
         Self { root }
     }
 
-    fn transactions(&self) -> Result<private_fs::PrivateDir, StoreError> {
-        let path = self.root.join("transactions");
-        private::ensure_dir(&path).map_err(|error| store_fs(path, error))
-    }
-
-    fn journal(&self, id: &TransactionId) -> Result<private_fs::PrivateDir, StoreError> {
-        let name = id.to_string();
-        let path = self.root.join("transactions").join(&name);
-        let root = self.transactions()?;
-        root.ensure_dir(&name)
-            .map_err(|error| store_fs(path.clone(), error))?;
-        root.sync_all()
-            .map_err(|error| store_fs(path.clone(), error))?;
-        private_fs::PrivateDir::open(&path).map_err(|error| store_fs(path, error))
+    fn namespace(
+        &self,
+        name: &str,
+        create: bool,
+    ) -> Result<Option<PrivateJournalDirectory>, StoreError> {
+        let root = match private_fs::PrivateDir::open(&self.root) {
+            Ok(root) => root,
+            Err(private_fs::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !create {
+                    return Ok(None);
+                }
+                zup_storage::ensure_private_dir(&self.root)
+                    .map_err(|error| store_fs(self.root.clone(), error))?
+            }
+            Err(error) => return Err(store_fs(self.root.clone(), error)),
+        };
+        let root = PrivateJournalDirectory(root);
+        if !create {
+            return root.open(name);
+        }
+        let directory = PrivateJournalDirectory(
+            root.0
+                .ensure_dir(name)
+                .map_err(|error| store_fs(self.root.join(name), error))?,
+        );
+        if !root.same_mount(&directory)? {
+            return Err(CorruptReason::IdentityMismatch.into());
+        }
+        root.sync()?;
+        Ok(Some(directory))
     }
 }
 
 impl JournalVolume for PrivateJournals {
-    fn read_journal(&self, id: &TransactionId) -> Result<Option<Vec<u8>>, StoreError> {
-        let path = self.root.join("transactions").join(id.to_string());
-        let directory = match private_fs::PrivateDir::open(&path) {
-            Ok(directory) => directory,
-            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(None);
-            }
-            Err(error) => return Err(store_fs(path, error)),
+    fn read_reservation(
+        &self,
+        id: zup_core::InstallationId,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let Some(directory) = self.namespace("identities", false)? else {
+            return Ok(None);
         };
-        match private::read_file(&directory, "transaction.json") {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                Ok(None)
-            }
-            Err(error) => Err(store_fs(path.join("transaction.json"), error)),
+        let bytes = directory.read(&format!("{id}.json"))?;
+        if bytes.is_some() {
+            directory.sync()?;
         }
+        Ok(bytes)
     }
-
-    fn publish_journal(
+    fn create_reservation(
+        &self,
+        id: zup_core::InstallationId,
+        bytes: &[u8],
+    ) -> Result<(), StoreError> {
+        self.namespace("identities", true)?
+            .ok_or(CorruptReason::Missing)?
+            .publish(&format!("{id}.json"), bytes, true)
+    }
+    fn open_journal(
         &self,
         id: &TransactionId,
-        bytes: &[u8],
-        create_new: bool,
-    ) -> Result<(), StoreError> {
-        let directory = self.journal(id)?;
-        let path = self
-            .root
-            .join("transactions")
-            .join(id.to_string())
-            .join("transaction.json");
-        let policy = if create_new {
-            Publication::CreateNew
-        } else {
-            Publication::Replace
+    ) -> Result<Option<Box<dyn crate::LockedJournal>>, StoreError> {
+        let Some(namespace) = self.namespace("transactions", false)? else {
+            return Ok(None);
         };
-        private::publish_full(&directory, "transaction.json", bytes, policy)
-            .map_err(|source| StoreError::Publication { path, source })
+        crate::JournalLease::open(namespace, *id)
+            .map(|journal| journal.map(|lease| Box::new(lease) as Box<dyn crate::LockedJournal>))
     }
-
-    fn lock_journal(&self, id: &TransactionId) -> Result<File, StoreError> {
-        let directory = self.journal(id)?;
-        let path = self
-            .root
-            .join("transactions")
-            .join(id.to_string())
-            .join("transaction.lock");
-        let file = private::open_lock(&directory, "transaction.lock")
-            .map_err(|source| store_fs(path.clone(), source))?;
-        file.lock()
-            .map_err(|source| StoreError::Io { path, source })?;
-        Ok(file)
+    fn create_journal(&self, id: &TransactionId, bytes: &[u8]) -> Result<(), StoreError> {
+        let creation = self
+            .namespace("journal-creation", true)?
+            .ok_or(CorruptReason::Missing)?;
+        let transactions = self
+            .namespace("transactions", true)?
+            .ok_or(CorruptReason::Missing)?;
+        crate::create_journal(&creation, &transactions, *id, bytes)
     }
-
     fn list_journals(&self) -> Result<Vec<TransactionId>, StoreError> {
-        let path = self.root.join("transactions");
-        let directory = match private_fs::PrivateDir::open(&path) {
-            Ok(directory) => directory,
-            Err(private_fs::Error::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(error) => return Err(store_fs(path, error)),
+        let Some(directory) = self.namespace("transactions", false)? else {
+            return Ok(Vec::new());
         };
-        let mut ids = Vec::new();
-        for name in directory
-            .entries()
-            .map_err(|error| store_fs(self.root.join("transactions"), error))?
-        {
-            let id = name
-                .to_str()
-                .and_then(|name| name.parse::<TransactionId>().ok())
-                .ok_or_else(|| StoreError::InvalidDirectory {
-                    name: name.to_string_lossy().into_owned(),
-                })?;
-            ids.push(id);
-        }
-        Ok(ids)
+        directory
+            .names()?
+            .into_iter()
+            .map(|name| {
+                name.parse::<TransactionId>()
+                    .map_err(|_| StoreError::InvalidDirectory { name })
+            })
+            .collect()
     }
 }
 
@@ -203,25 +251,86 @@ fn store_fs(path: PathBuf, error: private_fs::Error) -> StoreError {
     }
 }
 
-fn decode_record(bytes: &[u8]) -> Result<TransactionRecord, StoreError> {
-    let record: TransactionRecord = serde_json::from_slice(bytes)
-        .map_err(|error| CorruptReason::InvalidJson(error.to_string()))?;
-    record.validate()?;
-    Ok(record)
-}
-
 impl TransactionStore for FilesystemTransactionStore {
+    fn reserve_installation(
+        &self,
+        record: &TransactionRecord,
+    ) -> Result<crate::InstallationReservation, StoreError> {
+        record.validate()?;
+        let proposed =
+            crate::InstallationReservation::for_transaction(record).map_err(|reason| {
+                StoreError::Rejected {
+                    id: record.transaction_id.to_string(),
+                    reason,
+                }
+            })?;
+        let durable = self.load(&record.transaction_id)?;
+        if durable.plan_hash != record.plan_hash
+            || durable.app_id != record.app_id
+            || durable.scope != record.scope
+        {
+            return Err(CorruptReason::IdentityMismatch.into());
+        }
+        if !matches!(
+            durable
+                .nodes
+                .get(&zup_plan::OperationId::new(zup_plan::OperationId::RESERVE)),
+            Some(crate::NodeState::Running | crate::NodeState::Applied { .. })
+        ) {
+            return Err(StoreError::Rejected {
+                id: record.transaction_id.to_string(),
+                reason: "installation reservation has no durable request".into(),
+            });
+        }
+        let id = proposed.installation;
+        if self.volume.read_reservation(id)?.is_none() {
+            if record.reservation.is_some() || record.plan.observed.is_some() {
+                return Err(CorruptReason::Missing.into());
+            }
+            let bytes = serde_json::to_vec(&proposed).map_err(StoreError::Serialize)?;
+            match self.volume.create_reservation(id, &bytes) {
+                Ok(()) => {}
+                Err(StoreError::Publication { source, .. })
+                    if zup_storage::absent_collision(&source) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let bytes = self
+            .volume
+            .read_reservation(id)?
+            .ok_or(CorruptReason::Missing)?;
+        let reserved: crate::InstallationReservation = serde_json::from_slice(&bytes)
+            .map_err(|error| CorruptReason::InvalidJson(error.to_string()))?;
+        if !reserved.matches(record) {
+            return Err(StoreError::InstallationConflict { installation: id });
+        }
+        let origin = self.load(&reserved.origin)?;
+        if !reserved.matches(&origin) {
+            return Err(CorruptReason::IdentityMismatch.into());
+        }
+        if origin.reservation.as_ref() != Some(&reserved)
+            && !(origin.reservation.is_none()
+                && matches!(
+                    origin
+                        .nodes
+                        .get(&zup_plan::OperationId::new(zup_plan::OperationId::RESERVE)),
+                    Some(crate::NodeState::Running)
+                ))
+        {
+            return Err(CorruptReason::InvalidReceipt.into());
+        }
+        Ok(reserved)
+    }
     fn create(&self, record: &TransactionRecord) -> Result<(), StoreError> {
         record.validate()?;
         let id = record.transaction_id;
-        let _lock = self.volume.lock_journal(&id)?;
-        if self.volume.read_journal(&id)?.is_some() {
-            return Err(StoreError::AlreadyExists { id: id.to_string() });
-        }
         let bytes = serde_json::to_vec_pretty(record).map_err(StoreError::Serialize)?;
-        match self.volume.publish_journal(&id, &bytes, true) {
+        self.io.write(bytes.len());
+        match self.volume.create_journal(&id, &bytes) {
             Ok(()) => Ok(()),
-            Err(StoreError::Publication { source, .. }) if private::absent_collision(&source) => {
+            Err(StoreError::Publication { source, .. })
+                if zup_storage::absent_collision(&source) =>
+            {
                 Err(StoreError::AlreadyExists { id: id.to_string() })
             }
             Err(error) => Err(error),
@@ -229,16 +338,18 @@ impl TransactionStore for FilesystemTransactionStore {
     }
 
     fn load(&self, id: &TransactionId) -> Result<TransactionRecord, StoreError> {
-        match self.volume.read_journal(id)? {
-            Some(bytes) => {
-                let record = decode_record(&bytes)?;
-                if record.transaction_id != *id {
-                    return Err(CorruptReason::IdentityMismatch.into());
-                }
-                Ok(record)
-            }
-            None => Err(StoreError::Corrupt(CorruptReason::Missing)),
-        }
+        let journal = self
+            .volume
+            .open_journal(id)?
+            .ok_or(CorruptReason::Missing)?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| CorruptReason::InvalidHistory)?;
+        let current = self.current(journal.as_ref(), *id, cache.take())?;
+        let record = current.record.clone();
+        *cache = Some(current);
+        Ok(record)
     }
 
     fn compare_and_swap(
@@ -246,24 +357,108 @@ impl TransactionStore for FilesystemTransactionStore {
         expected_revision: u64,
         updated: &TransactionRecord,
     ) -> Result<(), StoreError> {
-        updated.validate()?;
-        if updated.revision != expected_revision.saturating_add(1) {
+        let journal = self
+            .volume
+            .open_journal(&updated.transaction_id)?
+            .ok_or(CorruptReason::Missing)?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| CorruptReason::InvalidHistory)?;
+        let mut current = self.current(journal.as_ref(), updated.transaction_id, cache.take())?;
+        check_revision(&current.record, expected_revision)?;
+        if expected_revision.checked_add(1) != Some(updated.revision) {
             return Err(CorruptReason::RevisionMismatch {
                 expected: expected_revision,
                 found: updated.revision,
             }
             .into());
         }
-        let id = updated.transaction_id;
-        let _lock = self.volume.lock_journal(&id)?;
-        let current = self.load(&id)?;
-        if current.revision != expected_revision {
-            return Err(StoreError::RevisionConflict {
-                expected: expected_revision,
-            });
+        let changes = crate::journal_format::changes(&current.record, updated)?;
+        for change in &changes {
+            change.apply(&mut current.record)?;
         }
-        let bytes = serde_json::to_vec_pretty(updated).map_err(StoreError::Serialize)?;
-        self.volume.publish_journal(&id, &bytes, false)
+        current.record.revision = updated.revision;
+        current.record.updated_at = updated.updated_at;
+        current.record.validate_state()?;
+        self.persist(journal.as_ref(), &mut current, changes)?;
+        *cache = Some(current);
+        Ok(())
+    }
+
+    fn commit_changes(
+        &self,
+        id: &TransactionId,
+        expected: u64,
+        changes: &[crate::TransactionChange],
+    ) -> Result<crate::JournalRevision, StoreError> {
+        let journal = self
+            .volume
+            .open_journal(id)?
+            .ok_or(CorruptReason::Missing)?;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| CorruptReason::InvalidHistory)?;
+        let mut current = self.current(journal.as_ref(), *id, cache.take())?;
+        check_revision(&current.record, expected)?;
+        for change in changes {
+            change.apply(&mut current.record)?;
+        }
+        current.record.touch();
+        current.record.validate_state()?;
+        self.persist(journal.as_ref(), &mut current, changes.to_vec())?;
+        let revision = crate::JournalRevision {
+            revision: current.record.revision,
+            updated_at: current.record.updated_at,
+        };
+        *cache = Some(current);
+        Ok(revision)
+    }
+}
+
+fn check_revision(record: &TransactionRecord, expected: u64) -> Result<(), StoreError> {
+    if record.revision != expected {
+        return Err(StoreError::RevisionConflict { expected });
+    }
+    if expected == u64::MAX {
+        return Err(CorruptReason::InvalidHistory.into());
+    }
+    Ok(())
+}
+
+impl FilesystemTransactionStore {
+    fn current(
+        &self,
+        journal: &dyn crate::LockedJournal,
+        id: TransactionId,
+        cached: Option<crate::journal_format::Loaded>,
+    ) -> Result<crate::journal_format::Loaded, StoreError> {
+        let head = crate::journal_format::read_head(journal, &self.io)?;
+        if let Some(cached) = cached
+            && cached.record.transaction_id == id
+            && cached.head_bytes == head
+            && cached.unchanged(journal)?
+        {
+            return Ok(cached);
+        }
+        crate::journal_format::load_head(journal, id, head, &self.io)
+    }
+
+    fn persist(
+        &self,
+        journal: &dyn crate::LockedJournal,
+        current: &mut crate::journal_format::Loaded,
+        changes: Vec<crate::TransactionChange>,
+    ) -> Result<(), StoreError> {
+        let id = current.record.transaction_id.to_string();
+        crate::fault_injection::boundary(crate::fault_injection::Boundary::JournalCasBefore, &id);
+        crate::journal_format::commit(journal, current, changes, &self.io)?;
+        crate::fault_injection::boundary(
+            crate::fault_injection::Boundary::JournalCasPublished,
+            &id,
+        );
+        Ok(())
     }
 }
 
@@ -345,6 +540,41 @@ impl ContentStoreIdentity {
 fn field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(value);
+}
+
+pub const MAINTENANCE_PACKAGE_NAME: &str = "variant.zup";
+
+pub const MAINTENANCE_RUNTIME_DIRECTORY: &str = "maintenance";
+
+pub const STATE_FOLDER: &str = "zup";
+
+pub const fn scope_name(scope: SelectedScope) -> &'static str {
+    match scope {
+        SelectedScope::User => "user",
+        SelectedScope::Machine => "machine",
+    }
+}
+
+pub fn is_maintenance_path(path: &Path) -> bool {
+    if !matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("maintenance" | "maintenance.exe")
+    ) {
+        return false;
+    }
+    let Some(instance) = path.parent() else {
+        return false;
+    };
+    instance
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.parse::<zup_core::MaterializationId>().is_ok())
+        && instance.parent().is_some_and(|parent| {
+            parent.file_name() == Some(std::ffi::OsStr::new("maintenance"))
+                && parent
+                    .parent()
+                    .is_some_and(|root| root.file_name() == Some(std::ffi::OsStr::new(".zup")))
+        })
 }
 
 #[cfg(test)]
@@ -443,172 +673,5 @@ mod tests {
         assert_eq!(segments[1].len(), 64, "the application is named by digest");
         assert_eq!(segments[2], "user");
         assert_eq!(segments[3], identity().digest().to_hex());
-    }
-}
-
-const MAINTENANCE_DIRECTORY: &str = "maintenance";
-
-pub const MAINTENANCE_PACKAGE_NAME: &str = "variant.zup";
-
-pub const MAINTENANCE_INDEX_NAME: &str = "artifact.json";
-
-pub const MAINTENANCE_RUNTIME_DIRECTORY: &str = "maintenance";
-
-pub const STATE_FOLDER: &str = "zup";
-
-pub const fn scope_name(scope: SelectedScope) -> &'static str {
-    match scope {
-        SelectedScope::User => "user",
-        SelectedScope::Machine => "machine",
-    }
-}
-
-pub fn maintenance_root(state_root: &Path, app_id: &AppId, scope: SelectedScope) -> PathBuf {
-    state_root
-        .join(MAINTENANCE_DIRECTORY)
-        .join(app_id.as_str())
-        .join(scope_name(scope))
-}
-
-/// version that was never checked - and the directory name is what tells one
-pub fn maintenance_directory(
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-    version: &Version,
-) -> PathBuf {
-    maintenance_root(state_root, app_id, scope).join(version.to_string())
-}
-
-pub fn maintenance_runtime_path(
-    state_root: &Path,
-    app_id: &AppId,
-    scope: SelectedScope,
-    version: &Version,
-    executable_suffix: &str,
-) -> PathBuf {
-    maintenance_directory(state_root, app_id, scope, version).join(format!(
-        "{MAINTENANCE_RUNTIME_DIRECTORY}{executable_suffix}"
-    ))
-}
-
-pub fn is_maintenance_path(path: &Path) -> bool {
-    let components = path
-        .components()
-        .map(|component| component.as_os_str())
-        .collect::<Vec<_>>();
-    components
-        .windows(2)
-        .any(|pair| pair[0] == MAINTENANCE_DIRECTORY && pair[1] != MAINTENANCE_DIRECTORY)
-}
-
-#[cfg(test)]
-mod installed_tests {
-    use super::*;
-    use semver::Version;
-    use std::path::Path;
-    use zup_core::{AppId, SelectedScope, Target};
-
-    fn app_id() -> AppId {
-        AppId::new("com.acme.desktop").expect("a valid id")
-    }
-
-    fn target() -> Target {
-        Target::parse("windows-x64").expect("a target")
-    }
-
-    fn version(text: &str) -> Version {
-        Version::parse(text).expect("a version")
-    }
-
-    /// directories - which is why they must not share a directory.
-    #[test]
-    fn the_scopes_never_share_a_maintenance_root() {
-        let state = Path::new("/var/lib/zup");
-        let user = maintenance_root(state, &app_id(), SelectedScope::User);
-        let machine = maintenance_root(state, &app_id(), SelectedScope::Machine);
-        assert_ne!(user, machine);
-        assert!(user.ends_with("user"));
-        assert!(machine.ends_with("machine"));
-        assert_eq!(
-            user.parent().and_then(Path::file_name),
-            Some(app_id().as_str().as_ref()),
-            "both nest under the application, so a reader can ask about one app across scopes"
-        );
-    }
-
-    #[test]
-    fn a_generation_is_one_version_below_the_root() {
-        let state = Path::new("/var/lib/zup");
-        let root = maintenance_root(state, &app_id(), SelectedScope::User);
-        let one = maintenance_directory(state, &app_id(), SelectedScope::User, &version("1.4.0"));
-        let two = maintenance_directory(state, &app_id(), SelectedScope::User, &version("1.5.0"));
-        assert!(one.starts_with(&root));
-        assert!(two.starts_with(&root));
-        assert_ne!(
-            one, two,
-            "two generations are two directories while both are owned"
-        );
-    }
-
-    #[test]
-    fn the_persisted_runtime_is_named_by_the_targets_convention() {
-        let state = Path::new("/var/lib/zup");
-        let windows = maintenance_runtime_path(
-            state,
-            &app_id(),
-            SelectedScope::User,
-            &version("1.4.0"),
-            target().executable_suffix(),
-        );
-        let linux = maintenance_runtime_path(
-            state,
-            &app_id(),
-            SelectedScope::User,
-            &version("1.4.0"),
-            Target::parse("linux-x64")
-                .expect("a target")
-                .executable_suffix(),
-        );
-        assert_eq!(
-            windows.file_name().and_then(|n| n.to_str()),
-            Some("maintenance.exe")
-        );
-        assert_eq!(
-            linux.file_name().and_then(|n| n.to_str()),
-            Some("maintenance")
-        );
-    }
-
-    #[test]
-    fn a_persisted_runtime_is_recognized_by_where_it_lives() {
-        let persisted = Path::new("zup")
-            .join(MAINTENANCE_DIRECTORY)
-            .join(app_id().as_str())
-            .join("user")
-            .join("1.4.0")
-            .join(format!("{MAINTENANCE_RUNTIME_DIRECTORY}.exe"));
-        assert!(is_maintenance_path(&persisted));
-
-        assert!(
-            !is_maintenance_path(
-                &Path::new("Downloads").join(format!("{MAINTENANCE_RUNTIME_DIRECTORY}-Setup.exe"))
-            ),
-            "a file outside any maintenance directory is an installation medium, not a runtime"
-        );
-        assert!(
-            !is_maintenance_path(&Path::new("zup").join(MAINTENANCE_DIRECTORY)),
-            "the maintenance directory itself is not a generation's runtime"
-        );
-    }
-
-    #[test]
-    fn the_sidecar_documents_carry_no_executable_suffix() {
-        for name in [MAINTENANCE_PACKAGE_NAME, MAINTENANCE_INDEX_NAME] {
-            assert!(
-                !name.ends_with(".exe"),
-                "{name} is a document, not a program"
-            );
-        }
     }
 }

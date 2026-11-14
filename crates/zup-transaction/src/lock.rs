@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use crate::private;
-
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
     #[error("cannot acquire installation lock `{key}`: {source}")]
@@ -20,7 +18,7 @@ pub enum LockError {
 }
 
 #[derive(Debug)]
-pub struct InstallationLock {
+pub struct ResourceLock {
     file: std::fs::File,
     key: String,
 }
@@ -40,7 +38,7 @@ impl LockScope {
     }
 }
 
-impl InstallationLock {
+impl ResourceLock {
     pub fn lock_key(app_id: &str, scope: &str) -> String {
         format!("zup-install-{}-{}", sanitize(app_id), sanitize(scope))
     }
@@ -69,15 +67,16 @@ impl InstallationLock {
     pub fn try_acquire(state_root: &Path, key: &str) -> Result<Option<Self>, LockError> {
         let path = lock_path(state_root, key);
         let directory = lock_dir(state_root)?;
-        let file = private::open_lock(&directory, &format!("{key}.lock")).map_err(|source| {
-            LockError::Io {
-                path: path.display().to_string(),
-                source: match source {
-                    private_fs::Error::Io(source) => source,
-                    other => std::io::Error::other(other),
-                },
-            }
-        })?;
+        let file =
+            zup_storage::open_lock(&directory, &format!("{key}.lock")).map_err(|source| {
+                LockError::Io {
+                    path: path.display().to_string(),
+                    source: match source {
+                        private_fs::Error::Io(source) => source,
+                        other => std::io::Error::other(other),
+                    },
+                }
+            })?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self {
                 file,
@@ -96,7 +95,7 @@ impl InstallationLock {
     }
 }
 
-impl Drop for InstallationLock {
+impl Drop for ResourceLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
     }
@@ -104,7 +103,7 @@ impl Drop for InstallationLock {
 
 fn lock_dir(state_root: &Path) -> Result<private_fs::PrivateDir, LockError> {
     let path = state_root.join("locks");
-    private::ensure_dir(&path).map_err(|source| LockError::Io {
+    zup_storage::ensure_private_dir(&path).map_err(|source| LockError::Io {
         path: path.display().to_string(),
         source: match source {
             private_fs::Error::Io(source) => source,
@@ -137,19 +136,19 @@ mod tests {
     #[test]
     fn two_sessions_in_one_process_exclude_each_other() {
         let root = tempfile::tempdir().expect("a temp root");
-        let key = InstallationLock::lock_key("com.acme.desktop", "user");
-        let held = InstallationLock::try_acquire(root.path(), &key)
+        let key = ResourceLock::lock_key("com.acme.desktop", "user");
+        let held = ResourceLock::try_acquire(root.path(), &key)
             .expect("acquire")
             .expect("the first session holds it");
         assert!(
-            InstallationLock::try_acquire(root.path(), &key)
+            ResourceLock::try_acquire(root.path(), &key)
                 .expect("a second attempt is an answer, not a failure")
                 .is_none(),
             "a second session in this process must not also acquire it"
         );
         drop(held);
         assert!(
-            InstallationLock::try_acquire(root.path(), &key)
+            ResourceLock::try_acquire(root.path(), &key)
                 .expect("acquire again")
                 .is_some(),
             "and the lock is available once the holder is gone"
@@ -158,15 +157,12 @@ mod tests {
 
     #[test]
     fn the_key_is_the_application_and_the_scope_and_nothing_else() {
-        let user = InstallationLock::lock_key("com.acme.desktop", "user");
-        assert_ne!(user, InstallationLock::lock_key("com.acme.other", "user"));
-        assert_ne!(
-            user,
-            InstallationLock::lock_key("com.acme.desktop", "machine")
-        );
-        assert_eq!(user, InstallationLock::lock_key("com.acme.desktop", "user"));
+        let user = ResourceLock::lock_key("com.acme.desktop", "user");
+        assert_ne!(user, ResourceLock::lock_key("com.acme.other", "user"));
+        assert_ne!(user, ResourceLock::lock_key("com.acme.desktop", "machine"));
+        assert_eq!(user, ResourceLock::lock_key("com.acme.desktop", "user"));
         assert_eq!(
-            InstallationLock::key_for("com.acme.desktop", "user", LockScope::Lifecycle),
+            ResourceLock::key_for("com.acme.desktop", "user", LockScope::Lifecycle),
             user,
             "the lifecycle key and the plain key are one key, spelled once"
         );
@@ -176,14 +172,14 @@ mod tests {
     #[test]
     fn a_bootstrap_lock_is_not_the_lifecycle_lock() {
         assert_ne!(
-            InstallationLock::key_for("com.acme.desktop", "user", LockScope::Lifecycle),
-            InstallationLock::key_for("com.acme.desktop", "user", LockScope::Bootstrap)
+            ResourceLock::key_for("com.acme.desktop", "user", LockScope::Lifecycle),
+            ResourceLock::key_for("com.acme.desktop", "user", LockScope::Bootstrap)
         );
     }
 
     #[test]
     fn an_application_id_cannot_choose_the_file_name() {
-        let sanitized = InstallationLock::lock_key("../../etc/passwd", "user");
+        let sanitized = ResourceLock::lock_key("../../etc/passwd", "user");
         assert!(
             !sanitized.contains('/') && !sanitized.contains('\\'),
             "a key must never carry a separator: {sanitized}"
@@ -194,18 +190,18 @@ mod tests {
     #[test]
     fn releasing_a_lock_keeps_the_same_file() {
         let root = tempfile::tempdir().expect("a temp root");
-        let key = InstallationLock::lock_key("com.acme.desktop", "user");
+        let key = ResourceLock::lock_key("com.acme.desktop", "user");
         let path = lock_path(root.path(), &key);
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
-        let held = InstallationLock::try_acquire(root.path(), &key)
+        let held = ResourceLock::try_acquire(root.path(), &key)
             .expect("acquire")
             .expect("held");
         #[cfg(unix)]
         let identity = std::fs::metadata(&path).expect("stat").ino();
         drop(held);
         assert!(path.exists(), "the lock file stays after release");
-        let again = InstallationLock::try_acquire(root.path(), &key)
+        let again = ResourceLock::try_acquire(root.path(), &key)
             .expect("acquire")
             .expect("held again");
         #[cfg(unix)]
@@ -215,5 +211,39 @@ mod tests {
             "a new acquire must lock the same file, not a replacement"
         );
         drop(again);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn launched_processes_cannot_inherit_installation_lock_authority() {
+        use std::io::{BufRead, Write};
+        use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
+        use std::process::{Command, Stdio};
+
+        let root = tempfile::tempdir().unwrap();
+        let held = ResourceLock::try_acquire(root.path(), "child-authority")
+            .unwrap()
+            .unwrap();
+        let metadata = held.file.metadata().unwrap();
+        let identity = (metadata.dev(), metadata.ino());
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.as_mut().unwrap().write_all(b"ready\n").unwrap();
+        let mut reply = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut reply)
+            .unwrap();
+        let inherited =
+            std::fs::metadata(format!("/proc/{}/fd/{}", child.id(), held.file.as_raw_fd()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(reply, "ready\n");
+        match inherited {
+            Ok(metadata) => assert_ne!((metadata.dev(), metadata.ino()), identity),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        }
     }
 }

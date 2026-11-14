@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use zup_bundle::{PackagePayloadSource, PayloadError, PayloadReader, PayloadSource};
 use zup_core::{ResourceKey, SelectedScope, Sha256Digest};
-use zup_plan::{InstallLedger, OwnedResource};
+use zup_plan::{InstallationRecord, OwnedResource};
 
 use crate::carrier::Carrier;
 use crate::error::{ExecError, PathError};
@@ -26,7 +26,6 @@ pub struct LinuxRunRequest {
 struct ExecutedRun {
     outcome: zup_runtime::InstallOutcome,
     version: semver::Version,
-    state_root: PathBuf,
 }
 
 pub fn run(request: &LinuxRunRequest) -> Result<LinuxOutcome, ExecError> {
@@ -59,6 +58,7 @@ fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> 
         discovery.installer().install.scope,
         &launch,
         &discovery.installations,
+        &discovery.recoveries,
     )
     .map_err(ExecError::Ownership)?;
     let context = discovery.context(scope).map_err(ExecError::Ownership)?;
@@ -66,6 +66,7 @@ fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> 
         crate::machine::resolve_machine_state_root(
             request.state_root.as_deref(),
             &crate::locations::MachineRoots::production(),
+            &discovery.installer().app.id,
         )?;
     } else {
         refuse_redirected_hierarchy(&context.state_root)?;
@@ -110,22 +111,29 @@ fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> 
         .target_plan()
         .map(|target| target.app.version.clone())
         .unwrap_or_else(|| discovery.build.installer.app.version.clone());
-    Ok(ExecutedRun {
-        outcome,
-        version,
-        state_root: context.state_root,
-    })
+    Ok(ExecutedRun { outcome, version })
 }
 
 fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
-    let ExecutedRun {
-        outcome,
-        version,
-        state_root,
-    } = executed;
+    let ExecutedRun { outcome, version } = executed;
     match outcome {
+        zup_runtime::InstallOutcome::RecoveryInspected { .. } => Err(ExecError::Ownership(
+            "inspection is not a deployment result".into(),
+        )),
+        zup_runtime::InstallOutcome::CommittedWithWarning { .. } => Ok(LinuxOutcome::Committed {
+            version: version.clone(),
+        }),
+        zup_runtime::InstallOutcome::RecoveryAssessed { assessment } => {
+            Ok(LinuxOutcome::Assessed(assessment.clone()))
+        }
         zup_runtime::InstallOutcome::Committed => Ok(LinuxOutcome::Committed {
             version: version.clone(),
+        }),
+        zup_runtime::InstallOutcome::Recovered { settlement } => Ok(match settlement {
+            zup_runtime::RecoverySettlement::Committed => LinuxOutcome::Committed {
+                version: version.clone(),
+            },
+            zup_runtime::RecoverySettlement::RolledBack => LinuxOutcome::RolledBack,
         }),
         zup_runtime::InstallOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
         zup_runtime::InstallOutcome::CommittedPendingReconciliation {
@@ -133,23 +141,14 @@ fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
             detail,
         } => Ok(LinuxOutcome::CommittedPendingReconciliation {
             detail: detail.clone(),
-            transaction: transaction.ok_or_else(|| {
-                ExecError::Ownership(format!(
-                    "{detail}; committed reconciliation omitted its transaction identity"
-                ))
-            })?,
+            transaction: transaction.as_uuid(),
         }),
-        zup_runtime::InstallOutcome::RecoveryRequired => Ok(LinuxOutcome::RecoveryRequired {
-            transaction: zup_runtime::discover_recovery(state_root)
-                .map_err(|error| ExecError::Ownership(error.to_string()))?
-                .into_iter()
-                .find_map(|status| match status {
-                    zup_runtime::RecoveryStatus::RecoveryRequired { transaction_id } => {
-                        Some(transaction_id)
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| ExecError::Ownership("recovery transaction unknown".into()))?,
+        zup_runtime::InstallOutcome::RecoveryRequired {
+            transaction,
+            detail,
+        } => Ok(LinuxOutcome::RecoveryRequired {
+            transaction: *transaction,
+            detail: detail.clone(),
         }),
         zup_runtime::InstallOutcome::Busy { .. } => Ok(LinuxOutcome::Busy),
         zup_runtime::InstallOutcome::Cancelled => Err(ExecError::Ownership("cancelled".into())),
@@ -200,51 +199,14 @@ pub(crate) fn refuse_redirected_hierarchy(state_root: &Path) -> Result<(), ExecE
     Ok(())
 }
 
-pub(crate) fn sweep_refresh(record: &zup_transaction::TransactionRecord) -> Result<(), ExecError> {
-    for node in &record.plan.nodes {
-        let zup_transaction::NodeKind::BackendOperation { .. } = &node.kind else {
-            continue;
-        };
-        let Some(backend) = &node.meta.backend else {
-            continue;
-        };
-        let request = crate::refresh::RefreshRequest::decode(&backend.payload)
-            .map_err(|error| ExecError::Executor(format!("invalid refresh payload: {error}")))?;
-        if !crate::refresh::database_present(&request) {
-            continue;
-        }
-        crate::refresh::ensure_refreshable(&request)?;
-        crate::refresh::run_refresh(&request)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn preflight_refresh(plan: &zup_transaction::TransactionPlan) -> Result<(), ExecError> {
-    for node in &plan.nodes {
-        let zup_transaction::NodeKind::BackendOperation { .. } = &node.kind else {
-            continue;
-        };
-        let Some(backend) = &node.meta.backend else {
-            return Err(ExecError::Executor(format!(
-                "a refresh node without its request: {}",
-                node.id
-            )));
-        };
-        let request = crate::refresh::RefreshRequest::decode(&backend.payload)
-            .map_err(|error| ExecError::Executor(format!("invalid refresh payload: {error}")))?;
-        crate::refresh::preflight(&request)?;
-    }
-    Ok(())
-}
-
 pub(crate) fn inspect_owned_matches_for(
-    ledger: Option<&InstallLedger>,
+    ledger: Option<&InstallationRecord>,
 ) -> BTreeMap<ResourceKey, bool> {
     let mut matches = BTreeMap::new();
     let Some(ledger) = ledger else {
         return matches;
     };
-    for (key, owned) in &ledger.resources {
+    for (key, owned) in &ledger.current.resources {
         let found = match owned {
             OwnedResource::File {
                 destination,

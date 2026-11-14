@@ -14,6 +14,15 @@ use crate::descriptor::ContentDescriptor;
 /// Why one blob could not be acquired from any source.
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
+    #[error("acquisition was cancelled")]
+    Cancelled,
+    #[error("{origin} HTTP {phase} timeout for {kind} {digest}")]
+    Timeout {
+        origin: String,
+        kind: &'static str,
+        digest: String,
+        phase: &'static str,
+    },
     /// The source is structurally unable to serve this descriptor. A source
     /// chain treats this as "ask the next one", not as a failure.
     #[error("{origin} does not carry {kind} {digest}")]
@@ -79,9 +88,11 @@ impl SourceError {
     /// Which source reported this.
     pub fn source(&self) -> &str {
         match self {
+            Self::Cancelled => "cancelled",
             Self::Absent { origin, .. }
             | Self::Corrupt { origin, .. }
-            | Self::Unavailable { origin, .. } => origin,
+            | Self::Unavailable { origin, .. }
+            | Self::Timeout { origin, .. } => origin,
         }
     }
 
@@ -91,7 +102,7 @@ impl SourceError {
     /// the same wherever the bytes come from, so a source that has nothing or
     /// has the wrong bytes says nothing about the next one.
     pub const fn is_tryable(&self) -> bool {
-        true
+        !matches!(self, Self::Cancelled)
     }
 }
 
@@ -114,6 +125,9 @@ pub enum AcquireError {
     /// The caller cancelled.
     #[error("acquisition was cancelled")]
     Cancelled,
+    /// An acquisition task panicked or could not be joined.
+    #[error("acquisition worker failed: {0}")]
+    Worker(String),
     /// No source could satisfy the closure.
     #[error("no source could acquire {kind} {digest}")]
     Unavailable {
@@ -163,15 +177,6 @@ impl AcquireError {
             path: path.into(),
             source,
         }
-    }
-
-    /// Whether this failure left the machine untouched.
-    ///
-    /// The acquisition barrier is the guarantee: every variant of this error
-    /// is raised before any application-owned mutation begins, so the answer
-    /// is always yes.
-    pub const fn left_machine_unchanged(&self) -> bool {
-        true
     }
 }
 
@@ -260,9 +265,11 @@ pub fn failing_digest(error: &AcquireError) -> Option<Sha256Digest> {
 
 fn source_digest(error: &SourceError) -> Option<Sha256Digest> {
     let digest = match error {
+        SourceError::Cancelled => return None,
         SourceError::Absent { digest, .. }
         | SourceError::Corrupt { digest, .. }
-        | SourceError::Unavailable { digest, .. } => digest,
+        | SourceError::Unavailable { digest, .. }
+        | SourceError::Timeout { digest, .. } => digest,
     };
     digest.parse().ok()
 }

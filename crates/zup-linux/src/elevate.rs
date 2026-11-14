@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use zup_core::SelectedScope;
+use zup_core::SessionId;
 use zup_protocol::{
     Capabilities, ExecuteOperation, Message, PROTOCOL_VERSION, PrepareOperation, SequenceTracker,
-    SessionId, WireEnvelope,
+    WireEnvelope,
 };
 
 use crate::error::{ExecError, PathError};
@@ -22,22 +23,13 @@ const ACCEPT_TIMEOUT: Duration = Duration::from_secs(600);
 
 const EXECUTE_TIMEOUT: Duration = Duration::from_secs(3600);
 
-#[derive(Debug, Clone)]
-pub(crate) struct ExpectedPlan {
-    pub digest: String,
-    pub target: zup_core::Target,
-
-    #[cfg(feature = "test-support")]
-    pub plan: zup_transaction::TransactionPlan,
-}
-
 pub(crate) fn plan_expected(
     request: &LinuxRunRequest,
     state_root: &PathBuf,
     roots: &MachineRoots,
     systemd: &crate::machine::SystemdRoots,
     expected_uid: u32,
-) -> Result<(PrepareOperation, ExpectedPlan), ExecError> {
+) -> Result<(PrepareOperation, zup_plan::DeploymentPlan), ExecError> {
     let carrier = crate::carrier::Carrier::open(&request.installer)?;
     let mut targets = carrier.package().build_plan()?.targets;
     if targets.len() != 1 {
@@ -62,18 +54,23 @@ pub(crate) fn plan_expected(
         .into());
     }
 
-    crate::machine::assess_machine_state_root(state_root, expected_uid, true).map_err(|error| {
-        PathError::Refused {
-            path: state_root.display().to_string(),
-            reason: error.to_string(),
-        }
+    crate::machine::resolve_machine_state_root(Some(state_root), roots, &build.installer.app.id)?;
+    crate::machine::assess_application_state_root(
+        roots,
+        &build.installer.app.id,
+        expected_uid,
+        true,
+    )
+    .map_err(|error| PathError::Refused {
+        path: state_root.display().to_string(),
+        reason: error.to_string(),
     })?;
     crate::machine::verify_ledger_trust(state_root, &build.installer.app.id, expected_uid)
         .map_err(|error| PathError::Refused {
             path: state_root.display().to_string(),
             reason: error.to_string(),
         })?;
-    let ledger_store = crate::ledger::LinuxLedgerStore::new(state_root);
+    let ledger_store = crate::ledger::LinuxInstallationStore::new(state_root);
     let ledger = ledger_store.load(&build.installer.app.id, SelectedScope::Machine)?;
     let selection = request.selection.clone();
     let host = crate::operation_host::LinuxOperationHost {
@@ -97,78 +94,31 @@ pub(crate) fn plan_expected(
     ledger_store.validate_plan(
         &build.installer.app.id,
         SelectedScope::Machine,
-        &build.installer.app.version,
         &prepared.transaction_plan,
     )?;
-    let digest = prepared.transaction_plan.fingerprint().to_hex();
     let intent = PrepareOperation {
-        recovery_id: None,
-        operation: request.action.name().to_owned(),
-        force: matches!(
-            request.action,
-            zup_runtime::Operation::Repair { force } if force
-        ),
-        install_dir_override: request
-            .selection
-            .install_directory
-            .as_ref()
-            .map(|directory| directory.display().to_string()),
-        selected_components: request.selection.enable.clone(),
-        disabled_components: request.selection.disable.clone(),
-        expected_plan_digest: Some(digest.clone()),
+        operation: zup_protocol::PrivilegedRequest::Deployment {
+            intent: Box::new(zup_plan::DeploymentIntent {
+                deployment: zup_plan::DeploymentSelection::from_plan(&prepared.transaction_plan),
+                action: prepared.action,
+                enable: request.selection.enable.clone(),
+                disable: request.selection.disable.clone(),
+                install_directory: request.selection.install_directory.clone(),
+            }),
+            expected_requirements: Some(Box::new(prepared.transaction_plan.requirements.clone())),
+        },
         app_id: build.installer.app.id.to_string(),
         app_version: build.installer.app.version.to_string(),
         scope: "machine".to_owned(),
         target,
         state_root: state_root.display().to_string(),
     };
-    Ok((
-        intent,
-        ExpectedPlan {
-            digest,
-            target,
-            #[cfg(feature = "test-support")]
-            plan: prepared.transaction_plan,
-        },
-    ))
-}
-
-#[cfg(feature = "test-support")]
-pub(crate) fn run_machine_elevated(
-    request: &LinuxRunRequest,
-    launcher: &impl PkexecLauncher,
-) -> Result<LinuxOutcome, ExecError> {
-    match run_machine_elevated_once(request, launcher) {
-        Err(ExecError::StalePlan) => run_machine_elevated_once(request, launcher),
-        outcome => outcome,
-    }
-}
-
-#[cfg(feature = "test-support")]
-pub(crate) fn run_machine_elevated_once(
-    request: &LinuxRunRequest,
-    launcher: &impl PkexecLauncher,
-) -> Result<LinuxOutcome, ExecError> {
-    let roots = MachineRoots::production();
-    let state_root =
-        crate::machine::resolve_machine_state_root(request.state_root.as_deref(), &roots)?;
-    let systemd = crate::machine::SystemdRoots::production();
-    let (intent, expected) = plan_expected(request, &state_root, &roots, &systemd, 0)?;
-    drive_elevated(
-        &request.installer,
-        &intent,
-        &expected.digest,
-        &expected.target,
-        launcher,
-        None,
-        None,
-    )
+    Ok((intent, prepared.transaction_plan))
 }
 
 pub(crate) fn drive_elevated(
     worker_exe: &std::path::Path,
     intent: &PrepareOperation,
-    expected_digest: &str,
     target: &zup_core::Target,
     launcher: &impl PkexecLauncher,
     events: Option<&tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>>,
@@ -230,15 +180,7 @@ pub(crate) fn drive_elevated(
         let _ = events.send(zup_runtime::RuntimeEvent::WorkerConnected);
     }
 
-    let outcome = drive_client(
-        &mut stream,
-        session,
-        intent,
-        expected_digest,
-        target,
-        events,
-        cancellation,
-    );
+    let outcome = drive_client(&mut stream, session, intent, target, events, cancellation);
 
     let launch_result = spawned
         .wait()
@@ -255,7 +197,6 @@ pub(crate) fn drive_client(
     stream: &mut UnixStream,
     session: SessionId,
     intent: &PrepareOperation,
-    expected_digest: &str,
     expected_target: &zup_core::Target,
     events: Option<&tokio::sync::broadcast::Sender<zup_runtime::RuntimeEvent>>,
     cancellation: Option<&zup_runtime::CancellationHandle>,
@@ -282,8 +223,27 @@ pub(crate) fn drive_client(
         &mut outgoing,
         Message::Prepare(intent.clone()),
     )?;
+    let prepare_deadline = std::time::Instant::now() + crate::socket::PREPARE_TIMEOUT;
     let prepared = loop {
-        match recv_or_fail(stream, session, &mut incoming, HANDSHAKE_TIMEOUT)?.message {
+        if cancellation.is_some_and(|cancel| cancel.is_cancelled()) {
+            send_msg(stream, session, &mut outgoing, Message::Cancel)?;
+            return Err(ExecError::Cancelled);
+        }
+        let remaining = prepare_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(ExecError::Worker("worker preparation timed out".into()));
+        }
+        let envelope = match recv_msg(
+            stream,
+            session,
+            &mut incoming,
+            remaining.min(Duration::from_millis(200)),
+        ) {
+            Ok(envelope) => envelope,
+            Err(RecvFail::Timeout) => continue,
+            Err(RecvFail::Failed(error)) => return Err(error),
+        };
+        match envelope.message {
             Message::Prepared(prepared) => break prepared,
             Message::Progress(report) => {
                 emit_progress(&report, events);
@@ -291,6 +251,15 @@ pub(crate) fn drive_client(
             }
             Message::Failed(failed) if failed.kind == zup_protocol::WorkerFailure::StalePlan => {
                 return Err(ExecError::StalePlan);
+            }
+            Message::Failed(zup_protocol::Failed {
+                kind: zup_protocol::WorkerFailure::RecoveryRequired { transaction },
+                message,
+            }) => {
+                return Err(ExecError::RecoveryRequired {
+                    transaction,
+                    detail: message,
+                });
             }
             Message::Failed(failed) => {
                 return Err(ExecError::Worker(format!(
@@ -305,14 +274,26 @@ pub(crate) fn drive_client(
     if prepared.app_id != intent.app_id
         || prepared.scope != intent.scope
         || prepared.target != intent.target
-        || prepared.operation != intent.operation
+        || prepared.operation != intent.operation.name()
     {
         return Err(ExecError::Worker(
             "the worker prepared a different operation".into(),
         ));
     }
-    if intent.recovery_id.is_none()
-        && prepared.plan_digest.to_lowercase() != expected_digest.to_lowercase()
+    prepared
+        .plan
+        .validate()
+        .map_err(|error| ExecError::Worker(error.to_string()))?;
+    if prepared.plan.fingerprint().to_hex() != prepared.plan_digest
+        || prepared.plan.target != prepared.target
+        || prepared.plan.requirements.app.id.to_string() != prepared.app_id
+        || prepared.plan.requirements.scope.to_string() != prepared.scope
+    {
+        return Err(ExecError::Worker(
+            "prepared graph differs from its authenticated response".into(),
+        ));
+    }
+    if matches!(&intent.operation, zup_protocol::PrivilegedRequest::Deployment { expected_requirements: Some(expected), .. } if expected.as_ref() != &prepared.plan.requirements)
     {
         return Err(ExecError::Worker(
             "the worker's plan differs from the confirmed one".into(),
@@ -330,6 +311,11 @@ pub(crate) fn drive_client(
     if cancellation.is_some_and(|cancel| cancel.is_cancelled()) {
         send_msg(stream, session, &mut outgoing, Message::Cancel)?;
         return Err(ExecError::Cancelled);
+    }
+    if let Some(events) = events {
+        let _ = events.send(zup_runtime::RuntimeEvent::PlanPrepared {
+            plan: prepared.plan.clone(),
+        });
     }
     send_msg(
         stream,
@@ -373,11 +359,35 @@ pub(crate) fn drive_client(
                     zup_protocol::WorkerOutcome::Committed => {
                         Ok(LinuxOutcome::Committed { version })
                     }
-                    zup_protocol::WorkerOutcome::RolledBack => Ok(LinuxOutcome::RolledBack),
+                    zup_protocol::WorkerOutcome::RolledBack => {
+                        if let (Some(events), Some(message)) = (events, completed.detail) {
+                            let _ = events.send(zup_runtime::RuntimeEvent::Failed {
+                                kind: zup_runtime::FailureKind::Transaction,
+                                message,
+                            });
+                        }
+                        Ok(LinuxOutcome::RolledBack)
+                    }
+                    zup_protocol::WorkerOutcome::RecoveryAssessed => {
+                        Ok(LinuxOutcome::Assessed(Box::new(
+                            serde_json::from_str(completed.detail.as_deref().ok_or_else(|| {
+                                ExecError::Worker("worker assessment missing".into())
+                            })?)
+                            .map_err(|error| ExecError::Worker(error.to_string()))?,
+                        )))
+                    }
                     zup_protocol::WorkerOutcome::Cancelled => Err(ExecError::Cancelled),
                     zup_protocol::WorkerOutcome::RecoveryRequired => {
+                        let detail = completed.detail.unwrap_or_else(|| "The transaction requires recovery before another operation can proceed".into());
+                        if let Some(events) = events {
+                            let _ = events.send(zup_runtime::RuntimeEvent::Failed {
+                                kind: zup_runtime::FailureKind::RecoveryRequired,
+                                message: detail.clone(),
+                            });
+                        }
                         Ok(LinuxOutcome::RecoveryRequired {
-                            transaction: completed.transaction_id.to_string(),
+                            transaction: Some(completed.transaction_id),
+                            detail,
                         })
                     }
                     zup_protocol::WorkerOutcome::CommittedPendingReconciliation => {
@@ -451,7 +461,7 @@ fn emit_progress(
         ProgressKind::PreflightStarted => zup_runtime::RuntimeEvent::PreflightStarted,
         ProgressKind::ResourceBlocked => zup_runtime::RuntimeEvent::ResourceBlocked {
             detail: report.detail.clone(),
-            pids: Vec::new(),
+            pids: report.blocked_pids.clone(),
         },
         ProgressKind::StagingStarted => zup_runtime::RuntimeEvent::StagingStarted {
             id: report.detail.clone(),
@@ -534,8 +544,12 @@ pub(crate) fn run_machine_loopback(
     roots: &MachineRoots,
     control: &zup_runtime::RuntimeControl,
 ) -> Result<LinuxOutcome, ExecError> {
-    let state_root =
-        crate::machine::resolve_machine_state_root(request.state_root.as_deref(), roots)?;
+    let carrier = crate::carrier::Carrier::open(&request.installer)?;
+    let state_root = crate::machine::resolve_machine_state_root(
+        request.state_root.as_deref(),
+        roots,
+        &carrier.package().plan().installer.app.id,
+    )?;
     run_machine_loopback_with_on(
         request,
         &state_root,
@@ -572,8 +586,12 @@ fn run_machine_loopback_with(
     systemd: &crate::machine::SystemdRoots,
     fault: crate::worker::WorkerFault,
 ) -> Result<LinuxOutcome, ExecError> {
-    let state_root =
-        crate::machine::resolve_machine_state_root(request.state_root.as_deref(), roots)?;
+    let carrier = crate::carrier::Carrier::open(&request.installer)?;
+    let state_root = crate::machine::resolve_machine_state_root(
+        request.state_root.as_deref(),
+        roots,
+        &carrier.package().plan().installer.app.id,
+    )?;
     run_machine_loopback_with_on(request, &state_root, roots, systemd, fault, None)
 }
 
@@ -601,7 +619,7 @@ fn run_machine_loopback_with_once(
     fault: crate::worker::WorkerFault,
     control: Option<&zup_runtime::RuntimeControl>,
 ) -> Result<LinuxOutcome, ExecError> {
-    let (intent, expected) = plan_expected(
+    let (intent, _) = plan_expected(
         request,
         state_root,
         roots,
@@ -618,13 +636,12 @@ fn run_machine_loopback_with_once(
         carrier_pin: None,
         fault,
     };
-    drive_loopback(context, &intent, &expected.digest, control)
+    drive_loopback(context, &intent, control)
 }
 
 fn drive_loopback(
     context: crate::worker::WorkerContext,
     intent: &PrepareOperation,
-    expected_digest: &str,
     control: Option<&zup_runtime::RuntimeControl>,
 ) -> Result<LinuxOutcome, ExecError> {
     let session = context.session;
@@ -639,16 +656,18 @@ fn drive_loopback(
         &mut client,
         session,
         intent,
-        expected_digest,
         &intent.target,
         control.map(|control| &control.events),
         control.map(|control| &control.cancellation),
     );
     drop(client);
-    match worker.join() {
-        Ok(Ok(_)) => outcome,
-        Ok(Err(error)) => Err(ExecError::Worker(error.to_string())),
-        Err(_) => Err(ExecError::Worker("the worker thread failed".into())),
+    let finished = worker
+        .join()
+        .map_err(|_| ExecError::Worker("the worker thread failed".into()))
+        .and_then(|result| result.map_err(into_run_error));
+    match (outcome, finished) {
+        (Ok(outcome), Ok(_)) => Ok(outcome),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
     }
 }
 
@@ -660,18 +679,16 @@ pub(crate) fn recover_machine(
     installer: &std::path::Path,
     state_root: &std::path::Path,
     id: uuid::Uuid,
+    request: &zup_transaction::RecoveryRequest,
     control: &zup_runtime::RuntimeControl,
 ) -> Result<LinuxOutcome, ExecError> {
     let carrier = crate::carrier::Carrier::open(installer)?;
     let app = &carrier.package().plan().installer.app;
     let intent = PrepareOperation {
-        recovery_id: Some(id),
-        operation: zup_protocol::privileged_operation::RECOVER.into(),
-        force: false,
-        install_dir_override: None,
-        selected_components: Vec::new(),
-        disabled_components: Vec::new(),
-        expected_plan_digest: None,
+        operation: zup_protocol::PrivilegedRequest::Recovery {
+            transaction: zup_core::TransactionId::from_uuid(id),
+            request: request.clone(),
+        },
         app_id: app.id.to_string(),
         app_version: app.version.to_string(),
         scope: "machine".into(),
@@ -685,7 +702,6 @@ pub(crate) fn recover_machine(
         return drive_elevated(
             installer,
             &intent,
-            "",
             carrier.target(),
             &crate::pkexec::SystemPkexec::resolve()?,
             Some(&control.events),
@@ -702,7 +718,7 @@ pub(crate) fn recover_machine(
         carrier_pin: None,
         fault: crate::worker::WorkerFault::None,
     };
-    drive_loopback(context, &intent, "", Some(control))
+    drive_loopback(context, &intent, Some(control))
 }
 
 #[cfg(test)]

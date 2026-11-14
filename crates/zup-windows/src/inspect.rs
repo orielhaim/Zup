@@ -1,4 +1,7 @@
-use std::fs::{self, File};
+use std::fs;
+use std::io::Read;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use zup_core::TargetPath;
 
 use thiserror::Error;
 use tracing::{info, info_span};
@@ -6,10 +9,9 @@ use windows_registry::Key;
 use zup_core::hash_reader;
 use zup_core::{SelectedScope, Target};
 use zup_plan::{
-    DesiredState, HostSnapshot, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
+    HostSnapshot, ObservedExtensionState, ObservedFile, ObservedFileAssociation,
     ObservedFileAssociationState, ObservedFileState, ObservedLauncher, ObservedLauncherState,
-    ObservedPathEntry, ObservedProtocol, ObservedProtocolState, ObservedService,
-    ObservedServiceState, SearchPath, TargetPath,
+    ObservedPathEntry, ObservedProtocol, ObservedProtocolState, ObservedService, SearchPath,
 };
 
 use crate::cmdline;
@@ -32,6 +34,9 @@ pub enum InspectError {
         source: std::io::Error,
     },
 
+    #[error("cannot inspect `{path}` while it is in use; close the application and retry")]
+    TargetInUse { path: String },
+
     #[error("target file `{path}` changed while being inspected")]
     TargetChangedDuringInspection { path: String },
 
@@ -45,9 +50,7 @@ pub enum InspectError {
     ServiceQueryFailed { name: String, reason: String },
 }
 
-pub fn inspect_target(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-) -> Result<HostSnapshot, InspectError> {
+pub fn inspect_target(target: &zup_plan::BoundDeployment) -> Result<HostSnapshot, InspectError> {
     inspect_target_with(target, &InspectReads::production())
 }
 
@@ -55,8 +58,7 @@ pub fn inspect_target(
 pub struct InspectReads {
     pub read_shortcut:
         fn(&TargetPath) -> Result<ObservedLauncherState, crate::shortcuts::ShortcutError>,
-    pub read_service:
-        fn(&str, &Target) -> Result<ObservedServiceState, crate::services::ServiceError>,
+    pub read_service: fn(&str, &Target) -> Result<crate::scm::ScmObservation, crate::scm::ScmError>,
     pub open_classes_key: fn(SelectedScope, &str) -> Result<Option<Key>, RegistryError>,
     pub open_environment_key: fn(SelectedScope) -> Result<Option<Key>, RegistryError>,
 }
@@ -65,7 +67,7 @@ impl InspectReads {
     pub fn production() -> Self {
         Self {
             read_shortcut: crate::shortcuts::read_shortcut,
-            read_service: crate::services::read_service,
+            read_service: crate::scm::query_service,
             open_classes_key: crate::registry::open_classes_key,
             open_environment_key: crate::registry::open_environment_key,
         }
@@ -75,7 +77,12 @@ impl InspectReads {
     pub fn without_native_readers() -> Self {
         Self {
             read_shortcut: |_| Ok(ObservedLauncherState::Absent),
-            read_service: |_, _| Ok(ObservedServiceState::Absent),
+            read_service: |_, _| {
+                Ok(crate::scm::ScmObservation {
+                    state: zup_plan::ObservedServiceState::Absent,
+                    registration: zup_core::ObservedServiceRegistration::Unclaimed,
+                })
+            },
             open_classes_key: crate::registry::open_classes_key,
             open_environment_key: crate::registry::open_environment_key,
         }
@@ -83,7 +90,7 @@ impl InspectReads {
 }
 
 pub fn inspect_target_with(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: &zup_plan::BoundDeployment,
     reads: &InspectReads,
 ) -> Result<HostSnapshot, InspectError> {
     let _span = info_span!("inspect_target").entered();
@@ -117,27 +124,23 @@ pub fn inspect_target_with(
 }
 
 pub fn inspect_files(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: &zup_plan::BoundDeployment,
 ) -> Result<Vec<ObservedFile>, InspectError> {
     let mut files = Vec::with_capacity(target.files.len());
-    let mut bytes_inspected = 0u64;
 
-    for file in &target.files {
-        let path = host_path(&file.destination);
-        let state = observe_file(&path, &mut bytes_inspected)?;
+    for file in target.fixed_files() {
+        let path = host_path(file.destination());
+        let state = inspect_file(&path)?;
         files.push(ObservedFile {
             key: file.key.clone(),
-            path: file.destination.clone(),
+            path: file.destination().clone(),
             state,
         });
     }
     Ok(files)
 }
 
-fn observe_file(
-    path: &std::path::Path,
-    bytes_inspected: &mut u64,
-) -> Result<ObservedFileState, InspectError> {
+pub fn inspect_file(path: &std::path::Path) -> Result<ObservedFileState, InspectError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -156,22 +159,68 @@ fn observe_file(
         return Ok(ObservedFileState::NonFile);
     }
 
-    let before = fs::metadata(path).map_err(|source| InspectError::TargetMetadataFailed {
-        path: path.display().to_string(),
-        source,
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .custom_flags(crate::bindings::FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|source| {
+            use windows::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
+            if source.raw_os_error().is_some_and(|error| {
+                error == ERROR_SHARING_VIOLATION.0 as i32 || error == ERROR_LOCK_VIOLATION.0 as i32
+            }) {
+                InspectError::TargetInUse {
+                    path: path.display().to_string(),
+                }
+            } else {
+                InspectError::TargetReadFailed {
+                    path: path.display().to_string(),
+                    source,
+                }
+            }
+        })?;
+    inspect_open_file(path, &mut file)
+}
+
+pub(crate) fn inspect_open_file(
+    path: &std::path::Path,
+    file: &mut std::fs::File,
+) -> Result<ObservedFileState, InspectError> {
+    let before = file
+        .metadata()
+        .map_err(|source| InspectError::TargetMetadataFailed {
+            path: path.display().to_string(),
+            source,
+        })?;
+    if !before.is_file()
+        || before.file_attributes() & crate::bindings::FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Ok(ObservedFileState::NonFile);
+    }
+    let (volume, object) =
+        crate::filesystem::identity(file).map_err(|source| InspectError::TargetReadFailed {
+            path: path.display().to_string(),
+            source: std::io::Error::other(source),
+        })?;
+    crate::filesystem::verify_payload_file(file).map_err(|source| {
+        InspectError::TargetReadFailed {
+            path: path.display().to_string(),
+            source: std::io::Error::other(source),
+        }
     })?;
-    let file = File::open(path).map_err(|source| InspectError::TargetReadFailed {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let (size, sha256) = hash_reader(file).map_err(|source| InspectError::TargetReadFailed {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let after = fs::metadata(path).map_err(|source| InspectError::TargetMetadataFailed {
-        path: path.display().to_string(),
-        source,
-    })?;
+    let (size, sha256) =
+        hash_reader((&mut *file).take(before.len().saturating_add(1))).map_err(|source| {
+            InspectError::TargetReadFailed {
+                path: path.display().to_string(),
+                source,
+            }
+        })?;
+    let after = file
+        .metadata()
+        .map_err(|source| InspectError::TargetMetadataFailed {
+            path: path.display().to_string(),
+            source,
+        })?;
 
     if before.len() != after.len() || before.len() != size {
         return Err(InspectError::TargetChangedDuringInspection {
@@ -186,12 +235,19 @@ fn observe_file(
         });
     }
 
-    *bytes_inspected = bytes_inspected.saturating_add(size);
-    Ok(ObservedFileState::File { size, sha256 })
+    Ok(ObservedFileState::File {
+        object: zup_core::NativeObjectIdentity::Windows {
+            volume,
+            file: object,
+        },
+        size,
+        sha256,
+        executable: None,
+    })
 }
 
 fn inspect_launchers(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: &zup_plan::BoundDeployment,
     read_shortcut: fn(
         &TargetPath,
     ) -> Result<ObservedLauncherState, crate::shortcuts::ShortcutError>,
@@ -214,7 +270,7 @@ fn inspect_launchers(
 }
 
 fn inspect_path_entries(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: &zup_plan::BoundDeployment,
 ) -> Result<Vec<ObservedPathEntry>, InspectError> {
     let mut cache: Vec<(SelectedScope, SearchPath)> = Vec::new();
     let mut out = Vec::with_capacity(target.path_entries.len());
@@ -246,8 +302,8 @@ fn inspect_path_entries(
 }
 
 fn inspect_services(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
-    read_service: fn(&str, &Target) -> Result<ObservedServiceState, crate::services::ServiceError>,
+    target: &zup_plan::BoundDeployment,
+    read_service: fn(&str, &Target) -> Result<crate::scm::ScmObservation, crate::scm::ScmError>,
 ) -> Result<Vec<ObservedService>, InspectError> {
     let mut out = Vec::with_capacity(target.services.len());
     for service in &target.services {
@@ -258,16 +314,17 @@ fn inspect_services(
             }
         })?;
         out.push(ObservedService {
+            registration: state.registration,
             key: service.key.clone(),
             id: service.id.clone(),
-            state,
+            state: state.state,
         });
     }
     Ok(out)
 }
 
 fn inspect_protocols(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: &zup_plan::BoundDeployment,
     reads: &InspectReads,
 ) -> Result<Vec<ObservedProtocol>, InspectError> {
     let mut out = Vec::with_capacity(target.protocols.len());
@@ -305,7 +362,7 @@ fn inspect_protocols(
 }
 
 fn inspect_file_associations(
-    target: &DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>,
+    target: &zup_plan::BoundDeployment,
     reads: &InspectReads,
 ) -> Result<Vec<ObservedFileAssociation>, InspectError> {
     let mut out = Vec::with_capacity(target.file_associations.len());

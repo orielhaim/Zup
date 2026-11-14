@@ -1,5 +1,5 @@
 use zup_core::{InstallScope, Installer, SelectedScope};
-use zup_plan::InstallLedger;
+use zup_plan::InstallationRecord;
 use zup_preset_protocol::{
     Capabilities, ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions,
     InstallationHealth, MaintenanceState, ProductIdentity, SelectionRequirement,
@@ -37,13 +37,14 @@ pub fn default_scope(installer: &Installer) -> SelectedScope {
 pub fn components(
     installer: &Installer,
     preselected: Option<&[zup_core::ComponentId]>,
-    installed: Option<&InstallLedger>,
+    installed: Option<&InstallationRecord>,
 ) -> Vec<ComponentOption> {
     installer
         .components
         .iter()
         .map(|component| {
-            let has = installed.map(|ledger| ledger.selected_components.contains(&component.id));
+            let has =
+                installed.map(|ledger| ledger.current.selected_components.contains(&component.id));
             let selected = match (preselected, has) {
                 (Some(preselected), _) => preselected.contains(&component.id),
                 (None, Some(has)) => has || component.required,
@@ -111,7 +112,7 @@ pub fn install_options(
     scope: SelectedScope,
     existing_version: Option<String>,
     preselected: Option<&[zup_core::ComponentId]>,
-    installed: Option<&InstallLedger>,
+    installed: Option<&InstallationRecord>,
 ) -> InstallOptions {
     let components = components(installer, preselected, installed);
     let groups = component_groups(installer, &components);
@@ -128,13 +129,22 @@ pub fn install_options(
 
 pub fn maintenance_state(
     installer: &Installer,
-    ledger: &InstallLedger,
+    ledger: &InstallationRecord,
     scope: SelectedScope,
 ) -> MaintenanceState {
     let components = components(installer, None, Some(ledger));
     let groups = component_groups(installer, &components);
     MaintenanceState {
-        installed_version: ledger.version.to_string(),
+        retained: ledger
+            .retained
+            .iter()
+            .rev()
+            .map(|snapshot| zup_preset_protocol::RetainedDeployment {
+                revision: snapshot.revision,
+                version: snapshot.version.to_string(),
+            })
+            .collect(),
+        installed_version: ledger.current.version.to_string(),
         components,
         groups,
         updates_enabled: installer.updates.is_some(),
@@ -162,9 +172,9 @@ pub fn capabilities(installer: &Installer, maintenance: bool) -> Capabilities {
     zup_artifact::preset::offers_for(installer, maintenance)
 }
 
-pub fn persisted_location(ledger: Option<&InstallLedger>) -> Option<String> {
+pub fn persisted_location(ledger: Option<&InstallationRecord>) -> Option<String> {
     ledger
-        .and_then(|ledger| ledger.install_directory.as_ref())
+        .map(|ledger| &ledger.directory)
         .and_then(|path| zup_core::Template::parse(&path.to_string()).ok())
         .map(|template| template.to_string())
 }

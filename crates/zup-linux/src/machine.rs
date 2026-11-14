@@ -22,6 +22,8 @@ pub enum MachineDestination {
     SharedData,
 
     MachineState,
+
+    Environment,
 }
 
 pub fn authorize_machine_destination(
@@ -54,6 +56,14 @@ pub fn authorize_machine_destination(
     if host.starts_with(&roots.state) {
         return Ok(MachineDestination::MachineState);
     }
+    if host.parent() == Some(roots.environment.as_path())
+        && host
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("99-zup-") && name.ends_with(".conf"))
+    {
+        return Ok(MachineDestination::Environment);
+    }
     Err(refused(
         "outside the machine payload, variable-data, and Zup state trees",
     ))
@@ -65,12 +75,12 @@ pub fn authorize_machine_install_directory(
 ) -> Result<(), PathError> {
     match authorize_machine_destination(host, roots)? {
         MachineDestination::Programs => Ok(()),
-        MachineDestination::SharedData | MachineDestination::MachineState => {
-            Err(PathError::PolicyRefused {
-                path: host.display().to_string(),
-                reason: "a machine install directory lives under the program tree".to_owned(),
-            })
-        }
+        MachineDestination::SharedData
+        | MachineDestination::MachineState
+        | MachineDestination::Environment => Err(PathError::PolicyRefused {
+            path: host.display().to_string(),
+            reason: "a machine install directory lives under the program tree".to_owned(),
+        }),
     }
 }
 
@@ -120,25 +130,37 @@ pub fn authorize_systemd_unit(unit: &str, roots: &SystemdRoots) -> Result<PathBu
 
 pub fn ensure_machine_state_root(
     roots: &MachineRoots,
+    app: &zup_core::AppId,
     expected_uid: u32,
 ) -> Result<PathBuf, PathError> {
-    ensure_machine_state_dir(&roots.state, expected_uid)?;
-    Ok(roots.state.clone())
+    verify_creation_parent(&roots.state, expected_uid)?;
+    create_or_verify_dir(&roots.state, MACHINE_STATE_DIR_MODE, expected_uid)?;
+    let apps = roots.state.join("apps");
+    create_or_verify_dir(&apps, MACHINE_STATE_DIR_MODE, expected_uid)?;
+    let state = roots.application_state(app);
+    ensure_machine_state_dir(&state, expected_uid)?;
+    crate::fs::sync_directory(&roots.state)?;
+    if let Some(parent) = roots.state.parent() {
+        crate::fs::sync_directory(parent)?;
+    }
+    Ok(state)
 }
 
 pub fn resolve_machine_state_root(
     requested: Option<&Path>,
     roots: &MachineRoots,
+    app: &zup_core::AppId,
 ) -> Result<PathBuf, PathError> {
+    let expected = roots.application_state(app);
     let state = requested
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| roots.state.clone());
-    if state != roots.state {
+        .unwrap_or_else(|| expected.clone());
+    if state != expected {
         return Err(PathError::StateRefused {
             path: state.display().to_string(),
             reason: format!(
                 "machine state is the worker's own state root ({}), never a client path",
-                roots.state.display()
+                expected.display()
             ),
         });
     }
@@ -350,6 +372,26 @@ pub fn assess_machine_state_root(
     Ok(MachineStateReadiness::Initialized)
 }
 
+pub fn assess_application_state_root(
+    roots: &MachineRoots,
+    app: &zup_core::AppId,
+    expected_uid: u32,
+    privacy: bool,
+) -> Result<MachineStateReadiness, PathError> {
+    let apps = roots.state.join("apps");
+    for container in [&roots.state, &apps] {
+        match crate::fs::OwnedDirectory::open(container) {
+            Ok(directory) => verify_owner_and_privacy_fd(&directory, container, expected_uid)?,
+            Err(PathError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                verify_creation_parent(container, expected_uid)?;
+                return Ok(MachineStateReadiness::Uninitialized);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    assess_machine_state_root(&roots.application_state(app), expected_uid, privacy)
+}
+
 fn require_initialized(
     readiness: MachineStateReadiness,
     state_root: &Path,
@@ -497,7 +539,7 @@ pub fn verify_ledger_trust(
     app_id: &zup_core::AppId,
     expected_uid: u32,
 ) -> Result<(), PathError> {
-    let path = crate::ledger::LinuxLedgerStore::new(state_root)
+    let path = crate::ledger::LinuxInstallationStore::new(state_root)
         .path_for(app_id, zup_core::SelectedScope::Machine);
     match std::fs::symlink_metadata(&path) {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -555,7 +597,10 @@ pub fn normalize_state_modes(state_root: &Path, expected_uid: u32) -> Result<(),
             continue;
         }
         match (name.as_str(), stat.kind) {
-            ("transactions" | "locks" | "objects", crate::fs::EntryKind::Directory) => {
+            (
+                "transactions" | "identities" | "locks" | "objects",
+                crate::fs::EntryKind::Directory,
+            ) => {
                 owned.chmod_child(
                     &name,
                     rustix::fs::Mode::from_bits_truncate(MACHINE_PRIVATE_DIR_MODE),
@@ -673,12 +718,12 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), PathError> {
 
 pub fn normalize_published_modes(
     state_root: &Path,
-    ledger: &zup_plan::InstallLedger,
+    ledger: &zup_plan::InstallationRecord,
 ) -> Result<(), PathError> {
-    let store = crate::ledger::LinuxLedgerStore::new(state_root);
+    let store = crate::ledger::LinuxInstallationStore::new(state_root);
     let ledger_path = store.path_for(&ledger.app_id, ledger.scope);
     set_mode(&ledger_path, MACHINE_PUBLIC_FILE_MODE)?;
-    for owned in ledger.resources.values() {
+    for owned in ledger.current.resources.values() {
         let zup_plan::OwnedResource::File { destination, .. } = owned else {
             continue;
         };
@@ -742,6 +787,7 @@ mod tests {
             base.path().join("opt"),
             base.path().join("var/lib/zup"),
             base.path().join("var/opt"),
+            base.path().join("environment.d"),
         );
         (base, roots)
     }
@@ -831,8 +877,16 @@ mod tests {
         let (base, roots) = isolated();
         std::fs::create_dir_all(roots.state.parent().expect("a parent")).expect("a parent");
         let uid = current_uid();
-        let state = ensure_machine_state_root(&roots, uid).expect("creation");
-        assert_eq!(state, roots.state);
+        let state = ensure_machine_state_root(
+            &roots,
+            &zup_core::AppId::new("com.example.state").unwrap(),
+            uid,
+        )
+        .expect("creation");
+        assert_eq!(
+            state,
+            roots.application_state(&zup_core::AppId::new("com.example.state").unwrap())
+        );
         let mode = std::fs::symlink_metadata(&state)
             .expect("stat")
             .permissions()
@@ -840,9 +894,21 @@ mod tests {
             & 0o777;
         assert_eq!(mode, MACHINE_STATE_DIR_MODE);
 
-        ensure_machine_state_root(&roots, uid).expect("verification");
+        ensure_machine_state_root(
+            &roots,
+            &zup_core::AppId::new("com.example.state").unwrap(),
+            uid,
+        )
+        .expect("verification");
 
-        assert!(ensure_machine_state_root(&roots, uid.wrapping_add(1)).is_err());
+        assert!(
+            ensure_machine_state_root(
+                &roots,
+                &zup_core::AppId::new("com.example.state").unwrap(),
+                uid.wrapping_add(1)
+            )
+            .is_err()
+        );
         let _ = base;
     }
 
@@ -853,7 +919,14 @@ mod tests {
         let elsewhere = base.path().join("elsewhere");
         std::fs::create_dir_all(&elsewhere).expect("a target");
         std::os::unix::fs::symlink(&elsewhere, &roots.state).expect("a planted link");
-        assert!(ensure_machine_state_root(&roots, current_uid()).is_err());
+        assert!(
+            ensure_machine_state_root(
+                &roots,
+                &zup_core::AppId::new("com.example.state").unwrap(),
+                current_uid()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -864,7 +937,14 @@ mod tests {
         let mut permissions = std::fs::metadata(&roots.state).expect("stat").permissions();
         permissions.set_mode(0o777);
         std::fs::set_permissions(&roots.state, permissions).expect("chmod");
-        assert!(ensure_machine_state_root(&roots, current_uid()).is_err());
+        assert!(
+            ensure_machine_state_root(
+                &roots,
+                &zup_core::AppId::new("com.example.state").unwrap(),
+                current_uid()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -928,6 +1008,7 @@ mod tests {
             base.path().join("opt"),
             base.path().join("var/lib/zup"),
             base.path().join("var/opt"),
+            base.path().join("environment.d"),
         );
         for root in [&roots.programs, &roots.shared_data] {
             std::fs::create_dir_all(root).expect("a root");

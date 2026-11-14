@@ -8,8 +8,20 @@ description = "Linux backend for zup"
 publish = false
 
 [features]
-online = ["dep:zup-update", "dep:zup-acquire", "dep:zstd", "dep:zup-presentation", "dep:tempfile"]
-test-support = ["dep:tempfile", "dep:zup-preset-ipc", "zup-preset-ipc/test-support"]
+online = [
+  "dep:zup-update",
+  "dep:zup-acquire",
+  "dep:zstd",
+  "dep:zup-presentation",
+]
+test-support = ["dep:zup-preset-ipc", "zup-preset-ipc/test-support"]
+test-service = ["dep:sd-notify"]
+test-faults = ["zup-transaction/test-faults"]
+
+[[bin]]
+name = "zup-test-linux-service"
+path = "src/bin/test_linux_service.rs"
+required-features = ["test-service"]
 
 [[bin]]
 name = "test-gui-install-preset"
@@ -22,6 +34,7 @@ path = "src/bin/test_gui_close_preset.rs"
 required-features = ["test-support"]
 
 [dependencies]
+zup-storage.workspace = true
 zup-presentation = { workspace = true, optional = true }
 zup-update = { workspace = true, features = ["bundle"], optional = true }
 zup-acquire = { workspace = true, optional = true }
@@ -31,17 +44,19 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 typed-path.workspace = true
 uuid.workspace = true
 xdg.workspace = true
+directories.workspace = true
 zup-artifact.workspace = true
 zup-binary.workspace = true
 zup-bundle.workspace = true
 zup-compose.workspace = true
 zup-core.workspace = true
+zup-bootstrap.workspace = true
 zup-plan.workspace = true
 zup-plugin-runtime.workspace = true
 zup-preset-host.workspace = true
@@ -65,6 +80,9 @@ zup-toolchain.workspace = true
 zup-transaction.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+futures-util = "0.3"
 rustix.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
 zbus_systemd.workspace = true
+sd-notify = { version = "0.5", optional = true }
+uzers = { version = "0.12.2", default-features = false }

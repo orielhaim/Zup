@@ -30,18 +30,18 @@ zup init --yes --name Acme --app-id com.acme.desktop \
   --target windows-x64 --target linux-arm64 --source dist
 ```
 
-| Flag | Meaning |
-| --- | --- |
-| `-y`, `--yes` | accept defaults without prompting |
-| `--name`, `--app-id` | display name and application ID |
-| `--target` | target platform; repeat or use a comma-separated list |
-| `--version` | starting version (default `0.1.0`) |
-| `--source` | payload directory |
-| `--main` | existing entry point relative to the source directory |
-| `--scope` | `user` (default), `machine`, or `either` |
-| `--frontend` | `gui` (default), `console`, or `headless` |
-| `--manifest` | where to write (default `zup.toml`) |
-| `--force` | replace an existing manifest |
+| Flag                 | Meaning                                               |
+| -------------------- | ----------------------------------------------------- |
+| `-y`, `--yes`        | accept defaults without prompting                     |
+| `--name`, `--app-id` | display name and application ID                       |
+| `--target`           | target platform; repeat or use a comma-separated list |
+| `--version`          | starting version (default `0.1.0`)                    |
+| `--source`           | payload directory                                     |
+| `--main`             | existing entry point relative to the source directory |
+| `--scope`            | `user` (default), `machine`, or `either`              |
+| `--frontend`         | `gui` (default), `console`, or `headless`             |
+| `--manifest`         | where to write (default `zup.toml`)                   |
+| `--force`            | replace an existing manifest                          |
 
 Version, scope, and frontend are not wizard questions. Zup sets `app.main` only
 when it finds exactly one compatible executable in the source directory, or when
@@ -70,6 +70,10 @@ scope = "user"
 
 [install.directory]
 user = "${location.user_data}/Acme"
+
+[[files]]
+id = "application"
+source = "**/*"
 ```
 
 Put the built application in `dist/`.

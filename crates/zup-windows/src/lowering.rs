@@ -9,9 +9,9 @@ use crate::shortcut_name::is_reserved_device_stem;
 #[cfg(windows)]
 use zup_core::Target;
 use zup_core::TargetOperatingSystem;
-use zup_plan::TargetPath;
+use zup_core::TargetPath;
 #[cfg(windows)]
-use zup_plan::TargetPathError;
+use zup_core::TargetPathError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetPathValidationError {

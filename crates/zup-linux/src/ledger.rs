@@ -1,23 +1,22 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use zup_plan::DeploymentEffects;
+use zup_plan::{DeploymentPlan, NodeKind};
 use zup_transaction::valid_file_key;
 
 use zup_core::{AppId, ResourceKey, SelectedScope};
-use zup_plan::{InstallLedger, ObservedServiceState, OwnedResource, ServiceState};
-use zup_transaction::{
-    NodeKind, OperationReceipt, TransactionNode, TransactionPhase, TransactionPlan,
-    TransactionRecord,
-};
+use zup_plan::InstallationRecord;
+use zup_transaction::{TransactionPhase, TransactionRecord};
 
 use crate::error::{ExecError, PathError};
 use crate::fs::OwnedDirectory;
-use crate::lowering::to_host_path;
 
-pub struct LinuxLedgerStore {
+pub struct LinuxInstallationStore {
     root: PathBuf,
 }
 
-impl LinuxLedgerStore {
+impl LinuxInstallationStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -30,69 +29,120 @@ impl LinuxLedgerStore {
         &self,
         app_id: &AppId,
         scope: SelectedScope,
-    ) -> Result<Option<InstallLedger>, ExecError> {
+    ) -> Result<Option<InstallationRecord>, ExecError> {
+        Ok(self
+            .load_evidence(app_id, scope)?
+            .map(|(installation, _)| installation))
+    }
+
+    /// Read-only planning metadata; execution requires protected journal evidence.
+    pub fn observe(
+        &self,
+        app_id: &AppId,
+        scope: SelectedScope,
+    ) -> Result<Option<InstallationRecord>, ExecError> {
         let path = self.path_for(app_id, scope);
         let bytes = match read_ledger(&path, scope) {
             Ok(bytes) => bytes,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(PathError::io(&(path), source).into()),
         };
-        let ledger: InstallLedger = serde_json::from_slice(&bytes)?;
-        if !zup_transaction::validate_ledger_identity(&ledger, app_id, scope) {
+        let ledger = InstallationRecord::decode(&bytes).map_err(|_| ExecError::LedgerInvalid)?;
+        if !zup_transaction::validate_installation_record(&ledger, app_id, scope) {
             return Err(ExecError::LedgerInvalid);
         }
         Ok(Some(ledger))
+    }
+
+    fn load_evidence(
+        &self,
+        app_id: &AppId,
+        scope: SelectedScope,
+    ) -> Result<Option<(InstallationRecord, TransactionRecord)>, ExecError> {
+        let Some(ledger) = self.observe(app_id, scope)? else {
+            return Ok(None);
+        };
+        use zup_transaction::TransactionStore;
+        let journal = zup_transaction::FilesystemTransactionStore::private_at(&self.root)
+            .load(&ledger.commit.transaction)
+            .map_err(|error| ExecError::Ownership(error.to_string()))?;
+        zup_transaction::verify_installation_evidence(&ledger, &journal)
+            .map_err(ExecError::Ownership)?;
+        Ok(Some((ledger, journal)))
+    }
+
+    fn load_authoritative(
+        &self,
+        app_id: &AppId,
+        scope: SelectedScope,
+        publishing: Option<zup_core::TransactionId>,
+    ) -> Result<Option<InstallationRecord>, ExecError> {
+        let Some((installation, journal)) = self.load_evidence(app_id, scope)? else {
+            return Ok(None);
+        };
+        if journal.phase != TransactionPhase::Committed
+            && publishing != Some(journal.transaction_id)
+        {
+            return Err(ExecError::RecoveryRequired {
+                transaction: Some(journal.transaction_id),
+                detail: journal.recovery_detail(),
+            });
+        }
+        Ok(Some(installation))
     }
 
     pub fn validate_plan(
         &self,
         app_id: &AppId,
         scope: SelectedScope,
-        app_version: &semver::Version,
-        plan: &TransactionPlan,
+        plan: &DeploymentPlan,
     ) -> Result<(), ExecError> {
         plan.validate()
             .map_err(|error| ExecError::Ownership(error.to_string()))?;
-        let ledger = self.load(app_id, scope)?;
-        let retired_ledger = retired_ledger_keys(plan)?;
-        let retired =
-            zup_transaction::validate_ownership(plan, scope, ledger.as_ref(), &retired_ledger)
-                .map_err(|error| ExecError::Ownership(error.to_string()))?;
+        let ledger = self.load_authoritative(app_id, scope, None)?;
+        let claims =
+            crate::persistent::discover(&self.root, scope, app_id, plan.target, ledger.as_ref())?;
+        zup_plan::validate_owned_service_inputs(plan, ledger.as_ref())
+            .map_err(ExecError::Ownership)?;
+        let retired_ledger = retired_owned_keys(plan)?;
+        zup_transaction::validate_ownership(
+            plan,
+            scope,
+            ledger.as_ref(),
+            &retired_ledger,
+            claims.as_ref(),
+        )
+        .map_err(|error| ExecError::Ownership(error.to_string()))?;
         for node in &plan.nodes {
             match &node.kind {
+                NodeKind::PersistentDirectory { .. } => {}
+                NodeKind::NativeService { operation } => {
+                    operation
+                        .source_node(&plan.nodes)
+                        .map_err(|error| ExecError::Ownership(error.to_string()))?;
+                }
+                NodeKind::ServiceControl { operation } => {
+                    crate::service_control::validate_binding(plan, operation, ledger.as_ref())
+                        .map_err(|_| ExecError::Ownership(node.id.to_string()))?
+                }
                 NodeKind::FileMutation { key, .. } => {
-                    if !valid_file_key(key, app_id, app_version, &plan.target) {
+                    if !valid_file_key(key, &plan.target) {
                         return Err(ExecError::Ownership(node.id.to_string()));
                     }
                 }
-                NodeKind::BackendOperation { key, .. } => {
-                    let Some(backend) = &node.meta.backend else {
-                        return Err(ExecError::Ownership(node.id.to_string()));
-                    };
-                    if backend.key != *key {
-                        return Err(ExecError::Ownership(node.id.to_string()));
-                    }
-                    if is_service_backend(&backend.key) {
-                        validate_service_apply(node, backend, ledger.as_ref())?;
-                        continue;
-                    }
-                    let request = crate::refresh::RefreshRequest::decode(&backend.payload)
-                        .map_err(|_| ExecError::Ownership(node.id.to_string()))?;
-                    if request.key() != *key {
-                        return Err(ExecError::Ownership(node.id.to_string()));
-                    }
-                }
-                NodeKind::BackendRemoval { key } => {
-                    let Some(backend) = &node.meta.backend else {
-                        return Err(ExecError::Ownership(node.id.to_string()));
-                    };
-                    if is_service_backend(&backend.key) && backend.key == *key {
-                        validate_service_removal(node, backend, ledger.as_ref(), &retired)?;
-                        continue;
-                    }
+                NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. } => {
                     return Err(ExecError::Ownership(node.id.to_string()));
                 }
-                NodeKind::FileRemoval { .. } | NodeKind::Barrier | NodeKind::StageFile { .. } => {}
+                NodeKind::Cleanup { .. }
+                | NodeKind::NativeCache { .. }
+                | NodeKind::FileRemoval { .. }
+                | NodeKind::Barrier
+                | NodeKind::StageFile { .. }
+                | NodeKind::RetainFile { .. }
+                | NodeKind::Generation { .. }
+                | NodeKind::Retention { .. }
+                | NodeKind::ReserveInstallation
+                | NodeKind::PublishInstallation => {}
             }
         }
         if let Some(preset) = &plan.preset {
@@ -101,17 +151,45 @@ impl LinuxLedgerStore {
         Ok(())
     }
 
-    pub fn publish_committed(
+    pub fn persistent_claims(
+        &self,
+        app_id: &AppId,
+        scope: SelectedScope,
+        target: zup_core::Target,
+    ) -> Result<Option<zup_plan::PersistentClaimSelection>, ExecError> {
+        let installation = self.load_authoritative(app_id, scope, None)?;
+        crate::persistent::discover(&self.root, scope, app_id, target, installation.as_ref())
+    }
+
+    pub fn reconcile_installation(
         &self,
         record: &TransactionRecord,
         scope: SelectedScope,
-    ) -> Result<InstallLedger, ExecError> {
+    ) -> Result<InstallationRecord, ExecError> {
         let store = zup_transaction::FilesystemTransactionStore::private_at(&self.root);
         zup_transaction::reconcile_committed(&store, record, &self.root, |record| {
             let ledger = self
-                .publish_ledger(record, scope)
-                .map_err(|error| error.to_string())?;
-            if !record.plan.uninstall && scope == SelectedScope::Machine {
+                .load_authoritative(&record.app_id, scope, None)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "committed installation record is missing".to_string())?;
+            if ledger.commit.transaction != record.transaction_id {
+                if ledger.id == record.plan.installation
+                    && ledger.target == record.target
+                    && (record.reconciliation == zup_transaction::ReconciliationState::Complete
+                        || ledger.retained.iter().any(|snapshot| {
+                            snapshot.transaction == record.transaction_id
+                                && snapshot.plan_hash == record.plan_hash
+                                && snapshot.requirements == record.plan.requirements
+                        }))
+                {
+                    return Ok(ledger);
+                }
+                return Err(
+                    "committed transaction is not rooted in the authoritative installation".into(),
+                );
+            }
+            zup_transaction::verify_installation_evidence(&ledger, record)?;
+            if !record.plan.transition.is_remove() && scope == SelectedScope::Machine {
                 crate::machine::normalize_published_modes(&self.root, &ledger)
                     .map_err(|error| error.to_string())?;
             }
@@ -127,100 +205,83 @@ impl LinuxLedgerStore {
         .map_err(ExecError::Executor)
     }
 
-    fn publish_ledger(
+    fn prepare_installation(
         &self,
         record: &TransactionRecord,
         scope: SelectedScope,
-    ) -> Result<InstallLedger, ExecError> {
-        if record.phase != TransactionPhase::Committed {
-            return Err(ExecError::LedgerUncommitted);
+    ) -> Result<InstallationRecord, ExecError> {
+        if record.phase != TransactionPhase::Applying {
+            return Err(ExecError::LedgerInvalid);
         }
         if record.scope != scope {
             return Err(ExecError::LedgerInvalid);
         }
         record.validate().map_err(|_| ExecError::LedgerInvalid)?;
         if record.plan.nodes.iter().any(|node| {
-            !matches!(node.kind, NodeKind::Barrier) && record.receipt(&node.id).is_none()
+            !node.kind.is_post_commit()
+                && !matches!(
+                    node.kind,
+                    NodeKind::Barrier
+                        | NodeKind::ReserveInstallation
+                        | NodeKind::PublishInstallation
+                )
+                && record.receipt(&node.id).is_none()
         }) {
             return Err(ExecError::LedgerUncommitted);
         }
-        let previous = self.load(&record.app_id, scope)?;
-        match zup_transaction::ledger_publication(record, previous.as_ref())
-            .map_err(|error| ExecError::Ownership(error.to_string()))?
+        let previous =
+            self.load_authoritative(&record.app_id, scope, Some(record.transaction_id))?;
+        if let Some(previous) = &previous
+            && previous.commit.transaction != record.transaction_id
         {
-            zup_transaction::LedgerPublication::Settled => {
-                return Ok(previous.unwrap_or_else(|| {
-                    InstallLedger::new(
-                        record.app_id.clone(),
-                        record.target,
-                        scope,
-                        record.transaction_id,
-                    )
-                }));
+            let store = zup_transaction::FilesystemTransactionStore::private_at(&self.root);
+            for node in &record.plan.nodes {
+                if let NodeKind::Retention { selection } = &node.kind {
+                    zup_transaction::validate_retention(&store, previous, selection, record)
+                        .map_err(ExecError::Ownership)?;
+                }
             }
-            zup_transaction::LedgerPublication::Current => {
-                cleanup_committed_files(record)?;
-                cleanup_removed_directories(record)?;
-                return Ok(previous.expect("published generation has a ledger"));
-            }
-            zup_transaction::LedgerPublication::Advance => {}
         }
-        if record.plan.uninstall {
-            let retired_ledger_keys = retired_ledger_keys(&record.plan)?;
+        if record.plan.transition.is_remove() {
+            let retired_owned_keys = retired_owned_keys(&record.plan)?;
             if let Some(ledger) = previous.as_ref()
-                && (retired_ledger_keys.len() != ledger.resources.len()
-                    || retired_ledger_keys
+                && ledger.commit.transaction != record.transaction_id
+                && (retired_owned_keys.len() != ledger.current.resources.len()
+                    || retired_owned_keys
                         .iter()
-                        .any(|key| !ledger.resources.contains_key(key)))
+                        .any(|key| !ledger.current.resources.contains_key(key)))
             {
                 return Err(ExecError::LedgerInvalid);
             }
-            let path = self.path_for(&record.app_id, scope);
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => return Err(PathError::io(&(path), source).into()),
-            }
-            cleanup_committed_files(record)?;
-            cleanup_removed_directories(record)?;
-            cleanup_application_state(&self.root, record)?;
-
-            return Ok(InstallLedger::new(
-                record.app_id.clone(),
-                record.target,
-                scope,
-                record.transaction_id,
-            ));
         }
-        let mut ledger = previous.unwrap_or_else(|| {
-            InstallLedger::new(
-                record.app_id.clone(),
-                record.target,
-                scope,
-                record.transaction_id,
-            )
-        });
-        if ledger.target != record.target {
-            return Err(ExecError::Ownership("target identity".into()));
-        }
-        zup_transaction::project_committed_files(record, &mut ledger)
+        let mut ledger = zup_transaction::prepare_installation_record(record, previous.as_ref())
             .map_err(|_| ExecError::LedgerInvalid)?;
-        for node in &record.plan.nodes {
-            if matches!(
-                &node.kind,
-                NodeKind::BackendOperation { .. } | NodeKind::BackendRemoval { .. }
-            ) {
-                publish_service_node(&mut ledger, record, node)?;
-            }
-        }
-        zup_transaction::retire_resources(&mut ledger, &retired_ledger_keys(&record.plan)?);
-        ledger.committed_transaction = record.transaction_id;
-        let path = self.path_for(&record.app_id, scope);
-        let bytes = serde_json::to_vec_pretty(&ledger)?;
-        write_ledger(&path, &bytes, scope)?;
-        cleanup_committed_files(record)?;
+        zup_transaction::retire_resources(&mut ledger, &retired_owned_keys(&record.plan)?);
+        Ok(ledger)
+    }
 
-        cleanup_removed_directories(record)?;
+    fn write_installation(
+        &self,
+        record: &TransactionRecord,
+        scope: SelectedScope,
+    ) -> Result<InstallationRecord, ExecError> {
+        let ledger = self.prepare_installation(record, scope)?;
+        let path = self.path_for(&record.app_id, scope);
+        let bytes = ledger.encode().map_err(|_| ExecError::LedgerInvalid)?;
+        let expected = match record.publication {
+            zup_transaction::PublicationState::Requested { record_hash }
+            | zup_transaction::PublicationState::Published { record_hash } => record_hash,
+            zup_transaction::PublicationState::NotRequested => {
+                return Err(ExecError::LedgerInvalid);
+            }
+        };
+        if zup_core::hash_bytes(&bytes) != expected {
+            return Err(ExecError::LedgerInvalid);
+        }
+        write_ledger(&path, &bytes, scope)?;
+        if self.load(&record.app_id, scope)?.as_ref() != Some(&ledger) {
+            return Err(ExecError::LedgerInvalid);
+        }
         Ok(ledger)
     }
 
@@ -230,7 +291,12 @@ impl LinuxLedgerStore {
         let records = zup_transaction::settled_records(&journals, app_id, scope, ledger.as_ref())
             .map_err(|error| match error {
             zup_transaction::ReconciliationError::RecoveryRequired(id) => {
-                ExecError::RecoveryRequired(id.to_string())
+                ExecError::RecoveryRequired {
+                    transaction: Some(id),
+                    detail: format!(
+                        "Transaction {id} must be recovered before ownership can be reconciled"
+                    ),
+                }
             }
             other => ExecError::Ownership(other.to_string()),
         })?;
@@ -239,7 +305,7 @@ impl LinuxLedgerStore {
                 TransactionPhase::Committed
                     if record.reconciliation == zup_transaction::ReconciliationState::Complete => {}
                 TransactionPhase::Committed => {
-                    self.publish_committed(&record, scope)?;
+                    self.reconcile_installation(&record, scope)?;
                 }
                 TransactionPhase::RolledBack => {}
                 _ => unreachable!("settled_records accepts only terminal journals"),
@@ -249,28 +315,38 @@ impl LinuxLedgerStore {
     }
 }
 
-fn retired_ledger_keys(plan: &TransactionPlan) -> Result<BTreeSet<ResourceKey>, ExecError> {
-    zup_transaction::retired_ledger_keys(plan, |node| {
-        service_ledger_key(node).ok_or_else(|| ExecError::Ownership(node.id.to_string()))
-    })
-}
+impl zup_transaction::InstallationPublisher for LinuxInstallationStore {
+    type Error = ExecError;
 
-fn is_service_backend(key: &ResourceKey) -> bool {
-    match key {
-        ResourceKey::Backend { id } => id
-            .as_str()
-            .starts_with(crate::service_ops::SERVICE_BACKEND_PREFIX),
-        _ => false,
+    fn read_current(
+        &self,
+        transaction: &TransactionRecord,
+    ) -> Result<Option<InstallationRecord>, Self::Error> {
+        self.load_authoritative(
+            &transaction.app_id,
+            transaction.scope,
+            Some(transaction.transaction_id),
+        )
+    }
+
+    fn prepare(&self, transaction: &TransactionRecord) -> Result<InstallationRecord, Self::Error> {
+        self.prepare_installation(transaction, transaction.scope)
+    }
+
+    fn publish(
+        &self,
+        transaction: &TransactionRecord,
+        observed: &zup_transaction::PublicationObservation,
+    ) -> Result<InstallationRecord, Self::Error> {
+        observed
+            .check_current(transaction, self.read_current(transaction)?)
+            .map_err(ExecError::Ownership)?;
+        self.write_installation(transaction, transaction.scope)
     }
 }
 
-fn service_ledger_key(node: &TransactionNode) -> Option<ResourceKey> {
-    let backend = node.meta.backend.as_ref()?;
-    if !is_service_backend(&backend.key) {
-        return None;
-    }
-    let payload = crate::service_ops::decode_payload(&backend.payload).ok()?;
-    Some(crate::service_ops::ledger_key_for_payload(&payload))
+fn retired_owned_keys(plan: &DeploymentPlan) -> Result<BTreeSet<ResourceKey>, ExecError> {
+    zup_transaction::retired_owned_keys(plan, |node| Err(ExecError::Ownership(node.id.to_string())))
 }
 
 fn validate_preset_plan(preset: &zup_core::InstalledPreset) -> Result<(), ExecError> {
@@ -289,125 +365,9 @@ fn validate_preset_plan(preset: &zup_core::InstalledPreset) -> Result<(), ExecEr
     Ok(())
 }
 
-fn validate_service_apply(
-    node: &TransactionNode,
-    backend: &zup_transaction::BackendOperation,
-    ledger: Option<&InstallLedger>,
-) -> Result<(), ExecError> {
-    let payload = crate::service_ops::decode_payload(&backend.payload)
-        .map_err(|_| ExecError::Ownership(node.id.to_string()))?;
-    let crate::service_ops::ServicePayload::Apply {
-        service,
-        unit,
-        binary_owned,
-        ..
-    } = payload
-    else {
-        return Err(ExecError::Ownership(node.id.to_string()));
-    };
-    if crate::service_ops::backend_key_for_unit(&unit) != backend.key {
-        return Err(ExecError::Ownership(node.id.to_string()));
-    }
-    if !binary_owned {
-        return Err(ExecError::Ownership(node.id.to_string()));
-    }
-    match ledger.and_then(|ledger| ledger.resources.get(&service.key)) {
-        None | Some(OwnedResource::Service { .. }) => Ok(()),
-        _ => Err(ExecError::Ownership(node.id.to_string())),
-    }
-}
-
-fn validate_service_removal(
-    node: &TransactionNode,
-    backend: &zup_transaction::BackendOperation,
-    ledger: Option<&InstallLedger>,
-    retired: &BTreeSet<&ResourceKey>,
-) -> Result<(), ExecError> {
-    let payload = crate::service_ops::decode_payload(&backend.payload)
-        .map_err(|_| ExecError::Ownership(node.id.to_string()))?;
-    let crate::service_ops::ServicePayload::Remove { key, owned, .. } = payload else {
-        return Err(ExecError::Ownership(node.id.to_string()));
-    };
-    if !retired.contains(&backend.key) {
-        return Err(ExecError::Ownership(node.id.to_string()));
-    }
-    if ledger.and_then(|ledger| ledger.resources.get(&key)) != Some(&owned) {
-        return Err(ExecError::Ownership(node.id.to_string()));
-    }
-    Ok(())
-}
-
-fn publish_service_node(
-    ledger: &mut InstallLedger,
-    record: &TransactionRecord,
-    node: &TransactionNode,
-) -> Result<(), ExecError> {
-    let NodeKind::BackendOperation { .. } = &node.kind else {
-        return Ok(());
-    };
-    let Some(backend) = &node.meta.backend else {
-        return Err(ExecError::LedgerInvalid);
-    };
-    if !is_service_backend(&backend.key) {
-        return Ok(());
-    }
-    let payload = crate::service_ops::decode_payload(&backend.payload)
-        .map_err(|_| ExecError::LedgerInvalid)?;
-    let crate::service_ops::ServicePayload::Apply { service, .. } = payload else {
-        return Err(ExecError::LedgerInvalid);
-    };
-    let Some(receipt) = record.receipt(&node.id) else {
-        return Ok(());
-    };
-    let OperationReceipt::Backend { payload, .. } = receipt else {
-        return Err(ExecError::LedgerInvalid);
-    };
-    let service_receipt: crate::service_ops::ServiceReceipt =
-        serde_json::from_slice(payload).map_err(|_| ExecError::LedgerInvalid)?;
-    let key = service.key.clone();
-    let previous = match &service.previous {
-        ObservedServiceState::InvalidService => match ledger.resources.get(&service.key) {
-            Some(OwnedResource::Service { previous, .. }) => previous.clone(),
-            _ => return Err(ExecError::LedgerInvalid),
-        },
-        ObservedServiceState::Absent => ServiceState::Absent,
-        ObservedServiceState::Service {
-            display_name,
-            command,
-            start,
-            ..
-        } => ServiceState::Registration {
-            display_name: display_name.clone(),
-            command: command.clone(),
-            start: *start,
-        },
-    };
-    let installed = ServiceState::Registration {
-        display_name: service.display_name.clone(),
-        command: service.command.clone(),
-        start: service.start,
-    };
-
-    let _ = service_receipt;
-    let old_previous = match ledger.resources.get(&key) {
-        Some(OwnedResource::Service { previous, .. }) => Some(previous.clone()),
-        _ => None,
-    };
-    ledger.resources.insert(
-        key,
-        OwnedResource::Service {
-            name: service.name.clone(),
-            privilege: service.privilege,
-            previous: old_previous.unwrap_or(previous),
-            installed,
-        },
-    );
-    Ok(())
-}
-
 fn read_ledger(path: &Path, scope: SelectedScope) -> std::io::Result<Vec<u8>> {
     if scope == SelectedScope::User {
-        return zup_transaction::read_private(path).map_err(|error| match error {
+        return zup_storage::read_private(path).map_err(|error| match error {
             private_fs::Error::Io(source) => source,
             other => std::io::Error::other(other),
         });
@@ -417,7 +377,7 @@ fn read_ledger(path: &Path, scope: SelectedScope) -> std::io::Result<Vec<u8>> {
 
 fn write_ledger(path: &Path, bytes: &[u8], scope: SelectedScope) -> Result<(), ExecError> {
     if scope == SelectedScope::User {
-        return zup_transaction::publish_private(path, bytes).map_err(|error| {
+        return zup_storage::publish_private(path, bytes).map_err(|error| {
             PathError::io(
                 path,
                 match error {
@@ -453,205 +413,74 @@ fn write_ledger(path: &Path, bytes: &[u8], scope: SelectedScope) -> Result<(), E
     Ok(())
 }
 
-fn cleanup_committed_files(record: &TransactionRecord) -> Result<(), ExecError> {
-    for node in &record.plan.nodes {
-        let Some(receipt) = record.receipt(&node.id) else {
-            continue;
-        };
-        let (backup, destination, size, sha256, prefix) = match receipt {
-            OperationReceipt::RemoveFile {
-                backup_path,
-                sha256,
-                size,
-                destination,
-                ..
-            } => (
-                to_host_path(backup_path).map_err(|_| ExecError::LedgerInvalid)?,
-                to_host_path(destination).map_err(|_| ExecError::LedgerInvalid)?,
-                *size,
-                *sha256,
-                "removed",
-            ),
-            OperationReceipt::ReplaceFile {
-                backup_path,
-                previous_sha256,
-                previous_size,
-                destination,
-                ..
-            } => (
-                PathBuf::from(backup_path),
-                PathBuf::from(destination),
-                *previous_size,
-                previous_sha256
-                    .parse()
-                    .map_err(|_| ExecError::LedgerInvalid)?,
-                "backup",
-            ),
-            _ => continue,
-        };
-        if !backup_artifact_owned(
-            &record.transaction_id,
-            &node.id,
-            prefix,
-            &backup,
-            &destination,
-        ) {
-            return Err(ExecError::LedgerInvalid);
-        }
-        let (directory, name) = match crate::fs::open_parent(&backup) {
-            Ok(opened) => opened,
-            Err(error) if error.is_not_found() => continue,
-            Err(error) => return Err(error.into()),
-        };
-        match directory.kind_or_absent(&name) {
-            Ok(None) => {}
-            Ok(Some(crate::fs::EntryKind::Regular)) => {
-                let current = match directory.stream_regular(&name) {
-                    Ok(current) => current,
-                    Err(error) if error.is_not_found() => continue,
-                    Err(error) => return Err(error.into()),
-                };
-                if current.size != size || current.sha256 != sha256 {
-                    return Err(ExecError::LedgerInvalid);
-                }
-                directory
-                    .remove_file(&name)
-                    .map_err(|_| ExecError::LedgerInvalid)?;
-                directory.sync()?;
-            }
-            Ok(Some(_)) => return Err(ExecError::LedgerInvalid),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
-fn backup_artifact_owned(
-    transaction: &zup_transaction::TransactionId,
-    node_id: &zup_transaction::OperationId,
-    prefix: &str,
-    backup: &Path,
-    destination: &Path,
-) -> bool {
-    let expected = crate::executor::backup_name(transaction, node_id.as_str(), prefix);
-    backup
-        .file_name()
-        .is_some_and(|leaf| leaf.to_string_lossy().into_owned() == expected)
-        && matches!((backup.parent(), destination.parent()), (Some(a), Some(b)) if !a.as_os_str().is_empty() && a == b)
-}
-
-fn cleanup_removed_directories(record: &TransactionRecord) -> Result<(), ExecError> {
-    let mut directories = BTreeSet::new();
-    for node in &record.plan.nodes {
-        if !matches!(node.kind, NodeKind::FileRemoval { .. }) {
-            continue;
-        }
-        let Some(removal) = &node.meta.removal else {
-            continue;
-        };
-        for directory in &removal.created_directories {
-            directories.insert(directory.clone());
-        }
-    }
-    let mut directories: Vec<_> = directories.into_iter().collect();
-    directories.sort_by_key(|path| std::cmp::Reverse(path.to_string().len()));
-    for directory in directories {
-        let path = to_host_path(&directory).map_err(|_| ExecError::LedgerInvalid)?;
-        match std::fs::remove_dir(&path) {
-            Ok(()) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                ) => {}
-            Err(source) => {
-                return Err(PathError::io(&(path), source).into());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn cleanup_application_state(root: &Path, uninstall: &TransactionRecord) -> Result<(), ExecError> {
-    let store = zup_transaction::FilesystemTransactionStore::private_at(root);
-    let records = zup_transaction::retired_records(&store, uninstall)
-        .map_err(|error| ExecError::Ownership(error.to_string()))?;
-    for record in records {
-        let id = record.transaction_id;
-        let directory = root.join("transactions").join(id.to_string());
-        if std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
-            std::fs::remove_dir_all(&directory)
-                .map_err(|source| PathError::io(&(directory.clone()), source))?;
-        } else {
-            return Err(ExecError::LedgerInvalid);
-        }
-    }
-    for directory in [root.join("transactions"), root.join("installations")] {
-        match std::fs::remove_dir(&directory) {
-            Ok(()) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                ) => {}
-            Err(source) => {
-                return Err(PathError::io(&(directory), source).into());
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zup_plan::FileOperationKind;
     use zup_transaction::TransactionStore;
-
-    fn transaction_id() -> zup_transaction::TransactionId {
-        zup_transaction::TransactionId::new_v7()
-    }
-
-    fn node(id: &str) -> zup_transaction::OperationId {
-        zup_transaction::OperationId::new(id)
-    }
 
     #[test]
     fn uninstall_reconciliation_preserves_a_later_committed_install() {
-        use zup_transaction::{NodeState, OperationReceipt, TransactionInput, TransactionRecord};
-
         let root = tempfile::tempdir().unwrap();
-        let journals = zup_transaction::FilesystemTransactionStore::private_at(root.path());
+        let journals =
+            zup_transaction::FilesystemTransactionStore::private_at(root.path().join("state"));
         let app = AppId::new("com.example.reconciliation").unwrap();
+        let installation = zup_core::InstallationId::new_v7();
+        let ledgers = LinuxInstallationStore::new(root.path().join("state"));
         let committed = |uninstall, version| {
-            let mut input = TransactionInput::new(zup_core::Target::LINUX_X64);
-            input.uninstall = uninstall;
-            let plan = zup_transaction::compile_transaction(&input).unwrap();
-            let mut record = TransactionRecord::new(
-                transaction_id(),
-                app.clone(),
-                SelectedScope::User,
-                semver::Version::new(version, 0, 0),
-                plan,
+            let previous = ledgers.load(&app, SelectedScope::User).unwrap();
+            let mut input = DeploymentEffects::new(
+                installation,
+                crate::requirements_fixture::requirements(
+                    zup_core::Target::LINUX_X64,
+                    zup_core::SelectedScope::User,
+                    app.as_str(),
+                    &semver::Version::new(version, 0, 0).to_string(),
+                ),
             );
-            record.phase = TransactionPhase::Committed;
-            for state in record.nodes.values_mut() {
-                *state = NodeState::Applied {
-                    receipt: Box::new(OperationReceipt::Control),
-                };
-            }
-            journals.create(&record).unwrap();
-            record
+            input.install_directory = Some(
+                zup_core::TargetPath::new(
+                    zup_core::Target::LINUX_X64,
+                    "/opt/reconciliation-fixture",
+                )
+                .unwrap(),
+            );
+            input.observed = previous.as_ref().map(|record| record.current.selection());
+            input.observed_transaction = previous.as_ref().map(|record| record.commit.transaction);
+            input.transition = if uninstall {
+                zup_plan::DeploymentTransition::Remove
+            } else {
+                zup_plan::DeploymentTransition::Deploy
+            };
+            let open = zup_transaction::TransactionCoordinator::new(journals.clone())
+                .begin(
+                    app.clone(),
+                    SelectedScope::User,
+                    semver::Version::new(version, 0, 0),
+                    zup_plan::compile_deployment(&input).unwrap(),
+                )
+                .unwrap();
+            let mut executor = crate::LinuxFileExecutor::new();
+            executor.register_plan(&open.record().plan).unwrap();
+            executor.set_transaction_id(open.transaction_id);
+            let settled = open.execute(&mut executor, &ledgers).unwrap();
+            assert_eq!(
+                settled.outcome,
+                zup_transaction::TransactionOutcome::Committed,
+                "{:?}; {:?}",
+                settled.record.failure,
+                settled.record.recovery_failure
+            );
+            settled.record
         };
-        let ledgers = LinuxLedgerStore::new(root.path());
+        let _initial = committed(false, 0);
         let uninstall = committed(true, 1);
         ledgers
-            .publish_committed(&uninstall, SelectedScope::User)
+            .reconcile_installation(&uninstall, SelectedScope::User)
             .unwrap();
         let install = committed(false, 2);
         ledgers.repair_committed(&app, SelectedScope::User).unwrap();
         let ledger = ledgers.load(&app, SelectedScope::User).unwrap().unwrap();
-        assert_eq!(ledger.committed_transaction, install.transaction_id);
+        assert_eq!(ledger.commit.transaction, install.transaction_id);
         assert_eq!(
             journals
                 .load(&install.transaction_id)
@@ -659,258 +488,17 @@ mod tests {
                 .reconciliation,
             zup_transaction::ReconciliationState::Complete
         );
+        let settled_uninstall = journals.load(&uninstall.transaction_id).unwrap();
         ledgers
-            .publish_committed(&uninstall, SelectedScope::User)
+            .reconcile_installation(&uninstall, SelectedScope::User)
             .unwrap();
+        assert_eq!(
+            journals.load(&uninstall.transaction_id).unwrap(),
+            settled_uninstall
+        );
         assert_eq!(
             ledgers.load(&app, SelectedScope::User).unwrap().unwrap(),
             ledger
         );
-    }
-
-    #[test]
-    fn only_journal_bound_sibling_backups_clean_up() {
-        let transaction = transaction_id();
-        let install = PathBuf::from("/tmp/zup-ledger-test/install");
-        let owned = install.join(crate::executor::backup_name(
-            &transaction,
-            "op-replace",
-            "backup",
-        ));
-        assert!(backup_artifact_owned(
-            &transaction,
-            &node("op-replace"),
-            "backup",
-            &owned,
-            &install.join("app.dat"),
-        ));
-        assert!(
-            !backup_artifact_owned(
-                &transaction_id(),
-                &node("op-replace"),
-                "backup",
-                &owned,
-                &install.join("app.dat"),
-            ),
-            "another transaction owns nothing here"
-        );
-        assert!(
-            !backup_artifact_owned(
-                &transaction,
-                &node("op-other"),
-                "backup",
-                &owned,
-                &install.join("app.dat"),
-            ),
-            "another operation owns nothing here"
-        );
-        assert!(
-            !backup_artifact_owned(
-                &transaction,
-                &node("op-replace"),
-                "removed",
-                &owned,
-                &install.join("app.dat"),
-            ),
-            "the wrong artifact kind owns nothing here"
-        );
-        assert!(
-            !backup_artifact_owned(
-                &transaction,
-                &node("op-replace"),
-                "backup",
-                &owned,
-                &PathBuf::from("/tmp/zup-ledger-test/elsewhere/app.dat"),
-            ),
-            "a backup never cleans outside its own directory"
-        );
-        assert!(
-            !backup_artifact_owned(
-                &transaction,
-                &node("op-replace"),
-                "backup",
-                &install.join("backup-foreign.bin"),
-                &install.join("app.dat"),
-            ),
-            "an unknown file is never owned"
-        );
-    }
-
-    fn cleanup_record(
-        transaction: &zup_transaction::TransactionId,
-        install: &Path,
-        old: &[u8],
-        new: &[u8],
-    ) -> TransactionRecord {
-        let (_, old_digest) = zup_core::hash_reader(old).expect("old bytes hash");
-        let (_, new_digest) = zup_core::hash_reader(new).expect("new bytes hash");
-        let destination = install.join("app.dat").display().to_string();
-        let backup = install
-            .join(crate::executor::backup_name(
-                transaction,
-                "op-replace",
-                "backup",
-            ))
-            .display()
-            .to_string();
-        let node = TransactionNode {
-            id: node("op-replace"),
-            phase: zup_transaction::Phase::FileMutation,
-            kind: NodeKind::FileMutation {
-                key: ResourceKey::File {
-                    destination: String::from("/tmp/whatever"),
-                },
-                delta: FileOperationKind::Replace,
-            },
-            declaration_order: 0,
-            meta: Default::default(),
-        };
-        let plan = TransactionPlan {
-            schema: zup_transaction::TRANSACTION_PLAN_SCHEMA,
-            target: zup_core::Target::parse("linux-x64").expect("a target"),
-            selected_components: Vec::new(),
-            install_directory: None,
-            uninstall: false,
-            retired_keys: Vec::new(),
-            nodes: vec![node.clone()],
-            dependencies: Vec::new(),
-            audit: Default::default(),
-            execution_order: vec![node.id.clone()],
-            rollback_order: vec![node.id.clone()],
-            preset: None,
-            observed_transaction: None,
-        };
-        let mut record = TransactionRecord::new(
-            *transaction,
-            AppId::new("com.example.tool").expect("an id"),
-            SelectedScope::User,
-            semver::Version::parse("1.0.0").expect("a version"),
-            plan,
-        );
-        record.phase = TransactionPhase::Committed;
-        record.nodes.insert(
-            node.id,
-            zup_transaction::NodeState::Applied {
-                receipt: Box::new(OperationReceipt::ReplaceFile {
-                    destination,
-                    previous_sha256: old_digest.to_hex(),
-                    previous_size: old.len() as u64,
-                    previous_mode: 0o644,
-                    backup_path: backup,
-                    new_sha256: new_digest.to_hex(),
-                    new_size: new.len() as u64,
-                    executable: false,
-                }),
-            },
-        );
-        record
-    }
-
-    #[test]
-    fn committed_cleanup_verifies_and_removes_a_journal_bound_backup() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        std::fs::write(install.join("app.dat"), b"v2").expect("the current file");
-        let transaction = transaction_id();
-        let backup = install.join(crate::executor::backup_name(
-            &transaction,
-            "op-replace",
-            "backup",
-        ));
-        std::fs::write(&backup, b"v1").expect("the backup");
-
-        let record = cleanup_record(&transaction, &install, b"v1", b"v2");
-        cleanup_committed_files(&record).expect("cleanup removes a verified backup");
-        assert!(!backup.exists(), "the backup is gone");
-        assert_eq!(
-            std::fs::read(install.join("app.dat")).expect("read"),
-            b"v2",
-            "the installed file is untouched"
-        );
-        cleanup_committed_files(&record).expect("repeated cleanup is idempotent");
-    }
-
-    #[test]
-    fn committed_cleanup_refuses_a_backup_with_unexpected_bytes() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        std::fs::write(install.join("app.dat"), b"v2").expect("the current file");
-        let transaction = transaction_id();
-        let backup = install.join(crate::executor::backup_name(
-            &transaction,
-            "op-replace",
-            "backup",
-        ));
-        std::fs::write(&backup, b"tampered").expect("the backup");
-
-        let record = cleanup_record(&transaction, &install, b"v1", b"v2");
-        assert!(
-            matches!(
-                cleanup_committed_files(&record),
-                Err(ExecError::LedgerInvalid)
-            ),
-            "a content mismatch fails the journal, not the filesystem"
-        );
-        assert_eq!(
-            std::fs::read(&backup).expect("read"),
-            b"tampered",
-            "the unexpected file is preserved"
-        );
-    }
-
-    #[test]
-    fn committed_cleanup_skips_genuinely_absent_artifacts() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let transaction = transaction_id();
-        let missing = root.path().join("gone").join("install");
-        let record = cleanup_record(&transaction, &missing, b"v1", b"v2");
-        cleanup_committed_files(&record).expect("a missing hierarchy cleans to nothing");
-
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        std::fs::write(install.join("app.dat"), b"v2").expect("the current file");
-        let record = cleanup_record(&transaction, &install, b"v1", b"v2");
-        cleanup_committed_files(&record).expect("an already-removed backup cleans to nothing");
-    }
-
-    #[test]
-    fn committed_cleanup_reports_an_uninspectable_parent() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let dir_as_file = root.path().join("dir-as-file");
-        std::fs::write(&dir_as_file, b"not a directory").expect("a blocking file");
-        let transaction = transaction_id();
-        let record = cleanup_record(&transaction, &dir_as_file, b"v1", b"v2");
-        let error = cleanup_committed_files(&record).expect_err("a blocked parent is never silent");
-        assert!(
-            matches!(error, ExecError::Path(_)),
-            "the filesystem failure propagates, not journal corruption: {error}"
-        );
-    }
-
-    #[test]
-    fn committed_cleanup_refuses_a_non_regular_backup_occupant() {
-        let root = tempfile::tempdir().expect("a temp directory");
-        let install = root.path().join("install");
-        std::fs::create_dir_all(&install).expect("install");
-        std::fs::write(install.join("app.dat"), b"v2").expect("the current file");
-        let transaction = transaction_id();
-        let backup = install.join(crate::executor::backup_name(
-            &transaction,
-            "op-replace",
-            "backup",
-        ));
-        std::fs::create_dir_all(&backup).expect("a blocking directory");
-
-        let record = cleanup_record(&transaction, &install, b"v1", b"v2");
-        assert!(
-            matches!(
-                cleanup_committed_files(&record),
-                Err(ExecError::LedgerInvalid)
-            ),
-            "a non-regular occupant fails the journal"
-        );
-        assert!(backup.is_dir(), "the occupant is preserved");
     }
 }

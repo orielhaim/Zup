@@ -1,5 +1,6 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
+use zup_core::TransactionId;
 
 use clap::{Args, Subcommand, ValueHint};
 use zup_acquire::CachePolicy;
@@ -7,7 +8,7 @@ use zup_core::{AppId, Frontend, SelectedScope};
 use zup_plan::LifecycleAction;
 use zup_presentation::{InstallerEvent, InstallerResult, OutputFormat, ProcessOutcome};
 use zup_runtime::{ExecutionPolicy, RuntimeRequest};
-use zup_transaction::{NodeKind, TransactionId, TransactionStore};
+use zup_transaction::TransactionStore;
 use zup_update::{ComponentSelection, TrustContext};
 
 use crate::lifecycle::{self, PreparedRuntime};
@@ -47,11 +48,6 @@ impl UninstallArgs {
 pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Result<()> {
     let executable = package::current_executable()?;
 
-    if zup_transaction::is_maintenance_path(&executable) {
-        launch_runner(&executable, &args, false)?;
-        return Ok(());
-    }
-
     if context.frontend != Frontend::Gui && package::open_bundle_if_present(&executable)?.is_some()
     {
         let scope = args.scope.map(Into::into);
@@ -67,9 +63,8 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
     }
 
     if args.ui {
-        return Err(miette::miette!(
-            "this build has no graphical surface; omit --ui or add --yes"
-        ));
+        let bundle = package::open_bundle(&executable)?;
+        return crate::frontend::graphical_uninstall(context, &executable, &bundle, &args);
     }
 
     if context
@@ -117,17 +112,12 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
             build.as_ref().map(|build| build.installer.frontend),
         )?,
     };
-    let result = if output == OutputFormat::Human {
+    if output == OutputFormat::Human {
         crate::execute::execute_with_policy(prepared, policy).map_err(Into::into)
     } else {
         crate::execute::execute_frontend(prepared, output, LifecycleAction::Uninstall)
             .map_err(Into::into)
-    };
-    if result.is_ok() {
-        zup_windows::cleanup_app_payload_overlays(&state_root, &app_id, scope)
-            .map_err(|error| miette::miette!("clean up payload overlays: {error}"))?;
     }
-    result
 }
 
 fn prepare_from_package(
@@ -155,9 +145,10 @@ fn prepare_from_ledger(
     state_root: PathBuf,
     frontend: Option<Frontend>,
 ) -> miette::Result<PreparedRuntime> {
-    let ledger = zup_windows::InstallLedgerStore::new(&state_root)
-        .load(app_id, scope)
+    let ledger = zup_windows::InstallationRecordStore::new(&state_root)
+        .observe(app_id, scope)
         .map_err(|error| miette::miette!("ledger: {error}"))?
+        .filter(|record| record.is_installed())
         .ok_or_else(|| miette::miette!("installation not found"))?;
     let execution = zup_windows::plan_target_lifecycle_with_frontend(
         LifecycleAction::Uninstall,
@@ -172,16 +163,26 @@ fn prepare_from_ledger(
     let payload_root =
         std::env::current_dir().map_err(|error| miette::miette!("working directory: {error}"))?;
     let request = RuntimeRequest {
-        intent: None,
+        operation: zup_runtime::RuntimeOperation::Deployment(Box::new(
+            zup_runtime::RuntimeDeployment {
+                plan: execution.clone(),
+
+                intent: zup_plan::DeploymentIntent {
+                    deployment: zup_plan::DeploymentSelection::from_plan(&execution),
+                    action: zup_plan::LifecycleAction::Uninstall,
+                    enable: Vec::new(),
+                    disable: Vec::new(),
+                    install_directory: None,
+                },
+                bootstrap: None,
+                release: None,
+            },
+        )),
         target: ledger.target,
         app_id: app_id.clone(),
-        app_version: ledger.version,
+        app_version: ledger.current.version,
         scope,
-        transaction_plan: execution,
         state_root: state_root.clone(),
-        recovery_id: None,
-        release: None,
-        bootstrap: None,
     };
     let backend = zup_windows::WindowsRuntimeBackend::from_path(payload_root, None)
         .map_err(|error| miette::miette!("payload source: {error}"))?;
@@ -205,13 +206,13 @@ fn resolve_scope(
             })?;
         return Ok((
             scope,
-            resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
+            resolve_state_root(app_id, state_root.map(Path::to_path_buf), scope)?,
         ));
     }
     if let Some(scope) = requested {
         return Ok((
             scope,
-            resolve_state_root(state_root.map(Path::to_path_buf), scope)?,
+            resolve_state_root(app_id, state_root.map(Path::to_path_buf), scope)?,
         ));
     }
     discover_scope(
@@ -228,9 +229,9 @@ fn discover_scope(
 ) -> miette::Result<(SelectedScope, PathBuf)> {
     let mut found = Vec::new();
     for scope in allowed.iter().copied() {
-        let root = resolve_state_root(state_root.map(Path::to_path_buf), scope)?;
-        let installed = zup_windows::InstallLedgerStore::new(&root)
-            .load(app_id, scope)
+        let root = resolve_state_root(app_id, state_root.map(Path::to_path_buf), scope)?;
+        let installed = zup_windows::InstallationRecordStore::new(&root)
+            .observe(app_id, scope)
             .map_err(|error| miette::miette!("ledger: {error}"))?
             .is_some();
         if installed {
@@ -248,93 +249,6 @@ fn discover_scope(
     Err(miette::miette!(
         "this application is not installed; specify --scope to inspect one installation"
     ))
-}
-
-/// in both cases waiting would mean the runner could never begin.
-/// ending that process's tree must not end the runner's. Every other child Zup
-pub fn launch_runner(
-    executable: &Path,
-    args: &UninstallArgs,
-    ui: bool,
-) -> miette::Result<std::process::Child> {
-    let interactive = crate::run::console_is_a_terminal()
-        && !args.non_interactive
-        && !args.yes
-        && args.output == Output::Human;
-    let mut command = runner_command(executable, "__uninstall_runner", interactive)?;
-    if ui {
-        command.arg("--ui");
-    }
-    if let Some(scope) = args.scope {
-        command.arg("--scope").arg(scope.as_str());
-    }
-    if let Some(value) = &args.app_id {
-        command.arg("--app-id").arg(value);
-    }
-    if let Some(value) = &args.state_root {
-        command.arg("--state-root").arg(value);
-    }
-    if args.non_interactive {
-        command.arg("--non-interactive");
-    }
-    if args.yes {
-        command.arg("--yes");
-    }
-    if args.plain {
-        command.arg("--plain");
-    }
-    if args.output != Output::Human {
-        command.arg("--output").arg(args.output.as_str());
-    }
-    command
-        .spawn()
-        .map_err(|error| miette::miette!("start the uninstall runner: {error}"))
-}
-
-fn runner_command(
-    executable: &Path,
-    kind: &str,
-    interactive: bool,
-) -> miette::Result<std::process::Command> {
-    use std::os::windows::process::CommandExt;
-    let temporary =
-        std::env::temp_dir().join(format!("zup-maintenance-{}.exe", uuid::Uuid::now_v7()));
-    zup_windows::copy_new_durable(executable, &temporary)
-        .map_err(|error| miette::miette!("prepare the maintenance helper: {error}"))?;
-    let mut command = std::process::Command::new(temporary);
-    command
-        .arg(kind)
-        .arg("--wait-pid")
-        .arg(std::process::id().to_string());
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    command.creation_flags(if interactive {
-        CREATE_NEW_CONSOLE
-    } else {
-        DETACHED_PROCESS
-    });
-    Ok(command)
-}
-
-pub fn launch_terminal_runner(executable: &Path) -> miette::Result<()> {
-    runner_command(executable, "__terminal_runner", true)?
-        .arg("--")
-        .args(std::env::args_os().skip(1))
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| miette::miette!("start the maintenance terminal: {error}"))
-}
-
-pub fn schedule_runner_cleanup(path: &Path) {
-    let path = path.to_string_lossy().replace('\'', "''");
-    let script = format!(
-        "Wait-Process -Id {} -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '{}' -Force -ErrorAction SilentlyContinue",
-        std::process::id(),
-        path
-    );
-    let _ = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-        .spawn();
 }
 
 #[cfg(test)]
@@ -358,6 +272,8 @@ mod tests {
             frontend: Frontend::Headless,
             updates: None,
             install: zup_core::Install {
+                generation_readers: Default::default(),
+                data: Vec::new(),
                 scope: zup_core::InstallScope::Machine,
                 directory: zup_core::InstallDirectory {
                     user: None,
@@ -379,16 +295,13 @@ mod tests {
         let (scope, root) = resolve_scope(&app, Some(&installer), None, None)
             .expect("a machine-wide application resolves without asking");
         assert!(
-            root.ends_with("zup"),
-            "machine scope uses the authoritative state root"
+            root.ends_with(Path::new("zup").join("apps").join(app.state_key().to_hex())),
+            "machine scope uses the application-specific authority root"
         );
         assert_eq!(scope, SelectedScope::Machine);
         assert!(resolve_scope(&app, Some(&installer), Some(SelectedScope::User), None).is_err());
     }
 }
-
-#[cfg(feature = "gui")]
-use zup_preset_protocol::UpdateState;
 
 #[derive(Debug, Args)]
 pub struct UpdateArgs {
@@ -440,7 +353,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
 
     let (scope, state_root, ledger) = committed_installation(context, installer, &args)?;
     let update_root = if scope == SelectedScope::Machine && args.state_root.is_none() {
-        peer_user_state_root()?
+        peer_user_state_root(&installer.app.id)?
     } else {
         state_root.clone()
     };
@@ -450,7 +363,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
             "{}",
             serde_json::to_string(&InstallerEvent::started(
                 installer.app.id.as_str(),
-                ledger.version.to_string(),
+                ledger.current.version.to_string(),
                 "update",
             ))
             .map_err(|error| miette::miette!("output: {error}"))?
@@ -468,8 +381,12 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
 
     let installed = ledger.release_identity().cloned();
     let sink = zup_acquire::ProgressSink::discard();
-    let trust =
-        TrustContext::from_update_config(config, installer.app.id.clone(), update_root.clone());
+    let trust = TrustContext::from_update_config(
+        config,
+        installer.app.id.clone(),
+        installer.install.scope,
+        update_root.clone(),
+    );
     let mut resolver = zup_update::ReleaseResolver::new(
         trust,
         zup_acquire::HostProfile::native(),
@@ -489,19 +406,19 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
         .block_on(resolver.resolve())
         .map_err(|error| miette::miette!("update check: {error}"))?;
 
-    let same_release = installed.as_ref().is_some_and(|installed| {
-        installed.release == resolved.descriptor.release_digest
-            && installed.catalog == resolved.descriptor.catalog.digest
-    });
-    let newer = match &installed {
-        Some(installed) => acquire::is_newer(installed, &resolved.descriptor.version),
-        None => true,
+    let candidate = zup_core::ReleaseCandidate {
+        version: resolved
+            .descriptor
+            .version
+            .parse()
+            .map_err(|error: semver::Error| miette::miette!("update version: {error}"))?,
+        release: resolved.descriptor.release_digest,
     };
-    if same_release || !newer {
+    if !candidate.is_update_for(&ledger.current.version, installed.as_ref()) {
         return up_to_date(
             output,
             installer.app.id.as_str(),
-            ledger.version.to_string(),
+            ledger.current.version.to_string(),
             scope,
             machine_run,
         );
@@ -510,7 +427,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
         return update_available(
             output,
             installer.app.id.as_str(),
-            ledger.version.to_string(),
+            ledger.current.version.to_string(),
             resolved.descriptor.version.clone(),
             scope,
         );
@@ -520,7 +437,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     if output == OutputFormat::Human {
         println!(
             "update available: {} → {}",
-            ledger.version, resolved.descriptor.version
+            ledger.current.version, resolved.descriptor.version
         );
         if std::io::stderr().is_terminal() {
             eprintln!("Acquiring the update…");
@@ -532,10 +449,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
             resolved,
             ComponentSelection::All,
         ))
-        .map_err(|error| {
-            debug_assert!(error.left_machine_unchanged());
-            miette::miette!("update acquisition: {error}")
-        })?;
+        .map_err(|error| miette::miette!("update acquisition: {error}"))?;
     if output == OutputFormat::Human {
         eprintln!("  {}", acquired.estimate());
     }
@@ -546,6 +460,7 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     };
     lifecycle::run_acquired_transition(
         acquire::Request {
+            state_root: Some(state_root),
             scope: Some(scope),
             ..acquire::Request::new(LifecycleAction::Upgrade)
         },
@@ -555,110 +470,20 @@ pub fn run_update(context: RuntimeContext, args: UpdateArgs) -> miette::Result<(
     )
 }
 
-#[cfg(feature = "gui")]
-pub fn from_maintenance_surface(
-    executable: &Path,
-    scope: SelectedScope,
-    request: &zup_runtime::UpdateRequest,
-    status: &mut dyn FnMut(UpdateState),
-) -> Result<(), String> {
-    let bundle = package::open_bundle(executable).map_err(|error| error.to_string())?;
-    let build = package::target_plan(&bundle).map_err(|error| error.to_string())?;
-    let installer = &build.installer;
-    let config = installer
-        .updates
-        .as_ref()
-        .ok_or_else(|| "this application is not configured for updates".to_owned())?;
-    let root = resolve_state_root(None, scope).map_err(|error| error.to_string())?;
-    let ledger = zup_windows::InstallLedgerStore::new(&root)
-        .load(&installer.app.id, scope)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "the installed application was not found".to_owned())?;
-    let current = ledger.version.to_string();
-    let update_root = if scope == SelectedScope::Machine {
-        peer_user_state_root().map_err(|error| error.to_string())?
-    } else {
-        root.clone()
-    };
-    let context = TrustContext::from_update_config(config, installer.app.id.clone(), update_root);
-    let (sink, receiver) = zup_acquire::ProgressSink::channel(64);
-    let emitter = zup_presentation::acquisition_thread(receiver);
-    let tokio = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| error.to_string())?;
-
-    status(UpdateState::Checking {
-        detail: "Resolving the update channel…".into(),
-    });
-    let resolver = zup_update::ReleaseResolver::new(
-        context,
-        zup_acquire::HostProfile::native(),
-        CachePolicy::Auto,
-        sink,
-    )
-    .map_err(|error| error.to_string())?;
-    let resolved = tokio
-        .block_on(resolver.resolve())
-        .map_err(|error| error.to_string())?;
-    let available = resolved.descriptor.version.clone();
-    if semver::Version::parse(&available).map_err(|error| error.to_string())? <= ledger.version {
-        status(UpdateState::UpToDate { current });
-        return Ok(());
-    }
-    if matches!(request, zup_runtime::UpdateRequest::Check) {
-        status(UpdateState::Available { current, available });
-        return Ok(());
-    }
-    if let zup_runtime::UpdateRequest::Install {
-        version: Some(expected),
-    } = request
-        && expected != &available
-    {
-        return Err(
-            "The available update changed. Check for updates again before installing.".into(),
-        );
-    }
-    let acquired = tokio
-        .block_on(acquire::acquire_closure(
-            &resolver,
-            resolved,
-            ComponentSelection::All,
-        ))
-        .map_err(|error| error.to_string())?;
-    status(UpdateState::Installing {
-        detail: acquired.estimate().to_string(),
-    });
-    lifecycle::run_acquired_transition(
-        acquire::Request {
-            scope: Some(scope),
-            ..acquire::Request::new(LifecycleAction::Upgrade)
-        },
-        &acquired,
-        OutputFormat::Human,
-        ExecutionPolicy::Interactive,
-    )
-    .map_err(|error| error.to_string())?;
-    let _ = emitter;
-    status(UpdateState::UpToDate { current: available });
-    Ok(())
-}
-
 fn committed_installation(
     context: RuntimeContext,
     installer: &zup_core::Installer,
     args: &UpdateArgs,
-) -> miette::Result<(SelectedScope, PathBuf, zup_plan::InstallLedger)> {
+) -> miette::Result<(SelectedScope, PathBuf, zup_plan::InstallationRecord)> {
     let scope = crate::terminal::choose_scope(
         installer,
         args.scope.map(Into::into),
         context.may_prompt(args.non_interactive, args.yes),
         args.plain,
     )?;
-    let state_root = resolve_state_root(args.state_root.clone(), scope)?;
-    let ledger = zup_windows::InstallLedgerStore::new(&state_root)
-        .load(&installer.app.id, scope)
+    let state_root = resolve_state_root(&installer.app.id, args.state_root.clone(), scope)?;
+    let ledger = zup_windows::InstallationRecordStore::new(&state_root)
+        .observe(&installer.app.id, scope)
         .map_err(|error| miette::miette!("installation ledger: {error}"))?
         .ok_or_else(|| {
             miette::miette!("this application is not installed in the selected scope")
@@ -759,7 +584,11 @@ fn update_available(
 
 #[derive(Debug, Args)]
 pub struct RecoveryArgs {
-    #[arg(long)]
+    #[arg(long, conflicts_with = "decision")]
+    pub assess: bool,
+    #[arg(long, value_name = "JSON")]
+    pub decision: Option<PathBuf>,
+    #[arg(long = "transaction")]
     pub transaction_id: uuid::Uuid,
     #[arg(long, value_enum)]
     pub scope: Option<Scope>,
@@ -768,12 +597,11 @@ pub struct RecoveryArgs {
 
     #[arg(long, hide = true, value_hint = clap::ValueHint::DirPath)]
     pub state_root: Option<PathBuf>,
-    #[arg(long, hide = true, value_hint = clap::ValueHint::DirPath)]
-    pub payload_root: Option<PathBuf>,
 }
 
 pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Result<()> {
     let _ = context;
+    let recovery_request = crate::recovery_request(args.assess, args.decision.as_deref())?;
     let executable = package::current_executable()?;
     let bundle = package::open_bundle_if_present(&executable)?;
     let embedded = bundle.as_ref().map(package::target_plan).transpose()?;
@@ -789,35 +617,42 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             .map(Into::into)
             .ok_or_else(|| miette::miette!("recovery requires --scope user or --scope machine"))?,
     };
-    let state_root = resolve_state_root(args.state_root, scope)?;
     let id = TransactionId::from_uuid(args.transaction_id);
+    let state_root = match &embedded {
+        Some(build) => resolve_state_root(&build.installer.app.id, args.state_root, scope)?,
+        None if scope == SelectedScope::User => {
+            let root = args.state_root.ok_or_else(|| {
+                miette::miette!("recovery without an embedded application requires --state-root")
+            })?;
+            let root = std::path::absolute(root)
+                .map_err(|error| miette::miette!("state root: {error}"))?;
+            let record = zup_transaction::FilesystemTransactionStore::private_at(&root)
+                .load(&id)
+                .map_err(|error| miette::miette!("transaction: {error}"))?;
+            resolve_state_root(&record.app_id, Some(root), scope)?
+        }
+        None => {
+            return Err(miette::miette!(
+                "machine recovery uses the package embedded in this installer"
+            ));
+        }
+    };
     if scope == SelectedScope::Machine {
         let build = embedded.ok_or_else(|| {
             miette::miette!("machine recovery uses the package embedded in this installer")
         })?;
-        let plan = zup_transaction::compile_transaction(&zup_transaction::TransactionInput::new(
-            build.installer.target,
-        ))
-        .map_err(|error| miette::miette!("transaction: {error}"))?;
         let request = RuntimeRequest {
-            intent: None,
+            operation: zup_runtime::RuntimeOperation::Recovery {
+                transaction: id,
+                request: recovery_request,
+            },
             target: build.installer.target,
             app_id: build.installer.app.id.clone(),
             app_version: build.installer.app.version.clone(),
             scope,
-            transaction_plan: plan,
             state_root,
-            recovery_id: Some(id),
-            release: None,
-            bootstrap: None,
         };
-        let backend = zup_windows::WindowsRuntimeBackend::for_recovery(
-            args.payload_root.unwrap_or(executable),
-            &request.state_root,
-            scope,
-            id,
-        )
-        .map_err(|error| miette::miette!("payload recovery: {error}"))?;
+        let backend = zup_windows::WindowsRuntimeBackend::for_recovery();
         let prepared = PreparedRuntime {
             request,
             backend: std::sync::Arc::new(backend),
@@ -837,23 +672,6 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     let record = zup_transaction::FilesystemTransactionStore::private_at(&state_root)
         .load(&id)
         .map_err(|error| miette::miette!("transaction: {error}"))?;
-    let stages_files = record
-        .plan
-        .nodes
-        .iter()
-        .any(|node| matches!(node.kind, NodeKind::StageFile { .. }));
-    if stages_files && args.payload_root.is_none() && bundle.is_none() {
-        return Err(miette::miette!(
-            "a file transaction needs the payload it staged; pass --payload-root"
-        ));
-    }
-    let payload_root = args.payload_root.unwrap_or_else(|| {
-        if bundle.is_some() {
-            executable
-        } else {
-            std::env::current_dir().unwrap_or_else(|_| state_root.clone())
-        }
-    });
     let target = embedded
         .as_ref()
         .map(|build| build.installer.target)
@@ -864,24 +682,17 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
             record.target
         ));
     }
-    let backend = zup_windows::WindowsRuntimeBackend::for_recovery(
-        payload_root,
-        &state_root,
-        record.scope,
-        id,
-    )
-    .map_err(|error| miette::miette!("payload recovery: {error}"))?;
+    let backend = zup_windows::WindowsRuntimeBackend::for_recovery();
     let request = RuntimeRequest {
-        intent: None,
+        operation: zup_runtime::RuntimeOperation::Recovery {
+            transaction: id,
+            request: recovery_request,
+        },
         target,
         app_id: record.app_id.clone(),
         app_version: record.app_version,
         scope: record.scope,
-        transaction_plan: record.plan.clone(),
         state_root,
-        recovery_id: Some(id),
-        bootstrap: None,
-        release: None,
     };
     let prepared = PreparedRuntime {
         request,
@@ -900,25 +711,30 @@ pub fn run_recovery(context: RuntimeContext, args: RecoveryArgs) -> miette::Resu
     }
 }
 
-pub fn state_root(scope: SelectedScope) -> miette::Result<PathBuf> {
-    zup_windows::default_state_root(scope).map_err(|error| miette::miette!("{error}"))
+pub fn state_root(app: &AppId, scope: SelectedScope) -> miette::Result<PathBuf> {
+    zup_windows::default_state_root(app, scope).map_err(|error| miette::miette!("{error}"))
 }
 
 pub fn resolve_state_root(
+    app: &AppId,
     explicit: Option<PathBuf>,
     scope: SelectedScope,
 ) -> miette::Result<PathBuf> {
-    zup_windows::resolve_state_root(explicit, scope).map_err(|error| miette::miette!("{error}"))
+    zup_windows::resolve_state_root(app, explicit, scope)
+        .map_err(|error| miette::miette!("{error}"))
 }
 
-pub fn peer_user_state_root() -> miette::Result<PathBuf> {
-    state_root(SelectedScope::User)
+pub fn peer_user_state_root(app: &AppId) -> miette::Result<PathBuf> {
+    state_root(app, SelectedScope::User)
 }
 
 pub fn action_name(action: LifecycleAction) -> &'static str {
     match action {
+        LifecycleAction::Cleanup { .. } => "cleanup",
         LifecycleAction::Install => "install",
         LifecycleAction::Upgrade => "upgrade",
+        LifecycleAction::Downgrade => "downgrade",
+        LifecycleAction::Rollback { .. } => "rollback",
         LifecycleAction::Modify => "modify",
         LifecycleAction::Repair { .. } => "repair",
         LifecycleAction::Uninstall => "uninstall",

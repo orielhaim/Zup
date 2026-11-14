@@ -10,17 +10,19 @@ build = "build.rs"
 
 [features]
 default = []
-# Ahead-of-time compilation, for the build host only. A machine that installs
-# applications loads precompiled plugins and never needs a compiler.
-compiler = ["wasmtime/cranelift", "wasmtime/all-arch"]
+compiler = ["wasmtime/all-arch"]
 
 [dependencies]
 sha2.workspace = true
 thiserror.workspace = true
-wasmtime.workspace = true
+wasmtime = { workspace = true, features = ["cranelift"] }
+wasmtime-wasi.workspace = true
+tokio.workspace = true
 zup-plugin-abi.workspace = true
 
 [dev-dependencies]
+toml.workspace = true
+zup-plugin-abi = { workspace = true, features = ["test-fixture"] }
 rstest.workspace = true
 wit-component.workspace = true
 wit-parser.workspace = true

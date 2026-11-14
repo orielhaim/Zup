@@ -93,7 +93,7 @@ impl EmbeddedBundle {
         self.package.payload_source()
     }
 
-    pub fn plan(&self) -> &zup_bundle::PortableBuildPlan {
+    pub fn plan(&self) -> &zup_core::PackagePlan {
         self.package.plan()
     }
 
@@ -116,22 +116,22 @@ impl EmbeddedBundle {
         self.plan().installer.frontend
     }
 
-    pub fn plugin_artifacts(&self) -> &[zup_bundle::PluginArtifact] {
+    pub fn plugin_artifacts(&self) -> &[zup_core::PluginArtifact] {
         self.package.plugin_artifacts()
     }
 
-    pub fn plugin_artifact(&self, id: &zup_core::PluginId) -> Option<&zup_bundle::PluginArtifact> {
+    pub fn plugin_artifact(&self, id: &zup_core::PluginId) -> Option<&zup_core::PluginArtifact> {
         self.package.plugin_artifact(id)
     }
 
-    pub fn plugin_aot(&self, id: &zup_core::PluginId) -> Result<Vec<u8>, BundleError> {
-        Ok(self.package.plugin_aot(id)?)
+    pub fn plugin_component(&self, id: &zup_core::PluginId) -> Result<Vec<u8>, BundleError> {
+        Ok(self.package.plugin_component(id)?)
     }
 
     pub fn prerequisite_artifact(
         &self,
         id: &zup_core::PrerequisiteId,
-    ) -> Option<&zup_bundle::PrerequisiteArtifact> {
+    ) -> Option<&zup_core::PrerequisiteArtifact> {
         self.package.prerequisite_artifact(id)
     }
 
@@ -281,6 +281,8 @@ impl PayloadSource for EmbeddedPayloadSource {
 }
 
 pub enum AutoPayloadSource {
+    #[cfg(windows)]
+    Acquired(std::sync::Arc<dyn PayloadSource + Send + Sync>),
     Portable(PortableAutoPayloadSource),
     Embedded(EmbeddedPayloadSource),
     Overlay(OverlayPayloadSource<Self>),
@@ -370,6 +372,8 @@ impl PayloadSource for AutoPayloadSource {
             });
         }
         match self {
+            #[cfg(windows)]
+            Self::Acquired(source) => source.open(path, expected_sha256, expected_size),
             Self::Overlay(source) => source.open(path, expected_sha256, expected_size),
             Self::Portable(source) => source.open(path, expected_sha256, expected_size),
             Self::Embedded(source) => source.open(path, expected_sha256, expected_size),

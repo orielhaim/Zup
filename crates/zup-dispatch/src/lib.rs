@@ -116,6 +116,10 @@ pub enum Verb {
     #[default]
     Install,
     Upgrade,
+    Downgrade,
+    Rollback(zup_core::ActivationRevision),
+    Cleanup(u16),
+    Inspect,
     Modify,
     Repair,
     Update,
@@ -127,6 +131,10 @@ impl Verb {
         match self {
             Self::Install => "install",
             Self::Upgrade => "upgrade",
+            Self::Downgrade => "downgrade",
+            Self::Rollback(_) => "rollback",
+            Self::Cleanup(_) => "cleanup",
+            Self::Inspect => "inspect",
             Self::Modify => "modify",
             Self::Repair => "repair",
             Self::Update => "update",
@@ -138,6 +146,9 @@ impl Verb {
         match arg.to_ascii_lowercase().as_str() {
             "install" => Some(Self::Install),
             "upgrade" => Some(Self::Upgrade),
+            "downgrade" => Some(Self::Downgrade),
+            "inspect" => Some(Self::Inspect),
+            "cleanup" => Some(Self::Cleanup(1)),
             "modify" => Some(Self::Modify),
             "repair" => Some(Self::Repair),
             "update" => Some(Self::Update),
@@ -214,7 +225,11 @@ pub fn dispatch(executable: &Path, options: &Options) -> Outcome {
             return Outcome::Refused { detail };
         }
     };
-    let state_root = match state_root(options.state_root.as_deref(), scope) {
+    let state_root = match state_root(
+        &manifest.plan.installer.app.id,
+        options.state_root.as_deref(),
+        scope,
+    ) {
         Ok(root) => root,
         Err(detail) => return Outcome::Refused { detail },
     };
@@ -297,7 +312,15 @@ fn staged_arguments(
         arguments.push(output.clone());
     }
     match options.verb {
-        Verb::Install | Verb::Upgrade | Verb::Modify | Verb::Repair => {
+        Verb::Cleanup(keep) => {
+            arguments.push("--keep".into());
+            arguments.push(keep.to_string());
+        }
+        Verb::Rollback(revision) => {
+            arguments.push("--revision".into());
+            arguments.push(revision.to_string());
+        }
+        Verb::Install | Verb::Upgrade | Verb::Downgrade | Verb::Modify | Verb::Repair => {
             for id in &options.enable {
                 arguments.push("--enable".to_owned());
                 arguments.push(id.clone());
@@ -314,7 +337,7 @@ fn staged_arguments(
                 arguments.push("--force".to_owned());
             }
         }
-        Verb::Update | Verb::Uninstall => {}
+        Verb::Update | Verb::Uninstall | Verb::Inspect => {}
     }
     arguments
 }
@@ -361,12 +384,13 @@ fn artifact_digest(artifact: &UniversalArtifact) -> zup_core::Sha256Digest {
 /// was three copies of the same environment-variable probe that could disagree
 /// with the runtime it starts. Both paths are the backend's question now.
 pub(crate) fn state_root(
+    app: &zup_core::AppId,
     named: Option<&Path>,
     scope: zup_core::SelectedScope,
 ) -> Result<PathBuf, String> {
     match named {
         Some(root) => Ok(root.to_path_buf()),
-        None => zup_windows::default_state_root(scope)
+        None => zup_windows::default_state_root(app, scope)
             .map_err(|error| format!("{error}, so there is nowhere to record the installation")),
     }
 }
@@ -497,6 +521,9 @@ pub fn options_from(
     let mut options = Options::default();
     let mut state_root = None;
     let mut verb_seen = false;
+    let mut rollback = false;
+    let mut revision = None;
+    let mut keep = None;
     let mut error = None;
     let mut iter = args.peekable();
     while let Some(argument) = iter.next() {
@@ -521,6 +548,12 @@ pub fn options_from(
             }
         };
         match name.as_str() {
+            "--revision" => {
+                match value().and_then(|value| value.parse::<zup_core::ActivationRevision>().ok()) {
+                    Some(value) => revision = Some(value),
+                    None => error = Some("--revision needs a positive activation revision".into()),
+                }
+            }
             "--state-root" => match value() {
                 Some(root) => state_root = Some(PathBuf::from(root)),
                 None => error = Some("--state-root needs a path".to_owned()),
@@ -553,6 +586,10 @@ pub fn options_from(
             },
             "--non-interactive" => flag(&mut options.non_interactive),
             "--yes" => flag(&mut options.yes),
+            "--keep" => match value().and_then(|value| value.parse::<u16>().ok()) {
+                Some(value) => keep = Some(value),
+                None => error = Some("--keep needs an integer between 0 and 65535".into()),
+            },
             "--plain" => flag(&mut options.plain),
             "--force" => flag(&mut options.force),
             "--enable" | "--component" => match value() {
@@ -574,11 +611,12 @@ pub fn options_from(
             _ if !verb_seen => {
                 verb_seen = true;
                 match Verb::from_arg(&name) {
+                    _ if name.eq_ignore_ascii_case("rollback") => rollback = true,
                     Some(verb) => options.verb = verb,
                     None => {
                         error = Some(format!(
                             "unrecognised verb `{name}`; expected install, modify, repair, \
-                             upgrade, update, or uninstall"
+                             upgrade, downgrade, rollback, inspect, update, or uninstall"
                         ));
                     }
                 }
@@ -593,6 +631,17 @@ pub fn options_from(
     }
     if let Some(error) = error {
         return Err(error);
+    }
+    if rollback {
+        options.verb = Verb::Rollback(revision.ok_or("rollback requires --revision")?);
+    } else if revision.is_some() {
+        return Err("--revision applies only to rollback".into());
+    }
+    if let Some(keep) = keep {
+        if !matches!(options.verb, Verb::Cleanup(_)) {
+            return Err("--keep applies only to cleanup".into());
+        }
+        options.verb = Verb::Cleanup(keep);
     }
     Ok((options, state_root))
 }

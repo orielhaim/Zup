@@ -20,6 +20,8 @@ pub enum TransportError {
     ParentPidMismatch { expected: u32, found: u32 },
     #[error("worker PID mismatch: expected {expected}, found {found}")]
     WorkerPidMismatch { expected: u32, found: u32 },
+    #[error("worker process {pid} did not exit after its connection closed")]
+    WorkerExitTimeout { pid: u32 },
     #[error("worker is not elevated")]
     WorkerNotElevated,
     #[error("elevation was cancelled")]
@@ -58,7 +60,7 @@ impl UserSid {
         let token = unsafe { OwnedHandle::from_raw_handle(token.cast()) };
         Self::from_token(&token)
     }
-    fn from_token(token: &OwnedHandle) -> Result<Self, TransportError> {
+    pub(crate) fn from_token(token: &OwnedHandle) -> Result<Self, TransportError> {
         let mut required = 0;
         // SAFETY: null buffer is the documented size-query form.
         unsafe {
@@ -177,6 +179,18 @@ impl ProcessHandle {
     pub fn pid(&self) -> u32 {
         self.pid
     }
+    pub fn wait_for_exit(&self, timeout: std::time::Duration) -> Result<(), TransportError> {
+        match unsafe {
+            win::WaitForSingleObject(
+                self._handle.as_raw_handle().cast(),
+                timeout.as_millis().min(u32::MAX as u128 - 1) as u32,
+            )
+        } {
+            0 => Ok(()),
+            0x102 => Err(TransportError::WorkerExitTimeout { pid: self.pid }),
+            _ => Err(last_error("WaitForSingleObject")),
+        }
+    }
 }
 
 pub fn is_process_elevated() -> Result<bool, TransportError> {
@@ -197,22 +211,6 @@ pub fn is_process_elevated() -> Result<bool, TransportError> {
         return Err(last_error("GetTokenInformation(TokenElevation)"));
     }
     Ok(elevation.TokenIsElevated != 0)
-}
-
-pub fn wait_for_process_exit(pid: u32) -> Result<(), TransportError> {
-    let process = unsafe { win::OpenProcess(win::SYNCHRONIZE, 0, pid) };
-    if process.is_null() {
-        return Ok(());
-    }
-    let result = unsafe { win::WaitForSingleObject(process, u32::MAX) };
-    unsafe {
-        win::CloseHandle(process);
-    }
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(last_error("WaitForSingleObject"))
-    }
 }
 
 pub fn verify_server_pid(raw: isize, expected: u32) -> Result<(), TransportError> {

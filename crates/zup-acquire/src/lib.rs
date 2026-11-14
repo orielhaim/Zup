@@ -84,29 +84,22 @@ pub use host::{
 };
 pub use layout::{
     BLOB_ROOT, CATALOG_SCHEMA, CatalogEntry, ContentCatalog, METADATA_ROOT, RELEASE_ROOT,
-    WebLayout, blob_path, catalog_path, check_channel, check_segment, release_path,
-    release_version_path, variant_manifest_path,
+    blob_path, check_channel, check_segment, document_path, release_path,
 };
 pub use local::{DirectorySource, MemorySource, SatisfiedSource};
 pub use plan::{AcquisitionEstimate, AcquisitionItem, AcquisitionPlan, format_bytes};
 pub use progress::{AcquisitionEvent, AcquisitionPhase, AcquisitionProgress};
 pub use release::{
     DocumentRef, OnlineTrust, RELEASE_SCHEMA, ReleaseDescriptor, ReleaseDownload,
-    ReleaseDownloadKind, ReleasePin, ReleaseRequirements, ReleaseVariant,
+    ReleaseDownloadKind, ReleaseRequirements, ReleaseVariant,
 };
 pub use retention::{
     DEFAULT_GRACE, MAX_RETENTION_BYTES, RETENTION_FILE, RETENTION_SCHEMA, RetentionReport,
-    RetentionState, read_retention, retention_path, sweep, sweep_root, write_retention,
+    RetentionState, maintain_cache, read_retention, retention_path, sweep, sweep_root,
+    write_retention,
 };
 pub use session::{
-    AcquisitionOutcome, AcquisitionSession, Barrier, BlobStager, NoStaging, ProgressSink,
-    RETRY_MARKER, SchedulerConfig, SharedCancellation, StagerFuture, retry_detail,
+    AcquisitionOutcome, AcquisitionSession, Barrier, BlobStager, NoStaging, ProgressReceiver,
+    ProgressSink, RETRY_MARKER, SchedulerConfig, SharedCancellation, StagerFuture, retry_detail,
 };
-pub use source::{AcquireRequest, ArtifactSource, SourceChain, SourceFuture};
-
-/// The identity an installed machine persists about the release that produced
-/// it.
-///
-/// Re-exported rather than moved so a caller that is holding a release graph
-/// does not have to know that the ownership ledger stores the same type.
-pub use zup_core::ReleaseIdentity;
+pub use source::{AcquireRequest, AcquisitionDeadline, ArtifactSource, SourceChain, SourceFuture};

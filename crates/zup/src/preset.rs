@@ -255,7 +255,7 @@ fn settings_summary(schema: &serde_json::Value) -> String {
 }
 
 fn human_bytes(bytes: u64) -> String {
-    zup_presentation::format_bytes(bytes)
+    zup_core::format_bytes(bytes)
 }
 
 fn read_description(path: &Path, identity: &PresetIdentity) -> miette::Result<PresetDescription> {

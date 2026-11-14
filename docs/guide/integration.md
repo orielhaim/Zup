@@ -6,11 +6,13 @@ Declare system integration as resources. Add only what the application owns.
 
 ```toml
 [[launchers]]
+id = "main"
 location = "menu"
 name = "Acme"
 target = "${install}/Acme.exe"
 
 [[launchers]]
+id = "desktop"
 location = "desktop"
 name = "Acme"
 target = "${install}/Acme.exe"
@@ -23,6 +25,7 @@ Locations are `menu` and `desktop`. Optional arguments and a working directory a
 
 ```toml
 [[path]]
+id = "cli-1"
 value = "${install}/bin"
 ```
 
@@ -32,8 +35,9 @@ Use PATH entries for command-line tools. Do not add an application directory to 
 
 ```toml
 [[services]]
+execution = { type = "windows_job", account = "local_service" }
 id = "acme-agent"
-name = "Acme Agent"
+display_name = "Acme Agent"
 binary = "${install}/acme-agent.exe"
 start = "automatic"
 ```
@@ -63,6 +67,10 @@ File associations register a capability; they do not make the application the de
 
 ## Linux
 
-User-scope Linux targets lower the same resources into freedesktop integration (`menu` launchers, protocol handlers, MIME packages, icons). Protocol arguments must carry exactly one `%1` placeholder, and every protocol and file association must name the same handler command.
+Launchers, URI handlers, MIME packages, and icons use freedesktop integration. Desktop launchers follow the configured XDG desktop directory; disabled directories are refused, and desktop trust approval may still be required.
 
-`desktop` launchers and `[[path]]` entries are refused on Linux, as is `mimeapps.list` takeover: registration is capability, never a default. Installing integration needs `update-mime-database` and `update-desktop-database` on the target machine; a project with no integration resources needs neither.
+PATH entries use per-application `environment.d` files. They reach processes inheriting the systemd user-manager environment, not every shell or existing process. Zup does not edit shell configuration.
+
+Protocol arguments require exactly one `%1` placeholder. Protocols and file associations must use the same handler command. MIME and desktop integration require `update-mime-database` and `update-desktop-database`. Zup does not change default handlers.
+
+See [services](/guide/services) for systemd configuration and lifecycle policies.

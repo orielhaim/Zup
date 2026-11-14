@@ -40,8 +40,18 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    Cleanup {
+        #[arg(long, default_value_t = 1)]
+        keep: u16,
+    },
+    Inspect,
     Install(Components),
     Upgrade(Components),
+    Downgrade(Components),
+    Rollback {
+        #[arg(long)]
+        revision: zup_core::ActivationRevision,
+    },
     Modify(Components),
     Repair {
         #[arg(long, alias = "force")]
@@ -52,6 +62,10 @@ pub(crate) enum Command {
     Recover {
         #[arg(long)]
         transaction: String,
+        #[arg(long, conflicts_with = "decision")]
+        assess: bool,
+        #[arg(long, value_name = "JSON")]
+        decision: Option<PathBuf>,
     },
     #[cfg(target_os = "linux")]
     Update {
@@ -135,8 +149,14 @@ impl Cli {
 
     fn operation_of(operation: Option<&Command>) -> Operation {
         match operation {
+            Some(Command::Cleanup { keep }) => Operation::Cleanup { keep: *keep },
+            Some(Command::Inspect) => Operation::Apply,
             Some(Command::Install(_)) => Operation::Install,
             Some(Command::Upgrade(_)) => Operation::Upgrade,
+            Some(Command::Downgrade(_)) => Operation::Downgrade,
+            Some(Command::Rollback { revision }) => Operation::Rollback {
+                revision: *revision,
+            },
             Some(Command::Modify(_)) => Operation::Modify,
             Some(Command::Repair { force }) => Operation::Repair { force: *force },
             Some(Command::Uninstall) => Operation::Uninstall,
@@ -172,6 +192,7 @@ impl From<zup_runtime::OperationError> for Failure {
         let message = error.to_string();
         let outcome = match error {
             zup_runtime::OperationError::Cancelled => ProcessOutcome::Cancelled,
+            zup_runtime::OperationError::RecoveryRequired(_) => ProcessOutcome::RecoveryRequired,
             zup_runtime::OperationError::Downgrade { .. } => ProcessOutcome::Configuration,
             zup_runtime::OperationError::Refused { stage, .. } => match stage {
                 "scope" | "selection" | "capabilities" | "plan" | "resolve" => {
@@ -240,11 +261,46 @@ pub fn uninstall<H: SessionHost>(
     )
 }
 
+pub(crate) fn inspect<H: SessionHost>(
+    host: &mut H,
+    scope: Option<SelectedScope>,
+    state_root: Option<&std::path::Path>,
+    output: OutputFormat,
+) -> miette::Result<()> {
+    let executable = std::env::current_exe()
+        .map_err(|error| miette::miette!("installer executable: {error}"))?;
+    let build = host
+        .describe(&executable)
+        .map_err(|error| miette::miette!("application: {error}"))?;
+    let scope = choose_scope(&build.installer, scope, false, true)?;
+    let context = host
+        .observe(&build.installer, scope, state_root)
+        .map_err(|error| miette::miette!("installation: {error}"))?;
+    let record = context
+        .ledger
+        .ok_or_else(|| miette::miette!("no recorded installation in {scope} scope"))?;
+    let report = zup_presentation::InstallationReport::from_record(&record)
+        .map_err(|error| miette::miette!("installation record: {error}"))?;
+    match output {
+        OutputFormat::Human => print!("{}", report.human()),
+        OutputFormat::Json | OutputFormat::Jsonl => write_json(&report)?,
+    }
+    Ok(())
+}
+
 pub(crate) fn run_cli<H: SessionHost>(
     mut host: H,
     frontend: Frontend,
     cli: Cli,
 ) -> miette::Result<()> {
+    if matches!(cli.operation, Some(Command::Inspect)) {
+        return inspect(
+            &mut host,
+            cli.scope.map(Into::into),
+            cli.state_root.as_deref(),
+            cli.output.into(),
+        );
+    }
     let output = cli.output.into();
     let interactive = crate::run::RuntimeContext::new(frontend)
         .with_output(output)
@@ -267,24 +323,14 @@ pub(crate) fn run_cli<H: SessionHost>(
         Ok(outcome) => ProcessOutcome::from(outcome),
         Err(error) => crate::error_outcome(error),
     };
-    if let Ok(InstallOutcome::CommittedPendingReconciliation { transaction, .. }) = &result {
-        report.result.transaction = transaction.map(|transaction| transaction.to_string());
-    }
-    let message = match &result {
-        Err(error) => Some(error.to_string()),
-        Ok(InstallOutcome::Failed(message)) => Some(message.clone()),
-        Ok(InstallOutcome::CommittedPendingReconciliation { detail, .. }) => Some(detail.clone()),
-        Ok(InstallOutcome::Busy { .. }) => Some("another maintenance operation is running".into()),
-        _ => None,
-    };
-    report.result.outcome = outcome;
-    report.result.code = outcome.code();
-    report.result.message = match (message, report.result.message.take()) {
-        (Some(message), Some(detail)) if !message.contains(&detail) => {
-            Some(format!("{message}\n{detail}"))
+    match &result {
+        Ok(outcome) => report.result.apply_outcome(outcome),
+        Err(error) => {
+            report.result.outcome = outcome;
+            report.result.code = outcome.code();
+            report.result.message = Some(error.to_string());
         }
-        (message, detail) => message.or(detail),
-    };
+    }
     if let Err(error) = report.finish() {
         return Err(ReportedFailure(Failure {
             outcome: if outcome == ProcessOutcome::Success {
@@ -335,16 +381,29 @@ fn drive<H: SessionHost>(
     }
     let scope = choose_scope(installer, cli.scope.map(Into::into), interactive, cli.plain)?;
     report.result.scope = Some(scope);
-    let context = host
-        .observe(installer, scope, cli.state_root.as_deref())
-        .map_err(|error| miette::miette!("{error}"))?;
+    #[cfg(target_os = "linux")]
+    let recovering = matches!(cli.operation, Some(Command::Recover { .. }));
+    #[cfg(not(target_os = "linux"))]
+    let recovering = false;
+    let context = if recovering {
+        zup_session::OperationContext {
+            scope,
+            state_root: host
+                .state_root(installer, scope, cli.state_root.as_deref())
+                .map_err(|error| miette::miette!("{error}"))?,
+            ledger: None,
+        }
+    } else {
+        host.observe(installer, scope, cli.state_root.as_deref())
+            .map_err(|error| miette::miette!("{error}"))?
+    };
     #[cfg(feature = "console")]
     let chosen = if interactive
         && cli.operation.is_none()
         && let Some(ledger) = &context.ledger
     {
         Some(crate::console::Console::new(cli.plain).maintenance(
-            &zup_runtime::maintenance_operations(&ledger.version, &installer.app.version),
+            &zup_runtime::maintenance_operations(&ledger.current.version, &installer.app.version),
             host.supports_updates() && installer.updates.is_some(),
         )?)
     } else {
@@ -355,7 +414,12 @@ fn drive<H: SessionHost>(
     #[cfg(not(feature = "console"))]
     let command = cli.operation.as_ref();
     #[cfg(target_os = "linux")]
-    if let Some(Command::Recover { transaction }) = command {
+    if let Some(Command::Recover {
+        transaction,
+        assess,
+        decision,
+    }) = command
+    {
         let control = OperationControl::new(if interactive {
             ExecutionPolicy::Interactive
         } else {
@@ -364,7 +428,15 @@ fn drive<H: SessionHost>(
         return execute_with_events(
             &control,
             report,
-            host.recover(&context, transaction, &control),
+            zup_linux::recover_installation(
+                &executable,
+                &context,
+                transaction
+                    .parse()
+                    .map_err(|error| miette::miette!("transaction identity: {error}"))?,
+                crate::recovery_request(*assess, decision.as_deref())?,
+                &control,
+            ),
         );
     }
     #[cfg(target_os = "linux")]
@@ -391,7 +463,7 @@ fn drive<H: SessionHost>(
                 &if update_command.is_some() {
                     zup_runtime::UpdateRequest::Check
                 } else {
-                    zup_runtime::UpdateRequest::Install { version: None }
+                    zup_runtime::UpdateRequest::Install { expected: None }
                 },
                 cancellation,
                 &mut |event| {
@@ -410,8 +482,8 @@ fn drive<H: SessionHost>(
                 report.result.message = Some(format!("already up to date: {version}"));
                 return Ok(InstallOutcome::Committed);
             }
-            zup_session::UpdatePreparation::Available { version } => {
-                report.result.message = Some(format!("update available: {version}"));
+            zup_session::UpdatePreparation::Available { candidate } => {
+                report.result.message = Some(format!("update available: {}", candidate.version));
                 return Ok(InstallOutcome::Committed);
             }
             zup_session::UpdatePreparation::Ready { build: updated } => {
@@ -433,7 +505,10 @@ fn drive<H: SessionHost>(
     #[cfg(feature = "console")]
     let action = zup_runtime::resolve_operation(
         operation,
-        context.ledger.as_ref().map(|ledger| &ledger.version),
+        context
+            .ledger
+            .as_ref()
+            .map(|ledger| &ledger.current.version),
         &installer.app.version,
     )
     .map_err(|error| miette::miette!("{error}"))?;
@@ -441,12 +516,16 @@ fn drive<H: SessionHost>(
         state: "planning".into(),
     })?;
     let (enable, disable) = match command {
-        Some(Command::Install(args) | Command::Upgrade(args) | Command::Modify(args)) => {
-            (args.enable.clone(), args.disable.clone())
-        }
+        Some(
+            Command::Install(args)
+            | Command::Upgrade(args)
+            | Command::Downgrade(args)
+            | Command::Modify(args),
+        ) => (args.enable.clone(), args.disable.clone()),
         _ => Default::default(),
     };
     let selection = OperationSelection {
+        deployment: None,
         enable,
         disable,
         install_directory: cli.install_directory.clone(),
@@ -483,6 +562,7 @@ fn drive<H: SessionHost>(
     }
     report.result.application = build.installer.app.id.to_string();
     report.result.version = build.installer.app.version.to_string();
+    let executable = host.content_executable(&executable);
     let bound = host
         .bind(&context)
         .map_err(|error| miette::miette!("{error}"))?;
@@ -510,12 +590,8 @@ fn drive<H: SessionHost>(
         plan.application = build.installer.app.name.to_string();
         plan.version = build.installer.app.version.to_string();
         if let Some(ledger) = &context.ledger {
-            plan.install_directory = ledger
-                .install_directory
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            plan.selected_components = ledger.selected_components.clone();
+            plan.install_directory = ledger.directory.to_string();
+            plan.selected_components = ledger.current.selected_components.clone();
         }
     }
     report.result.install_directory =
@@ -536,16 +612,6 @@ fn drive<H: SessionHost>(
     )?;
     let (outcome, drift) = zup_session::reconcile_operation(host, &context, &prepared, outcome);
     report.result.drift = drift;
-    if matches!(
-        outcome,
-        InstallOutcome::RecoveryRequired | InstallOutcome::CommittedPendingReconciliation { .. }
-    ) {
-        let details = zup_runtime::discover_recovery(&context.state_root)
-            .map(|states| format!("{states:?}"))
-            .unwrap_or_else(|error| format!("cannot inspect transaction state: {error}"));
-        let message = report.result.message.get_or_insert_with(String::new);
-        message.push_str(&format!("\nTransaction state: {}\n{details}\nRetry with recover --transaction <id> --scope {scope}", context.state_root.display()));
-    }
     Ok(outcome)
 }
 
@@ -669,6 +735,11 @@ impl Report {
 
         if let zup_runtime::RuntimeEvent::LogPath { path } = event {
             self.result.log_path = Some(path.clone());
+        }
+        if let zup_runtime::RuntimeEvent::PlanPrepared { plan } = event {
+            self.result.application = plan.requirements.app.id.to_string();
+            self.result.version = plan.requirements.app.version.to_string();
+            self.result.scope = Some(plan.requirements.scope);
         }
         for event in zup_session::automation_events(event) {
             if !matches!(

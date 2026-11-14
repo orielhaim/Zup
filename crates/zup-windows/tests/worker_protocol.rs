@@ -1,16 +1,12 @@
 #![cfg(windows)]
 
 use rstest::rstest;
-use zup_bootstrap::{BootstrapId, BootstrapKey, BootstrapPlan, BoundBootstrapPlan};
+use zup_core::SessionId;
 use zup_core::Target;
 use zup_protocol::{
-    ExecuteBootstrap, ExecuteTransaction, Message, PROTOCOL_VERSION, ParentHello, SequenceTracker,
-    SessionId, WireEnvelope, WorkerHello, decode_payload, encode_payload,
+    Message, PROTOCOL_VERSION, SequenceTracker, WireEnvelope, decode_payload, encode_payload,
 };
-use zup_windows::{
-    WorkerBootstrap, WorkerError, WorkerSession, format_bootstrap, parse_bootstrap, pipe_name,
-    plan_hash_hex,
-};
+use zup_windows::{WorkerBootstrap, WorkerError, format_bootstrap, parse_bootstrap, pipe_name};
 
 fn target() -> Target {
     Target::parse("windows-x64").unwrap()
@@ -24,83 +20,8 @@ fn bootstrap() -> WorkerBootstrap {
         expected_parent_pid: 42,
         expected_parent_sid: "S-1-5-21-test".into(),
         target: target(),
-        expected_plan_hash: "a".repeat(64),
+        expected_request_digest: "a".repeat(64),
     }
-}
-
-#[test]
-fn a_bootstrap_is_executed_only_for_the_target_the_worker_started_for() {
-    let plan = BootstrapPlan::new(
-        BootstrapKey {
-            app_id: zup_core::AppId::new("com.example.app").unwrap(),
-            app_version: semver::Version::new(1, 0, 0),
-            scope: zup_core::SelectedScope::User,
-            target: target(),
-        },
-        Vec::new(),
-    )
-    .unwrap();
-    let bound = BoundBootstrapPlan::new(plan, Default::default()).unwrap();
-    let bootstrap_json = serde_json::to_string(&bound).unwrap();
-    let hash = plan_hash_hex(&bootstrap_json);
-
-    let opened = || {
-        let mut worker_bootstrap = bootstrap();
-        worker_bootstrap.expected_plan_hash = hash.clone();
-        let session_id = worker_bootstrap.session_id;
-        let mut session = WorkerSession::new(worker_bootstrap.clone());
-        session
-            .handle_message(WireEnvelope {
-                version: PROTOCOL_VERSION,
-                session_id,
-                sequence: 1,
-                message: Message::ParentHello(ParentHello {
-                    protocol_version: PROTOCOL_VERSION,
-                    session_id,
-                    target: worker_bootstrap.target,
-                    transaction_id: bound.id.as_uuid(),
-                    expected_plan_hash: hash.clone(),
-                }),
-            })
-            .expect("the handshake matches the bootstrap it was given");
-        (session, session_id)
-    };
-
-    let execute = |target_in_message: Target| ExecuteBootstrap {
-        target: target_in_message,
-        bootstrap_json: bootstrap_json.clone(),
-        bootstrap_hash: hash.clone(),
-        bootstrap_id: BootstrapId::for_plan(&bound.plan).as_uuid(),
-        app_id: "com.example.app".into(),
-        app_version: "1.0.0".into(),
-        scope: "user".into(),
-        state_root: r"C:\state".into(),
-        quarantine_root: r"C:\quarantine".into(),
-        recovery_id: None,
-    };
-    let envelope = |session_id, message| WireEnvelope {
-        version: PROTOCOL_VERSION,
-        session_id,
-        sequence: 2,
-        message,
-    };
-
-    let (mut matching, session_id) = opened();
-    matching
-        .handle_message(envelope(
-            session_id,
-            Message::ExecuteBootstrap(execute(target())),
-        ))
-        .expect("the bootstrap the worker was started for is executed");
-
-    let (mut foreign, session_id) = opened();
-    assert!(matches!(
-        foreign.handle_message(envelope(
-            session_id,
-            Message::ExecuteBootstrap(execute(Target::parse("arm64-pc-windows-msvc").unwrap()))
-        )),
-        Err(WorkerError::TargetMismatch)
-    ));
 }
 
 fn bootstrap_with(field: usize, value: &str) -> String {
@@ -150,7 +71,6 @@ fn pipe_name_has_no_secrets() {
 #[test]
 fn an_envelope_offers_a_channel_no_replay() {
     let b = bootstrap();
-    let mut session = WorkerSession::new(b.clone());
 
     let envelope = |session_id, version| WireEnvelope {
         version,
@@ -158,12 +78,6 @@ fn an_envelope_offers_a_channel_no_replay() {
         sequence: 0,
         message: Message::Ping,
     };
-    assert!(
-        session
-            .handle_message(envelope(SessionId::new_v7(), PROTOCOL_VERSION))
-            .is_err()
-    );
-
     assert!(
         decode_payload(
             &encode_payload(&envelope(b.session_id, PROTOCOL_VERSION + 1)).unwrap_or_default()
@@ -178,151 +92,9 @@ fn an_envelope_offers_a_channel_no_replay() {
 }
 
 #[test]
-fn handshake_requires_valid_plan_hash() {
-    let b = bootstrap();
-    let mut session = WorkerSession::new(b.clone());
-    let hello = session.hello();
-    assert!(matches!(hello.message, Message::WorkerHello(_)));
-
-    let env = WireEnvelope {
-        version: PROTOCOL_VERSION,
-        session_id: b.session_id,
-        sequence: 1,
-        message: Message::ParentHello(ParentHello {
-            protocol_version: PROTOCOL_VERSION,
-            session_id: b.session_id,
-            target: target(),
-            transaction_id: uuid::Uuid::now_v7(),
-            expected_plan_hash: "b".repeat(64),
-        }),
-    };
-    assert!(matches!(
-        session.handle_message(env),
-        Err(WorkerError::PlanHashMismatch)
-    ));
-}
-
-#[test]
-fn handshake_rejects_target_mismatch_and_accepts_canonical_aliases() {
-    let mut b = bootstrap();
-    b.target = Target::parse("x64-pc-windows-msvc").unwrap();
-    let mut session = WorkerSession::new(b.clone());
-    let mismatch = WireEnvelope {
-        version: PROTOCOL_VERSION,
-        session_id: b.session_id,
-        sequence: 1,
-        message: Message::ParentHello(ParentHello {
-            protocol_version: PROTOCOL_VERSION,
-            session_id: b.session_id,
-            target: Target::parse("arm64-pc-windows-msvc").unwrap(),
-            transaction_id: uuid::Uuid::nil(),
-            expected_plan_hash: b.expected_plan_hash.clone(),
-        }),
-    };
-    assert!(matches!(
-        session.handle_message(mismatch),
-        Err(WorkerError::TargetMismatch)
-    ));
-
-    let mut canonical = bootstrap();
-    canonical.target = Target::parse("x64-pc-windows-msvc").unwrap();
-    let parsed = parse_bootstrap(&format_bootstrap(&canonical)).unwrap();
-    assert_eq!(parsed.target, Target::parse("windows-x64").unwrap());
-}
-
-#[test]
-fn execute_before_auth_rejected() {
-    let b = bootstrap();
-    let mut session = WorkerSession::new(b.clone());
-    let env = WireEnvelope {
-        version: PROTOCOL_VERSION,
-        session_id: b.session_id,
-        sequence: 1,
-        message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
-            content: None,
-            intent: None,
-            target: target(),
-            plan_json: "{}".into(),
-            plan_hash: b.expected_plan_hash.clone(),
-            app_id: "com.acme.app".into(),
-            app_version: "1.0.0".into(),
-            scope: "machine".into(),
-            payload_root: r"C:\payload".into(),
-            payload_overlay_root: None,
-            payload_overlay_base_root: None,
-            state_root: r"C:\state".into(),
-
-            recovery_id: None,
-            recovery_intent: None,
-            release: None,
-        })),
-    };
-    assert!(matches!(
-        session.handle_message(env),
-        Err(WorkerError::AuthFailed(_))
-    ));
-}
-
-#[test]
-fn authenticated_execute_rejects_target_mismatch_before_plan_validation() {
-    let b = bootstrap();
-    let mut session = WorkerSession::new(b.clone());
-    session
-        .handle_message(WireEnvelope {
-            version: PROTOCOL_VERSION,
-            session_id: b.session_id,
-            sequence: 1,
-            message: Message::ParentHello(ParentHello {
-                protocol_version: PROTOCOL_VERSION,
-                session_id: b.session_id,
-                target: b.target,
-                transaction_id: uuid::Uuid::nil(),
-                expected_plan_hash: b.expected_plan_hash.clone(),
-            }),
-        })
-        .unwrap();
-    let error = session
-        .handle_message(WireEnvelope {
-            version: PROTOCOL_VERSION,
-            session_id: b.session_id,
-            sequence: 2,
-            message: Message::ExecuteTransaction(Box::new(ExecuteTransaction {
-                content: None,
-                intent: None,
-                target: Target::parse("arm64-pc-windows-msvc").unwrap(),
-                plan_json: "not json".into(),
-                plan_hash: b.expected_plan_hash.clone(),
-                app_id: "com.acme.app".into(),
-                app_version: "1.0.0".into(),
-                scope: "user".into(),
-                payload_root: r"C:\payload".into(),
-                payload_overlay_root: None,
-                payload_overlay_base_root: None,
-                state_root: r"C:\state".into(),
-
-                recovery_id: None,
-                recovery_intent: None,
-                release: None,
-            })),
-        })
-        .unwrap_err();
-    assert!(matches!(error, WorkerError::TargetMismatch));
-}
-
-#[test]
-fn worker_hello_advertises_capability() {
-    let session = WorkerSession::new(bootstrap());
-    let hello = session.hello();
-    match hello.message {
-        Message::WorkerHello(WorkerHello {
-            capabilities,
-            protocol_version,
-            ..
-        }) => {
-            assert!(capabilities.file_transactions_v1);
-            assert_eq!(protocol_version, PROTOCOL_VERSION);
-            assert!(zup_windows::worker_capabilities().file_transactions_v1);
-        }
-        other => panic!("bad hello {other:?}"),
-    }
+fn worker_advertises_required_native_capabilities() {
+    let capabilities = zup_windows::worker_capabilities();
+    assert!(capabilities.file_transactions_v1);
+    assert!(capabilities.backend_operations_v1);
+    assert!(capabilities.lifecycle_v1);
 }

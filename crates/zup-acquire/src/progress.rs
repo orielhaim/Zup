@@ -56,7 +56,9 @@ impl AcquisitionPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AcquisitionProgress {
     pub phase: AcquisitionPhase,
-    /// Wire bytes present and verified.
+    pub acquired_bytes: u64,
+    pub acquired_items: u64,
+    /// Wire bytes verified and successfully staged.
     pub completed_bytes: u64,
     /// Wire bytes the closure needs.
     pub total_bytes: u64,
@@ -66,13 +68,13 @@ pub struct AcquisitionProgress {
     pub cached_items: u64,
     /// Transfers running right now.
     pub active_transfers: u64,
-    /// Items finished, from any source.
+    /// Items verified and successfully staged.
     pub completed_items: u64,
     /// Items the closure names.
     pub total_items: u64,
     /// Wall-clock time spent transferring.
     pub elapsed: Duration,
-    /// Bytes per second over the whole session, or zero before the first byte.
+    /// Measured bytes per second, or zero when no rate is available.
     pub throughput: u64,
     /// Seconds remaining at the current throughput, or `None` when it cannot be
     /// known yet.
@@ -92,17 +94,20 @@ impl AcquisitionProgress {
 
     /// Whether every byte the closure names is present.
     pub const fn is_complete(&self) -> bool {
-        self.total_bytes != 0 && self.completed_bytes >= self.total_bytes
+        self.completed_items == self.total_items && self.completed_bytes >= self.total_bytes
     }
 
     /// The line a GUI or a console renders under a progress bar.
     pub fn detail(&self) -> String {
         let mut line = format!(
-            "{} of {} · {}",
+            "{} of {}",
             crate::plan::format_bytes(self.completed_bytes),
-            crate::plan::format_bytes(self.total_bytes),
-            format_rate(self.throughput)
+            crate::plan::format_bytes(self.total_bytes)
         );
+        if self.throughput > 0 {
+            line.push_str(" · ");
+            line.push_str(&format_rate(self.throughput));
+        }
         if let Some(eta) = self.eta {
             line.push_str(" · ");
             line.push_str(&format_eta(eta));
@@ -112,17 +117,10 @@ impl AcquisitionProgress {
 
     /// Recompute the derived fields from the counters that changed.
     pub fn recompute(&mut self) {
-        self.throughput = if self.elapsed.as_secs_f64() > 0.05 {
-            (self.completed_bytes as f64 / self.elapsed.as_secs_f64()) as u64
-        } else {
-            0
-        };
-        self.eta = match (self.total_bytes, self.throughput) {
-            (total, rate) if total > self.completed_bytes && rate > 0 => {
-                Some(Duration::from_secs((total - self.completed_bytes) / rate))
-            }
-            _ => None,
-        };
+        // Aggregate counters include cache hits and local sources. They cannot
+        // measure network throughput or predict remaining staging time.
+        self.throughput = 0;
+        self.eta = None;
     }
 }
 
@@ -195,9 +193,6 @@ pub enum AcquisitionEvent {
         /// "the CDN reset the connection twice, then the mirror does not carry
         /// it" is.
         reasons: Vec<String>,
-        /// Always true. Present so a consumer can assert the guarantee rather
-        /// than infer it.
-        machine_unchanged: bool,
     },
 }
 

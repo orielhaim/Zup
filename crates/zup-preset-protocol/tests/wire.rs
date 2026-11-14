@@ -20,6 +20,8 @@ fn product() -> ProductIdentity {
 
 fn snapshot() -> Snapshot {
     Snapshot {
+        recovery: None,
+        settlement: None,
         product: product(),
         surface: Surface::Install(InstallOptions {
             existing_version: None,
@@ -85,7 +87,7 @@ fn bytes_that_are_not_a_frame_are_refused() {
         Err(WireError::Malformed(_))
     ));
     assert!(matches!(
-        decode(br#"{"version":2,"session":"nope"}"#),
+        decode(br#"{"version":1,"session":"nope"}"#),
         Err(WireError::Malformed(_))
     ));
 }
@@ -109,7 +111,7 @@ fn an_oversized_frame_is_refused() {
 
 #[test]
 fn an_action_that_is_not_in_the_vocabulary_is_refused() {
-    let bytes = br#"{"version":2,"session":"0192f0f0-0000-7000-8000-000000000000","sequence":1,"message":{"type":"action","action":"run_method","method":"install","arguments":{}}}"#;
+    let bytes = br#"{"version":1,"session":"0192f0f0-0000-7000-8000-000000000000","sequence":1,"message":{"type":"action","action":"run_method","method":"install","arguments":{}}}"#;
     assert!(matches!(decode(bytes), Err(WireError::Malformed(_))));
 }
 
@@ -246,6 +248,7 @@ fn a_snapshot_carries_the_whole_presentation_and_not_a_delta() {
 fn a_maintenance_snapshot_reports_what_can_be_done_to_an_installation() {
     let frame = envelope(Message::Snapshot(Box::new(Snapshot {
         surface: Surface::Maintenance(MaintenanceState {
+            retained: Vec::new(),
             installed_version: "1.3.0".into(),
             components: Vec::new(),
             groups: Vec::new(),

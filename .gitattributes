@@ -22,3 +22,7 @@ fixtures/automation/** -text
 # its line endings changes what Windows builds ship and breaks the lifecycle
 # check on bytes nothing changed. Git must not touch these bytes.
 fixtures/cross-matrix/payload/** -text
+scripts/verify-linux.sh text eol=lf
+scripts/verify-musl.sh text eol=lf
+# The native source lock verifies the patch's exact bytes.
+native/openrc/*.patch -text

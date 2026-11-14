@@ -8,30 +8,32 @@ use crate::error::PathError;
 
 const STATE_FOLDER: &str = "zup";
 
-const MACHINE_STATE_BASE: &str = "/var/lib";
-
-pub fn state_root(scope: SelectedScope) -> Result<PathBuf, PathError> {
+pub fn state_root(app: &zup_core::AppId, scope: SelectedScope) -> Result<PathBuf, PathError> {
     match scope {
-        SelectedScope::User => user_state_root(),
-        SelectedScope::Machine => machine_state_root(),
+        SelectedScope::User => user_state_root(app),
+        SelectedScope::Machine => machine_state_root(app),
     }
 }
 
-pub fn user_state_root() -> Result<PathBuf, PathError> {
-    create_user_root(xdg::BaseDirectories::new().get_state_home())
+pub fn user_state_root(app: &zup_core::AppId) -> Result<PathBuf, PathError> {
+    create_user_root(xdg::BaseDirectories::new().get_state_home(), app)
 }
 
-fn create_user_root(base: Option<PathBuf>) -> Result<PathBuf, PathError> {
+fn create_user_root(base: Option<PathBuf>, app: &zup_core::AppId) -> Result<PathBuf, PathError> {
     let base = base.ok_or(PathError::NoStateHome)?;
     std::fs::create_dir_all(&base).map_err(|source| io_error(&base, source))?;
     let root = base.join(STATE_FOLDER);
-    zup_transaction::ensure_private_dir(&root)
+    let directory = zup_storage::ensure_private_dir(&root)
         .map_err(|error| io_error(&root, std::io::Error::other(error)))?;
-    canonical(&root)
+    let relative = format!("apps/{}", app.state_key().to_hex());
+    directory
+        .ensure_dir_all(&relative)
+        .map_err(|error| io_error(&root, std::io::Error::other(error)))?;
+    canonical(&root.join(relative))
 }
 
-pub fn machine_state_root() -> Result<PathBuf, PathError> {
-    Ok(Path::new(MACHINE_STATE_BASE).join(STATE_FOLDER))
+pub fn machine_state_root(app: &zup_core::AppId) -> Result<PathBuf, PathError> {
+    Ok(crate::locations::MachineRoots::production().application_state(app))
 }
 
 fn canonical(path: &Path) -> Result<PathBuf, PathError> {
@@ -96,42 +98,65 @@ impl SourceFilePolicy for LinuxSourceFilePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn app() -> zup_core::AppId {
+        zup_core::AppId::new("com.example.paths").unwrap()
+    }
 
     #[test]
     fn the_user_root_is_created_and_the_machine_root_is_not() {
-        let user = user_state_root().expect("a user state root");
+        use std::os::unix::fs::MetadataExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let user =
+            create_user_root(Some(scratch.path().to_owned()), &app()).expect("a user state root");
         assert!(user.is_dir(), "{} should have been created", user.display());
         assert!(
-            user.ends_with(STATE_FOLDER),
+            user.ends_with(Path::new("apps").join(app().state_key().to_hex())),
             "{} should end in the state folder",
             user.display()
         );
 
-        let machine = machine_state_root().expect("a machine state root");
-        assert_eq!(machine, Path::new("/var/lib/zup"));
-        assert!(
-            !machine.exists(),
-            "creating the machine root is a privileged act, and this process has not been \
-             given one"
+        let metadata = || {
+            std::fs::symlink_metadata("/var/lib/zup")
+                .map(|value| {
+                    (
+                        value.dev(),
+                        value.ino(),
+                        value.uid(),
+                        value.gid(),
+                        value.mode(),
+                    )
+                })
+                .map_err(|error| error.kind())
+        };
+        let before = metadata();
+        let machine = machine_state_root(&app()).expect("a machine state root");
+        assert_eq!(
+            machine,
+            Path::new("/var/lib/zup/apps").join(app().state_key().to_hex())
+        );
+        assert_eq!(
+            metadata(),
+            before,
+            "resolving machine state must not create or alter it"
         );
     }
 
     #[test]
     fn a_scope_selects_between_the_two_answers() {
         assert_eq!(
-            state_root(SelectedScope::User).expect("user state"),
-            user_state_root().expect("user state")
+            state_root(&app(), SelectedScope::User).expect("user state"),
+            user_state_root(&app()).expect("user state")
         );
         assert_eq!(
-            state_root(SelectedScope::Machine).expect("machine state"),
-            machine_state_root().expect("machine state")
+            state_root(&app(), SelectedScope::Machine).expect("machine state"),
+            machine_state_root(&app()).expect("machine state")
         );
     }
 
     #[test]
     fn a_host_with_no_state_home_has_no_state_root() {
         assert!(matches!(
-            create_user_root(None),
+            create_user_root(None, &app()),
             Err(PathError::NoStateHome)
         ));
     }
@@ -139,11 +164,11 @@ mod tests {
     #[test]
     fn a_resolved_state_home_produces_a_created_canonical_root() {
         let base = tempfile::tempdir().expect("a temp base");
-        let root = create_user_root(Some(base.path().to_path_buf())).expect("a user root");
+        let root = create_user_root(Some(base.path().to_path_buf()), &app()).expect("a user root");
         assert!(root.is_dir(), "{} should have been created", root.display());
         assert_eq!(
             root.file_name().and_then(|name| name.to_str()),
-            Some(STATE_FOLDER)
+            Some(app().state_key().to_hex().as_str())
         );
         assert_eq!(
             root,

@@ -100,8 +100,9 @@ scope = "user"
 [install.directory]
 user = "${location.programs}/Universal"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#,
         )
         .unwrap();
@@ -213,17 +214,12 @@ fn stdout(output: &Output) -> String {
 
 /// A real launcher image from the staged toolchain.
 fn dispatcher(name: zup_toolchain::Subsystem, online: bool) -> PathBuf {
-    staged::dispatcher(&test_executable(), name, online)
+    staged::dispatcher(name, online)
 }
 
 /// The console dispatcher, which is what a console artifact is composed into.
 fn console_dispatcher() -> PathBuf {
     dispatcher(zup_toolchain::Subsystem::Console, false)
-}
-
-/// This test binary, which is where the staged toolchain was built beside.
-fn test_executable() -> PathBuf {
-    std::env::current_exe().expect("a test executable")
 }
 
 /// `--universal` on two architectures: one file, two variants, shared content

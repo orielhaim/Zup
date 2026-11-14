@@ -32,6 +32,8 @@ pub const PORTABLE_CORE: &[&str] = &[
     "zup-distribute-github",
     "zup-protocol",
     "zup-runtime",
+    "zup-session",
+    "zup-storage",
     "zup-presentation",
     "zup-preset-protocol",
     "zup-preset-ipc",

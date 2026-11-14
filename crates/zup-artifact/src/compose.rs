@@ -54,16 +54,14 @@ impl ArtifactRequest {
 
     pub fn thin_online(
         id: impl Into<String>,
-        application: &zup_core::App,
         trust: zup_acquire::OnlineTrust,
         output: impl Into<String>,
     ) -> Self {
         let pin = match &trust.pin {
-            zup_acquire::ReleasePin::Version { version } => ArtifactPin::Pinned {
-                version: semver::Version::parse(version)
-                    .unwrap_or_else(|_| application.version.clone()),
+            zup_core::ReleasePin::Release { version, .. } => ArtifactPin::Pinned {
+                version: version.clone(),
             },
-            zup_acquire::ReleasePin::Channel { channel } => ArtifactPin::Channel {
+            zup_core::ReleasePin::Channel { channel } => ArtifactPin::Channel {
                 channel: channel.clone(),
             },
         };

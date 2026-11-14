@@ -3,7 +3,11 @@ use std::collections::BTreeMap;
 
 use zup_core::Target;
 use zup_publish_github::MatrixTarget;
-use zup_publish_github::{WorkflowPolicy, generate};
+use zup_publish_github::WorkflowPolicy;
+
+fn generate(policy: &WorkflowPolicy, targets: &[MatrixTarget]) -> String {
+    zup_publish_github::generate(policy, targets).expect("valid workflow fixture")
+}
 
 fn matrix() -> Vec<MatrixTarget> {
     vec![
@@ -14,12 +18,91 @@ fn matrix() -> Vec<MatrixTarget> {
     ]
 }
 
+#[test]
+fn unsigned_workflow_has_only_real_job_and_output_producers() {
+    let yaml = generate(&WorkflowPolicy::default(), &matrix());
+    assert!(!yaml.contains("  sign:\n"));
+    assert!(!yaml.contains("needs: [plan, sign]"));
+    assert!(yaml.contains("steps.source.outputs.commit"));
+    assert!(yaml.contains("id: source"));
+    assert!(yaml.contains("steps.tool.outputs.zup-path"));
+}
+
+#[test]
+fn every_generated_policy_passes_yaml_graph_and_actionlint_validation() {
+    let root = tempfile::tempdir().unwrap();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../action/scripts/validate-workflow.ts");
+    let mut paths = Vec::new();
+    for signing in [false, true] {
+        for attestations in [false, true] {
+            for multiple in [false, true] {
+                for runner in ["ubuntu-latest", "windows-latest"] {
+                    let targets = if multiple {
+                        matrix()
+                    } else {
+                        vec![matrix().remove(0)]
+                    };
+                    let policy = WorkflowPolicy {
+                        signing: signing.then(|| zup_publish_github::Signing {
+                            command: "echo signing-command".into(),
+                        }),
+                        attestations,
+                        compose_runner: runner.into(),
+                        release_dir: "out artifacts/release".into(),
+                        runner_overrides: BTreeMap::from([(
+                            "windows-x64".into(),
+                            "windows-latest".into(),
+                        )]),
+                        ..WorkflowPolicy::default()
+                    };
+                    zup_publish_github::validate_policy(&policy, &targets).unwrap();
+                    let path = root.path().join(format!("policy-{}.yml", paths.len()));
+                    std::fs::write(&path, generate(&policy, &targets)).unwrap();
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    let output = std::process::Command::new("bun")
+        .arg(script)
+        .args(&paths)
+        .output()
+        .expect("Bun is required for generated workflow contract validation");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actionlint = std::env::var_os("ACTIONLINT").unwrap_or_else(|| "actionlint".into());
+    match std::process::Command::new(actionlint)
+        .args(["-shellcheck=", "-pyflakes="])
+        .args(&paths)
+        .output()
+    {
+        Ok(output) => assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && std::env::var_os("CI").is_none() =>
+        {
+            eprintln!("actionlint unavailable locally; set ACTIONLINT to validate expressions")
+        }
+        Err(error) => panic!("actionlint is required in CI: {error}"),
+    }
+}
+
 #[rstest]
 #[case("windows-x64", "windows-latest")]
 #[case("windows-arm64", "windows-11-arm")]
 #[case("linux-x64", "ubuntu-latest")]
 #[case("linux-arm64", "ubuntu-24.04-arm")]
 #[case("windows-x86", "windows-latest")]
+#[case("linux-x64-musl", "ubuntu-latest")]
+#[case("linux-arm64-musl", "ubuntu-latest")]
 fn a_runner_is_derived_from_the_target(#[case] name: &str, #[case] runner: &str) {
     let rendered = generate(
         &WorkflowPolicy::default(),
@@ -130,7 +213,7 @@ fn attestations_can_be_turned_off_entirely() {
     let rendered = generate(&policy, &matrix());
     assert!(!rendered.contains("  attest:"), "{rendered}");
     assert!(!rendered.contains("id-token: write"), "{rendered}");
-    assert!(rendered.contains("needs: [compose, sign]"), "{rendered}");
+    assert!(rendered.contains("needs: [plan, sign]"), "{rendered}");
 }
 
 #[test]
@@ -233,7 +316,7 @@ fn every_third_party_action_uses_the_ref_the_lock_tracks() {
         let locked = zup_publish_github::pin(repository.trim())
             .unwrap_or_else(|error| panic!("`{line}`: {error}"));
         assert_eq!(
-            revision, locked.version,
+            revision, locked.sha,
             "`{line}` does not use the ref the lock tracks"
         );
         assert_eq!(locked.sha.len(), 40, "`{line}` has no recorded commit");
@@ -281,4 +364,11 @@ fn generation_is_reproducible_and_check_notices_drift() {
     std::fs::write(&path, &first).expect("the file is rewritten");
     let current = zup_publish_github::check(root.path(), &policy, &matrix());
     assert!(current.current, "{}", current.detail);
+}
+
+#[test]
+fn gnu_runners_do_not_claim_native_musl_execution() {
+    for target in [Target::LINUX_X64_MUSL, Target::LINUX_ARM64_MUSL] {
+        assert!(zup_publish_github::native_runner(target).is_none());
+    }
 }

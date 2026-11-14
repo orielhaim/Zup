@@ -21,7 +21,7 @@ permissions:
 
 concurrency:
   group: full-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -47,7 +47,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -68,6 +68,14 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.146
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint@1.7.12
 
       - name: Linux dependencies
         if: runner.os == 'Linux'
@@ -92,9 +100,42 @@ jobs:
       - name: Toolchain
         run: cargo xtask toolchain build
 
+      - name: Build version-matched plugin test fixtures
+        run: |
+          rustup target add wasm32-wasip3
+          cargo xtask fixtures build
+
       - name: Windows tests
         if: runner.os == 'Windows'
         run: cargo nextest run --profile integration -p zup -p zup-installer -p zup-preview -p zup-windows --all-features --no-fail-fast
+
+      - name: Linux native installer service lifecycle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build -p zup
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          sudo python3 scripts/verify-systemd-service.py \
+            --zup "$PWD/target/debug/zup" \
+            --runtime "$PWD/target/debug/toolchain/$version/zup-setup-headless-linux-x64" \
+            --plugin "$PWD/target/test-fixtures/configure.wasm"
+
+      - name: Windows native SCM lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/verify-windows-services.ps1
+
+      - name: Windows generated installer service lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --locked -p zup
+          if ($LASTEXITCODE -ne 0) { throw 'CLI build failed.' }
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $runtime = "$PWD/target/debug/toolchain/$version/zup-setup-headless-windows-x64.exe"
+          ./scripts/verify-windows-service-installer.ps1 -Zup "$PWD/target/debug/zup.exe" -Runtime $runtime -Service "$PWD/target/debug/zup-test-service.exe"
+          ./scripts/verify-windows-service-installer.ps1 -Zup "$PWD/target/debug/zup.exe" -Runtime $runtime -Service "$PWD/target/debug/zup-test-service.exe" -RecoveryPolicy
 
       - name: Linux tests
         if: runner.os == 'Linux'

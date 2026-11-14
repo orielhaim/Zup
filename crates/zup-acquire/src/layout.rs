@@ -6,8 +6,7 @@
 //! ```text
 //! metadata/                              TUF metadata
 //! releases/<channel>.json                authenticated release descriptor
-//! releases/<channel>/catalog.json        digest-to-size catalog
-//! releases/<channel>/variants/<id>.json   one variant manifest
+//! documents/sha256/<ab>/<digest>         immutable JSON documents
 //! blobs/sha256/<ab>/<abcdef…>            one compressed blob
 //! ```
 //!
@@ -36,37 +35,11 @@ pub fn release_path(channel: &str) -> Result<RelativeContentPath, &'static str> 
     RelativeContentPath::parse(&format!("{RELEASE_ROOT}/{channel}.json"))
 }
 
-/// Path of the content catalog for `channel`.
-pub fn catalog_path(channel: &str) -> Result<RelativeContentPath, &'static str> {
-    check_channel(channel)?;
-    RelativeContentPath::parse(&format!("{RELEASE_ROOT}/{channel}/catalog.json"))
-}
-
-/// Path of the immutable release descriptor for one version of a channel.
-///
-/// A channel document moves; a version document does not. That is the whole
-/// reason a version-pinned installer can exist: it addresses the graph that was
-/// published for the version it was built for, and no later publication can
-/// change what that name resolves to. Both documents carry the same
-/// `release_digest`, so a pinned and a channel client that land on the same
-/// version can prove they are installing identical bytes.
-pub fn release_version_path(
-    channel: &str,
-    version: &str,
-) -> Result<RelativeContentPath, &'static str> {
-    check_channel(channel)?;
-    check_segment(version)?;
-    RelativeContentPath::parse(&format!("{RELEASE_ROOT}/{channel}/versions/{version}.json"))
-}
-
-/// Path of one variant manifest within a release.
-pub fn variant_manifest_path(
-    channel: &str,
-    variant: &str,
-) -> Result<RelativeContentPath, &'static str> {
-    check_channel(channel)?;
-    check_segment(variant)?;
-    RelativeContentPath::parse(&format!("{RELEASE_ROOT}/{channel}/variants/{variant}.json"))
+/// Path of an immutable metadata document, hashed over its stored bytes.
+pub fn document_path(digest: &Sha256Digest) -> RelativeContentPath {
+    let hex = digest.to_hex();
+    RelativeContentPath::parse(&format!("documents/sha256/{}/{}", &hex[..2], &hex[2..]))
+        .expect("a SHA-256 digest is a valid document path")
 }
 
 /// Path of one blob within the content-addressed tree.
@@ -120,43 +93,6 @@ pub fn check_segment(name: &str) -> Result<(), &'static str> {
         return Err("a variant name cannot start with `.`");
     }
     Ok(())
-}
-
-/// The immutable layout, stated once so staging and reading cannot disagree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WebLayout;
-
-impl WebLayout {
-    /// Path of the release descriptor for `channel`.
-    pub fn release(channel: &str) -> Result<RelativeContentPath, &'static str> {
-        release_path(channel)
-    }
-
-    /// Path of the content catalog for `channel`.
-    pub fn catalog(channel: &str) -> Result<RelativeContentPath, &'static str> {
-        catalog_path(channel)
-    }
-
-    /// Path of the immutable release descriptor for one version.
-    pub fn release_version(
-        channel: &str,
-        version: &str,
-    ) -> Result<RelativeContentPath, &'static str> {
-        release_version_path(channel, version)
-    }
-
-    /// Path of one variant manifest.
-    pub fn variant_manifest(
-        channel: &str,
-        variant: &str,
-    ) -> Result<RelativeContentPath, &'static str> {
-        variant_manifest_path(channel, variant)
-    }
-
-    /// Path of one blob.
-    pub fn blob(digest: &Sha256Digest) -> RelativeContentPath {
-        blob_path(digest)
-    }
 }
 
 /// One entry of a content catalog: what a digest costs to move.

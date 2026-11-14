@@ -36,12 +36,13 @@ pub use session::{Capabilities, Capability, HostHello, PresetHello, SessionId, U
 pub use session_machine::{Handshake, Identity, Session, SessionProgress};
 pub use snapshot::{
     ComponentGroupOption, ComponentOption, ComponentProminence, InstallOptions, InstallerState,
-    LaunchTarget, MaintenanceState, OperationKind, ProductIdentity, SelectionRequirement, Snapshot,
-    Surface,
+    LaunchTarget, MaintenanceState, OperationKind, ProductIdentity, RetainedDeployment,
+    SelectionRequirement, Snapshot, Surface,
 };
 pub use wire::{
     Envelope, MAX_FRAME_BYTES, Message, PeerRole, SequenceTracker, decode, encode, message_name,
     negotiate, sender_is_allowed,
 };
+pub use zup_core::{DeploymentSettlement, RecoveryCleanup, RecoveryKind, RecoverySummary};
 
 pub const PRESET_PROTOCOL_VERSION: u32 = 2;

@@ -3,7 +3,25 @@ name: action
 on:
   push:
     branches: [master]
+    paths:
+      - "action.yml"
+      - "action/**"
+      - "crates/**"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/action.yml"
   pull_request:
+    paths:
+      - "action.yml"
+      - "action/**"
+      - "crates/**"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/action.yml"
   workflow_dispatch:
 
 permissions:
@@ -33,7 +51,7 @@ jobs:
       - name: Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.4.4"
 
       - uses: actions/setup-node@v7
         with:
@@ -45,8 +63,8 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Lint and format
-        run: bun run biome
+      - name: Format
+        run: bun run format:check
 
       - name: Unit tests
         run: bun test
@@ -82,7 +100,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
 
       - uses: Swatinem/rust-cache@v2
         with:

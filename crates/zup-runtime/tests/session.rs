@@ -1,4 +1,11 @@
+mod requirements_fixture {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/deployment.rs"
+    ));
+}
 use std::path::PathBuf;
+use zup_plan::{DeploymentEffects, compile_deployment};
 
 use rstest::rstest;
 use zup_core::{SelectedScope, Target};
@@ -6,7 +13,6 @@ use zup_runtime::{
     ExecutionPolicy, InstallOutcome, OperationControl, RuntimeBackend, RuntimeControl,
     RuntimeEvent, RuntimeFuture, RuntimeRequest, SessionError, execute,
 };
-use zup_transaction::{TransactionInput, compile_transaction};
 
 struct FakeBackend;
 
@@ -41,21 +47,38 @@ impl RuntimeBackend for FakeBackend {
 }
 
 fn request() -> RuntimeRequest {
+    let target = Target::WINDOWS_X64;
+    let mut effects = DeploymentEffects::new(
+        zup_core::InstallationId::new_v7(),
+        requirements_fixture::requirements(
+            target,
+            zup_core::SelectedScope::User,
+            "example.application",
+            "1.0.0",
+        ),
+    );
+    effects.install_directory = Some(zup_core::TargetPath::new(target, r"C:\example").unwrap());
+    let plan = compile_deployment(&effects).unwrap();
     RuntimeRequest {
-        intent: None,
+        operation: zup_runtime::RuntimeOperation::Deployment(Box::new(
+            zup_runtime::RuntimeDeployment {
+                plan: plan.clone(),
+                intent: zup_plan::DeploymentIntent {
+                    deployment: zup_plan::DeploymentSelection::from_plan(&plan),
+                    action: zup_plan::LifecycleAction::Install,
+                    enable: Vec::new(),
+                    disable: Vec::new(),
+                    install_directory: None,
+                },
+                bootstrap: None,
+                release: None,
+            },
+        )),
         target: Target::parse("windows-x64").unwrap(),
         app_id: zup_core::AppId::new("com.example.runtime").unwrap(),
         app_version: "1.0.0".parse().unwrap(),
         scope: SelectedScope::User,
-        transaction_plan: compile_transaction(&TransactionInput::new(
-            Target::parse("windows-x64").unwrap(),
-        ))
-        .unwrap(),
         state_root: PathBuf::from("state"),
-
-        recovery_id: None,
-        bootstrap: None,
-        release: None,
     }
 }
 
@@ -117,4 +140,77 @@ async fn the_operation_outcome_is_independent_of_progress_delivery(
     }
     assert!(!ExecutionPolicy::NonInteractive.allows_authorization());
     assert!(ExecutionPolicy::Interactive.allows_authorization());
+}
+
+struct SettledBackend(InstallOutcome);
+
+impl RuntimeBackend for SettledBackend {
+    fn execute<'a>(
+        &'a self,
+        _request: RuntimeRequest,
+        _control: RuntimeControl,
+    ) -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>> {
+        Box::pin(async { Ok(self.0.clone()) })
+    }
+}
+
+#[rstest]
+#[case::committed(InstallOutcome::Committed, zup_runtime::RecoverySettlement::Committed)]
+#[case::compensated(
+    InstallOutcome::RolledBack,
+    zup_runtime::RecoverySettlement::RolledBack
+)]
+#[tokio::test]
+async fn recovery_reports_successful_settlement_without_changing_deployment_failures(
+    #[case] settlement: InstallOutcome,
+    #[case] expected: zup_runtime::RecoverySettlement,
+) {
+    let backend = SettledBackend(settlement.clone());
+    let control = OperationControl::new(ExecutionPolicy::NonInteractive);
+    assert_eq!(
+        execute(&backend, request(), &control).await.unwrap(),
+        settlement
+    );
+    let mut recovery = request();
+    recovery.operation = zup_runtime::RuntimeOperation::Recovery {
+        transaction: zup_core::TransactionId::new_v7(),
+        request: Default::default(),
+    };
+    assert_eq!(
+        execute(&backend, recovery, &control).await.unwrap(),
+        InstallOutcome::Recovered {
+            settlement: expected
+        },
+    );
+}
+
+struct BurstBackend;
+impl RuntimeBackend for BurstBackend {
+    fn execute<'a>(
+        &'a self,
+        _request: RuntimeRequest,
+        control: RuntimeControl,
+    ) -> RuntimeFuture<'a, Result<InstallOutcome, SessionError>> {
+        Box::pin(async move {
+            for completed in 1..=1000 {
+                let _ = control.events.send(RuntimeEvent::Progress {
+                    phase: zup_core::OperationPhase::Files,
+                    completed,
+                    total: 1000,
+                    action: String::new(),
+                });
+            }
+            Ok(InstallOutcome::Committed)
+        })
+    }
+}
+#[tokio::test]
+async fn terminal_drain_recovers_the_latest_snapshot_after_broadcast_lag() {
+    let control = OperationControl::new(ExecutionPolicy::Interactive);
+    assert_eq!(
+        execute(&BurstBackend, request(), &control).await.unwrap(),
+        InstallOutcome::Committed
+    );
+    assert_eq!(control.progress().completed, 1000);
+    assert_eq!(control.progress().total, 1000);
 }

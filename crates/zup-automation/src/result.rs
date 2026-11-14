@@ -432,10 +432,20 @@ pub struct PlanDetails {
 }
 
 #[cfg_attr(feature = "bindings", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanFilePlacement {
+    Generation,
+    FixedAtomic,
+    FixedQuiescent,
+}
+
+#[cfg_attr(feature = "bindings", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanResource {
     File {
+        placement: PlanFilePlacement,
         destination: String,
         size: ByteCount,
         digest: crate::Digest,

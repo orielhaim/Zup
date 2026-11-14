@@ -19,7 +19,17 @@ pub enum Action {
     Install,
     Update,
     Modify,
+    Downgrade,
+    Rollback {
+        revision: zup_core::ActivationRevision,
+    },
+    Cleanup {
+        keep: u16,
+    },
     Repair,
+    Recover {
+        transaction: zup_core::TransactionId,
+    },
     RequestUninstall,
     ConfirmUninstall,
     DismissUninstall,

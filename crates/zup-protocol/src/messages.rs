@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zup_core::Target;
 
-use crate::SessionId;
+use zup_core::SessionId;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
@@ -24,7 +24,9 @@ pub enum WorkerFailure {
     Protocol,
     Transaction,
     Cancelled,
-    RecoveryRequired,
+    RecoveryRequired {
+        transaction: Option<zup_core::TransactionId>,
+    },
     AuthorizationRequired,
     StalePlan,
     Policy,
@@ -41,9 +43,13 @@ pub struct WireEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Message {
+    RecoveryInspected {
+        target: Option<zup_core::RecoverySummary>,
+        active: Option<Box<zup_core::ActiveLaunchers>>,
+    },
     WorkerHello(WorkerHello),
     ParentHello(ParentHello),
-    ExecuteTransaction(Box<ExecuteTransaction>),
+    PrepareTransaction(Box<PrepareTransaction>),
     ExecuteBootstrap(ExecuteBootstrap),
     Prepare(PrepareOperation),
     Prepared(PreparedOperation),
@@ -72,7 +78,7 @@ pub struct ParentHello {
     pub session_id: SessionId,
     pub target: Target,
     pub transaction_id: Uuid,
-    pub expected_plan_hash: String,
+    pub expected_request_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -85,12 +91,17 @@ pub struct Capabilities {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecuteTransaction {
-    pub content: Option<zup_acquire::RuntimeHandoff>,
-    pub intent: Option<zup_plan::DeploymentIntent>,
+pub struct AcquiredSource {
+    pub handoff: zup_acquire::RuntimeHandoff,
+    pub image: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareTransaction {
+    pub content: Option<AcquiredSource>,
+    pub operation: PreparedTransactionRequest,
     pub target: Target,
-    pub plan_json: String,
-    pub plan_hash: String,
     pub app_id: String,
     pub app_version: String,
     pub scope: String,
@@ -100,40 +111,27 @@ pub struct ExecuteTransaction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_overlay_base_root: Option<String>,
     pub state_root: String,
-    pub recovery_id: Option<uuid::Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_intent: Option<MachineRecoveryIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<zup_core::ReleaseIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MachineRecoveryIntent {
-    pub transaction_id: uuid::Uuid,
-    pub app_id: String,
-    pub app_version: String,
-    pub scope: String,
-    pub target: Target,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PreparedTransactionRequest {
+    InspectRecovery,
+    Deployment {
+        plan: Box<zup_plan::DeploymentPlan>,
+        intent: Box<zup_plan::DeploymentIntent>,
+    },
+    Recovery {
+        transaction: zup_core::TransactionId,
+        request: zup_transaction::RecoveryRequest,
+    },
 }
 
-impl MachineRecoveryIntent {
-    pub fn canonical_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
-
-    pub fn validate_shape(&self) -> Result<(), crate::WireError> {
-        if self.scope != "machine" {
-            return Err(crate::WireError::Malformed(
-                "machine recovery is only for machine scope".into(),
-            ));
-        }
-        let bounded = |value: &str| !value.is_empty() && value.len() <= MAX_INTENT_STRING_BYTES;
-        if !bounded(&self.app_id) || !bounded(&self.app_version) || !bounded(&self.scope) {
-            return Err(crate::WireError::FrameTooLarge {
-                max: MAX_INTENT_STRING_BYTES,
-            });
-        }
-        Ok(())
+impl PrepareTransaction {
+    pub fn digest(&self) -> Result<String, serde_json::Error> {
+        Ok(zup_core::hash_bytes(&serde_json::to_vec(self)?).to_hex())
     }
 }
 
@@ -156,39 +154,31 @@ pub struct ExecuteBootstrap {
 pub const MAX_INTENT_STRING_BYTES: usize = 4096;
 pub const MAX_INTENT_COMPONENTS: usize = 64;
 
-pub mod privileged_operation {
-    pub const INSTALL: &str = "install";
-    pub const UPGRADE: &str = "upgrade";
-    pub const MODIFY: &str = "modify";
-    pub const REPAIR: &str = "repair";
-    pub const UNINSTALL: &str = "uninstall";
-    pub const APPLY: &str = "apply";
-    pub const RECOVER: &str = "recover";
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PrivilegedRequest {
+    Deployment {
+        intent: Box<zup_plan::DeploymentIntent>,
+        expected_requirements: Option<Box<zup_plan::DeploymentRequirements>>,
+    },
+    Recovery {
+        transaction: zup_core::TransactionId,
+        request: zup_transaction::RecoveryRequest,
+    },
+}
+impl PrivilegedRequest {
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Deployment { intent, .. } => intent.action.name(),
+            Self::Recovery { .. } => "recover",
+        }
+    }
 }
 
-pub const PRIVILEGED_OPERATIONS: &[&str] = &[
-    privileged_operation::INSTALL,
-    privileged_operation::UPGRADE,
-    privileged_operation::MODIFY,
-    privileged_operation::REPAIR,
-    privileged_operation::UNINSTALL,
-    privileged_operation::APPLY,
-    privileged_operation::RECOVER,
-];
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrepareOperation {
-    pub recovery_id: Option<uuid::Uuid>,
-    pub operation: String,
-    pub force: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub install_dir_override: Option<String>,
-    #[serde(default)]
-    pub selected_components: Vec<String>,
-    #[serde(default)]
-    pub disabled_components: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_plan_digest: Option<String>,
+    pub operation: PrivilegedRequest,
     pub app_id: String,
     pub app_version: String,
     pub scope: String,
@@ -198,19 +188,8 @@ pub struct PrepareOperation {
 
 impl PrepareOperation {
     pub fn validate_shape(&self) -> Result<(), crate::WireError> {
-        if (self.operation == privileged_operation::RECOVER) != self.recovery_id.is_some() {
-            return Err(crate::WireError::Malformed(
-                "recovery requires a transaction identity".into(),
-            ));
-        }
-        if !PRIVILEGED_OPERATIONS.contains(&self.operation.as_str()) {
-            return Err(crate::WireError::Malformed(
-                "unknown privileged operation".into(),
-            ));
-        }
         let bounded = |value: &str| value.len() <= MAX_INTENT_STRING_BYTES;
-        if !bounded(&self.operation)
-            || !bounded(&self.app_id)
+        if !bounded(&self.app_id)
             || !bounded(&self.app_version)
             || !bounded(&self.scope)
             || !bounded(&self.state_root)
@@ -219,39 +198,41 @@ impl PrepareOperation {
                 max: MAX_INTENT_STRING_BYTES,
             });
         }
-        if let Some(directory) = &self.install_dir_override
-            && !bounded(directory)
+        if let PrivilegedRequest::Deployment {
+            intent,
+            expected_requirements,
+        } = &self.operation
         {
-            return Err(crate::WireError::FrameTooLarge {
-                max: MAX_INTENT_STRING_BYTES,
-            });
-        }
-        if let Some(digest) = &self.expected_plan_digest
-            && !bounded(digest)
-        {
-            return Err(crate::WireError::FrameTooLarge {
-                max: MAX_INTENT_STRING_BYTES,
-            });
-        }
-        if self.selected_components.len() > MAX_INTENT_COMPONENTS {
-            return Err(crate::WireError::FrameTooLarge {
-                max: MAX_INTENT_COMPONENTS,
-            });
-        }
-        if self.disabled_components.len() > MAX_INTENT_COMPONENTS {
-            return Err(crate::WireError::FrameTooLarge {
-                max: MAX_INTENT_COMPONENTS,
-            });
-        }
-        if self.selected_components.iter().any(|name| !bounded(name)) {
-            return Err(crate::WireError::FrameTooLarge {
-                max: MAX_INTENT_STRING_BYTES,
-            });
-        }
-        if self.disabled_components.iter().any(|name| !bounded(name)) {
-            return Err(crate::WireError::FrameTooLarge {
-                max: MAX_INTENT_STRING_BYTES,
-            });
+            if intent
+                .install_directory
+                .as_ref()
+                .is_some_and(|directory| !bounded(&directory.to_string_lossy()))
+                || intent
+                    .enable
+                    .iter()
+                    .chain(&intent.disable)
+                    .any(|name| !bounded(name))
+            {
+                return Err(crate::WireError::FrameTooLarge {
+                    max: MAX_INTENT_STRING_BYTES,
+                });
+            }
+            if intent.enable.len() > MAX_INTENT_COMPONENTS
+                || intent.disable.len() > MAX_INTENT_COMPONENTS
+            {
+                return Err(crate::WireError::FrameTooLarge {
+                    max: MAX_INTENT_COMPONENTS,
+                });
+            }
+            if let Some(requirements) = expected_requirements
+                && (requirements.validate().is_err()
+                    || requirements.app.id.as_str() != self.app_id
+                    || requirements.target != self.target)
+            {
+                return Err(crate::WireError::Malformed(
+                    "deployment requirements differ from the prepared application".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -259,6 +240,7 @@ impl PrepareOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedOperation {
+    pub plan: Box<zup_plan::DeploymentPlan>,
     pub plan_digest: String,
     pub operation: String,
     pub app_id: String,
@@ -275,6 +257,8 @@ pub struct ExecuteOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProgressReport {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_pids: Vec<u32>,
     pub phase: zup_core::OperationPhase,
     pub kind: ProgressKind,
     pub detail: String,
@@ -306,6 +290,8 @@ pub struct TransactionStateChanged {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerOutcome {
+    RecoveryInspected,
+    RecoveryAssessed,
     Committed,
     RolledBack,
     Cancelled,
@@ -442,7 +428,7 @@ impl PrivilegedSession {
         match &self.state {
             PrivilegedSessionState::Prepared { plan_digest: bound } => {
                 if plan_digest.to_lowercase() != *bound {
-                    return Err(WireError::PlanHashMismatch);
+                    return Err(WireError::RequestDigestMismatch);
                 }
                 self.state = PrivilegedSessionState::Executed;
                 Ok(())
@@ -496,7 +482,7 @@ mod tests {
         tracker.prepared(id, DIGEST_A).expect("prepare binds");
         assert!(matches!(
             tracker.execute(id, DIGEST_B),
-            Err(WireError::PlanHashMismatch)
+            Err(WireError::RequestDigestMismatch)
         ));
         assert!(!tracker.executed());
     }

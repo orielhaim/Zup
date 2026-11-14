@@ -13,7 +13,7 @@ mod toolchain_fixture;
 
 const HOST_TARGET: &str = zup_plugin_contract::HOST_TARGET;
 
-/// A Linux ABI Zup parses but no backend builds.
+/// A target without a GUI frontend.
 const UNSUPPORTED_TARGET: &str = "linux-x64-musl";
 
 #[cfg(target_arch = "aarch64")]
@@ -64,19 +64,6 @@ fn fixture_frontend() -> zup_core::Frontend {
     }
 }
 
-/// The application main a fixture declares, when the host's backend reads one.
-///
-/// Windows never validates it; Linux requires it to name an executable shipped
-/// file, which these fixtures have no reason to do, so Linux fixtures declare
-/// none.
-fn fixture_main() -> &'static str {
-    if cfg!(windows) {
-        "main = \"app.exe\"\n"
-    } else {
-        ""
-    }
-}
-
 /// A runtime template for `target`, written as a real zup component.
 ///
 /// `doctor` reads a template's descriptor and its PE header and nothing else, so
@@ -95,7 +82,6 @@ frontend = "{frontend}"
 id = "com.example.doctor"
 name = "Doctor App"
 version = "1.0.0"
-{main}
 [build]
 
 [build.targets.default]
@@ -109,11 +95,11 @@ scope = "user"
 user = "${{location.user_data}}/DoctorApp"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#,
         frontend = selected_frontend(),
-        main = fixture_main(),
     )
 }
 
@@ -222,7 +208,7 @@ fn directory_entries(root: &Path) -> BTreeSet<String> {
 }
 
 fn plugin_component() -> Vec<u8> {
-    include_bytes!("../../../examples/plugins/configure/dist/configure.wasm").to_vec()
+    zup_plugin_abi::test_fixture::component()
 }
 
 #[test]
@@ -271,11 +257,6 @@ fn healthy_single_target_passes_every_required_check() {
         find(&rows, "frontend")["message"],
         format!("resolved frontend is `{}`", selected_frontend())
     );
-    assert!(
-        message(find(&rows, "source_payload")).contains("payload digest"),
-        "the payload summary carries a digest"
-    );
-
     if ON_WINDOWS {
         assert_eq!(statuses(&rows, "runtime_template"), only("pass"));
         assert_eq!(statuses(&rows, "build_backend"), only("pass"));
@@ -446,8 +427,9 @@ scope = "user"
 user = "${{location.user_data}}/DoctorMatrix"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#,
             frontend = selected_frontend()
         ),
@@ -526,7 +508,7 @@ fn machine_scope_reports_elevation_capability() {
     // names, and the point here is elevation rather than main validation.
     // Console on every host: a GUI frontend has no Linux runtime, which
     // would fail lowering for the wrong reason.
-    let manifest_text = manifest(target).replace(fixture_main(), "").replace(
+    let manifest_text = manifest(target).replace(
         &format!("frontend = \"{}\"", selected_frontend()),
         "frontend = \"console\"",
     );
@@ -605,6 +587,12 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
 
     // An unsupported target. The backend is a finding, and no artifact is produced.
     let project = single_target_project(UNSUPPORTED_TARGET);
+    let source = fs::read_to_string(project.path().join("zup.toml")).unwrap();
+    fs::write(
+        project.path().join("zup.toml"),
+        source.replace("frontend = \"console\"", "frontend = \"gui\""),
+    )
+    .unwrap();
     let runtime = setup_runtime(project.path(), HOST_TARGET);
     let result = run_doctor(
         &project.path().join("zup.toml"),
@@ -615,19 +603,16 @@ fn one_broken_thing_leaves_every_independent_check_reporting() {
     assert_eq!(report["ready"], false);
     let rows = checks(&result, "default");
     assert_eq!(report["targets"][0]["target"], UNSUPPORTED_TARGET);
-    // Linux on ARM64 parses but no Linux backend builds it: the finding names
-    // the supported Linux target rather than the host.
     assert_eq!(statuses(&rows, "build_backend"), only("pass"));
     assert_eq!(statuses(&rows, "target_lowering"), only("fail"));
     assert!(
-        message(find(&rows, "target_lowering")).contains("linux-x64"),
+        message(find(&rows, "target_lowering")).contains("frontend"),
         "{}",
         message(find(&rows, "target_lowering"))
     );
     for kind in [
         "manifest_compile",
         "source_payload",
-        "frontend",
         "canonical_target",
         "output_parent",
     ] {
@@ -689,8 +674,9 @@ scope = "user"
 user = "${{location.user_data}}/DoctorPlugins"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 
 [[plugins]]
 id = "helper"
@@ -752,7 +738,7 @@ source = "plugins/helper.wasm"
     let plugins = find(&rows, "plugin_engine");
     assert_eq!(plugins["status"], "fail", "{}", message(plugins));
     assert!(
-        message(plugins).contains("plugin AOT compilation is not ready"),
+        message(plugins).contains("plugin COMPONENT compilation is not ready"),
         "the plugin diagnostic explains the failure: {}",
         message(plugins)
     );

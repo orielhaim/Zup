@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod acquisition;
+mod installation;
+pub use installation::{DeploymentVersion, InstallationReport};
 
 pub use acquisition::{AcquisitionThread, acquisition_thread, automation_events, progress_line};
 
@@ -8,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize, de::Error as _};
+use zup_core::format_bytes;
 use zup_core::{ComponentId, ResourceKey, SelectedScope};
 use zup_plan::DesiredState;
 
@@ -51,6 +54,7 @@ pub struct PlanPreview {
     pub estimated_bytes: u64,
     #[serde(default)]
     pub download_bytes: u64,
+    pub storage: Option<zup_core::DeploymentStorageEstimate>,
     /// True when any change in this preview needs host-wide authority.
     pub requires_authorization: bool,
     pub groups: Vec<ChangeGroup>,
@@ -59,22 +63,43 @@ pub struct PlanPreview {
 }
 
 impl PlanPreview {
-    pub fn from_desired_state<P: std::fmt::Display, L>(
-        plan: &DesiredState<P, L>,
+    pub fn from_desired_state<P: std::fmt::Display, L, R>(
+        plan: &DesiredState<P, L, R>,
     ) -> Result<Self, zup_plan::ContractError> {
         let summary = plan.summary()?;
         let mut groups = BTreeMap::<ResourceCategory, Vec<PlannedChange>>::new();
+        for directory in &plan.data {
+            groups
+                .entry(ResourceCategory::Data)
+                .or_default()
+                .push(PlannedChange {
+                    category: ResourceCategory::Data,
+                    kind: ChangeKind::Preserve,
+                    label: directory.id.to_string(),
+                    location: directory.location.path().map(ToString::to_string),
+                    scope: Some(plan.scope),
+                    requires_authorization: plan.scope == SelectedScope::Machine,
+                    estimated_bytes: 0,
+                    component: None,
+                    technical_key: Some(format!("data:{}", directory.id)),
+                });
+        }
         for file in &plan.files {
-            let category = if matches!(file.key, ResourceKey::Maintenance { .. }) {
-                ResourceCategory::Maintenance
-            } else {
-                ResourceCategory::Files
+            let category = match (&file.key, &file.placement) {
+                (
+                    ResourceKey::File {
+                        id: zup_core::FileResourceId::Maintenance { .. },
+                    },
+                    _,
+                ) => ResourceCategory::Maintenance,
+                (_, zup_core::PayloadPlacement::Generation { .. }) => ResourceCategory::Application,
+                (_, zup_core::PayloadPlacement::Fixed { .. }) => ResourceCategory::Files,
             };
             groups.entry(category).or_default().push(PlannedChange {
                 category,
                 kind: ChangeKind::Create,
                 label: file.source_relative.to_string(),
-                location: Some(file.destination.to_string()),
+                location: Some(file.destination().to_string()),
                 scope: Some(plan.scope),
                 requires_authorization: file.privilege == zup_core::Privilege::System,
                 estimated_bytes: file.size,
@@ -188,6 +213,7 @@ impl PlanPreview {
             selected_components: plan.selected_components.clone(),
             estimated_bytes: summary.install_bytes,
             download_bytes: summary.download_bytes,
+            storage: None,
             requires_authorization: summary.requires_authorization,
             groups: groups
                 .into_iter()
@@ -202,16 +228,226 @@ impl PlanPreview {
     }
 
     pub fn from_transaction_plan(
-        plan: &zup_transaction::TransactionPlan,
+        plan: &zup_plan::DeploymentPlan,
         scope: SelectedScope,
-        target: Option<&zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath>>,
+        target: Option<&zup_plan::BoundDeployment>,
     ) -> Result<Self, zup_plan::ContractError> {
         let mut groups = BTreeMap::<ResourceCategory, Vec<PlannedChange>>::new();
         let mut estimated_bytes = 0u64;
         for node in &plan.nodes {
             match &node.kind {
-                zup_transaction::NodeKind::FileMutation { key, delta } => {
-                    let category = if matches!(key, ResourceKey::Maintenance { .. }) {
+                zup_plan::NodeKind::Cleanup { operation } => {
+                    let (label, location) = match &operation.candidate {
+                        zup_plan::CleanupCandidate::Generation(generation) => (
+                            "Collect retired generation when unused",
+                            Some(generation.materialization.directory().to_string()),
+                        ),
+                        zup_plan::CleanupCandidate::Fixed(file) => (
+                            "Collect unreferenced recovery file",
+                            Some(file.path.to_string()),
+                        ),
+                        zup_plan::CleanupCandidate::History(history) => (
+                            "Collect unreferenced deployment history",
+                            Some(history.source.to_string()),
+                        ),
+                    };
+                    groups
+                        .entry(ResourceCategory::Application)
+                        .or_default()
+                        .push(PlannedChange {
+                            category: ResourceCategory::Application,
+                            kind: ChangeKind::Remove,
+                            label: label.into(),
+                            location,
+                            scope: Some(scope),
+                            requires_authorization: scope == SelectedScope::Machine,
+                            estimated_bytes: 0,
+                            component: None,
+                            technical_key: Some(node.id.to_string()),
+                        });
+                }
+                zup_plan::NodeKind::Retention { selection } => {
+                    for snapshot in &selection.forget {
+                        groups
+                            .entry(ResourceCategory::Application)
+                            .or_default()
+                            .push(PlannedChange {
+                                category: ResourceCategory::Application,
+                                kind: ChangeKind::Remove,
+                                label: format!("Forget collected revision {}", snapshot.revision),
+                                location: None,
+                                scope: Some(scope),
+                                requires_authorization: scope == SelectedScope::Machine,
+                                estimated_bytes: 0,
+                                component: None,
+                                technical_key: Some(node.id.to_string()),
+                            });
+                    }
+                    for snapshot in &selection.retire {
+                        groups
+                            .entry(ResourceCategory::Application)
+                            .or_default()
+                            .push(PlannedChange {
+                                category: ResourceCategory::Application,
+                                kind: ChangeKind::Remove,
+                                label: format!("Retire rollback revision {}", snapshot.revision),
+                                location: None,
+                                scope: Some(scope),
+                                requires_authorization: scope == SelectedScope::Machine,
+                                estimated_bytes: 0,
+                                component: None,
+                                technical_key: Some(node.id.to_string()),
+                            });
+                    }
+                }
+                zup_plan::NodeKind::PersistentDirectory { operation } => {
+                    groups
+                        .entry(ResourceCategory::Data)
+                        .or_default()
+                        .push(PlannedChange {
+                            category: ResourceCategory::Data,
+                            kind: if operation.stage == zup_plan::PersistentDirectoryStage::Access {
+                                ChangeKind::Verify
+                            } else if operation.intent.previous.is_some() {
+                                ChangeKind::Preserve
+                            } else {
+                                ChangeKind::Create
+                            },
+                            label: operation.intent.directory.id.to_string(),
+                            location: operation
+                                .intent
+                                .binding
+                                .path(plan.target)
+                                .ok()
+                                .map(|path| path.to_string()),
+                            scope: Some(scope),
+                            requires_authorization: operation.intent.privilege
+                                == zup_core::Privilege::System,
+                            estimated_bytes: 0,
+                            component: None,
+                            technical_key: Some(node.id.to_string()),
+                        });
+                }
+                zup_plan::NodeKind::NativeService { operation } => {
+                    let (kind, label, name) = match operation.as_ref() {
+                        zup_plan::NativeServiceOperation::Configure { service, .. }
+                            if service.kind == zup_plan::IntegrationChangeKind::NoOp =>
+                        {
+                            (ChangeKind::Verify, "Verify native service", &service.name)
+                        }
+                        zup_plan::NativeServiceOperation::Configure { service, .. } => (
+                            ChangeKind::Update,
+                            "Configure native service",
+                            &service.name,
+                        ),
+                        zup_plan::NativeServiceOperation::Remove { service, .. } => {
+                            (ChangeKind::Remove, "Remove native service", &service.name)
+                        }
+                    };
+                    groups
+                        .entry(ResourceCategory::Services)
+                        .or_default()
+                        .push(PlannedChange {
+                            category: ResourceCategory::Services,
+                            kind,
+                            label: label.into(),
+                            location: Some(name.clone()),
+                            scope: Some(scope),
+                            requires_authorization: operation.privilege()
+                                == zup_core::Privilege::System,
+                            estimated_bytes: 0,
+                            component: None,
+                            technical_key: Some(format!("{:?}", operation.key())),
+                        });
+                }
+                zup_plan::NodeKind::NativeCache { operation } => {
+                    let category = ResourceCategory::FileAssociations;
+                    groups.entry(category).or_default().push(PlannedChange {
+                        category,
+                        kind: ChangeKind::Update,
+                        label: format!("Regenerate {}", operation.kind.title()),
+                        location: Some(operation.directory.to_string()),
+                        scope: Some(scope),
+                        requires_authorization: false,
+                        estimated_bytes: 0,
+                        component: None,
+                        technical_key: Some(node.id.to_string()),
+                    });
+                }
+                zup_plan::NodeKind::Generation { operation, intent } => {
+                    let (kind, label) = match operation {
+                        zup_plan::GenerationOperation::Materialize => {
+                            (ChangeKind::Prepare, "Prepare application files")
+                        }
+                        zup_plan::GenerationOperation::Seal => {
+                            (ChangeKind::Seal, "Seal application generation")
+                        }
+                        zup_plan::GenerationOperation::Verify => {
+                            (ChangeKind::Verify, "Verify retained application")
+                        }
+                        zup_plan::GenerationOperation::Activate => {
+                            (ChangeKind::Activate, "Activate application")
+                        }
+                    };
+                    let bytes = if *operation == zup_plan::GenerationOperation::Materialize {
+                        intent.materialization.descriptor().size()
+                    } else {
+                        0
+                    };
+                    estimated_bytes = estimated_bytes.saturating_add(bytes);
+                    groups
+                        .entry(ResourceCategory::Application)
+                        .or_default()
+                        .push(PlannedChange {
+                            category: ResourceCategory::Application,
+                            kind,
+                            label: label.into(),
+                            location: Some(intent.materialization.directory().to_string()),
+                            scope: Some(scope),
+                            requires_authorization: intent.privilege == zup_core::Privilege::System,
+                            estimated_bytes: bytes,
+                            component: None,
+                            technical_key: Some(
+                                intent
+                                    .materialization
+                                    .descriptor()
+                                    .tree_id()
+                                    .digest()
+                                    .to_hex(),
+                            ),
+                        });
+                }
+                zup_plan::NodeKind::RetainFile { key } => {
+                    let category = if matches!(
+                        key,
+                        ResourceKey::File {
+                            id: zup_core::FileResourceId::Maintenance { .. }
+                        }
+                    ) {
+                        ResourceCategory::Maintenance
+                    } else {
+                        ResourceCategory::Files
+                    };
+                    groups.entry(category).or_default().push(PlannedChange {
+                        category,
+                        kind: ChangeKind::Verify,
+                        label: "Verify retained file".into(),
+                        location: node.file_destination().map(ToString::to_string),
+                        scope: Some(scope),
+                        requires_authorization: node.meta.privilege
+                            == Some(zup_core::Privilege::System),
+                        estimated_bytes: 0,
+                        component: None,
+                        technical_key: Some(format!("{key:?}")),
+                    });
+                }
+                zup_plan::NodeKind::FileMutation { key, delta } => {
+                    let category = if matches!(
+                        key,
+                        ResourceKey::File {
+                            id: zup_core::FileResourceId::Maintenance { .. }
+                        }
+                    ) {
                         ResourceCategory::Maintenance
                     } else {
                         ResourceCategory::Files
@@ -249,9 +485,11 @@ impl PlanPreview {
                         technical_key: Some(format!("{key:?}")),
                     });
                 }
-                zup_transaction::NodeKind::FileRemoval { key } => {
+                zup_plan::NodeKind::FileRemoval { key } => {
                     let category = match key {
-                        ResourceKey::Maintenance { .. } => ResourceCategory::Maintenance,
+                        ResourceKey::File {
+                            id: zup_core::FileResourceId::Maintenance { .. },
+                        } => ResourceCategory::Maintenance,
                         _ => ResourceCategory::Files,
                     };
                     groups.entry(category).or_default().push(PlannedChange {
@@ -267,17 +505,36 @@ impl PlanPreview {
                         technical_key: Some(format!("{key:?}")),
                     });
                 }
-                zup_transaction::NodeKind::BackendOperation { key, .. }
-                | zup_transaction::NodeKind::BackendRemoval { key } => {
+                zup_plan::NodeKind::ServiceControl { operation } => {
+                    groups
+                        .entry(ResourceCategory::Services)
+                        .or_default()
+                        .push(PlannedChange {
+                            category: ResourceCategory::Services,
+                            kind: ChangeKind::Update,
+                            label: match operation.stage {
+                                zup_plan::ServiceControlStage::Quiesce => "Stop service",
+                                zup_plan::ServiceControlStage::Restore => "Start service",
+                            }
+                            .into(),
+                            location: Some(operation.native_name.clone()),
+                            scope: Some(scope),
+                            requires_authorization: operation.privilege
+                                == zup_core::Privilege::System,
+                            estimated_bytes: 0,
+                            component: None,
+                            technical_key: Some(format!("{:?}", operation.key)),
+                        });
+                }
+                zup_plan::NodeKind::BackendOperation { key, .. }
+                | zup_plan::NodeKind::BackendRemoval { key } => {
                     groups
                         .entry(ResourceCategory::AppsFeatures)
                         .or_default()
                         .push(PlannedChange {
                             category: ResourceCategory::AppsFeatures,
-                            kind: if matches!(
-                                node.kind,
-                                zup_transaction::NodeKind::BackendRemoval { .. }
-                            ) {
+                            kind: if matches!(node.kind, zup_plan::NodeKind::BackendRemoval { .. })
+                            {
                                 ChangeKind::Remove
                             } else {
                                 ChangeKind::Update
@@ -292,14 +549,46 @@ impl PlanPreview {
                             technical_key: Some(format!("{key:?}")),
                         });
                 }
-                zup_transaction::NodeKind::StageFile { .. }
-                | zup_transaction::NodeKind::Barrier => {}
+                zup_plan::NodeKind::ReserveInstallation
+                | zup_plan::NodeKind::PublishInstallation => {
+                    let reservation = matches!(node.kind, zup_plan::NodeKind::ReserveInstallation);
+                    groups
+                        .entry(ResourceCategory::Application)
+                        .or_default()
+                        .push(PlannedChange {
+                            category: ResourceCategory::Application,
+                            kind: if reservation {
+                                ChangeKind::Verify
+                            } else {
+                                ChangeKind::Update
+                            },
+                            label: if reservation {
+                                "Confirm installation ownership"
+                            } else {
+                                "Commit installation record"
+                            }
+                            .into(),
+                            location: None,
+                            scope: Some(scope),
+                            requires_authorization: scope == zup_core::SelectedScope::Machine,
+                            estimated_bytes: 0,
+                            component: None,
+                            technical_key: None,
+                        });
+                }
+                zup_plan::NodeKind::StageFile { .. } | zup_plan::NodeKind::Barrier => {}
             }
         }
         Ok(Self {
             basis: PlanBasis::ObservedMachine,
-            application: target.map_or_else(String::new, |target| target.app.name.to_string()),
-            version: target.map_or_else(String::new, |target| target.app.version.to_string()),
+            application: target.map_or_else(
+                || plan.requirements.app.id.to_string(),
+                |target| target.app.name.to_string(),
+            ),
+            version: target.map_or_else(
+                || plan.requirements.app.version.to_string(),
+                |target| target.app.version.to_string(),
+            ),
             scope,
             install_directory: target.map_or_else(
                 || {
@@ -315,6 +604,7 @@ impl PlanPreview {
                 |target| target.selected_components.clone(),
             ),
             estimated_bytes,
+            storage: Some(plan.storage_estimate()),
             download_bytes: target
                 .map(|target| target.summary())
                 .transpose()?
@@ -349,6 +639,32 @@ impl PlanPreview {
             let _ = writeln!(output, "Location: {}", self.install_directory);
         }
         let _ = writeln!(output, "Install: {}", format_bytes(self.estimated_bytes));
+        if let Some(storage) = self.storage {
+            let _ = writeln!(
+                output,
+                "Additional payload: {}",
+                format_bytes(storage.additional_payload_bytes())
+            );
+            let _ = writeln!(
+                output,
+                "Verified reuse: {}",
+                format_bytes(storage.verified_reuse_bytes)
+            );
+            let _ = writeln!(
+                output,
+                "Recovery files retained: {}",
+                format_bytes(storage.retained_fixed_bytes)
+            );
+            let _ = writeln!(
+                output,
+                "Cleanup candidates: {} (collection may be deferred)",
+                format_bytes(storage.cleanup_candidate_bytes)
+            );
+            let _ = writeln!(
+                output,
+                "Logical payload sizes exclude downloads, filesystem overhead, caches and mutable data."
+            );
+        }
         if self.download_bytes > 0 {
             let _ = writeln!(output, "Download: {}", format_bytes(self.download_bytes));
         }
@@ -412,7 +728,6 @@ fn requirements(prerequisites: &[zup_plan::PlannedPrerequisite]) -> Vec<Requirem
         .collect()
 }
 
-pub use zup_core::format_bytes;
 pub use zup_preset_protocol::{
     ChangeKind, OperationPhase, PlanBasis, RequirementPresentation, RequirementStatus,
     ResourceCategory,
@@ -622,6 +937,9 @@ pub const INSTALLER_PROTOCOL_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum InstallerEvent {
+    PlanPrepared {
+        preview: Box<PlanPreview>,
+    },
     Started {
         protocol_version: u32,
         application: String,
@@ -727,6 +1045,8 @@ impl InstallerEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallerResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_assessment: Option<Box<zup_runtime::RecoveryAssessment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction: Option<String>,
     pub protocol_version: u32,
     pub outcome: ProcessOutcome,
@@ -747,6 +1067,7 @@ impl InstallerResult {
         version: impl Into<String>,
     ) -> Self {
         Self {
+            recovery_assessment: None,
             transaction: None,
             protocol_version: INSTALLER_PROTOCOL_VERSION,
             outcome,
@@ -759,6 +1080,79 @@ impl InstallerResult {
             message: None,
             drift: Vec::new(),
         }
+    }
+
+    pub fn apply_outcome(&mut self, outcome: &zup_runtime::InstallOutcome) {
+        use zup_runtime::InstallOutcome;
+        self.outcome = ProcessOutcome::from(outcome);
+        self.code = self.outcome.code();
+        let message = match outcome {
+            InstallOutcome::RecoveryInspected { target, .. } => {
+                target.as_ref().map(|target| target.detail.clone())
+            }
+            InstallOutcome::RecoveryAssessed { assessment } => {
+                self.recovery_assessment = Some(assessment.clone());
+                self.transaction = Some(assessment.transaction.to_string());
+                Some(
+                    serde_json::to_string_pretty(assessment)
+                        .expect("recovery assessment serializes"),
+                )
+            }
+            InstallOutcome::Committed => None,
+            InstallOutcome::Recovered { settlement } => Some(
+                match settlement {
+                    zup_runtime::RecoverySettlement::Committed => {
+                        "Recovery committed the deployment"
+                    }
+                    zup_runtime::RecoverySettlement::RolledBack => {
+                        "Recovery restored the previous deployment"
+                    }
+                }
+                .into(),
+            ),
+            InstallOutcome::RecoveryRequired {
+                transaction,
+                detail,
+            } => {
+                self.transaction = transaction.map(|transaction| transaction.to_string());
+                Some(detail.clone())
+            }
+            InstallOutcome::CommittedPendingReconciliation {
+                transaction,
+                detail,
+            } => {
+                self.transaction = Some(transaction.to_string());
+                Some(detail.clone())
+            }
+            InstallOutcome::CommittedWithWarning { detail } => Some(detail.clone()),
+            InstallOutcome::Failed(message) => Some(message.clone()),
+            InstallOutcome::Busy { operation } => {
+                Some(format!("Another {operation} operation is running"))
+            }
+            InstallOutcome::RebootRequired {
+                prerequisite_id,
+                exit_code,
+            } => Some(format!(
+                "Restart required by {prerequisite_id} ({exit_code})"
+            )),
+            InstallOutcome::AuthorizationRequired => {
+                Some("Administrator authorization is required".into())
+            }
+            InstallOutcome::AuthorizationCancelled => {
+                Some("Administrator authorization was cancelled".into())
+            }
+            InstallOutcome::Cancelled => Some("The operation was cancelled".into()),
+            InstallOutcome::RolledBack => self
+                .message
+                .is_none()
+                .then(|| "The operation failed and was rolled back".into()),
+        };
+        self.message = match (message, self.message.take()) {
+            (Some(message), Some(detail)) if !message.contains(&detail) => {
+                Some(format!("{message}\n{detail}"))
+            }
+            (message, detail) => message.or(detail),
+        };
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
@@ -794,7 +1188,8 @@ impl InstallerResult {
 impl From<zup_runtime::CompletionOutcome> for ProcessOutcome {
     fn from(outcome: zup_runtime::CompletionOutcome) -> Self {
         match outcome {
-            zup_runtime::CompletionOutcome::Committed => Self::Success,
+            zup_runtime::CompletionOutcome::Committed
+            | zup_runtime::CompletionOutcome::Recovered { .. } => Self::Success,
             zup_runtime::CompletionOutcome::RebootRequired => Self::RebootRequired,
             zup_runtime::CompletionOutcome::Cancelled => Self::Cancelled,
             zup_runtime::CompletionOutcome::RolledBack => Self::Failure,
@@ -821,10 +1216,17 @@ impl From<&zup_runtime::InstallOutcome> for ProcessOutcome {
     fn from(outcome: &zup_runtime::InstallOutcome) -> Self {
         use zup_runtime::InstallOutcome;
         match outcome {
+            InstallOutcome::RecoveryAssessed { .. }
+            | InstallOutcome::RecoveryInspected { target: None, .. } => Self::Success,
+            InstallOutcome::RecoveryInspected {
+                target: Some(_), ..
+            } => Self::RecoveryRequired,
             InstallOutcome::RebootRequired { .. } => Self::RebootRequired,
-            InstallOutcome::Committed => Self::Success,
+            InstallOutcome::Committed
+            | InstallOutcome::Recovered { .. }
+            | InstallOutcome::CommittedWithWarning { .. } => Self::Success,
             InstallOutcome::Cancelled => Self::Cancelled,
-            InstallOutcome::RecoveryRequired
+            InstallOutcome::RecoveryRequired { .. }
             | InstallOutcome::CommittedPendingReconciliation { .. } => Self::RecoveryRequired,
             InstallOutcome::AuthorizationRequired | InstallOutcome::AuthorizationCancelled => {
                 Self::AuthorizationRequired
@@ -840,13 +1242,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recovery_results_preserve_transaction_and_native_diagnostic() {
+        let transaction = "00000000-0000-7000-8000-000000000001".parse().unwrap();
+        for outcome in [
+            zup_runtime::InstallOutcome::RecoveryRequired {
+                transaction: Some(transaction),
+                detail: "Native startup admission is closed".into(),
+            },
+            zup_runtime::InstallOutcome::CommittedPendingReconciliation {
+                transaction: zup_core::TransactionId::from_uuid(transaction),
+                detail: "Native startup admission is closed".into(),
+            },
+        ] {
+            let mut report =
+                InstallerResult::new(ProcessOutcome::Failure, "com.example.app", "1.0.0");
+            report.apply_outcome(&outcome);
+            let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+            assert_eq!(json["transaction"], "00000000-0000-7000-8000-000000000001");
+            assert_eq!(json["message"], "Native startup admission is closed");
+            assert_eq!(report.outcome, ProcessOutcome::RecoveryRequired);
+        }
+    }
+
+    #[test]
     fn transaction_preview_reports_resolved_requirements_and_downloads() {
         let target = zup_core::Target::parse("linux-x64").unwrap();
-        let directory = zup_plan::TargetPath::new(target, "/opt/app").unwrap();
-        let resolved: zup_plan::DesiredState<zup_plan::TargetPath, zup_plan::TargetPath> =
+        let directory = zup_core::TargetPath::new(target, "/opt/app").unwrap();
+        let resolved: zup_plan::DesiredState<zup_core::TargetPath, zup_core::TargetPath> =
             serde_json::from_value(serde_json::json!({
+                "requirements": null, "maintenance": null,
                 "app": {"id": "com.example.app", "name": "App", "version": "1.0.0"},
                 "target": target, "scope": "user", "install_directory": directory,
+                "installation": "00000000-0000-7000-8000-000000000001", "generation": null,
+                "generation_readers": "untracked",
                 "selected_components": ["core"],
                 "prerequisites": [{
                     "id": "runtime", "name": "Runtime", "target": "x64",
@@ -856,13 +1284,15 @@ mod tests {
                         "filename": "runtime.pkg"},
                     "installer": {}
                 }],
-                "files": [], "launchers": [], "path_entries": [], "services": [],
+                "data": [], "files": [], "launchers": [], "path_entries": [], "services": [],
                 "protocols": [], "file_associations": [], "preset": null
             }))
             .unwrap();
-        let transaction =
-            zup_transaction::compile_transaction(&zup_transaction::TransactionInput::new(target))
-                .unwrap();
+        let resolved = resolved.bind_fixed().unwrap();
+        let mut effects =
+            zup_plan::DeploymentEffects::new(resolved.installation, resolved.requirements.clone());
+        effects.install_directory = Some(directory);
+        let transaction = zup_plan::compile_deployment(&effects).unwrap();
         let preview =
             PlanPreview::from_transaction_plan(&transaction, SelectedScope::User, Some(&resolved))
                 .unwrap();

@@ -118,6 +118,7 @@ pub struct WindowsSessionHost {
 
 #[derive(Clone)]
 struct AcquiredContent {
+    image: Arc<zup_windows::AcquiredRuntime>,
     release: Arc<crate::acquire::Acquired>,
     payload: Arc<zup_bundle::AcquiredPayloadSource>,
 }
@@ -149,6 +150,62 @@ impl WindowsSessionHost {
             acquire_prerequisites: true,
         })
     }
+    fn inspect_deployment(
+        &self,
+        context: &zup_session::OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<
+        (
+            Option<zup_core::RecoverySummary>,
+            Option<Box<zup_core::ActiveLaunchers>>,
+        ),
+        String,
+    > {
+        let request = zup_runtime::RuntimeRequest {
+            operation: zup_runtime::RuntimeOperation::InspectRecovery,
+            target: zup_core::Target::host().map_err(|error| error.to_string())?,
+            app_id: app.clone(),
+            app_version: self
+                .bundle
+                .as_ref()
+                .ok_or("authenticated GUI carrier unavailable")?
+                .plan()
+                .installer
+                .app
+                .version
+                .clone(),
+            scope: context.scope,
+            state_root: context.state_root.clone(),
+        };
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?
+                .block_on(async {
+                    let control = zup_runtime::OperationControl::new(
+                        zup_runtime::ExecutionPolicy::Interactive,
+                    );
+                    match zup_runtime::execute(
+                        &zup_windows::WindowsRuntimeBackend::for_recovery(),
+                        request,
+                        &control,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?
+                    {
+                        zup_runtime::InstallOutcome::RecoveryInspected { target, active } => {
+                            Ok((target, active))
+                        }
+                        outcome => {
+                            Err(format!("Recovery inspection did not complete: {outcome:?}"))
+                        }
+                    }
+                })
+        })
+        .join()
+        .map_err(|_| "recovery inspection task failed".to_owned())?
+    }
 }
 
 impl SessionHost for WindowsSessionHost {
@@ -162,33 +219,30 @@ impl SessionHost for WindowsSessionHost {
         selection: &zup_runtime::OperationSelection,
         events: &mut (dyn FnMut(zup_presentation::InstallerEvent) + Send),
     ) -> Result<(), String> {
+        if matches!(
+            operation,
+            zup_runtime::Operation::Rollback { .. } | zup_runtime::Operation::Cleanup { .. }
+        ) {
+            return Ok(());
+        }
         if !self
             .bundle
             .as_ref()
             .is_some_and(|bundle| bundle.package().is_plan_only())
             && self.handoff.is_none()
+            && !matches!(operation, zup_runtime::Operation::Rollback { revision } if context.ledger.as_ref().is_some_and(|record| record.retained.iter().any(|snapshot| snapshot.revision == revision && snapshot.release.is_some())))
             || operation == zup_runtime::Operation::Uninstall
         {
             return Ok(());
         }
         let installer = &build.installer;
-        let config = installer.updates.as_ref().ok_or_else(|| {
-            "this thin installer has no authenticated update repository".to_owned()
-        })?;
-        if matches!(operation, zup_runtime::Operation::Repair { .. })
-            && context
-                .ledger
-                .as_ref()
-                .and_then(zup_plan::InstallLedger::release_identity)
-                .is_none()
-        {
-            return Err(
-                "this installation has no authenticated release identity to repair from".into(),
-            );
-        }
         let action = zup_runtime::resolve_operation(
             operation,
-            context.ledger.as_ref().map(|ledger| &ledger.version),
+            context
+                .ledger
+                .as_ref()
+                .filter(|ledger| ledger.is_installed())
+                .map(|ledger| &ledger.current.version),
             &installer.app.version,
         )
         .map_err(|error| error.to_string())?;
@@ -201,20 +255,36 @@ impl SessionHost for WindowsSessionHost {
             None,
         )
         .map_err(|error| error.to_string())?;
-        let selected = zup_plan::select_components(&installer.components, &request.components)
-            .map_err(|error| error.to_string())?;
-        let selected_names = selected.iter().map(|id| id.as_str()).collect::<Vec<_>>();
-        let components = zup_update::ComponentSelection::Only(&selected_names);
+        let selected = if let zup_runtime::Operation::Rollback { revision } = operation {
+            context
+                .ledger
+                .as_ref()
+                .and_then(|record| {
+                    record
+                        .retained
+                        .iter()
+                        .find(|snapshot| snapshot.revision == revision)
+                })
+                .ok_or("requested deployment is not retained")?
+                .selected_components
+                .clone()
+        } else {
+            zup_plan::select_components(&installer.components, &request.components)
+                .map_err(|error| error.to_string())?
+        };
+        let components = zup_update::ComponentSelection::Only(&selected);
         let content_root = if context.scope == SelectedScope::Machine {
-            state::peer_user_state_root().map_err(|error| error.to_string())?
+            state::peer_user_state_root(&build.installer.app.id)
+                .map_err(|error| error.to_string())?
         } else {
             context.state_root.clone()
         };
-        let trust = zup_update::TrustContext::from_update_config(
-            config,
-            installer.app.id.clone(),
+        let trust = crate::acquire::source_context(
+            installer,
+            context.ledger.as_ref(),
+            operation,
             content_root,
-        );
+        )?;
         let (sink, mut receiver) = zup_acquire::ProgressSink::channel(128);
         let acquired = std::thread::scope(|scope| {
             scope.spawn(move || {
@@ -229,7 +299,13 @@ impl SessionHost for WindowsSessionHost {
                 .enable_all()
                 .build()
                 .map_err(|error| error.to_string())?;
-            if let Some(handoff) = &self.handoff {
+            if let Some(handoff) = &self.handoff
+                && !matches!(
+                    operation,
+                    zup_runtime::Operation::Rollback { .. }
+                        | zup_runtime::Operation::Cleanup { .. }
+                )
+            {
                 let mut resolver = zup_update::ReleaseResolver::new(
                     trust,
                     zup_acquire::HostProfile::native(),
@@ -250,9 +326,7 @@ impl SessionHost for WindowsSessionHost {
             } else {
                 let seeds = self.seed.iter().cloned().collect::<Vec<_>>();
                 runtime
-                    .block_on(crate::acquire::acquire(
-                        trust, components, None, &seeds, sink,
-                    ))
+                    .block_on(crate::acquire::acquire(trust, components, &seeds, sink))
                     .map_err(|error| error.to_string())
             }
         })?;
@@ -267,17 +341,30 @@ impl SessionHost for WindowsSessionHost {
         if let Some(prior) = context
             .ledger
             .as_ref()
-            .and_then(zup_plan::InstallLedger::release_identity)
+            .and_then(zup_plan::InstallationRecord::release_identity)
             && prior.variant != acquired.resolved.variant.id
         {
             return Err("the authenticated release does not match the installed variant".into());
         }
+        crate::acquire::validate_selected_source(
+            &acquired,
+            self.bundle
+                .as_ref()
+                .ok_or("the session has no source package")?
+                .plan(),
+            context.ledger.as_ref(),
+            operation,
+        )?;
         let payload =
             crate::acquire::payload_source(&acquired).map_err(|error| error.to_string())?;
         *build = Arc::new(
             crate::acquire::target_plan(&acquired.manifest).map_err(|error| error.to_string())?,
         );
+        let image = Arc::new(
+            zup_windows::AcquiredRuntime::stage(&acquired).map_err(|error| error.to_string())?,
+        );
         self.acquired = Some(AcquiredContent {
+            image,
             release: Arc::new(acquired),
             payload: Arc::new(payload),
         });
@@ -288,6 +375,16 @@ impl SessionHost for WindowsSessionHost {
         self.acquired
             .as_ref()
             .map(|content| content.release.identity())
+            .or_else(|| {
+                self.handoff
+                    .as_ref()
+                    .map(|handoff| handoff.acquired.identity())
+            })
+            .or_else(|| {
+                self.bundle
+                    .as_ref()
+                    .and_then(|bundle| bundle.package().release_identity().cloned())
+            })
     }
 
     fn bind<'a>(
@@ -295,6 +392,48 @@ impl SessionHost for WindowsSessionHost {
         context: &'a zup_session::OperationContext,
     ) -> Result<Self::Bound<'a>, String> {
         self.operation_host(context)
+    }
+
+    fn content_executable(&self, _executable: &Path) -> PathBuf {
+        self.acquired.as_ref().map_or_else(
+            || self.executable.clone(),
+            |content| content.image.path().to_path_buf(),
+        )
+    }
+
+    fn refresh_installation(
+        &mut self,
+        context: &zup_session::OperationContext,
+    ) -> Result<Option<Arc<zup_core::TargetBuildPlan>>, String> {
+        let Some(record) = context
+            .ledger
+            .as_ref()
+            .filter(|record| record.is_installed())
+        else {
+            return Ok(None);
+        };
+        let maintenance = record
+            .current
+            .maintenance
+            .as_ref()
+            .ok_or("installation has no verified maintenance generation")?;
+        let runtime = maintenance
+            .descriptor()
+            .files()
+            .iter()
+            .find(|file| {
+                file.executable
+                    && file.path.as_str()
+                        == format!("maintenance{}", record.target.executable_suffix())
+            })
+            .ok_or("maintenance generation does not contain its runtime executable")?;
+        let path = maintenance
+            .directory()
+            .join(runtime.path.as_str())
+            .map_err(|error| error.to_string())?;
+        self.acquired = None;
+        self.handoff = None;
+        self.describe(Path::new(path.as_str())).map(Some)
     }
 
     fn describe(&mut self, executable: &Path) -> Result<Arc<zup_core::TargetBuildPlan>, String> {
@@ -316,16 +455,25 @@ impl SessionHost for WindowsSessionHost {
         Ok(Arc::new(build))
     }
 
+    fn state_root(
+        &self,
+        installer: &zup_core::Installer,
+        scope: SelectedScope,
+        hint: Option<&Path>,
+    ) -> Result<PathBuf, String> {
+        state::resolve_state_root(&installer.app.id, hint.map(Path::to_owned), scope)
+            .map_err(|error| error.to_string())
+    }
+
     fn observe(
         &self,
         installer: &zup_core::Installer,
         scope: SelectedScope,
         state_root: Option<&Path>,
     ) -> Result<zup_session::OperationContext, String> {
-        let state_root = state::resolve_state_root(state_root.map(Path::to_path_buf), scope)
-            .map_err(|error| error.to_string())?;
-        let ledger = zup_windows::InstallLedgerStore::new(&state_root)
-            .load(&installer.app.id, scope)
+        let state_root = self.state_root(installer, scope, state_root)?;
+        let ledger = zup_windows::InstallationRecordStore::new(&state_root)
+            .observe(&installer.app.id, scope)
             .map_err(|error| error.to_string())?;
         Ok(zup_session::OperationContext {
             scope,
@@ -334,12 +482,53 @@ impl SessionHost for WindowsSessionHost {
         })
     }
 
+    fn recovery_store(
+        &self,
+        context: &zup_session::OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<zup_transaction::FilesystemTransactionStore, String> {
+        zup_windows::InstallationRecordStore::new(&context.state_root)
+            .recovery_store(app, context.scope)
+            .map_err(|error| error.to_string())
+    }
+
+    fn pending_recovery(
+        &self,
+        context: &zup_session::OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<Option<zup_core::RecoverySummary>, String> {
+        if context.scope == SelectedScope::User {
+            return self
+                .recovery_store(context, app)?
+                .pending_recovery(app, context.scope)
+                .map(|target| target.map(|target| target.summary()))
+                .map_err(|error| error.to_string());
+        }
+        self.inspect_deployment(context, app)
+            .map(|(target, _)| target)
+    }
+
+    fn active_launchers(
+        &self,
+        context: &zup_session::OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<Option<zup_core::ActiveLaunchers>, String> {
+        self.inspect_deployment(context, app)
+            .map(|(_, active)| active.map(|active| *active))
+    }
+
     fn backend(
         &self,
         context: &zup_session::OperationContext,
         prepared: &zup_runtime::PreparedOperation,
     ) -> Result<Arc<dyn zup_runtime::RuntimeBackend>, String> {
-        let backend = if let Some(content) = &self.acquired {
+        let backend = if matches!(
+            prepared.action,
+            zup_plan::LifecycleAction::Rollback { .. } | zup_plan::LifecycleAction::Cleanup { .. }
+        ) {
+            zup_windows::WindowsRuntimeBackend::from_path(self.executable.clone(), None)
+                .map_err(|error| error.to_string())?
+        } else if let Some(content) = &self.acquired {
             zup_windows::WindowsRuntimeBackend::from_acquired(
                 Arc::clone(&content.payload),
                 content.release.cache.root().to_path_buf(),
@@ -350,14 +539,51 @@ impl SessionHost for WindowsSessionHost {
                         crate::lifecycle::handoff_mode(prepared.action),
                     )
                     .map_err(|error| error.to_string())?,
+                Arc::clone(&content.image),
             )
-            .map_err(|error| error.to_string())?
         } else {
             zup_windows::WindowsRuntimeBackend::from_path(self.executable.clone(), None)
                 .map_err(|error| error.to_string())?
         }
         .with_generated_files(prepared, &context.state_root)?;
         Ok(Arc::new(backend))
+    }
+
+    fn recover<'a>(
+        &'a self,
+        context: &'a zup_session::OperationContext,
+        target: zup_core::RecoverySummary,
+        request: zup_transaction::RecoveryRequest,
+        control: &'a zup_runtime::OperationControl,
+    ) -> zup_runtime::RuntimeFuture<
+        'a,
+        Result<zup_runtime::InstallOutcome, zup_runtime::SessionError>,
+    > {
+        Box::pin(async move {
+            let app = self.app_id.as_ref().ok_or_else(|| {
+                zup_runtime::SessionError::Protocol(
+                    "authenticated application identity unavailable".into(),
+                )
+            })?;
+            if target.app != *app || target.scope != context.scope {
+                return Err(zup_runtime::SessionError::Protocol(
+                    "recovery application or scope differs from the session".into(),
+                ));
+            }
+            let request = zup_runtime::RuntimeRequest {
+                operation: zup_runtime::RuntimeOperation::Recovery {
+                    transaction: target.transaction,
+                    request,
+                },
+                target: target.target,
+                app_id: target.app,
+                app_version: target.version,
+                scope: context.scope,
+                state_root: context.state_root.clone(),
+            };
+            let backend = zup_windows::WindowsRuntimeBackend::for_recovery();
+            zup_runtime::execute(&backend, request, control).await
+        })
     }
 
     fn materialize_preset(
@@ -370,11 +596,17 @@ impl SessionHost for WindowsSessionHost {
             .bundle
             .as_ref()
             .ok_or_else(|| "this file carries no installer package".to_owned())?;
-        let installed = context.ledger.is_some();
-        let capabilities = zup_preset_host::surface::capabilities(installer, installed);
+        let capabilities = zup_session::session_capabilities(installer, context);
         let installed: Option<(zup_core::InstalledPreset, PathBuf)> = context
             .ledger
             .as_ref()
+            .filter(|ledger| {
+                ledger.is_installed()
+                    && !discovery
+                        .recoveries
+                        .get(&context.scope)
+                        .is_some_and(|recovery| !matches!(recovery, Ok(None)))
+            })
             .map(|ledger| {
                 let runtime = ledger.preset().cloned().ok_or_else(|| {
                     format!(
@@ -384,11 +616,14 @@ impl SessionHost for WindowsSessionHost {
                         installer.app.name
                     )
                 })?;
-                let directory = zup_transaction::maintenance_directory(
-                    &context.state_root,
-                    &installer.app.id,
-                    context.scope,
-                    &ledger.version,
+                let directory = PathBuf::from(
+                    ledger
+                        .current
+                        .maintenance
+                        .as_ref()
+                        .ok_or("the installed preset has no verified maintenance generation")?
+                        .directory()
+                        .as_str(),
                 );
                 Ok::<_, String>((runtime, directory))
             })
@@ -425,37 +660,228 @@ impl SessionHost for WindowsSessionHost {
 
     #[cfg(feature = "gui")]
     fn update(
-        &self,
+        &mut self,
         context: &zup_session::OperationContext,
         request: &zup_runtime::UpdateRequest,
-        _control: &zup_runtime::OperationControl,
+        control: &zup_runtime::OperationControl,
         status: &mut (dyn FnMut(zup_preset_protocol::UpdateState) + Send),
-    ) -> Result<zup_runtime::InstallOutcome, String> {
-        state::from_maintenance_surface(&self.executable, context.scope, request, status)
-            .map(|_| zup_runtime::InstallOutcome::Committed)
+    ) -> Result<zup_session::SessionOutcome, String> {
+        use zup_acquire::CachePolicy;
+        use zup_preset_protocol::UpdateState;
+        use zup_update::{ComponentSelection, TrustContext};
+        let scope = context.scope;
+        let state_root = &context.state_root;
+        let bundle = package::open_bundle(&self.executable).map_err(|error| error.to_string())?;
+        let build = package::target_plan(&bundle).map_err(|error| error.to_string())?;
+        let installer = &build.installer;
+        let config = installer
+            .updates
+            .as_ref()
+            .ok_or_else(|| "this application is not configured for updates".to_owned())?;
+        let root =
+            state::resolve_state_root(&installer.app.id, Some(state_root.to_path_buf()), scope)
+                .map_err(|error| error.to_string())?;
+        let ledger = zup_windows::InstallationRecordStore::new(&root)
+            .observe(&installer.app.id, scope)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "the installed application was not found".to_owned())?;
+        let current = ledger.current.version.to_string();
+        let update_root = if scope == SelectedScope::Machine {
+            state::peer_user_state_root(&installer.app.id).map_err(|error| error.to_string())?
+        } else {
+            root.clone()
+        };
+        let context = TrustContext::from_update_config(
+            config,
+            installer.app.id.clone(),
+            installer.install.scope,
+            update_root,
+        );
+        let (sink, mut receiver) = zup_acquire::ProgressSink::channel(64);
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        status(UpdateState::Checking {
+            detail: "Resolving the update channel…".into(),
+        });
+        let resolver = zup_update::ReleaseResolver::new(
+            context,
+            zup_acquire::HostProfile::native(),
+            CachePolicy::Auto,
+            sink,
+        )
+        .map_err(|error| error.to_string())?;
+        let Some(resolved) = tokio.block_on(update_acquisition(
+            resolver.resolve(),
+            &mut receiver,
+            control.cancellation(),
+            request,
+            status,
+        ))?
+        else {
+            return Ok(zup_session::SessionOutcome::Deployment(
+                zup_runtime::InstallOutcome::Cancelled,
+            ));
+        };
+        let available = resolved.descriptor.version.clone();
+        let candidate = zup_core::ReleaseCandidate {
+            version: available
+                .parse()
+                .map_err(|error: semver::Error| error.to_string())?,
+            release: resolved.descriptor.release_digest,
+        };
+        if let zup_runtime::UpdateRequest::Install {
+            expected: Some(expected),
+        } = request
+            && expected != &candidate
+        {
+            return Err(
+                "The available update changed. Check for updates again before installing.".into(),
+            );
+        }
+        if !candidate.is_update_for(&ledger.current.version, ledger.release_identity()) {
+            status(UpdateState::UpToDate { current });
+            return Ok(zup_session::SessionOutcome::UpdateChecked);
+        }
+        if matches!(request, zup_runtime::UpdateRequest::Check) {
+            status(UpdateState::Available { current, candidate });
+            return Ok(zup_session::SessionOutcome::UpdateChecked);
+        }
+        let manifest =
+            crate::acquire::parse_manifest(&resolved).map_err(|error| error.to_string())?;
+        let closure = crate::acquire::component_closure(
+            &resolved,
+            &manifest,
+            ComponentSelection::Only(&ledger.current.selected_components),
+        )
+        .map_err(|error| error.to_string())?;
+        let cancellation = control.cancellation();
+        let Some(acquired) = tokio.block_on(update_acquisition(
+            crate::acquire::barrier_with_cancellation(
+                &resolver,
+                resolved,
+                manifest,
+                closure,
+                Arc::new(move || cancellation.is_cancelled()),
+            ),
+            &mut receiver,
+            control.cancellation(),
+            request,
+            status,
+        ))?
+        else {
+            return Ok(zup_session::SessionOutcome::Deployment(
+                zup_runtime::InstallOutcome::Cancelled,
+            ));
+        };
+        status(UpdateState::Installing {
+            detail: acquired.estimate().to_string(),
+        });
+        let updated_build = Arc::new(
+            crate::acquire::target_plan(&acquired.manifest).map_err(|error| error.to_string())?,
+        );
+        if updated_build.installer.app.id != installer.app.id
+            || updated_build.installer.target != installer.target
+            || updated_build.installer.app.version != candidate.version
+            || updated_build.installer.frontend != installer.frontend
+            || !updated_build
+                .installer
+                .install
+                .scope
+                .scopes()
+                .contains(&scope)
+        {
+            return Err(
+                "the authenticated update belongs to a different application or target".into(),
+            );
+        }
+        if ledger
+            .release_identity()
+            .is_some_and(|identity| identity.variant != acquired.resolved.variant.id)
+        {
+            return Err(
+                "the authenticated update differs from the installed release variant".into(),
+            );
+        }
+        let payload =
+            Arc::new(crate::acquire::payload_source(&acquired).map_err(|error| error.to_string())?);
+        let image = Arc::new(
+            zup_windows::AcquiredRuntime::stage(&acquired).map_err(|error| error.to_string())?,
+        );
+        self.acquired = Some(AcquiredContent {
+            image,
+            release: Arc::new(acquired),
+            payload,
+        });
+        let host = &*self;
+        let context = zup_session::OperationContext {
+            scope,
+            state_root: root,
+            ledger: Some(ledger),
+        };
+        let bound = host.bind(&context)?;
+        let cancellation = control.cancellation();
+        let prepared = zup_runtime::prepare_operation(
+            &zup_runtime::OperationInput {
+                build: &updated_build,
+                installer: &host.content_executable(&host.executable),
+                scope,
+                operation: zup_runtime::Operation::Upgrade,
+                selection: Default::default(),
+                prior: context.ledger.as_ref(),
+                state_root: &context.state_root,
+                cancellation: &|| cancellation.is_cancelled(),
+            },
+            &bound,
+        );
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error @ zup_runtime::OperationError::RecoveryRequired(transaction)) => {
+                return Ok(zup_session::SessionOutcome::Deployment(
+                    zup_runtime::InstallOutcome::RecoveryRequired {
+                        transaction: Some(transaction.0),
+                        detail: error.to_string(),
+                    },
+                ));
+            }
+            Err(zup_runtime::OperationError::Cancelled) => {
+                return Ok(zup_session::SessionOutcome::Deployment(
+                    zup_runtime::InstallOutcome::Cancelled,
+                ));
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        let result = tokio.block_on(zup_session::run_operation(
+            host,
+            &context,
+            &updated_build,
+            &prepared,
+            control,
+        ));
+        let (outcome, _) = zup_session::reconcile_operation(
+            host,
+            &context,
+            &prepared,
+            zup_runtime::outcome_of(result),
+        );
+        if matches!(outcome, zup_runtime::InstallOutcome::Committed) {
+            status(UpdateState::UpToDate { current: available });
+        }
+        Ok(zup_session::SessionOutcome::Deployment(outcome))
     }
 
     fn copy_diagnostics(&self, text: &str) {
         let _ = std::process::Command::new("clip").arg(text).output();
     }
 
-    fn after_commit(
-        &self,
-        context: &zup_session::OperationContext,
-        prepared: &zup_runtime::PreparedOperation,
-    ) -> Result<(), String> {
-        let app_id = self
-            .app_id
-            .as_ref()
-            .ok_or_else(|| "the session host was not discovered".to_owned())?;
-        if prepared.action == zup_plan::LifecycleAction::Uninstall {
-            zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
-                .map_err(|error| error.to_string())?;
-        }
+    fn after_commit(&self, _context: &zup_session::OperationContext) -> Result<(), String> {
         if let Some(acquired) = &self.acquired {
             acquired
                 .release
-                .record_retention(zup_acquire::CachePolicy::Auto)
+                .maintain_cache(zup_acquire::CachePolicy::Auto)
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
@@ -575,18 +1001,25 @@ impl Default for WindowsSessionHost {
 }
 
 pub(crate) fn command() -> clap::Command {
-    crate::terminal::command().subcommand(
-        clap::Command::new("update")
-            .about("Check for and install authenticated updates")
-            .subcommand(clap::Command::new("check"))
-            .arg(
-                clap::Arg::new("source")
-                    .long("source")
-                    .value_name("PATH")
-                    .value_parser(clap::value_parser!(PathBuf))
-                    .value_hint(clap::ValueHint::DirPath),
+    crate::terminal::command()
+        .subcommand(
+            <crate::maintenance::RecoveryArgs as clap::Args>::augment_args(
+                clap::Command::new("recover")
+                    .about("Reconcile a protected interrupted transaction"),
             ),
-    )
+        )
+        .subcommand(
+            clap::Command::new("update")
+                .about("Check for and install authenticated updates")
+                .subcommand(clap::Command::new("check"))
+                .arg(
+                    clap::Arg::new("source")
+                        .long("source")
+                        .value_name("PATH")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .value_hint(clap::ValueHint::DirPath),
+                ),
+        )
 }
 
 pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
@@ -627,39 +1060,6 @@ pub(crate) fn terminal(frontend: Frontend) -> miette::Result<()> {
     }
     let cli =
         crate::terminal::Cli::from_arg_matches(&matches).expect("validated terminal arguments");
-    if cli.operation.is_none()
-        && frontend == Frontend::Console
-        && !cli.non_interactive
-        && !cli.yes
-        && matches!(cli.output, crate::terminal::Output::Human)
-        && crate::run::console_is_a_terminal()
-    {
-        let executable =
-            std::env::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
-        if zup_transaction::is_maintenance_path(&executable) {
-            return crate::maintenance::launch_terminal_runner(&executable);
-        }
-    }
-    if matches!(&cli.operation, Some(crate::terminal::Command::Uninstall))
-        && std::env::current_exe()
-            .is_ok_and(|executable| zup_transaction::is_maintenance_path(&executable))
-    {
-        let output = zup_presentation::OutputFormat::from(cli.output);
-        let args = crate::maintenance::UninstallArgs {
-            scope: cli.scope,
-            output: cli.output,
-            non_interactive: cli.non_interactive,
-            yes: cli.yes,
-            plain: cli.plain,
-            state_root: cli.state_root,
-            app_id: None,
-            ui: false,
-        };
-        return crate::maintenance::run_uninstall(
-            crate::run::RuntimeContext::new(frontend).with_output(output),
-            args,
-        );
-    }
     crate::terminal::run_cli(WindowsSessionHost::default(), frontend, cli)
 }
 
@@ -670,6 +1070,7 @@ pub(crate) fn terminal_handoff(
     accepted: crate::handoff::Accepted,
 ) -> miette::Result<()> {
     let operation = match action {
+        zup_plan::LifecycleAction::Cleanup { keep } => crate::terminal::Command::Cleanup { keep },
         zup_plan::LifecycleAction::Install => {
             crate::terminal::Command::Install(crate::terminal::Components {
                 enable: args.enable.clone(),
@@ -681,6 +1082,15 @@ pub(crate) fn terminal_handoff(
                 enable: args.enable.clone(),
                 disable: args.disable.clone(),
             })
+        }
+        zup_plan::LifecycleAction::Downgrade => {
+            crate::terminal::Command::Downgrade(crate::terminal::Components {
+                enable: args.enable.clone(),
+                disable: args.disable.clone(),
+            })
+        }
+        zup_plan::LifecycleAction::Rollback { revision } => {
+            crate::terminal::Command::Rollback { revision }
         }
         zup_plan::LifecycleAction::Modify => {
             crate::terminal::Command::Modify(crate::terminal::Components {
@@ -710,4 +1120,36 @@ pub(crate) fn terminal_handoff(
         ..Default::default()
     };
     crate::terminal::run_cli(host, context.frontend, cli)
+}
+
+#[cfg(feature = "gui")]
+async fn update_acquisition<T, E: std::fmt::Display>(
+    work: impl std::future::Future<Output = Result<T, E>>,
+    receiver: &mut zup_acquire::ProgressReceiver,
+    cancellation: zup_runtime::CancellationHandle,
+    request: &zup_runtime::UpdateRequest,
+    status: &mut (dyn FnMut(zup_preset_protocol::UpdateState) + Send),
+) -> Result<Option<T>, String> {
+    tokio::pin!(work);
+    let mut receiving = true;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Ok(None),
+            result = &mut work => return result.map(Some).map_err(|error| error.to_string()),
+            event = receiver.recv(), if receiving => {
+                if let Some(event) = event {
+                    for event in zup_presentation::automation_events(&event) {
+                        if let zup_presentation::InstallerEvent::Progress { label, .. } = event {
+                            status(if matches!(request, zup_runtime::UpdateRequest::Check) {
+                                zup_preset_protocol::UpdateState::Checking { detail: label }
+                            } else {
+                                zup_preset_protocol::UpdateState::Installing { detail: label }
+                            });
+                        }
+                    }
+                } else { receiving = false; }
+            }
+        }
+    }
 }

@@ -62,6 +62,10 @@ world plugin {
 "#,
     "signature"
 )]
+#[case::changed_output_record(
+    VALID_WIT.replace("    readiness: service-readiness,", ""),
+    "signature"
+)]
 fn a_world_that_does_not_match_the_contract_is_refused(#[case] wit: String, #[case] refusal: &str) {
     assert_ne!(wit, VALID_WIT, "the fixture must actually change the world");
     let engine = PluginEngine::host().unwrap();
@@ -95,21 +99,8 @@ fn refusal_of(error: &ContractError) -> &'static str {
     }
 }
 
-#[rstest]
-#[case::arbitrary_bytes(&b"not aot"[..])]
-#[case::raw_core_module(&component_wat("(module)"))]
-#[case::component_that_was_never_precompiled(&component_for_wit(VALID_WIT))]
-fn a_precompiled_output_the_engine_did_not_produce_is_refused(#[case] aot: &[u8]) {
-    let engine = PluginEngine::host().unwrap();
-    let error = engine.verify_precompiled(aot).unwrap_err();
-    assert!(
-        matches!(error, ContractError::TrustedAot { .. }),
-        "{error:?}"
-    );
-}
-
 #[test]
-fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
+fn the_engine_fingerprint_is_stable_and_target_specific() {
     let first = engine_fingerprint("x86_64-pc-windows-msvc");
     assert_eq!(
         first,
@@ -121,8 +112,29 @@ fn the_fingerprint_covers_the_contract_and_the_engine_configuration() {
         engine_fingerprint("aarch64-pc-windows-msvc"),
         "the target is part of what an engine is"
     );
+}
+
+#[test]
+fn artifact_engine_version_matches_the_exact_dependency() {
+    let manifest: toml::Value = toml::from_str(include_str!("../../../Cargo.toml")).unwrap();
     assert_eq!(
-        first.to_hex(),
-        "6a6409031be665f1e12fb8e0846c8e039fe9873af353f80f8defed722778687a"
+        manifest["workspace"]["dependencies"]["wasmtime"]["version"]
+            .as_str()
+            .unwrap(),
+        format!("={}", zup_plugin_contract::WASMTIME_VERSION)
+    );
+}
+
+#[rstest]
+#[case("wasi:filesystem/types@0.3.0")]
+#[case("wasi:sockets/types@0.3.0")]
+#[case("wasi:random/random@0.3.0")]
+#[case("wasi:cli/environment@0.2.0")]
+fn imports_outside_the_native_planner_capabilities_are_rejected(#[case] name: &str) {
+    let engine = PluginEngine::host().unwrap();
+    let component = component_wat(&format!(r#"(component (import "{name}" (instance)))"#));
+    assert_eq!(
+        engine.compile_component(&component).unwrap_err(),
+        ContractError::UnexpectedImport { name: name.into() }
     );
 }

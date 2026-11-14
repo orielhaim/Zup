@@ -214,8 +214,8 @@ fn root_machine_state_ownership_and_modes() {
         assert_unwritable(&transactions);
     }
 
-    let ledger =
-        zup_linux::LinuxLedgerStore::new(&roots.state).path_for(&app_id(), SelectedScope::Machine);
+    let ledger = zup_linux::LinuxInstallationStore::new(&roots.state)
+        .path_for(&app_id(), SelectedScope::Machine);
     assert!(ledger.is_file());
     assert_eq!(uid_of(&ledger), 0);
     assert_eq!(mode_of(&ledger) & 0o777, 0o644);
@@ -302,8 +302,8 @@ fn root_refuses_user_writable_ledger() {
         "install commits: {outcome:?}",
     );
 
-    let ledger =
-        zup_linux::LinuxLedgerStore::new(&roots.state).path_for(&app_id(), SelectedScope::Machine);
+    let ledger = zup_linux::LinuxInstallationStore::new(&roots.state)
+        .path_for(&app_id(), SelectedScope::Machine);
     let mut permissions = std::fs::metadata(&ledger).expect("stat").permissions();
     permissions.set_mode(0o666);
     std::fs::set_permissions(&ledger, permissions).expect("chmod");

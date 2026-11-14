@@ -713,6 +713,32 @@ impl Installer {
             .layout(layout)
             .button("Repair", Emphasis::Normal, self.send(Action::Repair)),
         );
+        actions = actions.child(
+            ActionRow::new("cleanup", IconName::RefreshCw, "Clean up storage", "Keep the most recent rollback version and collect older payloads when they are unused.")
+                .layout(layout)
+                .button("Clean up", Emphasis::Normal, self.send(Action::Cleanup { keep: 1 })),
+        );
+        for retained in &state.retained {
+            actions = actions.child(
+                ActionRow::new(
+                    format!("rollback-{}", retained.revision),
+                    IconName::RefreshCw,
+                    format!("Version {}", retained.version),
+                    format!(
+                        "Saved deployment {}. Application data is preserved.",
+                        retained.revision
+                    ),
+                )
+                .layout(layout)
+                .button(
+                    "Restore",
+                    Emphasis::Normal,
+                    self.send(Action::Rollback {
+                        revision: retained.revision,
+                    }),
+                ),
+            );
+        }
         body = body
             .child(Section::new("Manage").child(actions))
             .child(DestructiveSection::new(
@@ -784,7 +810,15 @@ impl Installer {
     fn blocked(&self, snapshot: &Snapshot, layout: Layout) -> (AnyElement, ActionBar) {
         let body = BlockedView::new(model::blocked(snapshot)).into_any_element();
         let close = self.close();
-        let retry = self.send(Action::Retry);
+        let retry = self.send(
+            snapshot
+                .recovery
+                .as_ref()
+                .map(|target| Action::Recover {
+                    transaction: target.transaction,
+                })
+                .unwrap_or(Action::Retry),
+        );
         let bar = ActionBar::new(layout)
             .trailing(
                 Button::new("close")
@@ -794,7 +828,13 @@ impl Installer {
             .trailing(
                 Button::new("retry")
                     .primary()
-                    .label("Try again")
+                    .label(if snapshot.recovery.is_some() {
+                        "Recover"
+                    } else if snapshot.state == InstallerState::RefreshRequired {
+                        "Refresh"
+                    } else {
+                        "Try again"
+                    })
                     .icon(IconName::RotateCcw)
                     .min_w(theme::size::ACTION_MIN)
                     .on_click(move |_, window, cx| retry(window, cx)),
@@ -836,7 +876,15 @@ impl Installer {
                 );
         }
         let close = self.close();
-        let retry = self.send(Action::Retry);
+        let retry = self.send(
+            snapshot
+                .recovery
+                .as_ref()
+                .map(|target| Action::Recover {
+                    transaction: target.transaction,
+                })
+                .unwrap_or(Action::Retry),
+        );
         let bar = ActionBar::new(layout)
             .trailing(
                 Button::new("close")
@@ -846,7 +894,13 @@ impl Installer {
             .trailing(
                 Button::new("retry")
                     .primary()
-                    .label("Try again")
+                    .label(if snapshot.recovery.is_some() {
+                        "Recover"
+                    } else if snapshot.state == InstallerState::RefreshRequired {
+                        "Refresh"
+                    } else {
+                        "Try again"
+                    })
                     .icon(IconName::RotateCcw)
                     .min_w(theme::size::ACTION_MIN)
                     .on_click(move |_, window, cx| retry(window, cx)),

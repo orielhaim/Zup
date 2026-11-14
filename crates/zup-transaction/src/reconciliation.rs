@@ -15,7 +15,7 @@ pub fn reconcile_committed<T>(
     state_root: &Path,
     complete: impl FnOnce(&TransactionRecord) -> Result<T, String>,
 ) -> Result<T, String> {
-    if record.phase != TransactionPhase::Committed {
+    if record.phase != TransactionPhase::Committed || !record.cleanup_complete() {
         return Err("only committed changes can be reconciled".into());
     }
     let durable = store
@@ -41,6 +41,9 @@ pub fn reconcile_committed<T>(
             state_root.display()
         )
     });
+    if durable.reconciliation == ReconciliationState::Complete {
+        return result.map_err(|_| error.expect("failed reconciliation has a diagnostic"));
+    }
     let updated = store
         .update(&record.transaction_id, &mut |fresh| {
             fresh.reconciliation = match &error {
@@ -86,12 +89,10 @@ pub enum ReconciliationError {
     Store(#[from] crate::StoreError),
     #[error("committed history has ambiguous or disconnected generations")]
     Generations,
-    #[error("only a committed uninstall may retire transaction history")]
-    Retirement,
     #[error("transaction target differs from the installed target")]
     Target,
     #[error("unfinished transaction {0} requires recovery")]
-    RecoveryRequired(crate::TransactionId),
+    RecoveryRequired(zup_core::TransactionId),
 }
 
 /// Validate the entire history before allowing publication or cleanup of any record.
@@ -99,7 +100,7 @@ pub fn settled_records(
     store: &crate::FilesystemTransactionStore,
     app_id: &zup_core::AppId,
     scope: zup_core::SelectedScope,
-    ledger: Option<&zup_plan::InstallLedger>,
+    ledger: Option<&zup_plan::InstallationRecord>,
 ) -> Result<Vec<TransactionRecord>, ReconciliationError> {
     let mut settled = Vec::new();
     for id in store.list_ids()? {
@@ -114,6 +115,9 @@ pub fn settled_records(
             return Err(ReconciliationError::Target);
         }
         match record.phase {
+            TransactionPhase::Committed if !record.cleanup_complete() => {
+                return Err(ReconciliationError::RecoveryRequired(record.transaction_id));
+            }
             TransactionPhase::Committed | TransactionPhase::RolledBack => settled.push(record),
             _ => return Err(ReconciliationError::RecoveryRequired(record.transaction_id)),
         }
@@ -123,7 +127,60 @@ pub fn settled_records(
         record.phase == TransactionPhase::Committed
             && record.reconciliation != ReconciliationState::Complete
     });
-    let mut generation = ledger.map(|ledger| ledger.committed_transaction);
+    if let Some(installation) = ledger {
+        let current = pending
+            .iter()
+            .chain(&ordered)
+            .find(|record| record.transaction_id == installation.commit.transaction)
+            .ok_or(ReconciliationError::Generations)?;
+        crate::verify_installation_evidence(installation, current)
+            .map_err(|_| ReconciliationError::Generations)?;
+        for snapshot in installation
+            .retained
+            .iter()
+            .chain(
+                installation
+                    .retired_deployments
+                    .iter()
+                    .map(|retired| &retired.snapshot),
+            )
+            .chain(std::iter::once(&installation.current))
+        {
+            let record = pending
+                .iter()
+                .chain(&ordered)
+                .find(|record| record.transaction_id == snapshot.transaction)
+                .ok_or(ReconciliationError::Generations)?;
+            if record.phase != TransactionPhase::Committed
+                || record.plan.installation != installation.id
+                || record.plan_hash != snapshot.plan_hash
+                || record.target != installation.target
+            {
+                return Err(ReconciliationError::Generations);
+            }
+            if let Some(index) = pending
+                .iter()
+                .position(|record| record.transaction_id == snapshot.transaction)
+            {
+                ordered.push(pending.remove(index));
+            }
+        }
+    }
+    if let Some(installation) = ledger {
+        for retired in &installation.retired_deployments {
+            let retirement = pending
+                .iter()
+                .chain(&ordered)
+                .find(|record| record.transaction_id == retired.retired_by)
+                .ok_or(ReconciliationError::Generations)?;
+            if retirement.phase != TransactionPhase::Committed || retirement.plan.installation != installation.id
+                || !retirement.plan.nodes.iter().any(|node| matches!(&node.kind, zup_plan::NodeKind::Retention { selection }
+                    if selection.retire.iter().any(|selected| *selected == zup_plan::RetiredDeploymentSelection::from(&retired.snapshot)))) {
+                return Err(ReconciliationError::Generations);
+            }
+        }
+    }
+    let mut generation = ledger.map(|ledger| ledger.commit.transaction);
     while !pending.is_empty() {
         let current = pending
             .iter()
@@ -134,10 +191,7 @@ pub fn settled_records(
             let candidates: Vec<_> = pending
                 .iter()
                 .enumerate()
-                .filter(|(_, record)| {
-                    record.plan.observed_transaction == generation
-                        || (record.plan.uninstall && generation.is_none())
-                })
+                .filter(|(_, record)| record.plan.observed_transaction == generation)
                 .map(|(index, _)| index)
                 .collect();
             match candidates.as_slice() {
@@ -146,79 +200,8 @@ pub fn settled_records(
             }
         };
         let record = pending.remove(index);
-        generation = if record.plan.uninstall {
-            None
-        } else {
-            Some(record.transaction_id)
-        };
+        generation = Some(record.transaction_id);
         ordered.push(record);
     }
     Ok(ordered)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LedgerPublication {
-    Advance,
-    Current,
-    Settled,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum PublicationError {
-    #[error("only a committed transaction can publish ownership")]
-    Uncommitted,
-    #[error("committed transaction and ledger identities differ")]
-    Identity,
-    #[error("committed transaction does not follow the installed generation")]
-    Generation,
-}
-
-pub fn ledger_publication(
-    record: &TransactionRecord,
-    previous: Option<&zup_plan::InstallLedger>,
-) -> Result<LedgerPublication, PublicationError> {
-    if record.phase != TransactionPhase::Committed {
-        return Err(PublicationError::Uncommitted);
-    }
-    if record.reconciliation == ReconciliationState::Complete {
-        return Ok(LedgerPublication::Settled);
-    }
-    if previous.is_some_and(|ledger| {
-        ledger.app_id != record.app_id
-            || ledger.scope != record.scope
-            || ledger.target != record.target
-    }) {
-        return Err(PublicationError::Identity);
-    }
-    let generation = previous.map(|ledger| ledger.committed_transaction);
-    if generation == Some(record.transaction_id) {
-        return Ok(LedgerPublication::Current);
-    }
-    if generation == record.plan.observed_transaction
-        || (record.plan.uninstall && generation.is_none())
-    {
-        return Ok(LedgerPublication::Advance);
-    }
-    Err(PublicationError::Generation)
-}
-
-pub fn retired_records(
-    store: &crate::FilesystemTransactionStore,
-    uninstall: &TransactionRecord,
-) -> Result<Vec<TransactionRecord>, ReconciliationError> {
-    if uninstall.phase != TransactionPhase::Committed || !uninstall.plan.uninstall {
-        return Err(ReconciliationError::Retirement);
-    }
-    let records = settled_records(store, &uninstall.app_id, uninstall.scope, None)?;
-    let retired: Vec<_> = records
-        .into_iter()
-        .filter(|record| record.transaction_id != uninstall.transaction_id)
-        .collect();
-    if let Some(record) = retired.iter().find(|record| {
-        record.phase == TransactionPhase::Committed
-            && record.reconciliation != ReconciliationState::Complete
-    }) {
-        return Err(ReconciliationError::RecoveryRequired(record.transaction_id));
-    }
-    Ok(retired)
 }

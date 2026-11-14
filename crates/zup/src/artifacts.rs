@@ -174,7 +174,7 @@ fn entry_size(variants: &[&DistributionVariant], digest: zup_core::Sha256Digest)
         }
         for artifact in &variant.plan().plugins {
             if artifact.blob == digest {
-                return (1, artifact.aot_size);
+                return (1, artifact.component_size);
             }
         }
     }

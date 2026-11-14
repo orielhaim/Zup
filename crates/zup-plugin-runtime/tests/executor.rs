@@ -1,5 +1,6 @@
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use zup_core::PluginArtifact;
 
 use rstest::rstest;
 use semver::Version;
@@ -7,15 +8,15 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
-use zup_build::TargetBuildPlan;
-use zup_bundle::{BundleWriter, CompiledPluginArtifact, Package, PluginArtifact};
+use zup_bundle::{BundleWriter, CompiledPluginArtifact, Package};
+use zup_core::TargetBuildPlan;
 use zup_core::{
     App, AppId, ComponentId, Frontend, Install, InstallDirectory, InstallScope, Installer,
     NonEmptyString, PluginBinding, PluginId, SelectedScope, Sha256Digest, Target, Template,
 };
 use zup_plan::{NeverCancelled, PluginExecutor, PluginPlanningContext, PluginResource};
 use zup_plugin_contract::{
-    AOT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, PluginEngine, WASMTIME_VERSION,
+    COMPONENT_FORMAT_VERSION, HOST_TARGET, PLUGIN_API_VERSION, WASMTIME_VERSION,
     engine_fingerprint, wit_package_digest,
 };
 use zup_plugin_runtime::{LoadError, WasmtimePluginExecutor};
@@ -24,6 +25,7 @@ const PLUGIN_ID: &str = "helper";
 const VALID_WIT: &str = zup_plugin_abi::WIT_PACKAGE;
 
 fn component_for_body(body: &str) -> Vec<u8> {
+    let planner_major = PLUGIN_API_VERSION.split('.').next().unwrap();
     let wat = format!(
         r#"(module
             (type (func (param i32) (result i32)))
@@ -31,21 +33,16 @@ fn component_for_body(body: &str) -> Vec<u8> {
             (type (func (param i32 i32 i32 i32) (result i32)))
             (type (func))
             (memory (export "cm32p2_memory") 1)
-            (func (export "cm32p2|zup:plugin/planner@1|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
+            (func (export "cm32p2|zup:plugin/planner@{planner_major}|plan") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i32)
                 {body}
             )
-            (func (export "cm32p2|zup:plugin/planner@1|plan_post") (param i32))
+            (func (export "cm32p2|zup:plugin/planner@{planner_major}|plan_post") (param i32))
             (func (export "cm32p2_realloc") (param i32 i32 i32 i32) (result i32)
                 local.get 0
             )
             (func (export "cm32p2_initialize"))
             (data (i32.const 2048) "bad")
             (data (i32.const 2064) "failure")
-            (data (i32.const 3000) "file")
-            (data (i32.const 3064) "failure")
-            (data (i32.const 4000) "\01\02\03")
-            (data (i32.const 5000) "${{install}}/plugin-config.txt")
-            (data (i32.const 6000) "app id: com.example.runtime\0ainstall directory: ${{location.user_data}}/Runtime\0aselected components: core\0a")
         )"#
     );
     let mut resolve = Resolve::default();
@@ -62,6 +59,9 @@ fn component_for_body(body: &str) -> Vec<u8> {
 }
 
 fn fixture(name: &str) -> Vec<u8> {
+    if matches!(name, "all" | "configure") {
+        return zup_plugin_abi::test_fixture::component();
+    }
     let body = match name {
         "empty" => {
             r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 0)) (i32.const 1024)"#
@@ -75,22 +75,12 @@ fn fixture(name: &str) -> Vec<u8> {
         "output" => {
             r#"(drop (memory.grow (i32.const 129))) (i32.store (i32.const 1024) (i32.const 1)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 8388609)) (i32.store (i32.const 1036) (i32.const 0)) (i32.store (i32.const 1040) (i32.const 0)) (i32.const 1024)"#
         }
-        "all" => {
-            r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 6)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 3000)) (i32.store (i32.const 2056) (i32.const 4)) (i32.store (i32.const 2060) (i32.const 4000)) (i32.store (i32.const 2064) (i32.const 3)) (i32.store (i32.const 2100) (i32.const 1)) (i32.store (i32.const 2104) (i32.const 0)) (i32.store (i32.const 2108) (i32.const 3000)) (i32.store (i32.const 2112) (i32.const 4)) (i32.store (i32.const 2116) (i32.const 3064)) (i32.store (i32.const 2120) (i32.const 7)) (i32.store (i32.const 2124) (i32.const 0)) (i32.store (i32.const 2128) (i32.const 0)) (i32.store (i32.const 2132) (i32.const 0)) (i32.store (i32.const 2136) (i32.const 0)) (i32.store (i32.const 2152) (i32.const 2)) (i32.store (i32.const 2156) (i32.const 3000)) (i32.store (i32.const 2160) (i32.const 4)) (i32.store (i32.const 2204) (i32.const 3)) (i32.store (i32.const 2208) (i32.const 3000)) (i32.store (i32.const 2212) (i32.const 4)) (i32.store (i32.const 2216) (i32.const 3064)) (i32.store (i32.const 2220) (i32.const 7)) (i32.store (i32.const 2224) (i32.const 0)) (i32.store (i32.const 2228) (i32.const 0)) (i32.store (i32.const 2232) (i32.const 0)) (i32.store (i32.const 2236) (i32.const 3000)) (i32.store (i32.const 2240) (i32.const 4)) (i32.store (i32.const 2244) (i32.const 0)) (i32.store (i32.const 2248) (i32.const 0)) (i32.store (i32.const 2252) (i32.const 1)) (i32.store (i32.const 2256) (i32.const 4)) (i32.store (i32.const 2260) (i32.const 3000)) (i32.store (i32.const 2264) (i32.const 4)) (i32.store (i32.const 2268) (i32.const 3064)) (i32.store (i32.const 2272) (i32.const 7)) (i32.store (i32.const 2276) (i32.const 0)) (i32.store (i32.const 2280) (i32.const 0)) (i32.store (i32.const 2308) (i32.const 5)) (i32.store (i32.const 2312) (i32.const 3000)) (i32.store (i32.const 2316) (i32.const 4)) (i32.store (i32.const 2320) (i32.const 3064)) (i32.store (i32.const 2324) (i32.const 7)) (i32.store (i32.const 2328) (i32.const 0)) (i32.store (i32.const 2332) (i32.const 0)) (i32.store (i32.const 2336) (i32.const 0)) (i32.store (i32.const 2340) (i32.const 3000)) (i32.store (i32.const 2344) (i32.const 4)) (i32.const 1024)"#
-        }
-        "configure" => {
-            r#"(i32.store (i32.const 1024) (i32.const 0)) (i32.store (i32.const 1028) (i32.const 2048)) (i32.store (i32.const 1032) (i32.const 1)) (i32.store (i32.const 2048) (i32.const 0)) (i32.store (i32.const 2052) (i32.const 5000)) (i32.store (i32.const 2056) (i32.const 28)) (i32.store (i32.const 2060) (i32.const 6000)) (i32.store (i32.const 2064) (i32.const 103)) (i32.const 1024)"#
-        }
         _ => panic!("unknown fixture"),
     };
-    let component = component_for_body(body);
-    PluginEngine::new(HOST_TARGET)
-        .unwrap()
-        .precompile_component(&component)
-        .unwrap()
+    component_for_body(body)
 }
 
-fn empty_aot() -> Vec<u8> {
+fn empty_component() -> Vec<u8> {
     fixture("empty")
 }
 
@@ -114,6 +104,8 @@ fn installer() -> Installer {
         updates: None,
         prerequisites: Vec::new(),
         install: Install {
+            generation_readers: Default::default(),
+            data: Vec::new(),
             scope: InstallScope::User,
             directory: InstallDirectory {
                 user: Some(Template::parse("${location.user_data}/Runtime").unwrap()),
@@ -161,14 +153,14 @@ fn artifact(bytes: &[u8], target: &Target) -> CompiledPluginArtifact {
             source_sha256: digest,
             target: *target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
-            aot_format_version: AOT_FORMAT_VERSION,
+            component_format_version: COMPONENT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(
                 *engine_fingerprint(target.rust_triple()).as_bytes(),
             ),
-            aot_size: bytes.len() as u64,
-            aot_sha256: digest,
+            component_size: bytes.len() as u64,
+            component_sha256: digest,
             blob: digest,
         },
         bytes.to_vec(),
@@ -193,7 +185,7 @@ fn context(installer: &Installer) -> PluginPlanningContext {
 
 #[test]
 fn valid_empty_component_loads_and_runs() {
-    let bundle = build_package(&empty_aot(), &host_target());
+    let bundle = build_package(&empty_component(), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     assert_eq!(executor.target(), &host_target());
     let installer = installer();
@@ -207,7 +199,7 @@ fn valid_empty_component_loads_and_runs() {
 }
 
 #[test]
-fn configure_fixture_is_one_deterministic_generated_file_without_imports() {
+fn native_configure_fixture_produces_one_deterministic_generated_file() {
     let bundle = build_package(&fixture("configure"), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
@@ -218,16 +210,20 @@ fn configure_fixture_is_one_deterministic_generated_file_without_imports() {
         .unwrap();
     assert_eq!(first.resources.len(), 1);
     let PluginResource::GeneratedFile {
+        replacement,
+        id,
         destination,
         contents,
     } = &first.resources[0]
     else {
         panic!("configure fixture returned a non-file resource");
     };
-    assert_eq!(destination, "${install}/plugin-config.txt");
+    assert_eq!(*replacement, zup_core::FixedReplacement::Quiescent);
+    assert_eq!(id, "configuration");
+    assert_eq!(destination, "${install}/configure.txt");
     assert_eq!(
         contents,
-        b"app id: com.example.runtime\ninstall directory: ${location.user_data}/Runtime\nselected components: core\n"
+        b"application: Runtime\nversion: 1.0.0\nplugin: helper\ninstall directory: ${location.user_data}/Runtime\nscope: user\nselected components: core\n"
     );
     let second = executor
         .plan(&installer.plugins[0], &context, &NeverCancelled)
@@ -240,10 +236,13 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
     let bundle = build_package(&fixture("all"), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
+    let mut context = context(&installer);
+    context.scope = SelectedScope::Machine;
+    context.selected_components = vec![ComponentId::new("resources").unwrap()];
     let proposal = executor
-        .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
+        .plan(&installer.plugins[0], &context, &NeverCancelled)
         .unwrap();
-    assert_eq!(proposal.resources.len(), 6);
+    assert_eq!(proposal.resources.len(), 7);
     assert!(matches!(
         proposal.resources[0],
         PluginResource::GeneratedFile { .. }
@@ -256,16 +255,55 @@ fn converts_all_resource_families_at_the_public_executor_seam() {
         proposal.resources[2],
         PluginResource::PathEntry { .. }
     ));
+    assert!(proposal.resources.iter().any(|resource| matches!(resource, PluginResource::Data { directory } if directory.id.as_str() == "settings")));
+    let PluginResource::Service {
+        lifecycle,
+        readiness,
+        requires_files,
+        requires_services,
+        ..
+    } = &proposal.resources[4]
+    else {
+        panic!("service resource required");
+    };
+    assert_eq!(
+        *readiness,
+        if host_target().operating_system() == zup_core::TargetOperatingSystem::Linux {
+            zup_core::ServiceReadiness::Notify
+        } else {
+            zup_core::ServiceReadiness::Manager
+        }
+    );
+    assert_eq!(requires_files, &["${install}/configure.txt"]);
+    assert!(requires_services.is_empty());
+    assert_eq!(
+        *lifecycle,
+        zup_core::ServiceLifecycle {
+            install: zup_core::InitialServiceState::Running,
+            change: zup_core::ChangedServiceState::Preserve,
+            timeouts: Some(
+                if host_target().operating_system() == zup_core::TargetOperatingSystem::Linux {
+                    zup_core::ServiceTimeouts::Systemd {
+                        start_timeout_seconds: 17,
+                        stop_grace_seconds: 23,
+                        abort_timeout_seconds: 5,
+                        settle_seconds: 5,
+                    }
+                } else {
+                    zup_core::ServiceTimeouts::Windows {
+                        start_observation_seconds: 17,
+                        stop_observation_seconds: 23,
+                    }
+                }
+            ),
+        }
+    );
     assert!(matches!(
-        proposal.resources[3],
-        PluginResource::Service { .. }
-    ));
-    assert!(matches!(
-        proposal.resources[4],
+        proposal.resources[5],
         PluginResource::Protocol { .. }
     ));
     assert!(matches!(
-        proposal.resources[5],
+        proposal.resources[6],
         PluginResource::FileAssociation { .. }
     ));
 }
@@ -344,7 +382,7 @@ fn other_target() -> Target {
 
 #[test]
 fn context_target_mismatch_is_rejected_before_invocation() {
-    let bundle = build_package(&empty_aot(), &host_target());
+    let bundle = build_package(&empty_component(), &host_target());
     let mut executor = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap();
     let installer = installer();
     let mut context = context(&installer);
@@ -361,16 +399,16 @@ fn context_target_mismatch_is_rejected_before_invocation() {
 #[rstest]
 #[case::raw_webassembly(b"\0asm\x01\0\0\0")]
 #[case::never_precompiled(b"not a precompiled component")]
-fn bytes_that_are_not_a_trusted_component_are_refused(#[case] aot: &[u8]) {
-    let bundle = build_package(aot, &host_target());
+fn bytes_that_are_not_a_trusted_component_are_refused(#[case] component: &[u8]) {
+    let bundle = build_package(component, &host_target());
     let error = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap_err();
     assert!(matches!(error, LoadError::NotAComponent { .. }));
 }
 
 #[test]
-fn target_mismatch_is_rejected_before_deserialize() {
+fn target_mismatch_is_rejected_before_compilation() {
     let target = other_target();
-    let bundle = build_package(&empty_aot(), &target);
+    let bundle = build_package(&empty_component(), &target);
     assert_eq!(bundle.plan().installer.target, target);
     assert_eq!(bundle.plugin_artifacts()[0].target, target);
     let error = WasmtimePluginExecutor::load(bundle, &host_target()).unwrap_err();
@@ -386,12 +424,12 @@ enum TamperStage {
 #[rstest]
 #[case::before_load(TamperStage::BeforeLoad)]
 #[case::before_invocation(TamperStage::BeforeInvocation)]
-fn aot_mutation_is_rejected_or_isolated_from_execution(#[case] stage: TamperStage) {
+fn component_mutation_is_rejected_or_isolated_from_execution(#[case] stage: TamperStage) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("runtime.zupbundle");
     let mut bytes = BundleWriter::encode(
         &plan(host_target()),
-        &[artifact(&empty_aot(), &host_target())],
+        &[artifact(&empty_component(), &host_target())],
     )
     .unwrap();
     fs::write(&path, &bytes).unwrap();
@@ -426,7 +464,7 @@ fn aot_mutation_is_rejected_or_isolated_from_execution(#[case] stage: TamperStag
 fn assert_metadata_mutation_rejected(field: &str, value: serde_json::Value) {
     let mut package = BundleWriter::encode(
         &plan(host_target()),
-        &[artifact(&empty_aot(), &host_target())],
+        &[artifact(&empty_component(), &host_target())],
     )
     .unwrap();
     let metadata_len = u64::from_le_bytes(package[20..28].try_into().unwrap()) as usize;
@@ -445,7 +483,7 @@ fn package_rejects_contract_metadata_mismatches_before_loading() {
     let zero_digest = serde_json::json!("0".repeat(64));
     for (field, value) in [
         ("wasmtime_version", serde_json::json!("48.0.0")),
-        ("aot_format_version", serde_json::json!(2)),
+        ("component_format_version", serde_json::json!(1)),
         ("plugin_api_version", serde_json::json!("0.9.0")),
         ("wit_digest", zero_digest.clone()),
         ("engine_fingerprint", zero_digest),
@@ -491,7 +529,7 @@ fn acquired_and_embedded_plugins_produce_the_same_resources() {
 
 #[test]
 fn build_host_execution_preserves_the_requested_target_context() {
-    let bytes = empty_aot();
+    let bytes = empty_component();
     let mut installer = installer();
     installer.target = other_target();
     let mut executor =
@@ -502,4 +540,56 @@ fn build_host_execution_preserves_the_requested_target_context() {
         .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
         .unwrap();
     assert!(result.resources.is_empty());
+}
+#[rstest]
+#[case::unmodified(false)]
+#[case::forged(true)]
+fn native_payload_is_rejected_without_execution(#[case] mutate: bool) {
+    let mut config = wasmtime::Config::new();
+    config.wasm_component_model(true);
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    let mut bytes = engine
+        .precompile_component(&component_for_body("unreachable"))
+        .unwrap();
+    if mutate {
+        *bytes.last_mut().unwrap() ^= 0x55;
+    }
+    let package = build_package(&bytes, &host_target());
+    assert!(matches!(
+        WasmtimePluginExecutor::load(package.clone(), &host_target()),
+        Err(LoadError::NotAComponent { .. })
+    ));
+    use zup_acquire::{
+        CachePolicy, CatalogEntry, ContentCache, ContentCatalog, ContentDescriptor, ContentKind,
+    };
+    let root = TempDir::new().unwrap();
+    let metadata = &package.plan().plugins[0];
+    let cache = ContentCache::open(root.path().join("cache"), CachePolicy::Auto).unwrap();
+    let descriptor =
+        ContentDescriptor::stored(ContentKind::Payload, metadata.blob, bytes.len() as u64);
+    let mut writer = cache.writer(&descriptor).unwrap();
+    writer.write(&bytes).unwrap();
+    writer.commit().unwrap();
+    let catalog = ContentCatalog::new(vec![CatalogEntry::stored(
+        metadata.blob,
+        bytes.len() as u64,
+    )])
+    .unwrap();
+    let source = zup_bundle::AcquiredPayloadSource::new(cache, catalog, &package);
+    assert!(matches!(
+        WasmtimePluginExecutor::load_acquired(package.plan(), &source, &host_target()),
+        Err(LoadError::NotAComponent { .. })
+    ));
+}
+
+#[test]
+fn forged_wasm_header_reaches_only_safe_compilation() {
+    let package = build_package(b"\0asm\x0d\0\x01\0malformed", &host_target());
+    let mut executor = WasmtimePluginExecutor::load(package, &host_target()).unwrap();
+    let installer = installer();
+    assert!(
+        executor
+            .plan(&installer.plugins[0], &context(&installer), &NeverCancelled)
+            .is_err()
+    );
 }

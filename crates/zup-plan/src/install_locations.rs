@@ -1,7 +1,7 @@
 use thiserror::Error;
 use zup_core::{InstallLocation, SelectedScope, Target};
 
-use crate::target_path::TargetPath;
+use zup_core::TargetPath;
 
 #[derive(Debug, Error)]
 pub enum InstallLocationError {

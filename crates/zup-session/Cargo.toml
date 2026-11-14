@@ -22,6 +22,10 @@ name = "install_preset"
 required-features = ["test-support"]
 
 [[bin]]
+name = "recovery_preset"
+required-features = ["test-support"]
+
+[[bin]]
 name = "install_close_preset"
 required-features = ["test-support"]
 
@@ -39,6 +43,14 @@ required-features = ["test-support"]
 
 [[bin]]
 name = "user_scope_install_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "refresh_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "journal_recovery_preset"
 required-features = ["test-support"]
 
 [dependencies]
@@ -59,6 +71,7 @@ zup-runtime.workspace = true
 zup-transaction.workspace = true
 
 [dev-dependencies]
+rstest.workspace = true
 tempfile.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 zup-bundle.workspace = true

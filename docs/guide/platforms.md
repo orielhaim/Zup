@@ -1,7 +1,8 @@
 # Platforms and targets
 
-A target is an operating system and an architecture, named operating system
-first: `windows-x64`, `windows-arm64`, `windows-x86`, `linux-x64`, `linux-arm64`.
+A target names an operating system, an architecture, and a Linux C library ABI, with the operating system
+first: `windows-x64`, `windows-arm64`, `windows-x86`, `linux-x64`, `linux-arm64`,
+`linux-x64-musl`, `linux-arm64-musl`.
 
 A target profile binds a project source directory to a target. When the profile
 name is a target, no `target` field is needed:
@@ -61,33 +62,34 @@ A Windows build embeds the package into the runtime template as PE resources —
 
 ## Linux
 
-| Capability | Status |
-| --- | --- |
-| Targets | `linux-x64`, `linux-arm64` |
-| Frontends | `gui`, `console`, `headless` (`gui` needs a Wayland or X11 session) |
-| Scope | `user`, `machine`, `either` (`either` needs an explicit `--scope`) |
-| Artifact | one self-contained installer per target (no universal) |
-| Signing | no platform signature; authenticity is the artifact digest and release identity |
-| Machine payload | `/opt/<App>`, `/var/opt` for shared data, `/var/lib/zup` for state |
-| Machine services | systemd system units, machine scope only |
-| User services | not supported |
-| Desktop integration, PATH, protocols, file associations | user scope only; `desktop` launchers and PATH entries are refused on Linux |
-| Prerequisites | unsupported in both scopes |
-| Plugins | user and machine scope; generated resources follow the same capability and ownership rules as static resources |
-| Authenticated updates | installed GUI, Console, and Headless applications |
+| Capability                                            | Status                                                                                                         |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Targets                                               | `linux-x64`, `linux-arm64`, `linux-x64-musl`, `linux-arm64-musl`                                               |
+| Frontends                                             | GNU: `gui`, `console`, `headless`. musl: `console`, `headless`. GUI needs a Wayland or X11 session.            |
+| Scope                                                 | `user`, `machine`, `either` (`either` needs an explicit `--scope`)                                             |
+| Artifact                                              | one self-contained installer per target (no universal)                                                         |
+| Signing                                               | no platform signature; authenticity is the artifact digest and release identity                                |
+| Machine payload                                       | `/opt/<App>`, `/var/opt` for shared data, `/var/lib/zup` for state                                             |
+| Machine services                                      | systemd or OpenRC, machine scope only                                                                          |
+| User services                                         | not supported                                                                                                  |
+| Desktop launchers, menu, protocols, file associations | user scope; desktop launchers follow XDG user directories                                                      |
+| Directory PATH entries                                | user and machine scope, through systemd `environment.d`                                                        |
+| Prerequisites                                         | native packages through APT, DNF/RPM, APK, or Pacman; detect-only or repository policy                         |
+| Plugins                                               | user and machine scope; generated resources follow the same capability and ownership rules as static resources |
+| Authenticated updates                                 | installed GUI, Console, and Headless applications                                                              |
 
-A Linux build writes one extensionless installer per target (for example `Acme-Setup`).
-Both architectures use the same backend and support GUI, console, headless, user,
-and machine operations. Native ARM64 CI runs the lifecycle suite and installers
-composed on Windows. Cross-build templates with
-`cargo xtask toolchain build --target linux-arm64 --profile release`; this needs
-`cargo-zigbuild`, Zig, and the `aarch64-unknown-linux-gnu` Rust target.
-Preset packages need a native binary for each GUI target.
+Linux installers are extensionless executables. GNU GUI requires Wayland or X11 and a preset binary for the target. musl supports Console and Headless only.
 
-## Linux machine scope
+Machine installs use a short-lived privileged worker. User payload operations do not elevate; `zup build` never needs administrator rights. Machine services use the active supported manager, systemd or OpenRC. User services are unsupported. See [services](/guide/services) for policies, identities, and recovery.
 
-Machine installs run through a short-lived privileged worker: the installer plans without authority, requests administrator authorization through `pkexec` at execution time, and the worker re-verifies the package and executes inside `/opt`, `/var/opt`, `/var/lib/zup`, and the owned unit sources. User installs never elevate. `zup build` never needs authority. Zup never handles an administrator password.
+## Desktop shortcuts and directory PATH entries
 
-A machine project may declare `[[services]]` or plugin-generated services. Each becomes a systemd system unit owned at `/usr/local/lib/systemd/system/<unit>.service`. Installing, upgrading, repairing, or uninstalling never starts, stops, or restarts a service: Zup registers boot policy (`automatic` enables for boot, `manual` installs without enabling, `disabled` masks) and systemd decides when the process runs. The service binary must be a Zup-owned payload executable; anything else is refused. Failed service changes restore prior unit contents and boot policy; incomplete restoration reports recovery required.
+A user `location = "desktop"` launcher uses `XDG_DESKTOP_DIR` from the XDG user-directory configuration. A desktop directory set to the home directory is disabled. Missing or disabled configuration produces an error; Zup does not guess a directory. A configured directory can be absent and is created through the file transaction. Symlink traversal and unrelated destination files are refused. Desktop entries are executable. Some desktops require the user to approve a launcher before running it; Zup does not forge desktop-environment trust metadata.
 
-`zup check` and `zup build` accept services on any host without systemd. The installing machine needs systemd 240+ only when services are present; `zup doctor` reports that readiness.
+`[[path]]` adds directories to the environment of services launched by the systemd user manager. It does not expose a single executable as a command. User installations own one file under `$XDG_CONFIG_HOME/environment.d`; machine installations own one under `/usr/local/lib/environment.d`. Different applications and scopes have distinct filenames. Machine PATH directories must lie within the application install directory and have root-owned, non-writable ancestry. The generator must be installed. Systems without it fail clearly.
+
+Start a new login session to propagate changes. Existing processes keep their inherited environment. SSH logins, shells launched outside the user manager, and desktop sessions that do not import its environment may need separate administrator configuration. Zup does not edit shell startup files. Existing PATH entries remain in order after the application's directories, including any inherited duplicates. Uninstall removes only the owned configuration file; it cannot change environments of running processes.
+
+Cross-build musl runtime templates with `cargo xtask toolchain build --target linux-x64-musl --profile dev` or `--target linux-arm64-musl`. Install the corresponding Rust target, `cargo-zigbuild`, and Zig first. GNU and musl descriptors remain distinct, even for static binaries. A dynamic ELF with a GNU interpreter cannot satisfy a musl target, or vice versa. Static ELF does not prove which C library produced it; descriptors bind those bytes to the build target. Plugin packages carry portable WASM components. Build validation runs on the build host; activation compiles on the installation host. Engine policy fingerprints still bind packages to the declared installation target.
+
+See [system integration](/guide/integration) and [prerequisites](/guide/prerequisites) for configuration.

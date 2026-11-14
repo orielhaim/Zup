@@ -95,6 +95,16 @@ inputs:
     required: false
     default: "false"
 
+  allow-unsigned:
+    description: Finalize measured installer bytes without requiring a platform signature.
+    required: false
+    default: "false"
+
+  online-revocation:
+    description: Check platform certificate revocation online during finalization.
+    required: false
+    default: "false"
+
   prerelease:
     description: Mark the release a prerelease.
     required: false

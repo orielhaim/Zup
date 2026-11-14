@@ -7,9 +7,8 @@
 
 use zup_core::Sha256Digest;
 use zup_plan::FileOperationKind;
-use zup_transaction::{
-    NodeKind, OperationExecutor, OperationId, OperationReceipt, ReconcileResult, TransactionNode,
-};
+use zup_plan::{DeploymentNode, NodeKind, OperationId};
+use zup_transaction::{OperationExecutor, OperationReceipt, ReconcileResult};
 
 /// One recorded executor call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +41,7 @@ pub struct FakeExecutor {
     pub reconcile_calls: Vec<String>,
     pub fail_prepare_at: Option<usize>,
     pub fail_verify_at: Option<usize>,
+    pub fail_verify_operation: Option<OperationId>,
     pub fail_apply_at: Option<usize>,
     pub fail_rollback_at: Option<usize>,
     pub reconcile_result: ReconcileResult,
@@ -101,52 +101,131 @@ impl FakeExecutor {
             .collect()
     }
 
-    fn record(&mut self, verb: &'static str, operation: &TransactionNode) {
+    fn record(&mut self, verb: &'static str, operation: &DeploymentNode) {
         let id = operation.id.as_str().to_owned();
         self.calls.push(Call::new(verb, &id));
     }
 }
 
 /// The receipt a node would land with, for building durable fixtures.
-pub fn receipt_for(operation: &TransactionNode) -> OperationReceipt {
+pub fn receipt_for(operation: &DeploymentNode) -> OperationReceipt {
     receipt_for_node(operation)
 }
 
-fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
+fn receipt_for_node(operation: &DeploymentNode) -> OperationReceipt {
     let digest = operation
         .meta
         .expected_sha256
-        .unwrap_or_else(|| Sha256Digest::from_bytes([0; 32]))
-        .to_hex();
+        .unwrap_or_else(|| Sha256Digest::from_bytes([0; 32]));
     let size = operation.meta.expected_size.unwrap_or(1);
-    let destination = match &operation.kind {
-        NodeKind::FileMutation {
-            key:
-                zup_core::ResourceKey::File { destination }
-                | zup_core::ResourceKey::Maintenance { destination, .. },
-            ..
-        } => destination.clone(),
-        _ => String::new(),
+    let destination = operation
+        .file_destination()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let object = if operation.file_destination().is_some_and(|path| {
+        path.target().operating_system() == zup_core::TargetOperatingSystem::Linux
+    }) {
+        zup_core::NativeObjectIdentity::Linux {
+            device: 1,
+            inode: 2,
+        }
+    } else {
+        zup_core::NativeObjectIdentity::Windows {
+            volume: 1,
+            file: [2; 16],
+        }
     };
     match &operation.kind {
+        NodeKind::Cleanup { operation } => OperationReceipt::Cleanup {
+            intent: operation.fingerprint(),
+            completion: zup_transaction::CleanupCompletion::AlreadyAbsent,
+        },
+        NodeKind::PersistentDirectory { .. } => {
+            panic!("persistent directories require a native filesystem fixture")
+        }
+        NodeKind::NativeService { operation } => {
+            let configuration = operation.configurations().1;
+            let registration = if configuration == zup_plan::ServiceState::Absent {
+                zup_core::ObservedServiceRegistration::Unclaimed
+            } else {
+                match operation.registration() {
+                    zup_core::NativeServiceRegistration::SourceFile => {
+                        zup_core::ObservedServiceRegistration::SourceFile
+                    }
+                    registration @ zup_core::NativeServiceRegistration::Scm { .. } => {
+                        let zup_core::ResourceKey::Service { id } = operation.key() else {
+                            panic!("service fixture requires a service key");
+                        };
+                        zup_core::ObservedServiceRegistration::Scm {
+                            claim: registration.claim(id.clone()).unwrap(),
+                        }
+                    }
+                }
+            };
+            OperationReceipt::NativeService(Box::new(zup_transaction::NativeServiceReceipt {
+                intent: operation.fingerprint(),
+                configuration,
+                registration,
+            }))
+        }
+        NodeKind::NativeCache { operation } => OperationReceipt::NativeCache {
+            intent: operation.fingerprint(),
+            completion: zup_transaction::NativeCacheCompletion::Completed {
+                tool: zup_core::TargetPath::new(
+                    *operation.directory.target(),
+                    "/usr/bin/update-mime-database",
+                )
+                .unwrap(),
+                object: zup_core::NativeObjectIdentity::Linux {
+                    device: 1,
+                    inode: 2,
+                },
+                sha256: digest,
+            },
+        },
+        NodeKind::RetainFile { .. } => {
+            let Some(zup_plan::FilePrecondition::Exact {
+                object,
+                size,
+                sha256,
+            }) = operation.meta.file_precondition
+            else {
+                panic!("retained fixture requires an exact instance")
+            };
+            OperationReceipt::RetainedFile {
+                object,
+                destination: operation.meta.destination.clone().unwrap(),
+                size,
+                sha256,
+            }
+        }
         NodeKind::StageFile { .. } => OperationReceipt::StageFile {
+            object,
             staged_path: "staged".into(),
             size,
             sha256: digest,
         },
         NodeKind::FileMutation { delta, .. } => match delta {
-            FileOperationKind::Create => OperationReceipt::CreateFile {
-                destination,
-                installed_sha256: digest,
-                installed_size: size,
-                executable: operation.meta.executable.unwrap_or(false),
-                created_directories: Vec::new(),
-            },
+            FileOperationKind::Create | FileOperationKind::RestoreOwned => {
+                OperationReceipt::CreateFile {
+                    object,
+                    destination,
+                    installed_sha256: digest,
+                    installed_size: size,
+                    executable: operation.meta.executable.unwrap_or(false),
+                    created_directories: Vec::new(),
+                }
+            }
             _ => OperationReceipt::ReplaceFile {
+                object,
+                previous_object: match operation.meta.file_precondition {
+                    Some(zup_plan::FilePrecondition::Exact { object, .. }) => object,
+                    _ => super::owned_instance().object,
+                },
                 destination,
                 previous_sha256: match operation.meta.file_precondition {
-                    Some(zup_plan::FilePrecondition::Exact { sha256, .. }) => sha256.to_hex(),
-                    _ => digest.clone(),
+                    Some(zup_plan::FilePrecondition::Exact { sha256, .. }) => sha256,
+                    _ => digest,
                 },
                 previous_size: match operation.meta.file_precondition {
                     Some(zup_plan::FilePrecondition::Exact { size, .. }) => size,
@@ -166,6 +245,7 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
                 .as_ref()
                 .expect("file removal metadata");
             OperationReceipt::RemoveFile {
+                object: removal.instance.object,
                 destination: removal.destination.clone(),
                 backup_path: removal.destination.clone(),
                 sha256: removal.sha256,
@@ -179,14 +259,29 @@ fn receipt_for_node(operation: &TransactionNode) -> OperationReceipt {
                 payload: b"opaque".to_vec(),
             }
         }
-        NodeKind::Barrier => OperationReceipt::Control,
+        NodeKind::ServiceControl { operation } => {
+            OperationReceipt::ServiceControl(Box::new(zup_transaction::ServiceControlReceipt {
+                operation: operation.as_ref().clone(),
+                completion: zup_transaction::ServiceControlCompletion::Reached,
+                authority: zup_transaction::ServiceControlAuthority::Planned,
+                execution_generation: "fake-execution".into(),
+                process_scope: operation.process_scope.clone(),
+            }))
+        }
+        NodeKind::Retention { .. }
+        | NodeKind::ReserveInstallation
+        | NodeKind::PublishInstallation
+        | NodeKind::Barrier => OperationReceipt::Control,
+        NodeKind::Generation { .. } => {
+            panic!("generation fixtures require a materialization executor")
+        }
     }
 }
 
 impl OperationExecutor for FakeExecutor {
     type Error = String;
 
-    fn prepare(&mut self, operation: &TransactionNode) -> Result<(), Self::Error> {
+    fn prepare(&mut self, operation: &DeploymentNode) -> Result<(), Self::Error> {
         self.record("prepare", operation);
         if self.fail_prepare_at == Some(self.prepared.len()) {
             return Err(format!(
@@ -198,7 +293,11 @@ impl OperationExecutor for FakeExecutor {
         Ok(())
     }
 
-    fn apply(&mut self, operation: &TransactionNode) -> Result<OperationReceipt, Self::Error> {
+    fn apply(
+        &mut self,
+        operation: &DeploymentNode,
+        _transaction: &zup_transaction::TransactionRecord,
+    ) -> Result<OperationReceipt, Self::Error> {
         self.record("apply", operation);
         if self.fail_apply_at == Some(self.applied.len()) {
             return Err(format!(
@@ -207,16 +306,56 @@ impl OperationExecutor for FakeExecutor {
             ));
         }
         self.applied.push(operation.id.as_str().to_owned());
+        if let NodeKind::PersistentDirectory { operation } = &operation.kind {
+            let ownership = operation
+                .intent
+                .previous
+                .as_ref()
+                .map(|owned| owned.ownership.clone())
+                .unwrap_or_else(|| match &operation.intent.binding {
+                    zup_plan::PersistentBinding::Filesystem(binding) => {
+                        zup_plan::PersistentOwnership::Filesystem {
+                            binding: binding.clone(),
+                            object: zup_core::NativeObjectIdentity::Windows {
+                                volume: 1,
+                                file: [3; 16],
+                            },
+                        }
+                    }
+                    zup_plan::PersistentBinding::SystemdState(binding) => {
+                        zup_plan::PersistentOwnership::SystemdState {
+                            binding: binding.clone(),
+                        }
+                    }
+                });
+            return Ok(OperationReceipt::PersistentDirectory(Box::new(
+                zup_transaction::PersistentDirectoryReceipt {
+                    stage: operation.stage,
+                    owned: zup_plan::OwnedPersistentDirectory {
+                        installation: operation.intent.installation,
+                        directory: operation.intent.directory.clone(),
+                        ownership,
+                        origin: operation
+                            .intent
+                            .previous
+                            .as_ref()
+                            .map_or(_transaction.transaction_id, |owned| owned.origin),
+                    },
+                },
+            )));
+        }
         Ok(receipt_for_node(operation))
     }
 
     fn verify(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         _receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         self.record("verify", operation);
-        if self.fail_verify_at == Some(self.verified.len()) {
+        if self.fail_verify_at == Some(self.verified.len())
+            || self.fail_verify_operation.as_ref() == Some(&operation.id)
+        {
             return Err(format!(
                 "injected verify failure at {}",
                 operation.id.as_str()
@@ -228,7 +367,7 @@ impl OperationExecutor for FakeExecutor {
 
     fn rollback(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         _receipt: &OperationReceipt,
     ) -> Result<(), Self::Error> {
         self.record("rollback", operation);
@@ -244,8 +383,9 @@ impl OperationExecutor for FakeExecutor {
 
     fn reconcile(
         &mut self,
-        operation: &TransactionNode,
+        operation: &DeploymentNode,
         _receipt: Option<&OperationReceipt>,
+        _transaction: &zup_transaction::TransactionRecord,
     ) -> Result<ReconcileResult, Self::Error> {
         self.record("reconcile", operation);
         self.reconcile_calls.push(operation.id.as_str().to_owned());

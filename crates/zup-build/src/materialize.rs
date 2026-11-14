@@ -11,11 +11,11 @@ use zup_core::{
 };
 use zup_manifest::Manifest;
 
-use crate::digest::Sha256Digest;
 use crate::error::BuildError;
 use crate::pattern::FilePattern;
 use crate::plugins::{resolve_plugins, validate_plugin_declaration_count};
 use zup_assets::IconCache;
+use zup_core::Sha256Digest;
 use zup_core::{BuildPlan, ResolvedAsset, ResolvedFile, ResolvedPrerequisite, TargetBuildPlan};
 use zup_core::{PortableSourceFilePolicy, SourceFilePolicy};
 
@@ -171,18 +171,40 @@ fn materialize_target(
     info!(file_rules, "materializing file mappings");
 
     let mut resolved = Vec::new();
+    let mut declaration_ids = BTreeSet::new();
     for (index, mapping) in installer.files.iter().enumerate() {
+        if !declaration_ids.insert(&mapping.id) {
+            return Err(BuildError::DuplicateResourceDeclaration {
+                id: mapping.id.clone(),
+            });
+        }
         let rule_span = info_span!(
             "file_rule",
             index,
             pattern = mapping.source.as_str(),
-            destination = %mapping.destination
+            resource = %mapping.id
         );
         let _rule_guard = rule_span.enter();
-        expand_mapping(&source_root, mapping, &mut resolved)?;
+        let before = resolved.len();
+        expand_mapping(
+            &source_root,
+            mapping,
+            installer.app.main.as_ref(),
+            &mut resolved,
+        )?;
+        if matches!(
+            mapping.placement,
+            zup_core::PayloadMapping::GenerationFile { .. }
+                | zup_core::PayloadMapping::FixedFile { .. }
+        ) && resolved.len() - before > 1
+        {
+            return Err(BuildError::MultipleFilesForSingleMapping {
+                id: mapping.id.clone(),
+            });
+        }
     }
 
-    detect_collisions(&resolved)?;
+    detect_collisions(&resolved, installer.target)?;
 
     let icons = crate::icons::compile_icons(
         project_root,
@@ -191,13 +213,18 @@ fn materialize_target(
         &installer,
         policy,
     )?;
-    resolved.extend(crate::icons::pack_linux_icons(&icons, &installer)?);
+    resolved.extend(crate::icons::pack_linux_icons(&icons, &mut installer)?);
+    if let Some(main) = &installer.app.main
+        && !resolved.iter().any(|file| &file.id == main)
+    {
+        return Err(BuildError::MainPayloadMissing { id: main.clone() });
+    }
     resolved.sort_by(|a, b| {
         TargetBuildPlan::sort_key(a)
             .cmp(&TargetBuildPlan::sort_key(b))
             .then_with(|| a.source.cmp(&b.source))
     });
-    detect_collisions(&resolved)?;
+    detect_collisions(&resolved, installer.target)?;
     let mut total_size = 0u64;
     for file in &resolved {
         total_size = total_size
@@ -350,6 +377,7 @@ fn resolve_prerequisites(
                     total = total.checked_add(*size).ok_or(BuildError::SizeOverflow)?;
                 }
             }
+            PrerequisitePackage::DetectOnly | PrerequisitePackage::Repository => {}
             PrerequisitePackage::Embedded { path, sha256, size } => {
                 let source = project_root.join(path.as_str());
                 let normalized = lexical_normalize(&source);
@@ -514,6 +542,7 @@ fn is_within(base: &Path, candidate: &Path) -> bool {
 fn expand_mapping(
     source_root: &Path,
     mapping: &FileMapping,
+    main: Option<&zup_core::PayloadId>,
     out: &mut Vec<ResolvedFile>,
 ) -> Result<(), BuildError> {
     let pattern = FilePattern::compile(&mapping.source)?;
@@ -534,18 +563,21 @@ fn expand_mapping(
                 path: suffix.clone(),
                 reason: err.to_string(),
             })?;
-        let destination = mapping.destination.join_relative(&suffix_path);
+        let placement = mapping.member_placement(&suffix_path);
+        let id = mapping.member_id(&suffix_path);
+        let executable = mapping.requires_execution(&id, main);
 
         let (size, sha256) = hash_file(&absolute)?;
         out.push(ResolvedFile {
+            id,
             source: absolute,
             source_relative,
-            destination,
+            placement,
             size,
             sha256,
             component: mapping.component.clone(),
             condition: mapping.when.clone(),
-            executable: mapping.executable,
+            executable,
         });
     }
 
@@ -665,11 +697,17 @@ fn hash_file(path: &Path) -> Result<(u64, Sha256Digest), BuildError> {
     Ok((size, digest))
 }
 
-fn detect_collisions(files: &[ResolvedFile]) -> Result<(), BuildError> {
+fn detect_collisions(files: &[ResolvedFile], target: zup_core::Target) -> Result<(), BuildError> {
     let mut exact: BTreeMap<String, usize> = BTreeMap::new();
+    let mut resources = std::collections::BTreeSet::new();
 
     for (index, file) in files.iter().enumerate() {
-        let destination = file.destination.to_string();
+        if !resources.insert(&file.id) {
+            return Err(BuildError::ResourceCollision {
+                id: file.id.clone(),
+            });
+        }
+        let destination = file.placement.to_string();
         let source = file.source_relative.as_str().to_owned();
 
         if let Some(&prev) = exact.get(&destination) {
@@ -683,6 +721,21 @@ fn detect_collisions(files: &[ResolvedFile]) -> Result<(), BuildError> {
         exact.insert(destination, index);
     }
 
+    zup_core::GenerationDescriptor::new(
+        target,
+        files
+            .iter()
+            .filter_map(|file| match &file.placement {
+                zup_core::PayloadPlacement::Generation { path } => Some(zup_core::GenerationFile {
+                    path: path.clone(),
+                    size: file.size,
+                    sha256: file.sha256,
+                    executable: file.executable,
+                }),
+                zup_core::PayloadPlacement::Fixed { .. } => None,
+            })
+            .collect(),
+    )?;
     Ok(())
 }
 

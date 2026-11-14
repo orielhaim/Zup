@@ -24,7 +24,9 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+zstd.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 toml_edit.workspace = true
 zup-acquire.workspace = true
@@ -54,10 +56,11 @@ zup-linux.workspace = true
 zup-windows.workspace = true
 
 [dev-dependencies]
+zup-acquire-http.workspace = true
+zup-plugin-abi = { workspace = true, features = ["test-fixture"] }
 portable-pty = "0.9"
 rstest.workspace = true
 tempfile.workspace = true
-zstd.workspace = true
 wat = "1"
 windows-registry.workspace = true
 zup-xtask.workspace = true

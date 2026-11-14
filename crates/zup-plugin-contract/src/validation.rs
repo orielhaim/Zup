@@ -1,25 +1,24 @@
+#![forbid(unsafe_code)]
+
 use std::fmt;
 
 use thiserror::Error;
-use wasmtime::Precompiled;
 use wasmtime::Trap;
 use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, Linker};
 
 use crate::bindings::PluginPre;
-use crate::runtime::{
-    InvocationError, SandboxLimits, run_with_watchdog, sandbox_store, sanitize_error,
-};
+use crate::runtime::{InvocationError, Sandbox, run_with_watchdog, sandbox_store, sanitize_error};
 use crate::{Context, InstallationPlan, PluginError, ResourceItem};
 use crate::{
-    MAX_AOT_BYTES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES, MAX_PLAN_RESOURCES,
-    MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS, PluginEngine,
+    MAX_COMPONENT_BYTES, MAX_MEMORY_COUNT, MAX_MEMORY_PAGES, MAX_PLAN_OUTPUT_BYTES,
+    MAX_PLAN_RESOURCES, MAX_TABLE_COUNT, MAX_TABLE_ELEMENTS, PluginEngine,
 };
 use zup_plugin_abi::{PLAN_FUNCTION_NAME, PLANNER_EXPORT_NAME};
 
 #[derive(Clone)]
 pub struct ValidatedComponent {
-    pre: PluginPre<SandboxLimits>,
+    pre: PluginPre<Sandbox>,
     fingerprint: crate::EngineFingerprint,
 }
 
@@ -38,7 +37,7 @@ pub enum ContractError {
     CoreModule,
     #[error("component compilation failed: {message}")]
     Compilation { message: String },
-    #[error("component imports are forbidden; found {name:?}")]
+    #[error("component import is not permitted; found {name:?}")]
     UnexpectedImport { name: String },
     #[error("component must export {expected:?}")]
     MissingExport { expected: &'static str },
@@ -60,10 +59,8 @@ pub enum ContractError {
     },
     #[error("component does not implement the zup plugin contract: {message}")]
     Signature { message: String },
-    #[error("trusted AOT component could not be loaded: {message}")]
-    TrustedAot { message: String },
-    #[error("AOT component is {size} bytes; the limit is {limit} bytes")]
-    AotTooLarge { size: usize, limit: usize },
+    #[error("component is {size} bytes; the limit is {limit} bytes")]
+    ComponentTooLarge { size: usize, limit: usize },
 }
 
 impl ValidatedComponent {
@@ -85,15 +82,19 @@ impl ValidatedComponent {
     ) -> Result<Result<InstallationPlan, PluginError>, InvocationError> {
         let mut store = sandbox_store(self.pre.engine()).map_err(InvocationError::setup)?;
         let pre = &self.pre;
-        let mut call_was_trap = None;
-        let result = run_with_watchdog(self.pre.engine(), cancellation, || {
-            let plugin = pre.instantiate(&mut store)?;
+        let mut lifting_failed = false;
+        let result = run_with_watchdog(self.pre.engine(), cancellation, async {
+            let plugin = pre.instantiate_async(&mut store).await?;
             store.set_hostcall_fuel(MAX_PLAN_OUTPUT_BYTES);
             plugin
                 .zup_plugin_planner()
                 .call_plan(&mut store, context)
+                .await
                 .inspect_err(|error| {
-                    call_was_trap = Some(error.root_cause().is::<Trap>());
+                    lifting_failed = !(error.root_cause().is::<Trap>()
+                        || error.is::<crate::wasi::ClockDenied>()
+                        || error.is::<wasmtime_wasi::I32Exit>()
+                        || error.is::<wasmtime::component::ResourceTableError>());
                 })
         });
         let result = match result {
@@ -102,7 +103,7 @@ impl ValidatedComponent {
                 if store.data().growth_rejected {
                     return Err(InvocationError::MemoryLimit);
                 }
-                if matches!(error, InvocationError::Trap { .. }) && call_was_trap == Some(false) {
+                if matches!(error, InvocationError::Trap { .. }) && lifting_failed {
                     return Err(InvocationError::OutputLimit {
                         actual: MAX_PLAN_OUTPUT_BYTES as u64,
                         limit: MAX_PLAN_OUTPUT_BYTES as u64,
@@ -126,52 +127,16 @@ impl ValidatedComponent {
 }
 
 impl PluginEngine {
-    #[cfg(feature = "compiler")]
-    pub fn precompile_component(&self, component_wasm: &[u8]) -> Result<Vec<u8>, ContractError> {
-        if is_core_module(component_wasm) {
-            return Err(ContractError::CoreModule);
-        }
-        if self.target != crate::HOST_TARGET {
-            PluginEngine::host()
-                .map_err(|error| ContractError::Compilation {
-                    message: sanitize_error(error.to_string()),
-                })?
-                .compile_component(component_wasm)?;
-        }
-        let component_aot = self
-            .engine
-            .precompile_component(component_wasm)
-            .map_err(|error| ContractError::Compilation {
-                message: sanitize_error(error.to_string()),
-            })?;
-        if self.target == crate::HOST_TARGET {
-            self.validate_trusted_aot_inner(&component_aot)?;
-        } else {
-            self.verify_precompiled(&component_aot)?;
-        }
-        Ok(component_aot)
-    }
-
-    pub fn verify_precompiled(&self, component_aot: &[u8]) -> Result<(), ContractError> {
-        if component_aot.len() > MAX_AOT_BYTES {
-            return Err(ContractError::AotTooLarge {
-                size: component_aot.len(),
-                limit: MAX_AOT_BYTES,
-            });
-        }
-        if wasmtime::Engine::detect_precompiled(component_aot) != Some(Precompiled::Component) {
-            return Err(ContractError::TrustedAot {
-                message: "precompiled output is not a Wasmtime component".to_owned(),
-            });
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "compiler")]
     pub fn compile_component(
         &self,
         component_wasm: &[u8],
     ) -> Result<ValidatedComponent, ContractError> {
+        if component_wasm.len() > MAX_COMPONENT_BYTES {
+            return Err(ContractError::ComponentTooLarge {
+                size: component_wasm.len(),
+                limit: MAX_COMPONENT_BYTES,
+            });
+        }
         if is_core_module(component_wasm) {
             return Err(ContractError::CoreModule);
         }
@@ -190,33 +155,13 @@ impl PluginEngine {
         self.validate(component)
     }
 
-    /// # Safety
-    /// `component_aot` is bytes the verified package authenticated.
-    pub unsafe fn validate_trusted_aot(
-        &self,
-        component_aot: &[u8],
-    ) -> Result<ValidatedComponent, ContractError> {
-        self.validate_trusted_aot_inner(component_aot)
-    }
-
-    fn validate_trusted_aot_inner(
-        &self,
-        component_aot: &[u8],
-    ) -> Result<ValidatedComponent, ContractError> {
-        self.verify_precompiled(component_aot)?;
-        let component =
-            unsafe { Component::deserialize(&self.engine, component_aot) }.map_err(|error| {
-                ContractError::TrustedAot {
-                    message: sanitize_error(error.to_string()),
-                }
-            })?;
-        self.validate(component)
-    }
-
     fn validate(&self, component: Component) -> Result<ValidatedComponent, ContractError> {
         {
             let component_type = component.component_type();
-            if let Some((name, _)) = component_type.imports(&self.engine).next() {
+            if let Some((name, _)) = component_type
+                .imports(&self.engine)
+                .find(|(name, _)| !crate::wasi::allows_import(name))
+            {
                 return Err(ContractError::UnexpectedImport {
                     name: sanitize_error(name.to_owned()),
                 });
@@ -287,7 +232,10 @@ impl PluginEngine {
             check_resource_limit("table elements", elements, MAX_TABLE_ELEMENTS)?;
         }
 
-        let linker = Linker::<SandboxLimits>::new(&self.engine);
+        let mut linker = Linker::<Sandbox>::new(&self.engine);
+        crate::wasi::add_to_linker(&mut linker).map_err(|error| ContractError::Signature {
+            message: sanitize_error(error.to_string()),
+        })?;
         let instance_pre =
             linker
                 .instantiate_pre(&component)
@@ -300,8 +248,18 @@ impl PluginEngine {
         let mut store = sandbox_store(&self.engine).map_err(|error| ContractError::Signature {
             message: sanitize_error(error.to_string()),
         })?;
-        run_with_watchdog(&self.engine, &|| false, || {
-            pre.instantiate(&mut store).map(|_| ())
+        run_with_watchdog(&self.engine, &|| false, async {
+            let instance = pre.instance_pre().instantiate_async(&mut store).await?;
+            let (_, planner) = instance
+                .get_export(&mut store, None, PLANNER_EXPORT_NAME)
+                .ok_or_else(|| wasmtime::Error::msg("missing planner export"))?;
+            let (_, function) = instance
+                .get_export(&mut store, Some(&planner), PLAN_FUNCTION_NAME)
+                .ok_or_else(|| wasmtime::Error::msg("missing plan export"))?;
+            instance.get_typed_func::<(Context,), (Result<InstallationPlan, PluginError>,)>(
+                &mut store, &function,
+            )?;
+            Ok(())
         })
         .map_err(|error| ContractError::Signature {
             message: sanitize_error(error.to_string()),
@@ -314,7 +272,6 @@ impl PluginEngine {
     }
 }
 
-#[cfg(feature = "compiler")]
 fn is_core_module(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\0asm\x01\0\0\0")
 }
@@ -368,7 +325,32 @@ fn plan_output_size(plan: &InstallationPlan) -> usize {
     for resource in &plan.resources {
         size = size.saturating_add(1);
         size = match resource {
+            ResourceItem::Data(directory) => {
+                let location = match &directory.location {
+                    crate::DataLocation::Service(service) => string_size(service),
+                    crate::DataLocation::Path(path) => {
+                        string_size(&path.path).saturating_add(match &path.access {
+                            crate::DataAccess::Owner => 1,
+                            crate::DataAccess::Services(services) => {
+                                string_list_size(services).saturating_add(1)
+                            }
+                        })
+                    }
+                };
+                let compatibility = match &directory.compatibility {
+                    crate::DataCompatibility::Stable => 1,
+                    crate::DataCompatibility::Schema(schema) => 5usize
+                        .saturating_add(list_size(schema.reads.len()))
+                        .saturating_add(schema.reads.len().saturating_mul(4)),
+                };
+                size.saturating_add(string_size(&directory.id))
+                    .saturating_add(1)
+                    .saturating_add(location)
+                    .saturating_add(compatibility)
+            }
             ResourceItem::GeneratedFile(file) => size
+                .saturating_add(1)
+                .saturating_add(string_size(&file.id))
                 .saturating_add(string_size(&file.destination))
                 .saturating_add(list_size(file.contents.len()))
                 .saturating_add(file.contents.len()),
@@ -378,14 +360,26 @@ fn plan_output_size(plan: &InstallationPlan) -> usize {
                 .saturating_add(string_size(&launcher.target))
                 .saturating_add(string_list_size(&launcher.arguments))
                 .saturating_add(option_string_size(&launcher.working_directory)),
-            ResourceItem::PathEntry(entry) => size.saturating_add(string_size(&entry.value)),
+            ResourceItem::PathEntry(entry) => size
+                .saturating_add(string_size(&entry.id))
+                .saturating_add(string_size(&entry.value)),
             ResourceItem::Service(service) => size
                 .saturating_add(string_size(&service.id))
-                .saturating_add(string_size(&service.name))
+                .saturating_add(option_string_size(&service.native_name))
                 .saturating_add(option_string_size(&service.display_name))
                 .saturating_add(string_size(&service.binary))
                 .saturating_add(string_list_size(&service.arguments))
-                .saturating_add(1),
+                .saturating_add(string_list_size(&service.requires_files))
+                .saturating_add(string_list_size(&service.requires_services))
+                .saturating_add(match &service.execution {
+                    crate::ServiceExecution::SystemdUser(user)
+                    | crate::ServiceExecution::OpenrcUser(user) => 1usize
+                        .saturating_add(string_size(&user.user))
+                        .saturating_add(option_string_size(&user.group)),
+                    _ => 2,
+                })
+                .saturating_add(12)
+                .saturating_add(17),
             ResourceItem::Protocol(protocol) => size
                 .saturating_add(string_size(&protocol.scheme))
                 .saturating_add(string_size(&protocol.executable))
@@ -431,6 +425,8 @@ mod tests {
     #[case::a_generated_file_larger_than_the_limit(
         Over::Plan(InstallationPlan {
             resources: vec![ResourceItem::GeneratedFile(GeneratedFile {
+                replacement: crate::FixedReplacement::Atomic,
+                id: "configuration".to_owned(),
                 destination: "file".to_owned(),
                 contents: vec![0; MAX_PLAN_OUTPUT_BYTES + 1],
             })],

@@ -1,5 +1,6 @@
 //! Protocol framing and sequence tests.
 
+use zup_core::SessionId;
 use zup_protocol::*;
 
 #[test]

@@ -1,19 +1,25 @@
 #![cfg(target_os = "linux")]
 
+mod requirements_fixture {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/deployment.rs"
+    ));
+}
 #[path = "common/faults.rs"]
 mod faults;
 
 use std::path::Path;
+use zup_plan::{DeploymentEffects, compile_deployment};
 
 use faults::{Boundary, InterruptedExecutor, InterruptedStore};
 use zup_bundle::DirectoryPayloadSource;
+use zup_core::TargetPath;
 use zup_core::{AppId, Privilege, RelativePath, ResourceKey, SelectedScope, Target, hash_reader};
-use zup_linux::{LinuxFileExecutor, LinuxLedgerStore};
-use zup_plan::TargetPath;
+use zup_linux::{LinuxFileExecutor, LinuxInstallationStore};
 use zup_plan::{FileOperation, FileOperationKind, FilePrecondition};
 use zup_transaction::{
-    FilesystemTransactionStore, TransactionCoordinator, TransactionInput, TransactionOutcome,
-    TransactionStore, compile_transaction,
+    FilesystemTransactionStore, TransactionCoordinator, TransactionOutcome, TransactionStore,
 };
 
 const PAYLOAD: &[u8] = b"verified application content";
@@ -43,9 +49,9 @@ fn recovery_carrier(root: &Path) -> std::path::PathBuf {
             "app": {"id": "com.example.interrupted", "name": "Interrupted", "version": "1.0.0"},
             "target": Target::host().unwrap(), "frontend": "headless", "updates": null,
             "install": {"scope": "user", "directory": {"user": root.join("installed").to_string_lossy()}},
-            "components": [], "plugins": [], "files": [], "launchers": [], "path": [], "services": [], "protocols": [], "file_associations": []
+            "components": [], "plugins": [], "files": [{"id": "program", "source": "tool", "placement": {"kind": "fixed_file", "path": "${install}/tool"}}], "launchers": [], "path": [], "services": [], "protocols": [], "file_associations": []
         },
-        "files": [{"source": root.join("payload/tool"), "source_relative": "tool", "destination": "${install}/tool", "size": PAYLOAD.len(), "sha256": zup_core::hash_bytes(PAYLOAD), "component": null, "condition": null}],
+        "files": [{"source": root.join("payload/tool"), "source_relative": "tool", "id": {"kind": "file", "declaration": "program"}, "placement": {"kind": "fixed", "path": "${install}/tool", "replacement": "atomic"}, "size": PAYLOAD.len(), "sha256": zup_core::hash_bytes(PAYLOAD), "component": null, "condition": null}],
         "plugins": [], "prerequisites": [], "total_size": PAYLOAD.len(), "prerequisite_size": 0
     })).unwrap();
     let package = zup_bundle::BundleWriter::encode(&plan, &[]).unwrap();
@@ -73,10 +79,25 @@ fn interrupted_child() {
     let target = Target::host().unwrap();
     let destination =
         TargetPath::new(target, root.join("installed/tool").to_string_lossy()).unwrap();
-    let mut input = TransactionInput::new(target);
+    let mut input = DeploymentEffects::new(
+        zup_core::InstallationId::new_v7(),
+        requirements_fixture::requirements(
+            target,
+            zup_core::SelectedScope::User,
+            "com.example.interrupted",
+            "1.0.0",
+        ),
+    );
+    input.install_directory =
+        Some(TargetPath::new(target, root.join("installed").to_string_lossy()).unwrap());
     input.files.push(FileOperation {
+        replacement: zup_core::FixedReplacement::Atomic,
         key: ResourceKey::File {
-            destination: destination.to_string(),
+            id: zup_core::FileResourceId::Payload {
+                id: zup_core::PayloadId::File {
+                    declaration: zup_core::ResourceId::new("fixture-0").unwrap(),
+                },
+            },
         },
         source_relative: RelativePath::new("tool").unwrap(),
         destination,
@@ -98,17 +119,22 @@ fn interrupted_child() {
             AppId::new("com.example.interrupted").unwrap(),
             SelectedScope::User,
             "1.0.0".parse().unwrap(),
-            compile_transaction(&input).unwrap(),
+            compile_deployment(&input).unwrap(),
         )
         .unwrap();
     let mut executor = InterruptedExecutor {
         inner: executor(&root, &open),
         boundary,
     };
-    let settled = open.execute(&mut executor).unwrap();
+    let settled = open
+        .execute(
+            &mut executor,
+            &LinuxInstallationStore::new(root.join("state")),
+        )
+        .unwrap();
     boundary.reach(Boundary::BeforeLedger);
-    LinuxLedgerStore::new(root.join("state"))
-        .publish_committed(&settled.record, SelectedScope::User)
+    LinuxInstallationStore::new(root.join("state"))
+        .reconcile_installation(&settled.record, SelectedScope::User)
         .unwrap();
     boundary.reach(Boundary::AfterLedger);
     panic!("interruption point was not reached");
@@ -151,17 +177,15 @@ fn process_interruption_recovers_real_files() {
             let operation =
                 zup_runtime::OperationControl::new(zup_runtime::ExecutionPolicy::NonInteractive);
             let request = zup_runtime::RuntimeRequest {
-                intent: None,
+                operation: zup_runtime::RuntimeOperation::Recovery {
+                    transaction: record.transaction_id,
+                    request: Default::default(),
+                },
                 target: record.target,
                 app_id: record.app_id.clone(),
                 app_version: record.app_version.clone(),
                 scope: record.scope,
-                transaction_plan: record.plan.clone(),
                 state_root: root.path().join("state"),
-
-                recovery_id: Some(record.transaction_id),
-                bootstrap: None,
-                release: None,
             };
             let report = backend
                 .execute_blocking(
@@ -176,7 +200,7 @@ fn process_interruption_recovers_real_files() {
             let outcome = match report.outcome {
                 zup_runtime::InstallOutcome::Committed => TransactionOutcome::Committed,
                 zup_runtime::InstallOutcome::RolledBack => TransactionOutcome::RolledBack,
-                zup_runtime::InstallOutcome::RecoveryRequired => {
+                zup_runtime::InstallOutcome::RecoveryRequired { .. } => {
                     TransactionOutcome::RecoveryRequired
                 }
                 other => panic!("recovery at {index}: {other:?}"),
@@ -189,12 +213,13 @@ fn process_interruption_recovers_real_files() {
                     "repeated recovery changed the outcome at {index}"
                 );
             }
-            previous = Some(outcome);
+            previous = Some(outcome.clone());
             let installed = root.path().join("installed/tool");
             match outcome {
+                TransactionOutcome::Assessed(_) => panic!("ordinary recovery cannot assess"),
                 TransactionOutcome::Committed => {
-                    LinuxLedgerStore::new(root.path().join("state"))
-                        .publish_committed(&record, SelectedScope::User)
+                    LinuxInstallationStore::new(root.path().join("state"))
+                        .reconcile_installation(&record, SelectedScope::User)
                         .unwrap();
                     assert_eq!(std::fs::read(&installed).unwrap(), PAYLOAD);
                 }

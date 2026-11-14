@@ -22,12 +22,20 @@ interface planner {
     desktop,
   }
 
+  enum fixed-replacement {
+    atomic,
+    quiescent,
+  }
+
   record generated-file {
+    id: string,
+    replacement: fixed-replacement,
     destination: string,
     contents: list<u8>,
   }
 
   record launcher {
+    id: string,
     location: launcher-location,
     name: string,
     target: string,
@@ -36,6 +44,7 @@ interface planner {
   }
 
   record path-entry {
+    id: string,
     value: string,
   }
 
@@ -45,13 +54,104 @@ interface planner {
     disabled,
   }
 
+  enum initial-service-state {
+    stopped,
+    running,
+  }
+
+  enum changed-service-state {
+    preserve,
+    stopped,
+  }
+
+  record service-lifecycle {
+    install: initial-service-state,
+    change: changed-service-state,
+    timeouts: option<service-timeouts>,
+  }
+
+  record systemd-timeouts {
+    start-timeout-seconds: u32,
+    stop-grace-seconds: u32,
+    abort-timeout-seconds: u32,
+    settle-seconds: u32,
+  }
+  record openrc-timeouts {
+    start-timeout-seconds: u32,
+    stop-grace-seconds: u32,
+    kill-wait-seconds: u32,
+    settle-seconds: u32,
+  }
+  record windows-timeouts {
+    start-observation-seconds: u32,
+    stop-observation-seconds: u32,
+  }
+  variant service-timeouts {
+    systemd(systemd-timeouts),
+    openrc(openrc-timeouts),
+    windows(windows-timeouts),
+  }
+
+  enum windows-service-account {
+    local-service,
+    network-service,
+    local-system,
+  }
+
+  record systemd-user {
+    user: string,
+    group: option<string>,
+  }
+
+  variant service-execution {
+    windows-job(windows-service-account),
+    systemd-dynamic-user,
+    systemd-user(systemd-user),
+    openrc-user(systemd-user),
+  }
+
+  enum systemd-restart-condition { on-failure, on-abnormal }
+  record systemd-failure-policy {
+    condition: systemd-restart-condition,
+    delay-seconds: u32,
+    start-limit-burst: u32,
+    start-limit-interval-seconds: u32,
+  }
+  record windows-failure-policy {
+    delay-seconds: u32,
+    restart-attempts: u32,
+    reset-seconds: u32,
+  }
+  record openrc-failure-policy {
+    delay-seconds: u32,
+    max-respawns: u32,
+    respawn-period-seconds: u32,
+  }
+  variant service-failure-policy {
+    none,
+    systemd(systemd-failure-policy),
+    windows(windows-failure-policy),
+    openrc(openrc-failure-policy),
+  }
+
   record service {
+    failure: service-failure-policy,
+    execution: service-execution,
     id: string,
-    name: string,
+    native-name: option<string>,
     display-name: option<string>,
     binary: string,
     arguments: list<string>,
     start: service-start,
+    lifecycle: service-lifecycle,
+    readiness: service-readiness,
+    requires-files: list<string>,
+    requires-services: list<string>,
+  }
+
+  enum service-readiness {
+    manager,
+    notify,
   }
 
   record protocol {
@@ -67,7 +167,39 @@ interface planner {
     executable: string,
   }
 
+  variant data-access {
+    owner,
+    services(list<string>),
+  }
+
+  record data-path {
+    path: string,
+    access: data-access,
+  }
+
+  variant data-location {
+    path(data-path),
+    service(string),
+  }
+
+  record data-schema {
+    writes: u32,
+    reads: list<u32>,
+  }
+
+  variant data-compatibility {
+    stable,
+    schema(data-schema),
+  }
+
+  record data-directory {
+    id: string,
+    location: data-location,
+    compatibility: data-compatibility,
+  }
+
   variant resource-item {
+    data(data-directory),
     generated-file(generated-file),
     launcher(launcher),
     path-entry(path-entry),

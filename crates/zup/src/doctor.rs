@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueHint};
 use zup_automation::{AutomationResult, Details, LogLevel};
-use zup_core::{ResolvedTargetConfig, Sha256Digest, hash_reader};
+use zup_core::ResolvedTargetConfig;
 use zup_plugin_contract::{PluginEngine, WASMTIME_VERSION};
 
 use crate::build_inputs::{self, BuildInputs};
@@ -258,7 +258,7 @@ impl PlanOwner {
 }
 
 enum PlanOutcome {
-    Ready(Box<zup_build::BuildPlan>),
+    Ready(Box<zup_core::BuildPlan>),
     Failed(PlanOwner, String),
 }
 
@@ -519,7 +519,7 @@ impl TargetChecks<'_> {
         }
     }
 
-    fn compiled(&mut self, build: &zup_build::BuildPlan) {
+    fn compiled(&mut self, build: &zup_core::BuildPlan) {
         let installer = &build.targets[0].installer;
         self.pass(
             CheckKind::ManifestCompile,
@@ -535,30 +535,23 @@ impl TargetChecks<'_> {
 
     fn payload(
         &mut self,
-        build: &zup_build::BuildPlan,
+        build: &zup_core::BuildPlan,
         source_root: &Result<PathBuf, zup_build::BuildError>,
     ) {
         let plan = &build.targets[0];
         let root = source_root.as_ref().ok().cloned().unwrap_or_default();
-        match payload_digest(plan) {
-            Ok(digest) => self.pass(
-                CheckKind::SourcePayload,
-                format!(
-                    "{} file(s) · {} · payload digest {digest}",
-                    plan.files.len(),
-                    zup_presentation::format_bytes(plan.total_size)
-                ),
-                Some(&root),
+        self.pass(
+            CheckKind::SourcePayload,
+            format!(
+                "{} file(s) · {}",
+                plan.files.len(),
+                zup_core::format_bytes(plan.total_size)
             ),
-            Err(error) => self.fail(
-                CheckKind::SourcePayload,
-                format!("payload could not be summarized: {error}"),
-                Some(&root),
-            ),
-        }
+            Some(&root),
+        );
     }
 
-    fn plugins(&mut self, build: &zup_build::BuildPlan) {
+    fn plugins(&mut self, build: &zup_core::BuildPlan) {
         let plan = &build.targets[0];
         if plan.plugins.is_empty() {
             self.skip(
@@ -593,7 +586,7 @@ impl TargetChecks<'_> {
             ),
             Err(error) => self.fail(
                 CheckKind::PluginEngine,
-                format!("plugin AOT compilation is not ready: {error}"),
+                format!("plugin COMPONENT compilation is not ready: {error}"),
                 source.as_deref(),
             ),
         }
@@ -731,7 +724,7 @@ impl TargetChecks<'_> {
         );
     }
 
-    fn lowering(&mut self, build: &zup_build::BuildPlan) {
+    fn lowering(&mut self, build: &zup_core::BuildPlan) {
         match build_inputs::check_target_lowering(build, self.config) {
             Ok(scopes) => {
                 let scopes = scopes
@@ -812,7 +805,7 @@ impl TargetChecks<'_> {
 
     /// Read-only and never mutating: a probe that names the manager and
     /// reads one property, never an operation that changes unit state. A
-    fn service_runtime(&mut self, build: &zup_build::BuildPlan) {
+    fn service_runtime(&mut self, build: &zup_core::BuildPlan) {
         let target = &self.config.target;
         if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
             self.skip(
@@ -952,20 +945,6 @@ fn lowering_name(target: &zup_core::Target) -> &'static str {
     }
 }
 
-fn payload_digest(plan: &zup_build::TargetBuildPlan) -> io::Result<Sha256Digest> {
-    let mut summary = String::with_capacity(plan.files.len() * 96);
-    for file in &plan.files {
-        let _ = writeln!(
-            summary,
-            "{}\t{}\t{}",
-            file.destination,
-            file.size,
-            file.sha256.to_hex()
-        );
-    }
-    hash_reader(summary.as_bytes()).map(|(_, digest)| digest)
-}
-
 #[cfg(windows)]
 fn directory_accepts_writes(directory: &Path) -> io::Result<bool> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -1019,7 +998,7 @@ fn system_systemd() -> SystemdReadiness {
 #[cfg(target_os = "linux")]
 fn systemd_too_old_message(version: u32) -> String {
     format!(
-        "systemd {version} is older than the minimum {} for `Type=exec` service units",
+        "systemd {version} is older than the minimum {} for managed service units",
         zup_linux::MINIMUM_SYSTEMD_VERSION,
     )
 }
@@ -1027,7 +1006,7 @@ fn systemd_too_old_message(version: u32) -> String {
 /// Linux: a non-Linux host never constructs `TooOld`, so its copy just
 #[cfg(not(target_os = "linux"))]
 fn systemd_too_old_message(version: u32) -> String {
-    format!("systemd {version} is too old for `Type=exec` service units")
+    format!("systemd {version} is too old for managed service units")
 }
 #[allow(dead_code)]
 enum SystemdReadiness {
@@ -1052,7 +1031,7 @@ mod readiness_tests {
     use super::SystemdReadiness;
 
     #[test]
-    fn versions_verdict_by_the_exec_baseline() {
+    fn versions_verdict_by_the_service_timeout_baseline() {
         assert!(matches!(
             SystemdReadiness::of_version(Some("259")),
             SystemdReadiness::Ready(259)
@@ -1062,12 +1041,12 @@ mod readiness_tests {
             SystemdReadiness::Ready(259)
         ));
         assert!(matches!(
-            SystemdReadiness::of_version(Some("240")),
-            SystemdReadiness::Ready(240)
+            SystemdReadiness::of_version(Some("254")),
+            SystemdReadiness::Ready(254)
         ));
         assert!(matches!(
-            SystemdReadiness::of_version(Some("239")),
-            SystemdReadiness::TooOld(239)
+            SystemdReadiness::of_version(Some("242")),
+            SystemdReadiness::TooOld(242)
         ));
         assert!(matches!(
             SystemdReadiness::of_version(Some("not-a-version")),

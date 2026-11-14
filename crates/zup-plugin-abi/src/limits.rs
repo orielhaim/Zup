@@ -1,8 +1,10 @@
 pub const PLUGIN_API_VERSION: &str = "1.0.0";
 
-pub const WASMTIME_VERSION: &str = "50.0.0";
+pub const WASMTIME_VERSION: &str = "50.0.1";
 
-pub const AOT_FORMAT_VERSION: u32 = 1;
+pub const COMPONENT_FORMAT_VERSION: u32 = 2;
+
+pub const MAX_WASI_RESOURCES: usize = 32;
 
 pub const MAX_FUEL_PER_CALL: u64 = 100_000_000;
 
@@ -28,6 +30,6 @@ pub const MAX_PLAN_RESOURCES: usize = 4_096;
 
 pub const MAX_PLAN_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
-pub const MAX_AOT_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
 
 pub const MAX_WASM_STACK_BYTES: usize = 1024 * 1024;

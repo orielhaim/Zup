@@ -10,16 +10,16 @@ build = "build.rs"
 
 [features]
 preset = [
-    "dep:gpui-kit",
-    "dep:zup-preset-protocol",
-    "dep:zup-preset-ipc",
-    "dep:zup-sdk-macros",
-    "dep:schemars",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:thiserror",
-    "dep:futures-channel",
-    "dep:futures-util",
+  "dep:gpui-kit",
+  "dep:zup-preset-protocol",
+  "dep:zup-preset-ipc",
+  "dep:zup-sdk-macros",
+  "dep:schemars",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:thiserror",
+  "dep:futures-channel",
+  "dep:futures-util",
 ]
 plugin = ["dep:zup-plugin-abi", "dep:wit-bindgen"]
 test-support = ["preset", "gpui-kit/test-support"]

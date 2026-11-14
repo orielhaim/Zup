@@ -6,11 +6,11 @@ use std::sync::Mutex;
 use rstest::rstest;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use zup_build::{
-    BuildError, PortableSourceFilePolicy, Sha256Digest, SourceFilePolicy, materialize_with_policy,
-};
+use zup_build::{BuildError, materialize_with_policy};
 use zup_core::Installer;
-use zup_manifest::{Manifest, TargetOverrides, compile, parse, select_targets};
+use zup_core::TargetOverrides;
+use zup_core::{PortableSourceFilePolicy, Sha256Digest, SourceFilePolicy};
+use zup_manifest::{Manifest, compile, parse, select_targets};
 
 const PREREQUISITE: &[u8] = b"runtime payload";
 
@@ -87,8 +87,8 @@ scope = "user"
 user = "${{location.user_data}}/Acme"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
 
 [[prerequisites]]
 id = "runtime"
@@ -124,7 +124,7 @@ fn prerequisite_target(
     dir: &Path,
     manifest: &Manifest,
     policy: &dyn SourceFilePolicy,
-) -> Result<zup_build::TargetBuildPlan, BuildError> {
+) -> Result<zup_core::TargetBuildPlan, BuildError> {
     let mut plan = materialize_with_policy(
         &dir.join("zup.toml"),
         manifest,
@@ -137,10 +137,7 @@ fn prerequisite_target(
     Ok(plan.targets.pop().unwrap())
 }
 
-fn materialize_default(
-    dir: &Path,
-    manifest: &Manifest,
-) -> Result<zup_build::BuildPlan, BuildError> {
+fn materialize_default(dir: &Path, manifest: &Manifest) -> Result<zup_core::BuildPlan, BuildError> {
     zup_build::materialize(
         &dir.join("zup.toml"),
         manifest,

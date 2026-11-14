@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use tempfile::TempDir;
-use zup_build::{BuildPlan, materialize};
+use zup_build::materialize;
+use zup_core::BuildPlan;
+use zup_core::TargetOverrides;
 use zup_core::{ComponentId, LauncherLocation, Privilege, SelectedScope, ServiceStart, Target};
-use zup_manifest::{TargetOverrides, compile, parse, select_targets};
+use zup_manifest::{compile, parse, select_targets};
 use zup_plan::{
     CancellationQuery, MAX_PLUGIN_ARGUMENTS, MAX_PLUGIN_GENERATED_FILE_BYTES, MAX_PLUGIN_RESOURCES,
     MAX_PLUGIN_STRING_BYTES, NeverCancelled, PlanError, PlanRequest, PluginExecutor, PluginFailure,
@@ -138,6 +140,8 @@ impl PluginExecutor for FakeExecutor {
 
 fn generated(destination: &str, bytes: &[u8]) -> PluginResource {
     PluginResource::GeneratedFile {
+        replacement: zup_core::FixedReplacement::Atomic,
+        id: zup_core::hash_bytes(destination.as_bytes()).to_hex(),
         destination: destination.to_owned(),
         contents: bytes.to_vec(),
     }
@@ -147,6 +151,7 @@ fn all_resources() -> Vec<PluginResource> {
     vec![
         generated("${install}/generated.bin", b"generated"),
         PluginResource::Launcher {
+            id: "main".into(),
             location: LauncherLocation::Desktop,
             name: "Acme Plugin".to_owned(),
             target: "${install}/generated.bin".to_owned(),
@@ -154,11 +159,27 @@ fn all_resources() -> Vec<PluginResource> {
             working_directory: Some("${install}".to_owned()),
         },
         PluginResource::PathEntry {
+            id: "path-1".into(),
             value: "${install}/plugin-bin".to_owned(),
         },
         PluginResource::Service {
+            failure: Default::default(),
+            execution: zup_core::ServiceExecution::WindowsJob {
+                account: zup_core::WindowsServiceAccount::LocalService,
+            },
+            requires_files: Vec::new(),
+            requires_services: Vec::new(),
+            readiness: Default::default(),
+            lifecycle: zup_core::ServiceLifecycle {
+                install: zup_core::InitialServiceState::Running,
+                timeouts: Some(zup_core::ServiceTimeouts::Windows {
+                    start_observation_seconds: 17,
+                    stop_observation_seconds: 23,
+                }),
+                ..Default::default()
+            },
             id: "plugin-service".to_owned(),
-            name: "plugin-service".to_owned(),
+            native_name: None,
             display_name: Some("Plugin Service".to_owned()),
             binary: "${install}/generated.bin".to_owned(),
             arguments: vec!["--service".to_owned()],
@@ -198,7 +219,7 @@ source = "plugins/one.wasm"
         .plan
         .files
         .iter()
-        .find(|file| file.destination.to_string().ends_with("/generated.txt"))
+        .find(|file| file.destination().to_string().ends_with("/generated.txt"))
         .unwrap();
     assert!(
         generated_file
@@ -243,11 +264,70 @@ source = "plugins/one.wasm"
     assert_eq!(result.plan.protocols.len(), 1);
     assert_eq!(result.plan.file_associations.len(), 1);
     assert_eq!(result.plan.services[0].privilege, Privilege::System);
+    assert_eq!(
+        result.plan.services[0].lifecycle.install,
+        zup_core::InitialServiceState::Running
+    );
+    assert_eq!(
+        result.plan.services[0]
+            .lifecycle
+            .timeouts
+            .unwrap()
+            .start_observation_seconds(),
+        17
+    );
+    assert_eq!(
+        result.plan.services[0]
+            .lifecycle
+            .timeouts
+            .unwrap()
+            .stop_observation_seconds(),
+        23
+    );
     assert_eq!(result.plan.launchers[0].privilege, Privilege::System);
     assert_eq!(
         result.plan.file_associations[0].privilege,
         Privilege::System
     );
+}
+
+#[rstest]
+#[case::zero_deadline(0, ServiceStart::Manual)]
+#[case::excessive_deadline(3601, ServiceStart::Manual)]
+#[case::disabled_start(90, ServiceStart::Disabled)]
+fn plugin_service_policy_is_validated_by_the_trusted_planner(
+    #[case] timeout: u32,
+    #[case] start: ServiceStart,
+) {
+    let build = build(&with(
+        r#"
+[[plugins]]
+id = "helper"
+source = "plugins/one.wasm"
+"#,
+    ));
+    let mut resources = all_resources();
+    let PluginResource::Service {
+        lifecycle,
+        start: policy,
+        ..
+    } = &mut resources[3]
+    else {
+        panic!("service fixture required");
+    };
+    lifecycle.timeouts = Some(zup_core::ServiceTimeouts::Windows {
+        start_observation_seconds: timeout,
+        stop_observation_seconds: 23,
+    });
+    *policy = start;
+    let mut executor =
+        FakeExecutor::new([("helper".to_owned(), PluginResourceProposal::new(resources))]);
+    let mut request = request();
+    request.scope = SelectedScope::Machine;
+    assert!(matches!(
+        plan(&build, &request, Some(&mut executor), &NeverCancelled),
+        Err(PlanError::PluginResourceRejected { .. })
+    ));
 }
 
 #[test]
@@ -283,6 +363,7 @@ when = 'component("extra")'
             scope: SelectedScope::User,
             install_directory: None,
             components: zup_plan::ComponentOverrides::none(),
+            ..PlanRequest::new(target(), SelectedScope::User)
         },
         Some(&mut executor),
         &NeverCancelled,
@@ -293,7 +374,7 @@ when = 'component("extra")'
             .plan
             .files
             .iter()
-            .all(|file| !file.destination.to_string().ends_with("/plugin.txt"))
+            .all(|file| !file.destination().to_string().ends_with("/plugin.txt"))
     );
     assert_eq!(executor.calls.len(), 0);
 
@@ -311,6 +392,7 @@ when = 'component("extra")'
                 enable: [component_id("extra")].into_iter().collect(),
                 ..Default::default()
             },
+            ..PlanRequest::new(target(), SelectedScope::User)
         },
         Some(&mut executor),
         &NeverCancelled,
@@ -321,7 +403,7 @@ when = 'component("extra")'
             .plan
             .files
             .iter()
-            .any(|file| file.destination.to_string().ends_with("/plugin.txt"))
+            .any(|file| file.destination().to_string().ends_with("/plugin.txt"))
     );
     assert_eq!(executor.calls.len(), 1);
 }
@@ -462,19 +544,22 @@ fn windows_case_aliases_are_rejected_by_the_shared_contract() {
         (
             r#"
 [[files]]
+id = "payload-1"
 source = "base.txt"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#,
             generated("${install}/BASE.TXT", b"x"),
         ),
         (
             r#"
 [[launchers]]
+id = "main"
 location = "menu"
 name = "Same"
 target = "${install}/base.txt"
 "#,
             PluginResource::Launcher {
+                id: "main".into(),
                 location: LauncherLocation::Menu,
                 name: "same".to_owned(),
                 target: "${install}/base.txt".to_owned(),
@@ -485,23 +570,36 @@ target = "${install}/base.txt"
         (
             r#"
 [[path]]
+id = "cli-1"
 value = "${install}/Same"
 "#,
             PluginResource::PathEntry {
+                id: "path-2".into(),
                 value: "${install}/same".to_owned(),
             },
         ),
         (
             r#"
 [[services]]
+execution = { type = "windows_job", account = "local_service" }
 id = "SameService"
-name = "SameService"
+display_name = "SameService"
 binary = "${install}/base.txt"
 start = "manual"
 "#,
             PluginResource::Service {
+                failure: Default::default(),
+                execution: zup_core::ServiceExecution::WindowsJob {
+                    account: zup_core::WindowsServiceAccount::LocalService,
+                },
+                requires_files: Vec::new(),
+                requires_services: Vec::new(),
+                lifecycle: zup_core::ServiceLifecycle {
+                    ..Default::default()
+                },
+                readiness: Default::default(),
                 id: "sameservice".to_owned(),
-                name: "sameservice".to_owned(),
+                native_name: None,
                 display_name: None,
                 binary: "${install}/base.txt".to_owned(),
                 arguments: Vec::new(),
@@ -597,6 +695,7 @@ source = "plugins/two.wasm"
 
 #[rstest]
 #[case::unresolved_template(PluginResource::PathEntry {
+            id: "path-3".into(),
     value: "${unknown}".to_owned(),
 })]
 #[case::uninstalled_executable(PluginResource::FileAssociation {
@@ -606,8 +705,14 @@ source = "plugins/two.wasm"
     executable: "${install}/base.txt".to_owned(),
 })]
 #[case::nul_service_id(PluginResource::Service {
+    failure: Default::default(),
+    execution: zup_core::ServiceExecution::WindowsJob { account: zup_core::WindowsServiceAccount::LocalService },
+    requires_files: Vec::new(),
+    requires_services: Vec::new(),
+            lifecycle: zup_core::ServiceLifecycle { ..Default::default() },
+            readiness: Default::default(),
     id: "\0".to_owned(),
-    name: "service".to_owned(),
+    native_name: None,
     display_name: None,
     binary: "${install}/base.txt".to_owned(),
     arguments: Vec::new(),
@@ -667,6 +772,7 @@ source = "plugins/one.wasm"
 
     let too_many = (0..=MAX_PLUGIN_RESOURCES)
         .map(|index| PluginResource::PathEntry {
+            id: format!("path-{index}"),
             value: format!("${{install}}/{index}"),
         })
         .collect();
@@ -678,7 +784,10 @@ source = "plugins/one.wasm"
     let long_string = "x".repeat(MAX_PLUGIN_STRING_BYTES + 1);
     let mut executor = FakeExecutor::new([(
         "helper".to_owned(),
-        PluginResourceProposal::new(vec![PluginResource::PathEntry { value: long_string }]),
+        PluginResourceProposal::new(vec![PluginResource::PathEntry {
+            id: "path-5".into(),
+            value: long_string,
+        }]),
     )]);
     let error = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap_err();
     assert!(matches!(error, PlanError::PluginResourceLimit { .. }));
@@ -689,6 +798,7 @@ source = "plugins/one.wasm"
     let mut executor = FakeExecutor::new([(
         "helper".to_owned(),
         PluginResourceProposal::new(vec![PluginResource::Launcher {
+            id: "main".into(),
             location: LauncherLocation::Desktop,
             name: "Too many".to_owned(),
             target: "${install}/base.txt".to_owned(),
@@ -701,44 +811,68 @@ source = "plugins/one.wasm"
 }
 
 #[test]
-fn generated_source_identity_does_not_expose_plugin_origin() {
+fn generated_file_identity_is_scoped_to_plugin_and_independent_of_destination() {
     let build = build(&with(
         r#"
 [[plugins]]
 id = "one"
 source = "plugins/one.wasm"
-
 [[plugins]]
 id = "two"
 source = "plugins/two.wasm"
 "#,
     ));
-    let mut executor = FakeExecutor::new([
-        (
-            "one".to_owned(),
-            PluginResourceProposal::new(vec![generated("${install}/one.txt", b"one")]),
-        ),
-        (
-            "two".to_owned(),
-            PluginResourceProposal::new(vec![generated("${install}/two.txt", b"two")]),
-        ),
-    ]);
-    let result = plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap();
-    assert!(
-        !result.generated_files[0]
-            .source_relative
-            .as_str()
-            .contains("one")
-    );
-    assert!(
-        !result.generated_files[1]
-            .source_relative
-            .as_str()
-            .contains("two")
-    );
+    let generated = |destination: &str| PluginResource::GeneratedFile {
+        replacement: zup_core::FixedReplacement::Atomic,
+        id: "configuration".into(),
+        destination: destination.into(),
+        contents: b"configuration".to_vec(),
+    };
+    let run = |first_destination: &str| {
+        let mut executor = FakeExecutor::new([
+            (
+                "one".to_owned(),
+                PluginResourceProposal::new(vec![generated(first_destination)]),
+            ),
+            (
+                "two".to_owned(),
+                PluginResourceProposal::new(vec![generated("${install}/two.txt")]),
+            ),
+        ]);
+        plan(&build, &request(), Some(&mut executor), &NeverCancelled).unwrap()
+    };
+    let first = run("${install}/one.txt");
+    let moved = run("${install}/relocated.txt");
+    let keys = |result: &zup_plan::PlannedInstallation| {
+        result
+            .plan
+            .files
+            .iter()
+            .filter(|file| {
+                matches!(
+                    file.key,
+                    zup_core::ResourceKey::File {
+                        id: zup_core::FileResourceId::Plugin { .. }
+                    }
+                )
+            })
+            .map(|file| file.key.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let expected = ["one", "two"]
+        .map(|plugin| zup_core::ResourceKey::File {
+            id: zup_core::FileResourceId::Plugin {
+                plugin: zup_core::PluginId::new(plugin).unwrap(),
+                id: zup_core::ResourceId::new("configuration").unwrap(),
+            },
+        })
+        .into_iter()
+        .collect();
+    assert_eq!(keys(&first), expected);
+    assert_eq!(keys(&moved), expected);
     assert_ne!(
-        result.generated_files[0].source_relative,
-        result.generated_files[1].source_relative
+        first.generated_files[0].source_relative,
+        first.generated_files[1].source_relative
     );
 }
 

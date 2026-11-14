@@ -2,11 +2,11 @@
 
 Commands that support machine-readable reporting use `--format`.
 
-| Format | stdout |
-| --- | --- |
+| Format  | stdout                             |
+| ------- | ---------------------------------- |
 | `human` | terminal-oriented text, not stable |
-| `json` | one result document |
-| `jsonl` | one protocol event per line |
+| `json`  | one result document                |
+| `jsonl` | one protocol event per line        |
 
 In machine formats, parse stdout as the protocol stream/document. Logs and other terminal output belong on stderr.
 
@@ -22,12 +22,12 @@ Use the checked-in `schema/automation-v1.schema.json` as the exact contract rath
 
 The stream begins with a `version` event and ends with `completed`.
 
-| Event | Payload |
-| --- | --- |
-| `version` | `{ protocol, zup, operation }` |
-| `phase`, `progress` | `{ phase, message }`, `{ completed, total, label }` |
-| `diagnostic`, `artifact`, `publication`, `log` | the named object |
-| `completed` | `{ result }` |
+| Event                                          | Payload                                             |
+| ---------------------------------------------- | --------------------------------------------------- |
+| `version`                                      | `{ protocol, zup, operation }`                      |
+| `phase`, `progress`                            | `{ phase, message }`, `{ completed, total, label }` |
+| `diagnostic`, `artifact`, `publication`, `log` | the named object                                    |
+| `completed`                                    | `{ result }`                                        |
 
 Ignore event types and fields you do not recognise within the same protocol major version.
 
@@ -37,18 +37,18 @@ Machine integrations should branch on diagnostic `code`, not on English message 
 
 ## Exit codes
 
-| Code | Meaning |
-| --- | --- |
-| `0` | success |
-| `1` | failure |
-| `2` | cancelled |
-| `3` | invalid invocation or configuration |
-| `4` | another owner holds a needed resource |
-| `5` | elevation required |
-| `6` | signature, trust, or integrity failure |
-| `7` | an interrupted transaction needs reconciling |
-| `8` | another operation holds the installation lock |
-| `3010` | reboot required |
+| Code   | Meaning                                       |
+| ------ | --------------------------------------------- |
+| `0`    | success                                       |
+| `1`    | failure                                       |
+| `2`    | cancelled                                     |
+| `3`    | invalid invocation or configuration           |
+| `4`    | another owner holds a needed resource         |
+| `5`    | elevation required                            |
+| `6`    | signature, trust, or integrity failure        |
+| `7`    | an interrupted transaction needs reconciling  |
+| `8`    | another operation holds the installation lock |
+| `3010` | reboot required                               |
 
 Branch on the `status` field and diagnostic `code` in `--format json`, not on the exit code: failures without typed metadata are classified from their message, so CLI codes are best-effort. The installed runtime reports a typed outcome for every case.
 

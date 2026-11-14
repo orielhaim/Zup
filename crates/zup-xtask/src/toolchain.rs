@@ -65,6 +65,8 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
         )?);
     }
 
+    if zup_plan::capabilities(&host)
+        .is_some_and(|caps| caps.supports_preset(zup_core::Frontend::Gui))
     {
         let preset = build_and_stage_preset(root, &staged, &version, profile)?;
         println!("  preset             {}", component_name(&preset));
@@ -74,11 +76,48 @@ pub fn build(root: &Path, profile: &str, target: Option<&str>) -> Result<Vec<Pat
         println!("  preset-peer        {}", component_name(&peer));
         written.push(peer);
     }
-    #[cfg(windows)]
-    {
-        build_example_plugin(root)?;
-    }
     Ok(written)
+}
+
+pub fn build_fault_runtime(root: &Path, profile: &str, target: &str) -> Result<PathBuf, String> {
+    let target = zup_core::Target::parse(target).map_err(|error| error.to_string())?;
+    let component = zup_toolchain::ToolchainComponent::Runtime {
+        target,
+        frontend: zup_core::Frontend::Headless,
+        online: false,
+    };
+    let host = zup_core::Target::host().map_err(|error| error.to_string())?;
+    let mut args = vec![
+        "-p",
+        INSTALLER_PACKAGE,
+        "--no-default-features",
+        "--features",
+        "headless,test-faults",
+        "--bin",
+        "zup-setup-headless",
+        "--profile",
+        profile,
+    ];
+    let directory = if target == host {
+        args.insert(0, "build");
+        cargo(root, &args)?;
+        target_directory(root, profile)
+    } else {
+        args.extend(["--target", target.rust_triple()]);
+        if target.operating_system() != zup_core::TargetOperatingSystem::Linux {
+            return Err("fault runtimes for Windows require a native Windows build host".into());
+        }
+        zigbuild(root, &args)?;
+        target_directory(root, target.rust_triple()).join(output_directory(profile))
+    };
+    let staged = target_directory(root, profile).join("test-fixtures/fault-runtime");
+    std::fs::create_dir_all(&staged).map_err(|error| error.to_string())?;
+    stage_component(
+        &directory.join(format!("zup-setup-headless{}", target.executable_suffix())),
+        &staged,
+        &component,
+        &version()?,
+    )
 }
 
 #[cfg(windows)]
@@ -296,28 +335,6 @@ fn zigbuild(root: &Path, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn build_example_plugin(root: &Path) -> Result<(), String> {
-    let project = root.join("examples").join("plugins").join("configure");
-    if !project.is_dir() {
-        return Err(format!("no example plugin at {}", project.display()));
-    }
-    cargo(
-        root,
-        &[
-            "run",
-            "--quiet",
-            "-p",
-            "zup",
-            "--",
-            "plugin",
-            "build",
-            "--project",
-            &project.to_string_lossy(),
-        ],
-    )
-}
-
 fn build_and_stage_test_preset(
     root: &Path,
     staged: &Path,
@@ -433,7 +450,12 @@ pub fn staging_directory(root: &Path, profile: &str, version: &str) -> PathBuf {
 }
 
 fn target_directory(root: &Path, profile: &str) -> PathBuf {
-    root.join("target").join(output_directory(profile))
+    let directory = match std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+        Some(directory) if directory.is_absolute() => directory,
+        Some(directory) => root.join(directory),
+        None => root.join("target"),
+    };
+    directory.join(output_directory(profile))
 }
 
 fn output_directory(profile: &str) -> &str {
@@ -804,12 +826,12 @@ mod tests {
             directory.display()
         );
         assert!(
-            directory.starts_with("repo/target/debug"),
+            directory.ends_with("debug/toolchain/0.1.0"),
             "the development profile's directory is `debug`: {}",
             directory.display()
         );
         assert!(
-            staging_directory(root, "release", "0.1.0").starts_with("repo/target/release"),
+            staging_directory(root, "release", "0.1.0").ends_with("release/toolchain/0.1.0"),
             "a release zup does not look beside a debug one"
         );
         assert!(

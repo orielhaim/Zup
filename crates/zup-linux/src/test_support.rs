@@ -7,13 +7,14 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use zup_bundle::BundleWriter;
+use zup_core::SessionId;
 use zup_core::{
     App, AppId, FileAssociation, FileAssociationId, FileExtension, Frontend, Install,
     InstallDirectory, InstallScope, Installer, Launcher, LauncherLocation, NonEmptyString,
     Protocol, ProtocolScheme, RelativePath, ResolvedFile, SelectedScope, Target, TargetBuildPlan,
     Template, hash_reader,
 };
-use zup_protocol::{SessionId, WireEnvelope};
+use zup_protocol::WireEnvelope;
 
 use crate::error::{ExecError, IpcError};
 use crate::lifecycle::LinuxOutcome;
@@ -22,6 +23,29 @@ use crate::run::{LinuxRunRequest, run};
 use crate::systemd::{SystemdManager, UnitChange, UnitInfo};
 pub use crate::worker::WorkerFault;
 use zup_runtime::Operation;
+
+fn fixture_mappings(files: &[ResolvedFile]) -> Vec<zup_core::FileMapping> {
+    files
+        .iter()
+        .map(|file| {
+            let zup_core::PayloadPlacement::Fixed { path, replacement } = &file.placement else {
+                panic!("fixed-placement fixture")
+            };
+            zup_core::FileMapping {
+                id: file.id.declaration().clone(),
+                source: file.source_relative.to_string(),
+                placement: zup_core::PayloadMapping::FixedFile {
+                    path: path.clone(),
+                    replacement: *replacement,
+                },
+                component: file.component.clone(),
+                when: file.condition.clone(),
+                allow_empty: false,
+                executable: file.executable,
+            }
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct MachineTestRoots {
@@ -46,8 +70,14 @@ impl MachineTestRoots {
         ] {
             std::fs::create_dir_all(directory).expect("an isolated root");
         }
-        let roots = MachineRoots::new(programs, state.clone(), shared_data);
+        let roots = MachineRoots::new(
+            programs,
+            state.clone(),
+            shared_data,
+            base.join("environment.d"),
+        );
         let systemd = crate::machine::SystemdRoots::new(units);
+        let state = roots.application_state(&AppId::new("com.example.tool").unwrap());
         Self {
             roots,
             state,
@@ -89,6 +119,7 @@ pub fn run_machine_isolated(
             state_root: Some(test_roots.state.clone()),
             action,
             selection: zup_runtime::OperationSelection {
+                deployment: None,
                 install_directory: install_dir_override,
                 ..Default::default()
             },
@@ -125,18 +156,9 @@ pub fn drive_client_isolated(
     stream: &mut UnixStream,
     session: SessionId,
     intent: &zup_protocol::PrepareOperation,
-    expected_digest: &str,
     expected_target: &zup_core::Target,
 ) -> Result<crate::lifecycle::LinuxOutcome, crate::error::ExecError> {
-    crate::elevate::drive_client(
-        stream,
-        session,
-        intent,
-        expected_digest,
-        expected_target,
-        None,
-        None,
-    )
+    crate::elevate::drive_client(stream, session, intent, expected_target, None, None)
 }
 
 pub fn plan_for_test(
@@ -144,16 +166,14 @@ pub fn plan_for_test(
     test_roots: &MachineTestRoots,
     action: Operation,
     install_dir_override: Option<PathBuf>,
-) -> (
-    zup_protocol::PrepareOperation,
-    zup_transaction::TransactionPlan,
-) {
+) -> (zup_protocol::PrepareOperation, zup_plan::DeploymentPlan) {
     let request = crate::run::LinuxRunRequest {
         installer: installer.to_path_buf(),
         scope: zup_core::SelectedScope::Machine,
         state_root: Some(test_roots.state.clone()),
         action,
         selection: zup_runtime::OperationSelection {
+            deployment: None,
             install_directory: install_dir_override,
             ..Default::default()
         },
@@ -166,7 +186,7 @@ pub fn plan_for_test(
         rustix::process::geteuid().as_raw(),
     )
     .expect("the fixture plans");
-    (intent, expected.plan)
+    (intent, expected)
 }
 
 pub fn validate_rendezvous_for_test(
@@ -176,26 +196,13 @@ pub fn validate_rendezvous_for_test(
     crate::worker::validate_rendezvous(socket, invoking_uid)
 }
 
-pub fn run_machine_elevated_for_test(
+pub fn launch_prepared_for_test(
     installer: &Path,
-    state: &Path,
-    action: Operation,
-    install_dir_override: Option<PathBuf>,
+    intent: &zup_protocol::PrepareOperation,
+    plan: &zup_plan::DeploymentPlan,
     launcher: &impl crate::pkexec::PkexecLauncher,
 ) -> Result<LinuxOutcome, ExecError> {
-    crate::elevate::run_machine_elevated(
-        &crate::run::LinuxRunRequest {
-            installer: installer.to_path_buf(),
-            scope: zup_core::SelectedScope::Machine,
-            state_root: Some(state.to_path_buf()),
-            action,
-            selection: zup_runtime::OperationSelection {
-                install_directory: install_dir_override,
-                ..Default::default()
-            },
-        },
-        launcher,
-    )
+    crate::elevate::drive_elevated(installer, intent, &plan.target, launcher, None, None)
 }
 
 pub fn send_envelope_on(
@@ -214,6 +221,7 @@ pub fn recv_envelope_on(
 
 #[derive(Debug, Clone)]
 pub struct FakeSystemd {
+    pub runtimes: BTreeMap<String, crate::systemd::UnitRuntime>,
     units: BTreeMap<String, FakeUnit>,
 
     pub version: String,
@@ -231,6 +239,7 @@ pub struct FakeSystemd {
 impl Default for FakeSystemd {
     fn default() -> Self {
         Self {
+            runtimes: BTreeMap::new(),
             units: BTreeMap::new(),
 
             version: "259".into(),
@@ -323,9 +332,138 @@ impl FakeSystemd {
 }
 
 impl SystemdManager for FakeSystemd {
+    fn process_scope_is_empty(&mut self, unit: &str) -> Result<bool, IpcError> {
+        if let Some(error) = self.fail("process_scope", unit) {
+            return Err(error);
+        }
+        Ok(self.runtime(unit)?.state == zup_plan::ServiceRuntimeState::Stopped)
+    }
+    fn generation(&mut self) -> Result<String, IpcError> {
+        Ok("fake-manager".into())
+    }
+
+    fn runtime(&mut self, unit: &str) -> Result<crate::systemd::UnitRuntime, IpcError> {
+        if let Some(error) = self.fail("runtime", unit) {
+            return Err(error);
+        }
+        Ok(self
+            .runtimes
+            .get(unit)
+            .cloned()
+            .unwrap_or(crate::systemd::UnitRuntime {
+                state_directories: self
+                    .units
+                    .get(unit)
+                    .and_then(|entry| std::fs::read(&entry.fragment_path).ok())
+                    .and_then(|bytes| {
+                        crate::services::parse_unit(&bytes, zup_core::Target::host().unwrap(), unit)
+                            .ok()
+                    })
+                    .map(|definition| {
+                        definition
+                            .state_directories
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                dependencies: self
+                    .units
+                    .get(unit)
+                    .and_then(|entry| std::fs::read(&entry.fragment_path).ok())
+                    .and_then(|bytes| {
+                        crate::services::parse_unit(&bytes, zup_core::Target::host().unwrap(), unit)
+                            .ok()
+                    })
+                    .map(|definition| definition.dependencies)
+                    .unwrap_or_default(),
+                argv: self
+                    .units
+                    .get(unit)
+                    .and_then(|entry| std::fs::read(&entry.fragment_path).ok())
+                    .and_then(|bytes| {
+                        crate::services::parse_unit(&bytes, zup_core::Target::host().unwrap(), unit)
+                            .ok()
+                    })
+                    .map(|definition| definition.argv),
+                native_timeouts: Some(
+                    zup_core::ServiceTimeouts::for_execution(
+                        &zup_core::ServiceExecution::SystemdDynamicUser,
+                    )
+                    .native(),
+                ),
+                failure: Default::default(),
+                execution: Some(zup_core::ServiceExecution::SystemdUser {
+                    user: "root".into(),
+                    group: None,
+                }),
+                service_type: "exec".into(),
+                pending_job: false,
+                state: zup_plan::ServiceRuntimeState::Stopped,
+                sub_state: "dead".into(),
+                result: "success".into(),
+                manager_generation: "fake-manager".into(),
+                execution_generation: "stopped".into(),
+            }))
+    }
+
+    fn control(
+        &mut self,
+        unit: &str,
+        state: zup_plan::ServiceTerminalState,
+        _timeout: Duration,
+        _controlled_units: &[String],
+    ) -> Result<(), IpcError> {
+        if let Some(error) = self.fail("control", unit) {
+            return Err(error);
+        }
+        let current = self.runtime(unit)?;
+        let running = state == zup_plan::ServiceTerminalState::Running;
+        self.runtimes.insert(
+            unit.into(),
+            crate::systemd::UnitRuntime {
+                state_directories: current.state_directories,
+                argv: current.argv,
+                dependencies: current.dependencies,
+                native_timeouts: current.native_timeouts,
+                failure: Default::default(),
+                execution: current.execution,
+                service_type: current.service_type,
+                pending_job: false,
+                state: if running {
+                    zup_plan::ServiceRuntimeState::Running
+                } else {
+                    zup_plan::ServiceRuntimeState::Stopped
+                },
+                sub_state: if running { "running" } else { "dead" }.into(),
+                result: "success".into(),
+                manager_generation: current.manager_generation,
+                execution_generation: if running {
+                    uuid::Uuid::now_v7().to_string()
+                } else {
+                    "stopped".into()
+                },
+            },
+        );
+        if self.lost("control") {
+            return Err(IpcError::SystemdUnavailable("control reply lost".into()));
+        }
+        Ok(())
+    }
     fn reload(&mut self) -> Result<(), IpcError> {
         if let Some(error) = self.fail("reload", "") {
             return Err(error);
+        }
+        for (unit, runtime) in &mut self.runtimes {
+            runtime.argv = self
+                .units
+                .get(unit)
+                .and_then(|entry| std::fs::read(&entry.fragment_path).ok())
+                .and_then(|bytes| {
+                    crate::services::parse_unit(&bytes, zup_core::Target::host().unwrap(), unit)
+                        .ok()
+                })
+                .map(|definition| definition.argv);
         }
         self.reloads += 1;
         if self.lost("reload") {
@@ -358,6 +496,8 @@ impl SystemdManager for FakeSystemd {
         }
         let entry = self.units.get(unit);
         Ok(UnitInfo {
+            drop_in_paths: Vec::new(),
+            need_daemon_reload: false,
             load_state: entry
                 .map(|entry| entry.load_state.clone())
                 .unwrap_or_else(|| "not-found".to_owned()),
@@ -487,6 +627,26 @@ impl SharedFakeSystemd {
 }
 
 impl SystemdManager for SharedFakeSystemd {
+    fn process_scope_is_empty(&mut self, unit: &str) -> Result<bool, IpcError> {
+        self.0.borrow_mut().process_scope_is_empty(unit)
+    }
+    fn generation(&mut self) -> Result<String, IpcError> {
+        self.0.borrow_mut().generation()
+    }
+    fn runtime(&mut self, unit: &str) -> Result<crate::systemd::UnitRuntime, IpcError> {
+        self.0.borrow_mut().runtime(unit)
+    }
+    fn control(
+        &mut self,
+        unit: &str,
+        state: zup_plan::ServiceTerminalState,
+        timeout: Duration,
+        controlled_units: &[String],
+    ) -> Result<(), IpcError> {
+        self.0
+            .borrow_mut()
+            .control(unit, state, timeout, controlled_units)
+    }
     fn reload(&mut self) -> Result<(), IpcError> {
         self.0.borrow_mut().reload()
     }
@@ -668,6 +828,25 @@ pub fn machine_package_bytes(
     version: &str,
     files: &[FixtureFile],
     allow_directory_override: bool,
+    path: &[zup_core::PathEntry],
+) -> Vec<u8> {
+    machine_package_bytes_with_prerequisites(
+        scratch,
+        version,
+        files,
+        allow_directory_override,
+        path,
+        &[],
+    )
+}
+
+pub fn machine_package_bytes_with_prerequisites(
+    scratch: &Path,
+    version: &str,
+    files: &[FixtureFile],
+    allow_directory_override: bool,
+    path: &[zup_core::PathEntry],
+    prerequisites: &[zup_core::Prerequisite],
 ) -> Vec<u8> {
     let target = Target::host().expect("a supported Linux host");
     let payload_dir = scratch.join("payload");
@@ -679,10 +858,19 @@ pub fn machine_package_bytes(
             std::fs::write(&source, &file.bytes).expect("a payload file");
             let (size, sha256) = hash_reader(file.bytes.as_slice()).expect("a payload hashes");
             ResolvedFile {
+                id: zup_core::PayloadId::File {
+                    declaration: zup_core::ResourceId::new(format!(
+                        "payload-{}",
+                        zup_core::hash_bytes(file.name.as_bytes())
+                    ))
+                    .unwrap(),
+                },
                 source,
                 source_relative: RelativePath::new(file.name).expect("a relative path"),
-                destination: Template::parse(&format!("${{install}}/{}", file.name))
-                    .expect("a destination"),
+                placement: zup_core::PayloadPlacement::Fixed {
+                    path: Template::parse(&format!("${{install}}/{}", file.name)).unwrap(),
+                    replacement: zup_core::FixedReplacement::Atomic,
+                },
                 size,
                 sha256,
                 component: None,
@@ -707,6 +895,8 @@ pub fn machine_package_bytes(
             frontend: Frontend::Console,
             updates: None,
             install: Install {
+                generation_readers: Default::default(),
+                data: Vec::new(),
                 scope: InstallScope::Machine,
                 directory: InstallDirectory {
                     user: None,
@@ -716,13 +906,13 @@ pub fn machine_package_bytes(
                 },
                 allow_directory_override,
             },
-            prerequisites: Vec::new(),
+            prerequisites: prerequisites.to_vec(),
             components: Vec::new(),
             component_groups: Vec::new(),
             plugins: Vec::new(),
-            files: Vec::new(),
+            files: fixture_mappings(&resolved),
             launchers: Vec::new(),
-            path: Vec::new(),
+            path: path.to_vec(),
             services: Vec::new(),
             protocols: Vec::new(),
             file_associations: Vec::new(),
@@ -754,7 +944,7 @@ pub fn machine_fixture_override(
     files: &[FixtureFile],
     allow_directory_override: bool,
 ) -> PathBuf {
-    let package = machine_package_bytes(scratch, version, files, allow_directory_override);
+    let package = machine_package_bytes(scratch, version, files, allow_directory_override, &[]);
     let output = scratch.join(file_name);
     compose_installer(Path::new(inert_template()), &output, &package);
     output
@@ -795,13 +985,19 @@ pub fn machine_install_dir(roots: &crate::locations::MachineRoots) -> PathBuf {
 }
 
 pub fn machine_maintenance_path(state: &Path, version: &str) -> PathBuf {
-    zup_transaction::maintenance_runtime_path(
-        state,
-        &AppId::new("com.example.tool").expect("an id"),
-        SelectedScope::Machine,
-        &semver::Version::parse(version).expect("a version"),
-        Target::host().expect("a Linux target").executable_suffix(),
-    )
+    maintenance_path(state, SelectedScope::Machine, version)
+}
+
+pub fn maintenance_path(state: &Path, scope: SelectedScope, version: &str) -> PathBuf {
+    let record = crate::ledger::LinuxInstallationStore::new(state)
+        .load(&AppId::new("com.example.tool").unwrap(), scope)
+        .unwrap()
+        .unwrap();
+    let snapshot = std::iter::once(&record.current)
+        .chain(record.retained.iter().rev())
+        .find(|snapshot| snapshot.version.to_string() == version && snapshot.maintenance.is_some())
+        .unwrap();
+    PathBuf::from(snapshot.maintenance.as_ref().unwrap().directory().as_str()).join("maintenance")
 }
 
 pub struct FixtureIcon {
@@ -811,6 +1007,7 @@ pub struct FixtureIcon {
 
 pub fn menu_launcher(name: &str) -> Launcher {
     Launcher {
+        id: zup_core::ResourceId::new("main").unwrap(),
         location: LauncherLocation::Menu,
         name: NonEmptyString::new(name).expect("a name"),
         target: Template::parse("${location.programs}/tool/tool").expect("a target"),
@@ -891,6 +1088,8 @@ pub fn package_bytes_for(
         &[],
         &[],
         &[],
+        &[],
+        &[],
     )
 }
 
@@ -914,6 +1113,8 @@ pub fn gui_package_bytes(scratch: &Path, version: &str, files: &[FixtureFile]) -
         &[],
         &[],
         &[],
+        &[],
+        &[],
     )
 }
 
@@ -929,6 +1130,8 @@ pub fn package_bytes_full(
     protocols: &[Protocol],
     associations: &[FileAssociation],
     icons: &[FixtureIcon],
+    path: &[zup_core::PathEntry],
+    prerequisites: &[zup_core::Prerequisite],
 ) -> Vec<u8> {
     let target = *target;
     let payload_dir = scratch.join("payload");
@@ -940,10 +1143,20 @@ pub fn package_bytes_full(
             std::fs::write(&source, &file.bytes).expect("a payload file");
             let (size, sha256) = hash_reader(file.bytes.as_slice()).expect("a payload hashes");
             ResolvedFile {
+                id: zup_core::PayloadId::File {
+                    declaration: zup_core::ResourceId::new(format!(
+                        "payload-{}",
+                        zup_core::hash_bytes(file.name.as_bytes())
+                    ))
+                    .unwrap(),
+                },
                 source,
                 source_relative: RelativePath::new(file.name).expect("a relative path"),
-                destination: Template::parse(&format!("${{location.programs}}/tool/{}", file.name))
-                    .expect("a destination"),
+                placement: zup_core::PayloadPlacement::Fixed {
+                    path: Template::parse(&format!("${{location.programs}}/tool/{}", file.name))
+                        .unwrap(),
+                    replacement: zup_core::FixedReplacement::Atomic,
+                },
                 size,
                 sha256,
                 component: None,
@@ -958,11 +1171,21 @@ pub fn package_bytes_full(
         std::fs::write(&source, &icon.bytes).expect("an icon file");
         let (size, sha256) = hash_reader(icon.bytes.as_slice()).expect("an icon hashes");
         resolved.push(ResolvedFile {
+            id: zup_core::PayloadId::File {
+                declaration: zup_core::ResourceId::new(format!(
+                    "icon-{}",
+                    zup_core::hash_bytes(icon.name.as_bytes())
+                ))
+                .unwrap(),
+            },
             source,
             source_relative: RelativePath::new(format!("__zup_icons__/{}", icon.name))
                 .expect("an icon name"),
-            destination: Template::parse(&format!("${{location.user_data}}/icons/{}", icon.name))
-                .expect("an icon destination"),
+            placement: zup_core::PayloadPlacement::Fixed {
+                path: Template::parse(&format!("${{location.user_data}}/icons/{}", icon.name))
+                    .unwrap(),
+                replacement: zup_core::FixedReplacement::Atomic,
+            },
             size,
             sha256,
             component: None,
@@ -986,6 +1209,8 @@ pub fn package_bytes_full(
             frontend,
             updates: None,
             install: Install {
+                generation_readers: Default::default(),
+                data: Vec::new(),
                 scope: InstallScope::User,
                 directory: InstallDirectory {
                     user: Some(Template::parse("${location.programs}/tool").expect("a directory")),
@@ -993,13 +1218,13 @@ pub fn package_bytes_full(
                 },
                 allow_directory_override: false,
             },
-            prerequisites: Vec::new(),
+            prerequisites: prerequisites.to_vec(),
             components: Vec::new(),
             component_groups: Vec::new(),
             plugins: Vec::new(),
-            files: Vec::new(),
+            files: fixture_mappings(&resolved),
             launchers: launchers.to_vec(),
-            path: Vec::new(),
+            path: path.to_vec(),
             services: Vec::new(),
             protocols: protocols.to_vec(),
             file_associations: associations.to_vec(),
@@ -1058,6 +1283,8 @@ pub fn compose_integration_fixture(
         protocols,
         associations,
         icons,
+        &[],
+        &[],
     );
     let output = scratch.join(file_name);
     compose_installer(Path::new(inert_template()), &output, &package);
@@ -1176,14 +1403,29 @@ pub fn genuine_template(frontend: &str) -> PathBuf {
 }
 
 pub fn run_installer(installer: &Path, state: &Path, action: Operation) -> LinuxOutcome {
-    run(&LinuxRunRequest {
+    let outcome = run(&LinuxRunRequest {
         installer: installer.to_path_buf(),
         scope: SelectedScope::User,
         state_root: Some(state.to_path_buf()),
         action,
         selection: Default::default(),
     })
-    .expect("the run reaches a stable outcome")
+    .expect("the run reaches a stable outcome");
+    if let LinuxOutcome::RecoveryRequired {
+        transaction: Some(transaction),
+        ..
+    } = &outcome
+    {
+        let store = zup_transaction::FilesystemTransactionStore::private_at(state);
+        let id = zup_core::TransactionId::from_uuid(*transaction);
+        if let Ok(record) = zup_transaction::TransactionStore::load(&store, &id) {
+            eprintln!(
+                "transaction {id}: {:?}; failure {:?}; rollback {:?}; recovery {:?}",
+                record.phase, record.failure, record.rollback_failure, record.recovery_failure
+            );
+        }
+    }
+    outcome
 }
 
 pub fn run_installer_process(

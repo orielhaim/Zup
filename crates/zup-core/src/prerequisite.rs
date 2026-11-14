@@ -243,13 +243,18 @@ pub struct FileVersion {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 /// The portable semantic condition a prerequisite must satisfy.
 ///
 /// Every variant names a fact the target system can be asked about. Detection
 /// mechanics, package formats, and registry layout belong to the platform
 /// provider, not to this model.
 pub enum PrerequisiteRequirement {
+    NativePackage {
+        id: InstalledPackageId,
+        #[serde(default)]
+        minimum_version: Option<String>,
+    },
     /// A runtime that must be present, optionally within a version range.
     Runtime(Runtime),
     /// An installed package that must be present, optionally within a version range.
@@ -259,8 +264,34 @@ pub enum PrerequisiteRequirement {
 }
 
 impl PrerequisiteRequirement {
+    pub fn validate_native_package(&self) -> Result<(), &'static str> {
+        if let Self::NativePackage {
+            id,
+            minimum_version,
+        } = self
+        {
+            let id = id.as_str();
+            if !id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b".+-_".contains(&byte))
+                || minimum_version.as_ref().is_some_and(|version| {
+                    version.is_empty()
+                        || version.len() > 256
+                        || !version
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b".:+~^_-".contains(&byte))
+                })
+            {
+                return Err("invalid native package name or version");
+            }
+        }
+        Ok(())
+    }
+
     pub const fn kind_name(&self) -> &'static str {
         match self {
+            Self::NativePackage { .. } => "native_package",
             Self::Runtime(_) => "runtime",
             Self::InstalledPackage(_) => "installed_package",
             Self::FileVersion(_) => "file_version",
@@ -272,6 +303,8 @@ impl PrerequisiteRequirement {
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PrerequisitePackage {
+    DetectOnly,
+    Repository,
     Embedded {
         #[cfg_attr(feature = "schema", schemars(with = "String"))]
         path: RelativePath,
@@ -290,23 +323,26 @@ pub enum PrerequisitePackage {
 }
 
 impl PrerequisitePackage {
-    pub const fn digest(&self) -> Sha256Digest {
+    pub const fn digest(&self) -> Option<Sha256Digest> {
         match self {
-            Self::Embedded { sha256, .. } | Self::Remote { sha256, .. } => *sha256,
+            Self::Embedded { sha256, .. } | Self::Remote { sha256, .. } => Some(*sha256),
+            Self::DetectOnly | Self::Repository => None,
         }
     }
 
     pub const fn size(&self) -> Option<u64> {
         match self {
+            Self::DetectOnly | Self::Repository => None,
             Self::Embedded { size, .. } => Some(*size),
             Self::Remote { size, .. } => *size,
         }
     }
 
-    pub fn filename(&self) -> &str {
+    pub fn filename(&self) -> Option<&str> {
         match self {
-            Self::Embedded { path, .. } => path.file_name(),
-            Self::Remote { filename, .. } => filename,
+            Self::DetectOnly | Self::Repository => None,
+            Self::Embedded { path, .. } => Some(path.file_name()),
+            Self::Remote { filename, .. } => Some(filename),
         }
     }
 }
@@ -370,10 +406,4 @@ pub struct Prerequisite {
     pub package: PrerequisitePackage,
     #[serde(default)]
     pub installer: PrerequisiteInstaller,
-}
-
-impl Prerequisite {
-    pub fn expected_digest(&self) -> Sha256Digest {
-        self.package.digest()
-    }
 }

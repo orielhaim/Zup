@@ -39,9 +39,18 @@ pub fn run_with(
     scope: zup_core::SelectedScope,
     subsystem_gui: bool,
 ) -> Outcome {
-    if matches!(request.verb, crate::Verb::Update | crate::Verb::Uninstall) {
+    if matches!(
+        request.verb,
+        crate::Verb::Update
+            | crate::Verb::Uninstall
+            | crate::Verb::Rollback(_)
+            | crate::Verb::Cleanup(_)
+            | crate::Verb::Inspect
+    ) {
         return Outcome::Refused {
-            detail: "use the installed maintenance entry for update or uninstall".into(),
+            detail:
+                "use the installed maintenance entry for update, rollback, inspection or uninstall"
+                    .into(),
         };
     }
     let Some(trust) = index.artifact.trust.clone() else {
@@ -59,7 +68,11 @@ pub fn run_with(
             detail: detail.to_owned(),
         };
     }
-    let state_root = match crate::state_root(request.state_root.as_deref(), scope) {
+    let state_root = match crate::state_root(
+        &index.artifact.application.id,
+        request.state_root.as_deref(),
+        scope,
+    ) {
         Ok(root) => root,
         Err(detail) => return Outcome::Refused { detail },
     };
@@ -129,7 +142,6 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
     let context = TrustContext {
         trust: trust.clone(),
         state_root,
-        pin: trust.pin.clone(),
     };
     let mut resolver =
         match ReleaseResolver::new(context, HostProfile::native(), CachePolicy::Auto, sink) {
@@ -261,6 +273,8 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
     // is a different number, because a release document names it as a field.
     let document_digest = resolved.descriptor_digest;
     let handoff = RuntimeHandoff {
+        repository: resolved.repository.clone(),
+        pin: resolved.pin.clone(),
         schema: zup_acquire::HANDOFF_SCHEMA,
         app_id: resolved.descriptor.app_id.clone(),
         release: resolved.descriptor.release_digest,
@@ -274,9 +288,14 @@ async fn acquire_and_start(path: ThinPath<'_>) -> Outcome {
         mode: match request.verb {
             crate::Verb::Install => HandoffMode::Install,
             crate::Verb::Upgrade => HandoffMode::Upgrade,
+            crate::Verb::Downgrade => HandoffMode::Downgrade,
             crate::Verb::Modify => HandoffMode::Modify,
             crate::Verb::Repair => HandoffMode::Repair,
-            crate::Verb::Update | crate::Verb::Uninstall => {
+            crate::Verb::Update
+            | crate::Verb::Uninstall
+            | crate::Verb::Rollback(_)
+            | crate::Verb::Cleanup(_)
+            | crate::Verb::Inspect => {
                 unreachable!("refused before acquisition")
             }
         },

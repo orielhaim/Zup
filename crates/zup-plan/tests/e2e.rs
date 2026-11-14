@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zup_build::materialize;
 use zup_core::SelectedScope;
+use zup_core::TargetOverrides;
 use zup_core::{ComponentId, Privilege, Target, Variable};
-use zup_manifest::{TargetOverrides, compile, parse, select_targets};
+use zup_manifest::{compile, parse, select_targets};
 use zup_plan::{ComponentOverrides, PlanRequest, plan};
 
 fn write(path: PathBuf, contents: &[u8]) {
@@ -18,7 +19,7 @@ fn target() -> Target {
     Target::parse("windows-x64").unwrap()
 }
 
-fn acme_project() -> (TempDir, zup_build::BuildPlan) {
+fn acme_project() -> (TempDir, zup_core::BuildPlan) {
     let dir = TempDir::new().unwrap();
     write(dir.path().join("zup.toml"), b"");
     write(dir.path().join("dist/Acme.exe"), b"main-exe");
@@ -105,6 +106,7 @@ fn machine_plan_with_service_enabled() {
             enable: ids(&["service"]),
             disable: BTreeSet::new(),
         },
+        ..PlanRequest::new(target(), SelectedScope::Machine)
     };
     let result = plan(&build, &request, None, &zup_plan::NeverCancelled)
         .map(|installation| installation.plan)
@@ -147,7 +149,7 @@ fn install_directory_variables_resolved_into_destinations() {
     .unwrap();
 
     for file in &result.files {
-        let dest = file.destination.to_string();
+        let dest = file.destination().to_string();
         assert!(
             dest.starts_with("${location.programs}/Acme"),
             "dest: {dest}"

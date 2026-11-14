@@ -8,7 +8,7 @@ use zup_linux::test_support::{
     IsolatedUser, genuine_template, gui_package_bytes, mode_of, run_gui_installer_process,
     run_tool, v1_files,
 };
-use zup_linux::{LinuxLedgerStore, LinuxSessionHost};
+use zup_linux::{LinuxInstallationStore, LinuxSessionHost};
 use zup_session::SessionHost;
 
 fn driver_binary(name: &str) -> Vec<u8> {
@@ -36,7 +36,11 @@ fn gui_installer(scratch: &std::path::Path, name: &str, preset: &[u8]) -> PathBu
 }
 
 fn gui_state_root() -> PathBuf {
-    zup_linux::state_root(SelectedScope::User).expect("an isolated state root")
+    zup_linux::state_root(
+        &AppId::new("com.example.tool").unwrap(),
+        SelectedScope::User,
+    )
+    .expect("an isolated state root")
 }
 
 #[test]
@@ -58,7 +62,7 @@ fn a_graphical_run_without_a_display_is_refused_with_a_diagnostic() {
         stderr.contains("console"),
         "the refusal names the way forward: {stderr}"
     );
-    let ledger = LinuxLedgerStore::new(gui_state_root())
+    let ledger = LinuxInstallationStore::new(gui_state_root())
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
@@ -94,6 +98,7 @@ fn materialize_stages_a_private_executable_preset() {
             ..Default::default()
         },
         &discovery.installations,
+        &discovery.recoveries,
     )
     .expect("user scope");
     let context = discovery.context(scope).expect("context");
@@ -141,7 +146,7 @@ fn a_scripted_preset_installs_through_the_shared_session() {
         "tool 1.0.0",
         "the GUI install commits a working application"
     );
-    let ledger = LinuxLedgerStore::new(&state_root)
+    let ledger = LinuxInstallationStore::new(&state_root)
         .load(
             &AppId::new("com.example.tool").expect("an id"),
             SelectedScope::User,
@@ -152,13 +157,8 @@ fn a_scripted_preset_installs_through_the_shared_session() {
         ledger.preset().is_some(),
         "the window is retained for maintenance"
     );
-    let maintenance = zup_transaction::maintenance_runtime_path(
-        &state_root,
-        &AppId::new("com.example.tool").expect("an id"),
-        SelectedScope::User,
-        &semver::Version::parse("1.0.0").expect("a version"),
-        "",
-    );
+    let maintenance =
+        zup_linux::test_support::maintenance_path(&state_root, SelectedScope::User, "1.0.0");
     assert!(maintenance.exists(), "a maintenance copy is persisted");
     let mut host = LinuxSessionHost::open(maintenance.clone());
     let discovery = host
@@ -174,11 +174,14 @@ fn a_scripted_preset_installs_through_the_shared_session() {
     let launched = host
         .materialize_preset(&discovery, &discovery.context(SelectedScope::User).unwrap())
         .unwrap();
-    let generation = zup_transaction::maintenance_directory(
-        &state_root,
-        &ledger.app_id,
-        ledger.scope,
-        &ledger.version,
+    let generation = std::path::PathBuf::from(
+        ledger
+            .current
+            .maintenance
+            .as_ref()
+            .unwrap()
+            .directory()
+            .as_str(),
     );
     std::fs::remove_dir_all(generation).unwrap();
     assert_eq!(std::fs::read(&launched.executable).unwrap(), preset);

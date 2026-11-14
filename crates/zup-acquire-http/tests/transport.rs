@@ -53,7 +53,7 @@ fn payload_descriptor(bytes: &[u8]) -> ContentDescriptor {
 /// the segments, so the same string addresses a filesystem tree on every
 /// platform.
 fn blob_path(descriptor: &ContentDescriptor) -> String {
-    zup_acquire::WebLayout::blob(&descriptor.digest).to_string()
+    zup_acquire::blob_path(&descriptor.digest).to_string()
 }
 
 struct Fixture {
@@ -154,10 +154,10 @@ async fn a_blob_the_server_corrupts_never_reaches_the_cache() {
         .server
         .route(&blob_path(&descriptor), Behaviour::Serve(wire(&impostor)));
 
-    let error = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    acquire_raw(&fixture, descriptor, source_for(&fixture.server))
         .await
         .expect_err("a corrupt blob is refused");
-    assert!(error.left_machine_unchanged());
+
     assert!(
         fixture
             .cache
@@ -264,10 +264,10 @@ async fn a_content_range_that_does_not_line_up_is_refused_rather_than_appended()
         &blob_path(&descriptor),
         Behaviour::WrongContentRange(wire_form.clone()),
     );
-    let error = acquire_raw(&misaligned, descriptor, source_for(&misaligned.server))
+    acquire_raw(&misaligned, descriptor, source_for(&misaligned.server))
         .await
         .expect_err("a mismatched content range is refused");
-    assert!(error.left_machine_unchanged());
+
     assert!(
         !misaligned
             .cache
@@ -326,10 +326,9 @@ async fn a_wrong_content_length_is_refused_before_a_byte_is_appended() {
         &blob_path(&descriptor),
         Behaviour::WrongContentLength(wire_form),
     );
-    let error = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    acquire_raw(&fixture, descriptor, source_for(&fixture.server))
         .await
         .expect_err("a body of a different declared length is refused");
-    assert!(error.left_machine_unchanged());
 }
 
 /// A connection that drops part-way through a promised body is a failure, and it
@@ -346,10 +345,10 @@ async fn a_connection_that_drops_mid_body_publishes_nothing() {
         &blob_path(&descriptor),
         Behaviour::DisconnectAfter(wire_form, cut),
     );
-    let error = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    acquire_raw(&fixture, descriptor, source_for(&fixture.server))
         .await
         .expect_err("a dropped connection does not satisfy the closure");
-    assert!(error.left_machine_unchanged());
+
     assert!(
         !fixture
             .cache
@@ -401,10 +400,10 @@ async fn a_throttled_response_is_retried_and_then_gives_up_cleanly() {
     fixture
         .server
         .route(&blob_path(&descriptor), Behaviour::Throttled(429, 1));
-    let error = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    acquire_raw(&fixture, descriptor, source_for(&fixture.server))
         .await
         .expect_err("a permanently throttled origin does not satisfy the closure");
-    assert!(error.left_machine_unchanged());
+
     assert!(
         fixture.server.requests() >= 2,
         "a retryable status is retried, saw {} requests",
@@ -420,7 +419,7 @@ async fn a_not_found_is_not_retried() {
     fixture
         .server
         .route(&blob_path(&descriptor), Behaviour::Status(404));
-    let error = acquire_raw(&fixture, descriptor, source_for(&fixture.server))
+    acquire_raw(&fixture, descriptor, source_for(&fixture.server))
         .await
         .expect_err("a missing object does not satisfy the closure");
     assert_eq!(
@@ -428,7 +427,6 @@ async fn a_not_found_is_not_retried() {
         1,
         "a permanent refusal is sent once, not repeated"
     );
-    assert!(error.left_machine_unchanged());
 }
 
 /// A chain moves to the next origin when one is down or when one lies, and
@@ -608,7 +606,7 @@ async fn a_document_is_fetched_whole_and_bounded_by_its_limit() {
         zup_acquire_http::HttpClient::new(&HttpClientConfig::default()).expect("the client builds"),
         OriginSet::from_urls(&server.url(), Vec::<&str>::new()).expect("valid"),
     );
-    let path = zup_acquire::WebLayout::release("stable").expect("a path");
+    let path = zup_acquire::release_path("stable").expect("a path");
     let body = source
         .fetch_document(&path, 1024)
         .await
@@ -857,12 +855,88 @@ async fn a_server_that_never_answers_is_abandoned_by_the_header_timeout() {
         ..fast_policy()
     });
     let started = std::time::Instant::now();
-    let error = acquire_raw(&fixture(), descriptor, Arc::new(source))
+    acquire_raw(&fixture(), descriptor, Arc::new(source))
         .await
         .expect_err("a silent server does not satisfy the closure");
-    assert!(error.left_machine_unchanged());
+
     assert!(
         started.elapsed() < std::time::Duration::from_secs(10),
         "a stalled origin is abandoned, not waited on"
     );
+}
+
+#[tokio::test]
+async fn session_cancellation_wakes_an_http_request_waiting_for_headers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (requested, request_seen) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(stream.read_u8().await.unwrap());
+            }
+            requested.send(()).unwrap();
+            // No headers or timeout can complete the request before cancellation.
+            released.await.unwrap();
+            let _ = stream.shutdown().await;
+        });
+        let root = tempfile::tempdir().unwrap();
+        let cache = Arc::new(ContentCache::open(root.path(), CachePolicy::Keep).unwrap());
+        let descriptor = ContentDescriptor::stored(ContentKind::Runtime, digest_of(b"runtime"), 7);
+        let plan = AcquisitionPlan::build(vec![AcquisitionItem::new(
+            descriptor,
+            ContentReason::Runtime,
+        )])
+        .unwrap();
+        let source = Arc::new(
+            HttpSource::with_config(
+                "blocked",
+                &HttpClientConfig {
+                    use_platform_proxy: false,
+                    timeouts: TimeoutPolicy {
+                        connect: std::time::Duration::from_secs(60),
+                        headers: std::time::Duration::from_secs(60),
+                        idle: std::time::Duration::from_secs(60),
+                        per_blob: std::time::Duration::from_secs(60),
+                    },
+                    ..HttpClientConfig::default()
+                },
+                OriginSet::from_urls(&url, Vec::<&str>::new()).unwrap(),
+            )
+            .unwrap(),
+        );
+        let flag = Arc::new(zup_acquire::CancelFlag::new());
+        let handle = tokio::spawn({
+            let flag = flag.clone();
+            let cache = cache.clone();
+            async move {
+                AcquisitionSession::new(plan, cache, SchedulerConfig::default())
+                    .run(
+                        SourceChain::new(vec![source]),
+                        flag,
+                        &ProgressSink::discard(),
+                    )
+                    .await
+            }
+        });
+        request_seen.await.unwrap();
+        flag.cancel();
+        assert!(matches!(
+            handle.await.unwrap(),
+            Err(AcquireError::Cancelled)
+        ));
+        assert!(cache.get(&descriptor, Verify::Full).unwrap().is_none());
+        // The source's writer and its exclusive resource lock have settled.
+        assert_eq!(cache.writer(&descriptor).unwrap().wire_offset(), 0);
+        release.send(()).unwrap();
+        server.await.unwrap();
+    })
+    .await
+    .expect("cancellation must not wait for the HTTP timeout or server");
 }

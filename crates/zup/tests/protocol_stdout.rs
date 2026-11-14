@@ -65,8 +65,9 @@ scope = "user"
 user = "${location.user_data}/StdoutApp"
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#
         .replace("windows-x64", zup_plugin_contract::HOST_TARGET),
     )
@@ -287,16 +288,11 @@ fn a_child_that_floods_stdout_cannot_corrupt_the_protocol() {
     );
 
     let document = only_document(&output.stdout, "a dry-run publish with noisy children");
-    // A plan, not a failure: everything but the write was checked, and the missing
-    // credential is the diagnostic. The kilobyte the fake `gh` wrote is nowhere in
-    // it.
+    // A missing build remains a structured refusal despite the child's output.
     assert_eq!(document["operation"], "publish.github");
-    assert_eq!(document["status"], "success");
-    assert_eq!(document["publication"]["state"], "planned");
-    assert_eq!(
-        document["diagnostics"][0]["code"],
-        "zup.publish.no_credential"
-    );
+    assert_eq!(document["status"], "failure");
+    assert!(document["publication"].is_null());
+    assert!(!document["diagnostics"].as_array().unwrap().is_empty());
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains("Robocopy"),
         "a child's banner reached stdout"

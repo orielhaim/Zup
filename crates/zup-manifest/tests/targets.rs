@@ -2,9 +2,11 @@ use std::path::PathBuf;
 
 use miette::Diagnostic;
 use rstest::rstest;
+use zup_core::{
+    Frontend, InstallScope, Installer, Source, Target, TargetOverrides, TargetProfileId, Template,
+};
 use zup_manifest::{
-    Frontend, InstallScope, Installer, Manifest, ManifestError, Source, Target, TargetOverrideSet,
-    TargetOverrides, TargetProfileId, Template, compile, parse, parse_and_compile, select_targets,
+    Manifest, ManifestError, TargetOverrideSet, compile, parse, parse_and_compile, select_targets,
     select_targets_with,
 };
 
@@ -218,8 +220,9 @@ name = "Windows only"
 targets = ["windows-x64"]
 
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 component = "windows-only"
 "#,
     );
@@ -244,18 +247,21 @@ fn target_filters_every_resource_kind() {
     let source = with_resources(
         r#"
 [[launchers]]
+id = "main"
 location = "desktop"
 name = "Acme"
 target = "${install}/Acme.exe"
 targets = ["windows-x64"]
 
 [[path]]
+id = "cli-1"
 value = "${install}/bin"
 targets = ["linux-arm64"]
 
 [[services]]
+execution = { type = "windows_job", account = "local_service" }
 id = "windows-service"
-name = "Windows Service"
+display_name = "Windows Service"
 binary = "${install}/service.exe"
 start = "manual"
 targets = ["windows-x64"]
@@ -366,6 +372,7 @@ targets = ["missing"]
     "launcher",
     r#"
 [[launchers]]
+id = "launcher-2"
 location = "desktop"
 name = "Acme"
 target = "${install}/Acme.exe"
@@ -376,6 +383,7 @@ targets = ["missing"]
     "path entry",
     r#"
 [[path]]
+id = "cli-2"
 value = "${install}/bin"
 targets = ["missing"]
 "#
@@ -384,8 +392,9 @@ targets = ["missing"]
     "service",
     r#"
 [[services]]
+execution = { type = "windows_job", account = "local_service" }
 id = "agent"
-name = "Agent"
+display_name = "Agent"
 binary = "${install}/service.exe"
 start = "manual"
 targets = ["missing"]

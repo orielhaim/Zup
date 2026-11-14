@@ -13,7 +13,7 @@ use zup_pe::{
 
 pub const CARRIER_MAGIC: &[u8; 17] = b"ZUP-LINUX-CARRIER";
 
-pub const CARRIER_VERSION: u32 = 2;
+pub const CARRIER_VERSION: u32 = 1;
 
 pub const CARRIER_FOOTER_LEN: u64 = 121;
 
@@ -611,6 +611,16 @@ pub fn open_linux(path: &Path) -> Result<OpenedInstaller, ComposeError> {
     Ok(OpenedInstaller { package, preset })
 }
 
+pub fn linux_runtime_bytes(path: &Path) -> Result<Vec<u8>, ComposeError> {
+    let mut file = std::fs::File::open(path).map_err(|e| ComposeError::io(path, e))?;
+    let size = file
+        .metadata()
+        .map_err(|e| ComposeError::io(path, e))?
+        .len();
+    let footer = read_footer(&mut file, path, size)?;
+    read_range(&mut file, path, 0, footer.package_offset)
+}
+
 fn compress_preset(bytes: Option<&[u8]>) -> Result<Option<Vec<u8>>, ComposeError> {
     bytes
         .map(|bytes| {
@@ -687,8 +697,9 @@ scope = "user"
 [install.directory]
 user = "${location.user_data}/ComposeTest"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${install}"
+placement = { kind = "fixed", directory = "${install}" }
 "#;
         let parsed = zup_manifest::parse(manifest).expect("parse");
         let installer = zup_manifest::parse_and_compile(manifest, "default").expect("compile");

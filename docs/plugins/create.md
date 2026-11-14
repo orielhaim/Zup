@@ -34,7 +34,7 @@ crate-type = ["cdylib"]
 zup-sdk = { version = "0.1.0", features = ["plugin"] }
 ```
 
-The generated project is the whole scaffolding: bindings come from the WIT Zup owns, and `zup plugin build` owns compiling and componentising.
+The generated project is the whole scaffolding: bindings come from the WIT Zup owns, and `zup plugin build` owns compiling the native WASI Preview 3 component.
 
 ## Write the plugin
 
@@ -46,6 +46,7 @@ struct Configure;
 impl Plugin for Configure {
     fn plan(context: Context) -> Result<Plan, Error> {
         Ok(Plan::new().generated_file(GeneratedFile::text(
+            "configuration",
             "${install}/configure.txt",
             format!("installing {} for {}", context.app_name, context.plugin_id),
         )))
@@ -72,13 +73,13 @@ if context.target.ends_with("-windows-msvc") {
 zup plugin build
 ```
 
-It runs Cargo for `wasm32-unknown-unknown`, turns the module into a component implementing the plugin world, and writes `dist/configure.wasm`.
+It runs Cargo for `wasm32-wasip3`, emits a native WASI 0.3 component implementing the plugin world, and writes `dist/configure.wasm`.
 
-| Flag | Meaning |
-| --- | --- |
+| Flag              | Meaning                                                           |
+| ----------------- | ----------------------------------------------------------------- |
 | `--project <dir>` | Build a project somewhere else. Defaults to the current directory |
-| `--profile <p>` | Cargo profile. Defaults to `release` |
-| `--output <file>` | Where to write the component. Defaults to `dist/<name>.wasm` |
+| `--profile <p>`   | Cargo profile. Defaults to `release`                              |
+| `--output <file>` | Where to write the component. Defaults to `dist/<name>.wasm`      |
 
 Zup asks Cargo where its output actually is rather than guessing a path.
 

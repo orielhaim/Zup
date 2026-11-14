@@ -99,9 +99,13 @@ fn message_box(_message: &str, _style: u32) -> i32 {
 pub fn print_usage() {
     println!("zup installer launcher");
     println!();
-    println!("  [install | upgrade | modify | repair | update | uninstall] [options]");
+    println!(
+        "  [install | upgrade | downgrade | rollback | cleanup | inspect | modify | repair | update | uninstall] [options]"
+    );
     println!("  install is the default; use upgrade for an installed application");
     println!();
+    println!("  --keep <number>          previous deployments retained by cleanup (default 1)");
+    println!("  --revision <number>      retained activation to select for rollback");
     println!("  --scope <user|machine>   whose installation to affect");
     println!("  --state-root <dir>       where this machine records its installations");
     println!("  --source <dir>           a local release tree to read before the network");

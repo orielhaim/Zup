@@ -192,7 +192,13 @@ impl Scenario {
                 services: installer
                     .services
                     .iter()
-                    .map(|service| service.name.to_string())
+                    .map(|service| {
+                        service
+                            .display_name
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| service.id.to_string())
+                    })
                     .collect(),
                 protocols: installer
                     .protocols
@@ -335,6 +341,7 @@ impl Scenario {
             Surface::Maintenance => HostState::maintenance(
                 self.product.clone(),
                 MaintenanceState {
+                    retained: Vec::new(),
                     installed_version: self.installed_version.clone(),
                     // What a maintained machine has is what it was installed with.
                     components: self
@@ -622,6 +629,7 @@ impl Scenario {
             )
             .collect();
         Ok(zup_presentation::PlanPreview {
+            storage: None,
             basis: zup_presentation::PlanBasis::Simulation,
             application: self.product.name.clone(),
             version: self.product.version.clone(),
@@ -650,7 +658,7 @@ fn display_location(template: &zup_core::Template, name: &str, scope: SelectedSc
             Variable::AppName => name.to_owned(),
             Variable::AppId => name.to_ascii_lowercase(),
             Variable::AppVersion => "1.0.0".to_owned(),
-            Variable::Install => return None,
+            Variable::Install | Variable::Payload => return None,
             Variable::Location(location) => match (location, scope) {
                 (InstallLocation::Programs, SelectedScope::User) => {
                     r"C:\Users\you\AppData\Local\Programs".to_owned()
@@ -710,8 +718,58 @@ impl Machine {
         let decision = self.host.accept(action);
         if let HostDecision::Plan(selection) = &decision {
             self.answer(selection);
+        } else if decision == HostDecision::Refresh {
+            self.host.refresh_installation(self.scenario.host());
+            self.host.finish_with(&InstallOutcome::RecoveryInspected {
+                target: None,
+                active: None,
+            });
+            self.replan();
         }
         decision
+    }
+
+    pub fn show_recovery(&mut self, detail: &str) -> Result<(), String> {
+        let target =
+            zup_core::Target::parse(&self.scenario.target).map_err(|error| error.to_string())?;
+        let scope = zup_preset_host::convert::engine_scope(self.host.snapshot().surface.scope());
+        self.host.set_recovery(zup_core::RecoverySummary {
+            transaction: "10000000-0000-4000-8000-000000000001"
+                .parse()
+                .expect("simulation transaction"),
+            installation: "10000000-0000-4000-8000-000000000002"
+                .parse()
+                .expect("simulation installation"),
+            app: self
+                .scenario
+                .build
+                .as_ref()
+                .and_then(|build| build.targets.first())
+                .map(|build| build.installer.app.id.clone())
+                .unwrap_or_else(|| {
+                    zup_core::AppId::new("com.example.preview").expect("simulation app")
+                }),
+            version: self
+                .scenario
+                .product
+                .version
+                .parse()
+                .map_err(|error: semver::Error| error.to_string())?,
+            scope,
+            target,
+            directory: self
+                .host
+                .snapshot()
+                .surface
+                .install_directory()
+                .map(|directory| zup_core::TargetPath::new(target, directory))
+                .transpose()
+                .map_err(|error| error.to_string())?,
+            kind: zup_core::RecoveryKind::Interrupted,
+            detail: detail.into(),
+            cleanup: Vec::new(),
+        });
+        Ok(())
     }
 
     /// Report an engine event to the state machine.

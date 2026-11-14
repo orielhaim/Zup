@@ -4,7 +4,6 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueHint};
 
 use zup_presentation::OutputFormat;
 
-use crate::frontend;
 use crate::lifecycle;
 use crate::run::RuntimeContext;
 use crate::terminal::{Output, Scope};
@@ -39,7 +38,28 @@ pub fn parse() -> Cli {
 
 pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
     match cli.command {
+        Some(Commands::Inspect(args)) => crate::terminal::inspect(
+            &mut crate::host::WindowsSessionHost::default(),
+            args.scope.map(Into::into),
+            args.state_root.as_deref(),
+            args.output.into(),
+        ),
+        Some(Commands::Cleanup(args)) => lifecycle::run(
+            context,
+            lifecycle::Verb::Cleanup { keep: args.keep },
+            args.install,
+        ),
         Some(Commands::Install(args)) => lifecycle::apply(context, args),
+        Some(Commands::Downgrade(args)) => {
+            lifecycle::run(context, lifecycle::Verb::Downgrade, args)
+        }
+        Some(Commands::Rollback(args)) => lifecycle::run(
+            context,
+            lifecycle::Verb::Rollback {
+                revision: args.revision,
+            },
+            args.install,
+        ),
         Some(Commands::Modify(args)) => lifecycle::run(context, lifecycle::Verb::Modify, args),
         Some(Commands::Repair(args)) => lifecycle::run(
             context,
@@ -49,49 +69,10 @@ pub fn dispatch(cli: Cli, context: RuntimeContext) -> miette::Result<()> {
         Some(Commands::Update(args)) => crate::maintenance::run_update(context, args),
         Some(Commands::Uninstall(args)) => crate::maintenance::run_uninstall(context, args),
         Some(Commands::Worker { bootstrap }) => crate::run::run_worker(&bootstrap),
-        Some(Commands::TerminalRunner(args)) => {
-            zup_windows::wait_for_process_exit(args.wait_pid)
-                .map_err(|error| miette::miette!("wait for maintenance process: {error}"))?;
-            let executable = crate::package::current_executable()?;
-            let parsed = crate::terminal::Cli::parse_from(
-                std::iter::once(executable.clone().into_os_string()).chain(args.arguments),
-            );
-            let result = crate::terminal::run_cli(
-                crate::host::WindowsSessionHost::default(),
-                context.frontend,
-                parsed,
-            );
-            crate::maintenance::schedule_runner_cleanup(&executable);
-            result
-        }
-        Some(Commands::UninstallRunner(args)) => {
-            zup_windows::wait_for_process_exit(args.wait_pid)
-                .map_err(|error| miette::miette!("wait for maintenance process: {error}"))?;
-            let cleanup =
-                zup_windows::current_exe().map_err(|e| miette::miette!("executable: {e}"))?;
-            let result = if args.uninstall.ui {
-                uninstall_confirmation(context, &args.uninstall)
-            } else {
-                crate::maintenance::run_uninstall(context, args.uninstall)
-            };
-            crate::maintenance::schedule_runner_cleanup(&cleanup);
-            result
-        }
         Some(Commands::Upgrade(args)) => lifecycle::run(context, lifecycle::Verb::Upgrade, args),
         Some(Commands::Recover(args)) => crate::maintenance::run_recovery(context, args),
         None => lifecycle::direct_launch(context),
     }
-}
-
-fn uninstall_confirmation(
-    context: RuntimeContext,
-    args: &crate::maintenance::UninstallArgs,
-) -> miette::Result<()> {
-    let executable =
-        zup_windows::current_exe().map_err(|error| miette::miette!("executable: {error}"))?;
-    let bundle = zup_windows::EmbeddedBundle::open(&executable)
-        .map_err(|error| miette::miette!("installer package: {error}"))?;
-    frontend::graphical_uninstall(context, &executable, &bundle, args)
 }
 
 #[derive(Debug, Parser)]
@@ -102,8 +83,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
+    Cleanup(CleanupArgs),
+    Inspect(InspectArgs),
     Install(LifecycleArgs),
     Modify(LifecycleArgs),
+    Downgrade(LifecycleArgs),
+    Rollback(RollbackArgs),
     Repair(RepairArgs),
     Update(crate::maintenance::UpdateArgs),
     Uninstall(crate::maintenance::UninstallArgs),
@@ -111,14 +96,18 @@ pub(crate) enum Commands {
     Worker {
         bootstrap: String,
     },
-    #[command(name = "__uninstall_runner", hide = true)]
-    UninstallRunner(UninstallRunnerArgs),
-    #[command(name = "__terminal_runner", hide = true)]
-    TerminalRunner(TerminalRunnerArgs),
-    #[command(name = "__upgrade", hide = true)]
     Upgrade(LifecycleArgs),
-    #[command(name = "__recover", hide = true)]
     Recover(crate::maintenance::RecoveryArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct InspectArgs {
+    #[arg(long, value_enum)]
+    pub scope: Option<Scope>,
+    #[arg(long, value_hint = ValueHint::DirPath, hide = true)]
+    pub state_root: Option<PathBuf>,
+    #[arg(long, value_enum, default_value = "human")]
+    pub output: Output,
 }
 
 #[derive(Debug, Clone, Default, Args)]
@@ -162,27 +151,27 @@ impl LifecycleArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct CleanupArgs {
+    #[command(flatten)]
+    pub install: LifecycleArgs,
+    #[arg(long, default_value_t = 1)]
+    pub keep: u16,
+}
+
+#[derive(Debug, Args)]
+pub struct RollbackArgs {
+    #[command(flatten)]
+    pub install: LifecycleArgs,
+    #[arg(long)]
+    pub revision: zup_core::ActivationRevision,
+}
+
+#[derive(Debug, Args)]
 pub struct RepairArgs {
     #[command(flatten)]
     pub install: LifecycleArgs,
     #[arg(long)]
     pub force: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct TerminalRunnerArgs {
-    #[arg(long)]
-    wait_pid: u32,
-    #[arg(last = true)]
-    arguments: Vec<std::ffi::OsString>,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct UninstallRunnerArgs {
-    #[arg(long)]
-    wait_pid: u32,
-    #[command(flatten)]
-    uninstall: crate::maintenance::UninstallArgs,
 }
 
 impl Cli {
@@ -192,16 +181,20 @@ impl Cli {
         }
         match &self.command {
             None => true,
-            Some(Commands::Install(args) | Commands::Modify(args) | Commands::Upgrade(args)) => {
-                args.ui
-            }
-            Some(Commands::Repair(args)) => args.install.ui,
-            Some(Commands::Uninstall(args)) => args.ui,
-            Some(Commands::UninstallRunner(args)) => args.uninstall.ui,
             Some(
-                Commands::Update(_)
+                Commands::Install(args)
+                | Commands::Modify(args)
+                | Commands::Upgrade(args)
+                | Commands::Downgrade(args),
+            ) => args.ui,
+            Some(Commands::Repair(args)) => args.install.ui,
+            Some(Commands::Cleanup(args)) => args.install.ui,
+            Some(Commands::Rollback(args)) => args.install.ui,
+            Some(Commands::Uninstall(args)) => args.ui,
+            Some(
+                Commands::Inspect(_)
+                | Commands::Update(_)
                 | Commands::Worker { .. }
-                | Commands::TerminalRunner(_)
                 | Commands::Recover(_),
             ) => false,
         }
@@ -211,11 +204,14 @@ impl Cli {
         match &self.command {
             Some(Commands::Install(args))
             | Some(Commands::Modify(args))
-            | Some(Commands::Upgrade(args)) => args.output(),
+            | Some(Commands::Upgrade(args))
+            | Some(Commands::Downgrade(args)) => args.output(),
             Some(Commands::Repair(args)) => args.install.output(),
+            Some(Commands::Cleanup(args)) => args.install.output(),
+            Some(Commands::Rollback(args)) => args.install.output(),
+            Some(Commands::Inspect(args)) => args.output.into(),
             Some(Commands::Update(args)) => args.output(),
             Some(Commands::Uninstall(args)) => args.output(),
-            Some(Commands::UninstallRunner(args)) => args.uninstall.output(),
             Some(Commands::Recover(args)) => args.output.into(),
             _ => OutputFormat::Human,
         }

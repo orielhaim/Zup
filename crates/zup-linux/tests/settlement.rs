@@ -9,7 +9,7 @@ use zup_linux::test_support::{
     MachineTestRoots, WorkerFault, machine_fixture, machine_v1_files, machine_v2_files,
     run_machine_faulted,
 };
-use zup_linux::{LinuxLedgerStore, LinuxOutcome};
+use zup_linux::{LinuxInstallationStore, LinuxOutcome};
 use zup_runtime::Operation;
 use zup_transaction::{FilesystemTransactionStore, TransactionPhase, TransactionStore};
 
@@ -27,15 +27,13 @@ fn journals(state: &Path) -> Vec<zup_transaction::TransactionRecord> {
         .flatten()
         .filter_map(|entry| {
             let id = entry.file_name().to_str()?.parse().ok()?;
-            store
-                .load(&zup_transaction::TransactionId::from_uuid(id))
-                .ok()
+            store.load(&zup_core::TransactionId::from_uuid(id)).ok()
         })
         .collect()
 }
 
-fn ledger_published(state: &Path) -> bool {
-    LinuxLedgerStore::new(state)
+fn reconciled(state: &Path) -> bool {
+    LinuxInstallationStore::new(state)
         .load(&app_id(), SelectedScope::Machine)
         .expect("the ledger reads")
         .is_some()
@@ -47,13 +45,13 @@ fn ledger_published(state: &Path) -> bool {
 #[case::cancel_after_begin(WorkerFault::CancelAfterBegin)]
 #[case::progress_during_execute(WorkerFault::ProgressDuringExecute)]
 #[case::disconnect_after_commit(WorkerFault::DisconnectAfterCommit)]
-#[case::ledger_publish(WorkerFault::FailLedgerPublish)]
+#[case::reconciliation(WorkerFault::FailReconciliation)]
 fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
     let base = tempfile::tempdir().expect("an isolated base");
     let roots = MachineTestRoots::isolate_in(base.path());
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let mut installer = machine_fixture(scratch.path(), "v1", "1.0.0", &machine_v1_files());
-    let action = if fault == WorkerFault::FailLedgerPublish {
+    let action = if fault == WorkerFault::FailReconciliation {
         assert!(matches!(
             run_machine_faulted(&installer, &roots, Operation::Apply, WorkerFault::None),
             Ok(LinuxOutcome::Committed { .. })
@@ -72,7 +70,7 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
                 "a disconnect before begin fails closed: {outcome:?}"
             );
             assert!(records.is_empty(), "no journal exists before begin");
-            assert!(!ledger_published(&roots.state));
+            assert!(!reconciled(&roots.state));
         }
         WorkerFault::IpcAfterBegin | WorkerFault::CancelAfterBegin => {
             assert!(
@@ -81,7 +79,7 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
             );
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].phase, TransactionPhase::RolledBack);
-            assert!(!ledger_published(&roots.state));
+            assert!(!reconciled(&roots.state));
         }
         WorkerFault::ProgressDuringExecute | WorkerFault::DisconnectAfterCommit => {
             assert!(
@@ -93,15 +91,15 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
                     .iter()
                     .any(|record| record.phase == TransactionPhase::Committed)
             );
-            assert!(ledger_published(&roots.state));
+            assert!(reconciled(&roots.state));
         }
-        WorkerFault::FailLedgerPublish => {
+        WorkerFault::FailReconciliation => {
             assert!(
                 matches!(
                     outcome,
                     Ok(LinuxOutcome::CommittedPendingReconciliation { .. })
                 ),
-                "an unpublished commit is not a rollback: {outcome:?}"
+                "an unreconciled commit is not a rollback: {outcome:?}"
             );
             assert!(
                 records
@@ -121,13 +119,14 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
                     && detail.contains(&roots.state.display().to_string())
             );
             assert_eq!(
-                LinuxLedgerStore::new(&roots.state)
+                LinuxInstallationStore::new(&roots.state)
                     .load(&app_id(), SelectedScope::Machine)
                     .unwrap()
                     .unwrap()
+                    .current
                     .version
                     .to_string(),
-                "1.0.0"
+                "1.1.0"
             );
             let record = records
                 .iter()
@@ -147,18 +146,15 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
                 .unwrap();
             let original = std::fs::read(&backup).unwrap();
             let recover = || {
-                let session = zup_protocol::SessionId::new_v7();
+                let session = zup_core::SessionId::new_v7();
                 let (mut client, mut worker) = std::os::unix::net::UnixStream::pair().unwrap();
                 let worker_roots = roots.roots.clone();
                 let worker_exe = installer.clone();
                 let intent = zup_protocol::PrepareOperation {
-                    recovery_id: Some(id.as_uuid()),
-                    operation: "recover".into(),
-                    force: false,
-                    install_dir_override: None,
-                    selected_components: Vec::new(),
-                    disabled_components: Vec::new(),
-                    expected_plan_digest: None,
+                    operation: zup_protocol::PrivilegedRequest::Recovery {
+                        transaction: id,
+                        request: Default::default(),
+                    },
                     app_id: app_id().to_string(),
                     app_version: "1.1.0".into(),
                     scope: "machine".into(),
@@ -181,7 +177,6 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
                     &mut client,
                     session,
                     &intent,
-                    "",
                     &intent.target,
                 );
                 drop(client);
@@ -190,19 +185,14 @@ fn machine_execution_settles_without_the_client(#[case] fault: WorkerFault) {
             };
             std::fs::write(&backup, b"unowned content").unwrap();
             for _ in 0..2 {
-                let pending = recover();
-                let LinuxOutcome::CommittedPendingReconciliation { detail: latest, .. } = pending
-                else {
-                    panic!("{pending:?}")
-                };
-                assert!(latest.contains(detail));
+                assert!(matches!(recover(), LinuxOutcome::Committed { .. }));
                 assert_eq!(std::fs::read(&backup).unwrap(), b"unowned content");
             }
             std::fs::write(&backup, original).unwrap();
             for _ in 0..2 {
                 assert!(matches!(recover(), LinuxOutcome::Committed { .. }));
             }
-            assert!(ledger_published(&roots.state));
+            assert!(reconciled(&roots.state));
             assert_eq!(
                 FilesystemTransactionStore::private_at(&roots.state)
                     .load(&id)

@@ -8,8 +8,12 @@ use crate::session::{CancellationHandle, InstallOutcome, emit_terminal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimulatedLifecycle {
+    Recover,
+    Cleanup,
     Install,
     Upgrade,
+    Downgrade,
+    Rollback,
     Modify,
     Repair,
     Uninstall,
@@ -54,6 +58,7 @@ struct Stage {
 }
 
 struct Simulation {
+    lifecycle: SimulatedLifecycle,
     stages: Vec<Stage>,
     index: usize,
     stage_started: Instant,
@@ -76,6 +81,7 @@ impl Simulation {
         let total_weight = stages.iter().map(|stage| stage.weight).sum();
         let safe_wait = Duration::from_millis(575);
         Self {
+            lifecycle: job.lifecycle,
             stages,
             index: 0,
             stage_started: now,
@@ -106,7 +112,13 @@ impl Simulation {
             self.index += 1;
             self.stage_started += duration;
         }
-        Step::Finished(InstallOutcome::Committed)
+        Step::Finished(if self.lifecycle == SimulatedLifecycle::Recover {
+            InstallOutcome::Recovered {
+                settlement: crate::RecoverySettlement::Committed,
+            }
+        } else {
+            InstallOutcome::Committed
+        })
     }
 
     fn event(&mut self, now: Instant) -> Step {
@@ -141,6 +153,24 @@ fn stages(job: &SimulatedJob) -> Vec<Stage> {
         1200,
     )];
     match job.lifecycle {
+        SimulatedLifecycle::Recover => {
+            stages.push(stage(
+                zup_core::OperationPhase::Verify,
+                "Reconciling interrupted transaction",
+                1,
+                800,
+                800,
+            ));
+        }
+        SimulatedLifecycle::Cleanup => {
+            stages.push(stage(
+                zup_core::OperationPhase::Cleanup,
+                "Collecting unused deployments",
+                1,
+                800,
+                800,
+            ));
+        }
         SimulatedLifecycle::Uninstall => {
             let files = file_span(job.file_bytes);
             stages.push(stage(
@@ -186,7 +216,11 @@ fn stages(job: &SimulatedJob) -> Vec<Stage> {
                 ));
             }
         }
-        SimulatedLifecycle::Install | SimulatedLifecycle::Upgrade | SimulatedLifecycle::Modify => {
+        SimulatedLifecycle::Install
+        | SimulatedLifecycle::Upgrade
+        | SimulatedLifecycle::Downgrade
+        | SimulatedLifecycle::Rollback
+        | SimulatedLifecycle::Modify => {
             if job.download_bytes > 0 {
                 stages.push(stage(
                     zup_core::OperationPhase::Download,

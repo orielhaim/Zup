@@ -20,7 +20,7 @@ use zup_core::{
     NonEmptyString, RelativePath, ResolvedTargetConfig, Target, TargetProfileId, Template,
     UpdateConfig,
 };
-use zup_plugin_contract::{AOT_FORMAT_VERSION, PLUGIN_API_VERSION, WASMTIME_VERSION};
+use zup_plugin_contract::{COMPONENT_FORMAT_VERSION, PLUGIN_API_VERSION, WASMTIME_VERSION};
 
 /// The three machines a Windows application is usually built for.
 const TARGETS: &[(&str, &str, u64)] = &[
@@ -52,13 +52,15 @@ fn app() -> App {
         name: NonEmptyString::new("Acme").unwrap(),
         version: semver::Version::parse("1.4.0").unwrap(),
         publisher: Some(NonEmptyString::new("Acme Inc.").unwrap()),
-        main: Some(Template::parse("${install}/bin/Acme.exe").unwrap()),
+        main: None,
         description: None,
     }
 }
 
 fn install() -> Install {
     Install {
+        generation_readers: Default::default(),
+        data: Vec::new(),
         scope: InstallScope::Either,
         directory: InstallDirectory {
             user: Some(Template::parse("${location.programs}/Acme").unwrap()),
@@ -121,10 +123,16 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
         std::fs::write(&path, content).unwrap();
         let size = content.len() as u64;
         total += size;
-        resolved_files.push(zup_build::ResolvedFile {
+        resolved_files.push(zup_core::ResolvedFile {
             source: path,
             source_relative: RelativePath::new(name).unwrap(),
-            destination: Template::parse(&format!("${{install}}/{name}")).unwrap(),
+            id: zup_core::PayloadId::TreeMember {
+                declaration: zup_core::ResourceId::new("application").unwrap(),
+                member: RelativePath::new(name).unwrap(),
+            },
+            placement: zup_core::PayloadPlacement::Generation {
+                path: RelativePath::new(name).unwrap(),
+            },
             size,
             sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(content).into()),
             component: None,
@@ -134,36 +142,29 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
     }
     drop(files);
 
-    let mut installer_files: Vec<FileMapping> = resolved_files
-        .iter()
-        .map(|file| FileMapping {
-            source: "embedded".to_owned(),
-            destination: file.destination.clone(),
-            component: None,
-            when: None,
-            allow_empty: false,
-            executable: false,
-        })
-        .collect();
-    installer_files.sort_by(|left, right| {
-        left.destination
-            .to_string()
-            .cmp(&right.destination.to_string())
-    });
+    let installer_files = vec![FileMapping {
+        id: zup_core::ResourceId::new("application").unwrap(),
+        source: "**/*".to_owned(),
+        placement: zup_core::PayloadMapping::default(),
+        component: None,
+        when: None,
+        allow_empty: false,
+        executable: false,
+    }];
 
     // Each machine gets its own ahead-of-time plugin, which is a real cost of
     // targeting more than one architecture.
-    let mut plugin_bytes = payload(b"plugin-aot", RUNTIME_MEBIBYTES);
+    let mut plugin_bytes = payload(b"plugin-component", RUNTIME_MEBIBYTES);
     plugin_bytes.extend_from_slice(target.as_bytes());
     let plugin_digest = zup_core::Sha256Digest::from_bytes(Sha256::digest(&plugin_bytes).into());
     let plugin = zup_bundle::CompiledPluginArtifact::new(
-        zup_bundle::PluginArtifact {
+        zup_core::PluginArtifact {
             plugin_id: zup_core::PluginId::new("acme-plugins").unwrap(),
             source_size: 16,
             source_sha256: zup_core::Sha256Digest::from_bytes(Sha256::digest(b"source").into()),
             target: resolved.target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
-            aot_format_version: AOT_FORMAT_VERSION,
+            component_format_version: COMPONENT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: zup_core::Sha256Digest::from_bytes(
                 zup_plugin_contract::wit_package_digest(),
@@ -171,8 +172,8 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
             engine_fingerprint: zup_core::Sha256Digest::from_bytes(
                 *zup_plugin_contract::engine_fingerprint(target).as_bytes(),
             ),
-            aot_size: plugin_bytes.len() as u64,
-            aot_sha256: plugin_digest,
+            component_size: plugin_bytes.len() as u64,
+            component_sha256: plugin_digest,
             blob: plugin_digest,
         },
         plugin_bytes,
@@ -184,7 +185,7 @@ fn build(root: &std::path::Path, profile: &str, target: &str, tag: u64) -> Distr
 
     DistributionVariant::resolve(
         &resolved,
-        &zup_build::TargetBuildPlan {
+        &zup_core::TargetBuildPlan {
             installer: zup_core::Installer {
                 app: app(),
                 target: resolved.target,

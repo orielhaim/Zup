@@ -27,8 +27,9 @@ Attach resources with `component`:
 
 ```toml
 [[files]]
+id = "documentation"
 source = "docs/**"
-destination = "${install}/docs"
+placement = { kind = "generation", directory = "docs" }
 component = "docs"
 ```
 

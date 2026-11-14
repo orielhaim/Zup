@@ -1,4 +1,4 @@
-use zup_core::{ResourceKey, Template};
+use zup_core::Template;
 
 use crate::{DesiredFile, DesiredState, TargetPath};
 
@@ -10,12 +10,11 @@ pub fn resolve_files<E>(
         .files
         .iter()
         .map(|file| {
-            let destination = resolve(&file.destination, "file destination")?;
             Ok(DesiredFile {
-                key: ResourceKey::File {
-                    destination: destination.to_string(),
-                },
-                destination,
+                key: file.key.clone(),
+                placement: file
+                    .placement
+                    .resolve(|path| resolve(path, "file destination"))?,
                 source_relative: file.source_relative.clone(),
                 size: file.size,
                 sha256: file.sha256,

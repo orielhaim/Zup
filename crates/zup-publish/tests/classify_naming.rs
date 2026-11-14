@@ -80,8 +80,6 @@ fn remote_without_digest_is_unverifiable() {
 
 #[rstest]
 #[case("zup-release-stable.json", "releases/stable.json")]
-#[case("zup-release-stable-1.4.2.json", "releases/stable/versions/1.4.2.json")]
-#[case("zup-catalog-stable.json", "releases/stable/catalog.json")]
 #[case("zup-tuf-root.json", "metadata/root.json")]
 fn document_names_resolve_to_paths(#[case] name: &str, #[case] path: &str) {
     assert_eq!(document_path(name).expect("a document").to_string(), path);
@@ -98,34 +96,26 @@ fn non_documents_are_rejected(#[case] name: &str) {
 #[test]
 fn document_names_round_trip() {
     use zup_publish::DocumentKind;
+    let digest = zup_core::hash_bytes(b"a metadata document");
     for (kind, name) in [
         (
-            DocumentKind::Release {
-                channel: "stable",
-                version: None,
-            },
-            "zup-release-stable.json",
+            DocumentKind::Channel { channel: "stable" },
+            "zup-release-stable.json".to_string(),
         ),
         (
-            DocumentKind::Release {
-                channel: "stable",
-                version: Some("1.4.2"),
-            },
-            "zup-release-stable-1.4.2.json",
-        ),
-        (
-            DocumentKind::Catalog { channel: "stable" },
-            "zup-catalog-stable.json",
+            DocumentKind::Content { digest },
+            format!("zup-document-{}.json", digest.to_hex()),
         ),
         (
             DocumentKind::TufMetadata {
                 version_role: "root",
             },
-            "zup-tuf-root.json",
+            "zup-tuf-root.json".to_string(),
         ),
     ] {
         assert_eq!(document_name(&kind), name);
-        assert!(document_path(name).is_ok());
+        let path = document_path(&name).unwrap();
+        assert_eq!(zup_publish::asset_name(&path).unwrap(), name);
     }
 }
 

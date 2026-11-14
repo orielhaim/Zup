@@ -5,9 +5,10 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use wit_component::{ComponentEncoder, StringEncoding, dummy_module, embed_component_metadata};
 use wit_parser::{ManglingAndAbi, Resolve};
-use zup_build::{TargetBuildPlan, materialize};
+use zup_build::materialize;
+use zup_core::TargetBuildPlan;
+use zup_core::TargetOverrides;
 use zup_core::{Sha256Digest, Target};
-use zup_manifest::TargetOverrides;
 use zup_plugin_build::{PluginBuildError, compile_plugins};
 use zup_plugin_contract::{ContractError, HOST_TARGET, PluginEngine};
 
@@ -49,8 +50,9 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/PluginBuild"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 [[plugins]]
 id = "helper"
 source = "plugins/helper.wasm"
@@ -88,11 +90,10 @@ fn compiles_and_verifies_a_valid_component() {
     let metadata = artifacts[0].metadata();
     assert_eq!(metadata.target, plan.installer.target);
     assert_eq!(metadata.source_sha256, plan.plugins[0].sha256);
-    assert_eq!(metadata.blob, metadata.aot_sha256);
+    assert_eq!(metadata.blob, metadata.component_sha256);
     assert!(!artifacts[0].bytes().is_empty());
     let runtime = PluginEngine::new(HOST_TARGET).unwrap();
-    // SAFETY: these bytes were compiled from WebAssembly by this process.
-    let component = unsafe { runtime.validate_trusted_aot(artifacts[0].bytes()) }.unwrap();
+    let component = runtime.compile_component(artifacts[0].bytes()).unwrap();
     assert_eq!(component.fingerprint(), runtime.fingerprint());
 }
 
@@ -150,7 +151,7 @@ fn compiles_for_the_plan_target() {
 #[test]
 fn rejects_oversized_sources_before_compilation() {
     let (root, mut plan) = project();
-    let oversized = vec![0; zup_build::MAX_PLUGIN_SOURCE_BYTES as usize + 1];
+    let oversized = vec![0; zup_bundle::MAX_PLUGIN_SOURCE_BYTES as usize + 1];
     update_source(
         &mut plan,
         &root.path().join("plugins/helper.wasm"),

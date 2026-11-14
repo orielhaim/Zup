@@ -12,6 +12,7 @@ use crate::plugin::is_valid_source;
 use crate::target::{resolve_target_config, validate_target_matrix, validate_target_references};
 
 struct ManifestView {
+    target: zup_core::Target,
     app: App,
     ui: Ui,
     install: Install,
@@ -32,6 +33,7 @@ impl ManifestView {
     fn for_target(manifest: &Manifest, target: &ResolvedTargetConfig) -> Self {
         let profile = &target.profile;
         Self {
+            target: target.target,
             app: manifest.app.clone(),
             ui: manifest.ui.clone(),
             install: target.install.clone(),
@@ -70,6 +72,19 @@ pub fn compile(
     validate_target_references(manifest)?;
     validate_resolved_target(manifest, target, overrides)?;
     let view = ManifestView::for_target(manifest, target);
+    let mut payload_ids = BTreeSet::new();
+    for mapping in &view.files {
+        if !payload_ids.insert(&mapping.id) {
+            return Err(ManifestError::Invalid {
+                message: format!(
+                    "payload declaration `{}` is repeated for target `{}`",
+                    mapping.id, view.target
+                ),
+                src: None,
+                span: None,
+            });
+        }
+    }
 
     validate_install(&view.install)?;
     validate_ui(&view.ui)?;
@@ -446,6 +461,20 @@ fn validate_prerequisite(prerequisite: &Prerequisite) -> Result<(), ManifestErro
         src: None,
         span: None,
     };
+    prerequisite
+        .requirement
+        .validate_native_package()
+        .map_err(invalid)?;
+    if matches!(prerequisite.package, PrerequisitePackage::Repository)
+        && !matches!(
+            prerequisite.requirement,
+            PrerequisiteRequirement::NativePackage { .. }
+        )
+    {
+        return Err(invalid(
+            "repository policy requires a native_package requirement",
+        ));
+    }
     if prerequisite.installer.arguments.len() > zup_core::MAX_PREREQUISITE_ARGUMENTS
         || prerequisite.installer.arguments.iter().any(|argument| {
             argument.len() > zup_core::MAX_PREREQUISITE_ARGUMENT_BYTES
@@ -475,6 +504,7 @@ fn validate_prerequisite(prerequisite: &Prerequisite) -> Result<(), ManifestErro
         ));
     }
     match &prerequisite.package {
+        PrerequisitePackage::DetectOnly | PrerequisitePackage::Repository => {}
         PrerequisitePackage::Embedded { path, size, .. } => {
             if *size > zup_core::MAX_PREREQUISITE_PACKAGE_BYTES {
                 return Err(invalid(
@@ -601,11 +631,72 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
         }
     }
 
+    let graph = manifest
+        .services
+        .iter()
+        .map(|service| {
+            (
+                zup_core::ResourceKey::Service {
+                    id: service.id.clone(),
+                }
+                .canonical_for(&manifest.target),
+                zup_core::service_dependency_keys(&service.requires_services, manifest.target),
+            )
+        })
+        .collect();
+    zup_core::validate_service_graph(&graph).map_err(|message| ManifestError::Invalid {
+        message,
+        src: None,
+        span: None,
+    })?;
     let mut services = BTreeSet::new();
     for service in &manifest.services {
+        service
+            .execution
+            .native_name(&manifest.app.id, &service.id, service.native_name.as_ref())
+            .map_err(|message| ManifestError::Invalid {
+                message: format!("service {}: {message}", service.id),
+                src: None,
+                span: None,
+            })?;
+        service
+            .execution
+            .validate_policies(service.failure, service.readiness, manifest.target)
+            .map_err(|reason| ManifestError::Invalid {
+                message: format!("service `{}`: {reason}", service.id),
+                src: None,
+                span: None,
+            })?;
+        service
+            .readiness
+            .validate_for(manifest.target)
+            .map_err(|reason| ManifestError::Invalid {
+                message: format!("service `{}`: {reason}", service.id),
+                src: None,
+                span: None,
+            })?;
+        service
+            .lifecycle
+            .validate(service.start, &service.execution)
+            .map_err(|reason| ManifestError::Invalid {
+                message: format!("service `{}`: {reason}", service.id),
+                src: None,
+                span: None,
+            })?;
         if !services.insert(service.id.clone()) {
             return Err(ManifestError::DuplicateService {
                 id: service.id.to_string(),
+                src: None,
+                span: None,
+            });
+        }
+    }
+
+    let mut path_entries = BTreeSet::new();
+    for entry in &manifest.path {
+        if !path_entries.insert(&entry.id) {
+            return Err(ManifestError::Invalid {
+                message: format!("duplicate PATH declaration `{}`", entry.id),
                 src: None,
                 span: None,
             });
@@ -662,6 +753,9 @@ fn validate_resources(manifest: &ManifestView) -> Result<(), ManifestError> {
     }
     for service in &manifest.services {
         check_ref(service.component.as_ref(), &known, "service")?;
+        for component in &service.requires_components {
+            check_ref(Some(component), &known, "service dependency")?;
+        }
         check_condition(service.when.as_ref(), &known, "condition")?;
     }
     for protocol in &manifest.protocols {

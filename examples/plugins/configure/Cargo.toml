@@ -10,5 +10,10 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+sandbox-probes = []
+
 [dependencies]
-zup-sdk = { version = "0.1.0", path = "../../../crates/zup-sdk", features = ["plugin"] }
+zup-sdk = { version = "0.1.0", path = "../../../crates/zup-sdk", features = [
+  "plugin",
+] }

@@ -6,7 +6,7 @@
 
 use rstest::rstest;
 use zup_core::{Target, TargetOperatingSystem};
-use zup_plan::{TargetPath, TargetPathError};
+use zup_core::{TargetPath, TargetPathError};
 
 fn windows() -> Target {
     Target::parse("windows-x64").unwrap()

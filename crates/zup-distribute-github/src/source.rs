@@ -108,6 +108,7 @@ pub struct GithubContentSource {
     site: Origin,
     package: Package,
     catalog: ContentCatalog,
+    layout: ReleaseLayout,
     range: Arc<Mutex<RangeSupport>>,
     metrics: Arc<Metrics>,
     max_redirects: usize,
@@ -121,7 +122,7 @@ impl GithubContentSource {
         package: Package,
         catalog: ContentCatalog,
     ) -> Result<Self, DistributeError> {
-        let site = Origin::site(&layout.asset_url("zup-release.json")?)
+        let site = Origin::site(&layout.asset_url(&package.descriptor.document_name())?)
             .map_err(DistributeError::Repository)?;
         Ok(Self {
             name: name.into(),
@@ -134,6 +135,7 @@ impl GithubContentSource {
             site,
             package,
             catalog,
+            layout: layout.clone(),
             range: Arc::new(Mutex::new(RangeSupport::Unknown)),
             metrics: Arc::new(Metrics::default()),
             max_redirects: MAX_REDIRECTS,
@@ -183,8 +185,66 @@ impl GithubContentSource {
     pub fn carries(&self, descriptor: &ContentDescriptor) -> bool {
         match self.package.index.metadata.frame(&descriptor.digest) {
             Some(frame) => frame.size == descriptor.size,
-            None => false,
+            None => self.catalog.entry(&descriptor.digest).is_some_and(|entry| {
+                entry.compression == zup_acquire::ContentCompression::None
+                    && entry.size == descriptor.size
+                    && entry.compressed_size == descriptor.compressed_size
+            }),
         }
+    }
+
+    async fn acquire_native(
+        &self,
+        request: AcquireRequest<'_>,
+    ) -> Result<VerifiedBlob, SourceError> {
+        let descriptor = request.descriptor;
+        if !self.carries(descriptor) {
+            return Err(SourceError::absent(&self.name, descriptor));
+        }
+        let url = self
+            .layout
+            .asset_url(&zup_publish::blob_name(&descriptor.digest))
+            .map_err(|e| SourceError::unavailable(&self.name, descriptor, e.to_string()))?;
+        let response = self
+            .client
+            .get(&self.site, &url, self.max_redirects)
+            .await
+            .map_err(|e| refuse(&self.name, descriptor, "native object", e))?;
+        if !response.status().is_success() {
+            return Err(SourceError::unavailable(
+                &self.name,
+                descriptor,
+                "native object is unavailable",
+            ));
+        }
+        let mut writer = request
+            .cache
+            .writer(descriptor)
+            .map_err(|e| SourceError::unavailable(&self.name, descriptor, e.to_string()))?;
+        let offset = writer.wire_offset();
+        let mut consumed = 0u64;
+        let wire = response
+            .stream_into(descriptor.size, |chunk| {
+                if request.cancellation.is_cancelled() {
+                    return Err(std::io::Error::other("cancelled"));
+                }
+                let skip = (offset.saturating_sub(consumed)).min(chunk.len() as u64) as usize;
+                consumed += chunk.len() as u64;
+                writer.write(&chunk[skip..]).map_err(io)
+            })
+            .await
+            .map_err(|e| refuse(&self.name, descriptor, "native object", e))?;
+        self.metrics.request(wire);
+        if wire != descriptor.size {
+            return Err(SourceError::unavailable(
+                &self.name,
+                descriptor,
+                "native object is truncated",
+            ));
+        }
+        writer
+            .commit()
+            .map_err(|e| SourceError::unavailable(&self.name, descriptor, e.to_string()))
     }
 
     /// Fetch one blob's compressed frame straight into the cache, resuming.
@@ -588,7 +648,7 @@ impl ArtifactSource for GithubContentSource {
                 .frame(&descriptor.digest)
                 .copied()
             else {
-                return Err(SourceError::absent(&self.name, &descriptor));
+                return self.acquire_native(request).await;
             };
             if frame.size != descriptor.size {
                 return Err(SourceError::unavailable(
@@ -660,7 +720,8 @@ pub async fn open(
     descriptor: &PackageDescriptor,
     client: &HttpClient,
 ) -> Result<Package, DistributeError> {
-    let site = Origin::site(&layout.asset_url("zup-release.json")?)?;
+    descriptor.validate()?;
+    let site = Origin::site(&layout.asset_url(&descriptor.document_name())?)?;
     let urls: Vec<String> = descriptor
         .shards
         .iter()
@@ -689,14 +750,30 @@ pub async fn open(
             reason: format!("status {}", response.status().as_u16()),
         });
     }
-    let prefix = response
-        .into_body()
-        .bytes()
+    use sha2::Digest as _;
+    let mut digest = sha2::Sha256::new();
+    let mut prefix = Vec::new();
+    let prefix_limit = (crate::MAX_METADATA as usize).saturating_add(crate::HEADER_LEN);
+    let size = response
+        .stream_into(descriptor.shards[0].size, |chunk| {
+            digest.update(chunk);
+            let take = chunk.len().min(prefix_limit.saturating_sub(prefix.len()));
+            prefix.extend_from_slice(&chunk[..take]);
+            Ok(())
+        })
         .await
         .map_err(|error| DistributeError::Fetch {
             name: descriptor.shards[0].name.clone(),
-            reason: crate::safe_reason(&error),
+            reason: error.to_string(),
         })?;
+    if size != descriptor.shards[0].size
+        || zup_core::Sha256Digest::from_hasher(digest) != descriptor.shards[0].digest
+    {
+        return Err(DistributeError::Untrusted {
+            name: descriptor.shards[0].name.clone(),
+            reason: "first shard size or digest differs from the descriptor".to_owned(),
+        });
+    }
     let index = Index::read(&prefix).map_err(|error| match error {
         PackageError::Short { .. } => DistributeError::Fetch {
             name: descriptor.shards[0].name.clone(),
@@ -704,7 +781,10 @@ pub async fn open(
         },
         other => DistributeError::Package(other),
     })?;
-    if index.metadata.variant != descriptor.variant {
+    if index.metadata.variant != descriptor.variant
+        || index.metadata.target != descriptor.target
+        || index.metadata.application != descriptor.application
+    {
         return Err(DistributeError::Untrusted {
             name: descriptor.shards[0].name.clone(),
             reason: format!(
@@ -713,7 +793,18 @@ pub async fn open(
             ),
         });
     }
-    if index.metadata.shards.len() != descriptor.shards.len() {
+    if index
+        .metadata
+        .shards
+        .iter()
+        .map(|s| (s.index, s.start, s.size))
+        .collect::<Vec<_>>()
+        != descriptor
+            .shards
+            .iter()
+            .map(|s| (s.index, s.start, s.size))
+            .collect::<Vec<_>>()
+    {
         return Err(DistributeError::Untrusted {
             name: descriptor.shards[0].name.clone(),
             reason: format!(
@@ -756,12 +847,11 @@ pub async fn load_descriptor(
         });
     }
     let bytes = response
-        .into_body()
-        .bytes()
+        .read_to_end(crate::MAX_DESCRIPTOR_BYTES as u64)
         .await
         .map_err(|error| DistributeError::Fetch {
             name: name.clone(),
-            reason: crate::safe_reason(&error),
+            reason: error.to_string(),
         })?;
     PackageDescriptor::parse(&bytes, expected)
 }

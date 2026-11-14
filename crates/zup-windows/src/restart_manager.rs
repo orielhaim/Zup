@@ -1,20 +1,67 @@
 use std::path::{Path, PathBuf};
 
 use windows::Win32::System::RestartManager::{
-    RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
+    CCH_RM_SESSION_KEY, RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources,
+    RmStartSession,
 };
 use windows::core::PCWSTR;
-use zup_core::Target;
-use zup_plan::{FileOperation, TargetPath};
 
 use crate::lowering::host_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockingProcess {
+    pub service_name: Option<String>,
+    pub execution_generation: String,
     pub pid: u32,
     pub name: String,
     pub app_type: i32,
     pub restartable: bool,
+}
+
+pub(crate) fn preflight_services(
+    files: &[&Path],
+    controls: &[zup_plan::ServiceControlOperation],
+    lifecycle: &mut crate::service_control::ScmLifecycle,
+) -> Result<FilePreflight, String> {
+    use zup_transaction::NativeServiceManager;
+    for operation in controls
+        .iter()
+        .filter(|operation| operation.stage == zup_plan::ServiceControlStage::Quiesce)
+    {
+        lifecycle.observe(operation)?;
+    }
+    let FilePreflight::Blocked {
+        mut processes,
+        reboot_reason,
+    } = preflight(files)?
+    else {
+        return Ok(FilePreflight::Ready);
+    };
+    for operation in controls
+        .iter()
+        .filter(|operation| operation.stage == zup_plan::ServiceControlStage::Quiesce)
+    {
+        let observed = lifecycle.observe(operation)?;
+        if observed.configuration != operation.before_configuration
+            || observed.manager_generation != operation.manager_generation
+            || observed.execution_generation != operation.before_execution_generation
+            || !operation.before.matches(observed.runtime)
+        {
+            return Err("service changed during executable preflight".into());
+        }
+        processes.retain(|process| {
+            process.service_name.as_deref() != Some(operation.native_name.as_str())
+                || process.execution_generation != operation.before_execution_generation
+        });
+    }
+    Ok(if processes.is_empty() && reboot_reason == 0 {
+        FilePreflight::Ready
+    } else {
+        FilePreflight::Blocked {
+            processes,
+            reboot_reason,
+        }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +80,7 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
 
     unsafe {
         let mut session: u32 = 0;
-        let mut key = [0u16; 32];
+        let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
         let rc = RmStartSession(&mut session, None, windows::core::PWSTR(key.as_mut_ptr()));
         if rc.0 != 0 {
             return Err(format!("RmStartSession failed ({})", rc.0));
@@ -66,7 +113,7 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
             for _ in 0..3 {
                 let mut processes = vec![RM_PROCESS_INFO::default(); capacity];
                 let mut needed = 0;
-                let mut count = 0;
+                let mut count = processes.len() as u32;
                 let mut reboot = 0;
                 let rc = RmGetList(
                     session,
@@ -94,36 +141,20 @@ pub fn preflight(files: &[&Path]) -> Result<FilePreflight, String> {
     }
 }
 
-pub fn plan_mutating_paths(
-    plan: &zup_transaction::TransactionPlan,
-    target: &Target,
-) -> Vec<PathBuf> {
+pub fn preflight_paths(plan: &zup_plan::DeploymentPlan) -> Vec<PathBuf> {
     plan.nodes
         .iter()
-        .filter_map(|node| match &node.kind {
-            zup_transaction::NodeKind::FileMutation {
-                key,
-                delta:
-                    zup_plan::FileOperationKind::Create
-                    | zup_plan::FileOperationKind::Replace
-                    | zup_plan::FileOperationKind::RestoreOwned
-                    | zup_plan::FileOperationKind::RepairOwned,
-            } => {
-                let destination = match key {
-                    zup_core::ResourceKey::File { destination }
-                    | zup_core::ResourceKey::Maintenance { destination, .. } => destination,
-                    _ => return None,
-                };
-                let path = TargetPath::new(*target, destination).ok()?;
-                Some(host_path(&path))
-            }
-            zup_transaction::NodeKind::FileRemoval { .. } => node
-                .meta
-                .removal
-                .as_ref()
-                .map(|removal| host_path(&removal.destination)),
-            _ => None,
+        .filter(|node| {
+            matches!(
+                node.kind,
+                zup_plan::NodeKind::FileMutation {
+                    delta: zup_plan::FileOperationKind::Replace
+                        | zup_plan::FileOperationKind::RepairOwned,
+                    ..
+                } | zup_plan::NodeKind::FileRemoval { .. }
+            )
         })
+        .filter_map(|node| node.file_destination().map(host_path))
         .collect()
 }
 
@@ -172,6 +203,21 @@ fn blocked_or_ready(processes: Vec<RM_PROCESS_INFO>, reboot_reason: u32) -> File
                 name
             };
             BlockingProcess {
+                service_name: {
+                    let end = process
+                        .strServiceShortName
+                        .iter()
+                        .position(|c| *c == 0)
+                        .unwrap_or(process.strServiceShortName.len());
+                    (end != 0)
+                        .then(|| String::from_utf16_lossy(&process.strServiceShortName[..end]))
+                },
+                execution_generation: format!(
+                    "{}:{}:{}",
+                    process.Process.dwProcessId,
+                    process.Process.ProcessStartTime.dwHighDateTime,
+                    process.Process.ProcessStartTime.dwLowDateTime
+                ),
                 pid: process.Process.dwProcessId,
                 name,
                 app_type: process.ApplicationType.0,
@@ -189,15 +235,79 @@ fn blocked_or_ready(processes: Vec<RM_PROCESS_INFO>, reboot_reason: u32) -> File
     }
 }
 
-pub fn mutating_paths(files: &[FileOperation]) -> Vec<std::path::PathBuf> {
-    files
-        .iter()
-        .filter(|f| {
-            matches!(
-                f.kind,
-                zup_plan::FileOperationKind::Create | zup_plan::FileOperationKind::Replace
-            )
-        })
-        .map(|f| host_path(&f.destination))
-        .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zup_core::{
+        InstallationId, Privilege, RelativePath, ResourceKey, Target, TargetPath, hash_bytes,
+    };
+    use zup_plan::{
+        DeploymentEffects, FileOperation, FileOperationKind, FilePrecondition, compile_deployment,
+    };
+
+    #[rstest::rstest]
+    #[case::create(FileOperationKind::Create, false)]
+    #[case::restore_missing(FileOperationKind::RestoreOwned, false)]
+    #[case::retain(FileOperationKind::NoOp, false)]
+    #[case::replace(FileOperationKind::Replace, true)]
+    #[case::repair(FileOperationKind::RepairOwned, true)]
+    fn preflight_queries_only_existing_objects_that_will_change(
+        #[case] kind: FileOperationKind,
+        #[case] queried: bool,
+    ) {
+        let directory = TargetPath::new(Target::WINDOWS_X64, r"C:\Application").unwrap();
+        let destination = directory.join("program.exe").unwrap();
+        let mut effects = DeploymentEffects::new(
+            InstallationId::new_v7(),
+            crate::requirements_fixture::requirements(
+                Target::WINDOWS_X64,
+                zup_core::SelectedScope::User,
+                "example.application",
+                "1.0.0",
+            ),
+        );
+        effects.install_directory = Some(directory);
+        effects.files.push(FileOperation {
+            key: ResourceKey::File {
+                id: zup_core::FileResourceId::Payload {
+                    id: zup_core::PayloadId::File {
+                        declaration: zup_core::ResourceId::new("fixture-0").unwrap(),
+                    },
+                },
+            },
+            source_relative: RelativePath::new("program.exe").unwrap(),
+            destination: destination.clone(),
+            precondition: if matches!(
+                kind,
+                FileOperationKind::Create | FileOperationKind::RestoreOwned
+            ) {
+                FilePrecondition::Absent
+            } else {
+                FilePrecondition::Exact {
+                    object: zup_core::NativeObjectIdentity::Windows {
+                        volume: 1,
+                        file: [1; 16],
+                    },
+                    size: 3,
+                    sha256: hash_bytes(b"old"),
+                }
+            },
+            expected_sha256: hash_bytes(b"old"),
+            expected_size: 3,
+            privilege: Privilege::User,
+            kind,
+            executable: true,
+            conflict: None,
+            replacement: zup_core::FixedReplacement::Atomic,
+        });
+        let paths = preflight_paths(&compile_deployment(&effects).unwrap());
+        assert_eq!(
+            paths,
+            if queried {
+                vec![host_path(&destination)]
+            } else {
+                Vec::new()
+            }
+        );
+    }
 }

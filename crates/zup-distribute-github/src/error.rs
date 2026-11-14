@@ -15,6 +15,10 @@ pub enum PackageError {
     Short { expected: u64, found: u64 },
     #[error("the package metadata is {found} bytes, over the {limit} byte limit")]
     Metadata { limit: u64, found: u64 },
+    #[error(
+        "transport piece {index} requires {size} bytes, above the {limit} byte limit; increase the limit or reduce indivisible compressed frames"
+    )]
+    ShardLimit { index: u32, size: u64, limit: u64 },
     #[error("the package metadata hashes to sha256:{found}; the header says sha256:{expected}")]
     MetadataDigest { expected: String, found: String },
     #[error("the package metadata could not be read: {0}")]

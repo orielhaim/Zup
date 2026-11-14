@@ -4,8 +4,8 @@
 //! Nothing here names an operating-system facility: a service is a service
 //! wherever it lives, and a registration is a registration.
 
-use crate::{CommandSpec, TargetPath};
 use serde::{Deserialize, Serialize};
+use zup_core::{CommandSpec, TargetPath};
 use zup_core::{ProtocolScheme, ResourceKey, SelectedScope, ServiceId, ServiceStart, Sha256Digest};
 
 /// Observed state of one desired target file.
@@ -21,7 +21,12 @@ pub struct ObservedFile {
 #[serde(rename_all = "snake_case")]
 pub enum ObservedFileState {
     Absent,
-    File { size: u64, sha256: Sha256Digest },
+    File {
+        object: zup_core::NativeObjectIdentity,
+        size: u64,
+        sha256: Sha256Digest,
+        executable: Option<bool>,
+    },
     NonFile,
 }
 
@@ -110,6 +115,7 @@ pub struct ObservedPathEntry {
 /// Observed state of one desired service.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedService {
+    pub registration: zup_core::ObservedServiceRegistration,
     pub key: ResourceKey,
     pub id: ServiceId,
     pub state: ObservedServiceState,
@@ -122,9 +128,15 @@ pub enum ObservedServiceState {
     Absent,
     InvalidService,
     Service {
+        state_directories: Vec<zup_core::RelativePath>,
+        native_timeouts: zup_core::NativeServiceTimeouts,
+        dependencies: Vec<String>,
+        failure: zup_core::ServiceFailurePolicy,
+        execution: zup_core::ServiceExecution,
         display_name: String,
-        command: CommandSpec,
+        command: Box<CommandSpec>,
         start: ServiceStart,
+        readiness: zup_core::ServiceReadiness,
         runtime_state: Option<ServiceRuntimeState>,
     },
 }
@@ -135,14 +147,26 @@ impl ObservedServiceState {
             Self::Absent => Some(crate::ServiceState::Absent),
             Self::InvalidService => None,
             Self::Service {
+                state_directories,
+                native_timeouts,
+                failure,
+                dependencies,
+                execution,
                 display_name,
                 command,
                 start,
+                readiness,
                 ..
             } => Some(crate::ServiceState::Registration {
+                state_directories: state_directories.clone(),
+                native_timeouts: *native_timeouts,
+                failure: *failure,
+                dependencies: dependencies.clone(),
+                execution: execution.clone(),
                 display_name: display_name.clone(),
                 command: command.clone(),
                 start: *start,
+                readiness: *readiness,
             }),
         }
     }
@@ -226,7 +250,7 @@ pub enum ObservedExtensionState {
 
 /// Immutable snapshot of observed host state for planned resources.
 ///
-/// Every collection follows `DesiredState<crate::TargetPath, crate::TargetPath>` ordering. Inspection never mutates.
+/// Every collection follows `crate::BoundDeployment` ordering. Inspection never mutates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct HostSnapshot {
     pub files: Vec<ObservedFile>,

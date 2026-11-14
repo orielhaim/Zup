@@ -2,6 +2,13 @@
 test-threads = 8
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+[test-groups.systemd-manager]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(zup-linux) & binary(services_systemd)'
+test-group = 'systemd-manager'
+
 # Fast CI excludes staged-toolchain tests and generated SDK projects.
 [profile.fast]
 test-threads = 8
@@ -12,7 +19,7 @@ not (
   or package(zup-preview)
   or (package(zup-installer) and (
     binary(lifecycle) or binary(frontends) or binary(generated_files)
-    or binary(preset_session) or binary(preset_persistence)
+    or binary(preset_session) or binary(preset_persistence) or binary(windows_updates)
   ))
   or (package(zup-linux) and (binary(process) or binary(gui)))
   or (package(zup-windows) and binary(universal))
@@ -28,6 +35,9 @@ path = "junit.xml"
 [profile.systemd.junit]
 path = "junit.xml"
 
+[profile.scm.junit]
+path = "junit.xml"
+
 # Run the staged-toolchain cases once on each x64 native host.
 [profile.integration]
 test-threads = 8
@@ -37,11 +47,14 @@ default-filter = '''
   or package(zup-preview)
   or (package(zup-installer) and (
     binary(lifecycle) or binary(frontends) or binary(generated_files)
-    or binary(preset_session) or binary(preset_persistence)
+    or binary(preset_session) or binary(preset_persistence) or binary(windows_updates)
   ))
   or (package(zup-linux) and (binary(process) or binary(gui)))
   or (package(zup-windows) and binary(universal))
 '''
 
 [profile.integration.junit]
+path = "junit.xml"
+
+[profile.privileged.junit]
 path = "junit.xml"

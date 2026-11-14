@@ -23,48 +23,13 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use zup_core::{AppId, Sha256Digest, Target};
+use zup_core::{AppId, ReleasePin, Sha256Digest, Target};
 
 use crate::descriptor::{ContentDescriptor, ContentKind, RelativeContentPath};
 use crate::layout::{check_channel, check_segment};
 
 /// Current release descriptor schema.
 pub const RELEASE_SCHEMA: u32 = 1;
-
-/// How a release names itself, which decides whether a bootstrapper resolves
-/// it now or was built for one exact graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "pin", rename_all = "snake_case")]
-pub enum ReleasePin {
-    /// Exactly this release. A thin installer built this way always installs
-    /// this graph and never silently becomes a later one.
-    Version { version: String },
-    /// Whatever the channel currently resolves to, authenticated at runtime.
-    Channel { channel: String },
-}
-
-impl ReleasePin {
-    /// A short label for a build output and a window title.
-    pub fn label(&self) -> String {
-        match self {
-            Self::Version { version } => version.clone(),
-            Self::Channel { channel } => channel.clone(),
-        }
-    }
-
-    /// Whether this pin names one graph forever.
-    pub const fn is_pinned(&self) -> bool {
-        matches!(self, Self::Version { .. })
-    }
-
-    /// The channel this pin resolves through.
-    pub fn channel(&self) -> &str {
-        match self {
-            Self::Version { .. } => "",
-            Self::Channel { channel } => channel,
-        }
-    }
-}
 
 /// One claim inside a release descriptor: a document identified by its bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -558,37 +523,19 @@ impl OnlineTrust {
         if self.mirrors.len() > Self::MAX_MIRRORS {
             return Err("a trust configuration names more origins than this build accepts");
         }
-        match &self.pin {
-            ReleasePin::Version { version } => {
-                if version.is_empty() {
-                    return Err("a pinned release names no version");
-                }
+        if let ReleasePin::Channel { channel } = &self.pin {
+            check_channel(channel)?;
+            if channel != &self.channel {
+                return Err("release selection differs from its declared channel");
             }
-            ReleasePin::Channel { channel } => check_channel(channel)?,
         }
         Ok(())
     }
 
-    /// The document this bootstrapper authenticates for its own release.
-    ///
-    /// A version-pinned bootstrapper addresses the immutable version-addressed
-    /// document, so no later publication can change what it installs. A channel
-    /// bootstrapper addresses the channel pointer, which is exactly the promise
-    /// it makes and exactly as little.
     pub fn release_document(&self) -> Result<RelativeContentPath, &'static str> {
         match &self.pin {
             ReleasePin::Channel { .. } => crate::layout::release_path(&self.channel),
-            ReleasePin::Version { version } => {
-                crate::layout::release_version_path(&self.channel, version)
-            }
-        }
-    }
-
-    /// The version this bootstrapper insists on, when it is pinned.
-    pub fn pinned_version(&self) -> Option<&str> {
-        match &self.pin {
-            ReleasePin::Version { version } => Some(version),
-            ReleasePin::Channel { .. } => None,
+            ReleasePin::Release { document, .. } => Ok(crate::layout::document_path(document)),
         }
     }
 }

@@ -4,18 +4,18 @@ The developer CLI operates on projects and releases. Installed applications use 
 
 ## Project authoring
 
-| Command | Purpose |
-| --- | --- |
-| `zup init` | create a project |
-| `zup check` | validate manifest and build inputs |
-| `zup doctor` | report build readiness |
-| `zup plan` | preview desired resources, including plugin output, on any build host |
-| `zup preview` | open the application installer UI on a simulated machine |
-| `zup build` | build configured artifacts |
-| `zup artifact inspect <file>` | inspect a built artifact |
-| `zup fmt` | format `zup.toml` preserving comments |
-| `zup schema` | print/write authoritative JSON Schema |
-| `zup completions <shell>` | emit shell completions |
+| Command                       | Purpose                                                               |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `zup init`                    | create a project                                                      |
+| `zup check`                   | validate manifest and build inputs                                    |
+| `zup doctor`                  | report build readiness                                                |
+| `zup plan`                    | preview desired resources, including plugin output, on any build host |
+| `zup preview`                 | open the application installer UI on a simulated machine              |
+| `zup build`                   | build configured artifacts                                            |
+| `zup artifact inspect <file>` | inspect a built artifact                                              |
+| `zup fmt`                     | format `zup.toml` preserving comments                                 |
+| `zup schema`                  | print/write authoritative JSON Schema                                 |
+| `zup completions <shell>`     | emit shell completions                                                |
 
 Common project selection flags include `--manifest` and repeatable `--target`.
 
@@ -37,34 +37,34 @@ is found. An installer operation selects one concrete scope and never accepts
 
 ## Preset authoring
 
-| Command | Purpose |
-| --- | --- |
-| `zup preset init <name>` | create a preset project |
-| `zup preset dev` | run a preset against a simulated installer |
-| `zup preset pack` | package target binaries into `.zupui` |
-| `zup preset inspect <file>` | inspect a preset package |
+| Command                     | Purpose                                    |
+| --------------------------- | ------------------------------------------ |
+| `zup preset init <name>`    | create a preset project                    |
+| `zup preset dev`            | run a preset against a simulated installer |
+| `zup preset pack`           | package target binaries into `.zupui`      |
+| `zup preset inspect <file>` | inspect a preset package                   |
 
 ## Plugin authoring
 
-| Command | Purpose |
-| --- | --- |
-| `zup plugin init <name>` | create a plugin project |
-| `zup plugin build` | compile for wasm and componentise into the plugin Zup loads |
+| Command                  | Purpose                                          |
+| ------------------------ | ------------------------------------------------ |
+| `zup plugin init <name>` | create a plugin project                          |
+| `zup plugin build`       | compile a native WASI Preview 3 plugin component |
 
 Both generate a project whose only dependency is `zup-sdk`. `zup plugin build`
-runs Cargo for `wasm32-unknown-unknown` and componentises the result; the author
+runs Cargo for `wasm32-wasip3` and emits a native WASI Preview 3 component; the author
 installs no Wasm tooling and vendors no WIT.
 
 ## Release
 
-| Command | Purpose |
-| --- | --- |
-| `zup sign prepare` | prepare signing plan |
-| `zup sign verify` | verify signatures and finalize release |
-| `zup publish stage` | stage a static release tree |
-| `zup publish github` | publish to GitHub Releases |
-| `zup ci github generate` | generate release workflow |
-| `zup ci github check` | check committed workflow freshness |
+| Command                  | Purpose                                |
+| ------------------------ | -------------------------------------- |
+| `zup sign prepare`       | prepare signing plan                   |
+| `zup sign verify`        | verify signatures and finalize release |
+| `zup publish stage`      | stage a static release tree            |
+| `zup publish github`     | publish to GitHub Releases             |
+| `zup ci github generate` | generate release workflow              |
+| `zup ci github check`    | check committed workflow freshness     |
 
 ## Toolchain
 

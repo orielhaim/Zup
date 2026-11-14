@@ -18,17 +18,17 @@ struct Configure;
 
 impl Plugin for Configure {
     fn plan(context: Context) -> Result<Plan, Error> {
-        Ok(Plan::new().path_entry(Path::new("${install}/bin")))
+        Ok(Plan::new().path_entry(PathEntry::new("cli", "${install}/bin")))
     }
 }
 
 zup_sdk::plugin::export!(Configure);
 ```
 
-`zup plugin build` compiles that for `wasm32-unknown-unknown` and componentises
-it. The author never installs a Wasm toolchain or copies a WIT file.
+`zup plugin build` compiles that directly to a native WASI Preview 3
+component with `wasm32-wasip3`. The author never installs a Wasm toolchain or copies a WIT file.
 
 ## What a plugin cannot do
 
-The world imports nothing at all, which the host verifies before loading the component. A plugin cannot read a file, run a process, reach the network, get the time or a random number, or write a registry key. Everything it needs arrives in its [context](./context); everything it wants to exist it returns as a
+The planner uses typed WIT bindings. Rust standard library imports use WASI 0.3 CLI interfaces with an empty environment, closed input, discarded output, and no terminal. Clock interfaces link, but clock access traps to preserve deterministic planning. The host rejects all other imports. A plugin cannot read a file, run a process, reach the network, get the time or a random number, or write a registry key. Everything it needs arrives in its [context](./context); everything it wants to exist it returns as a
 resource.

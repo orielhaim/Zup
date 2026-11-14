@@ -1,0 +1,14 @@
+pre-commit:
+  parallel: false
+  commands:
+    cargo-fmt:
+      glob: "*.rs"
+      run: cargo fmt --all
+      stage_fixed: true
+
+    bun-fmt:
+      run: bun fmt --staged --no-script
+
+    cargo-clippy:
+      glob: "*.rs"
+      run: cargo clippy --workspace --all-targets --all-features -- -D warnings

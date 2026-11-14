@@ -108,11 +108,11 @@ impl HttpSource {
                 });
             }
             let mut body = Vec::new();
-            let mut stream = response.into_body().bytes_stream();
+            let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|error| HttpError::Transport {
                     origin: origin.to_string(),
-                    reason: crate::client::classify(&error),
+                    reason: error.to_string(),
                 })?;
                 if body.len() as u64 + chunk.len() as u64 > limit {
                     return Err(HttpError::TooLarge {
@@ -136,8 +136,9 @@ impl HttpSource {
         descriptor: &ContentDescriptor,
         cache: &zup_acquire::ContentCache,
         cancellation: &dyn Cancellation,
+        deadline: tokio::time::Instant,
     ) -> Result<VerifiedBlob, HttpError> {
-        let path = zup_acquire::WebLayout::blob(&descriptor.digest);
+        let path = zup_acquire::blob_path(&descriptor.digest);
         let mut last: Option<HttpError> = None;
 
         for (index, origin) in self.origins.indices() {
@@ -175,6 +176,7 @@ impl HttpSource {
                     writer: Some(writer),
                     offset,
                     cancellation,
+                    deadline,
                 };
                 match self.transfer(&mut attempt).await {
                     Ok(blob) => {
@@ -210,13 +212,11 @@ impl HttpSource {
         request: &mut BlobRequest<'_>,
     ) -> Result<VerifiedBlob, (HttpError, Option<String>)> {
         let (origin, url, offset) = (request.origin, request.url, request.offset);
-        let response = if offset > 0 {
-            self.client
-                .get_range(origin, url, offset, self.max_redirects)
-                .await
-        } else {
-            self.client.get(origin, url, self.max_redirects).await
-        };
+        let mut http = crate::client::Request::get(url).deadline(request.deadline);
+        if offset > 0 {
+            http = http.range(crate::client::Range::from(offset));
+        }
+        let response = self.client.send(origin, http, self.max_redirects).await;
         let response = match response {
             Ok(response) => response,
             Err(error) => {
@@ -282,7 +282,7 @@ impl HttpSource {
             ));
         }
 
-        match stream_body(response, origin, request).await {
+        match stream_body(response, request).await {
             Ok(()) => request.commit(),
             Err(error) => {
                 // A transfer that stopped early leaves a partial with a verified
@@ -302,6 +302,7 @@ impl HttpSource {
 /// `Option` because finishing a transfer consumes it, and every path out of
 /// `transfer` finishes it one way or another.
 struct BlobRequest<'a> {
+    deadline: tokio::time::Instant,
     origin: &'a Origin,
     url: &'a url::Url,
     descriptor: &'a ContentDescriptor,
@@ -409,20 +410,13 @@ fn check_range(
     Ok(())
 }
 
-async fn stream_body(
-    response: Response,
-    origin: &Origin,
-    request: &mut BlobRequest<'_>,
-) -> Result<(), HttpError> {
-    let mut stream = response.into_body().bytes_stream();
+async fn stream_body(response: Response, request: &mut BlobRequest<'_>) -> Result<(), HttpError> {
+    let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         if request.cancellation.is_cancelled() {
             return Err(HttpError::Cancelled);
         }
-        let chunk = chunk.map_err(|error| HttpError::Transport {
-            origin: origin.to_string(),
-            reason: crate::client::classify(&error),
-        })?;
+        let chunk = chunk?;
         request.write(&chunk)?;
     }
     Ok(())
@@ -431,6 +425,10 @@ async fn stream_body(
 impl ArtifactSource for HttpSource {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn acquisition_timeout(&self) -> Option<std::time::Duration> {
+        Some(self.client.timeouts().per_blob)
     }
 
     fn contains(&self, _descriptor: &ContentDescriptor) -> bool {
@@ -445,6 +443,9 @@ impl ArtifactSource for HttpSource {
         request: AcquireRequest<'a>,
     ) -> SourceFuture<'a, Result<VerifiedBlob, SourceError>> {
         Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(SourceError::Cancelled);
+            }
             let descriptor = *request.descriptor;
             // A verified blob is never re-fetched, whatever the origin list says.
             match request
@@ -474,11 +475,22 @@ impl ArtifactSource for HttpSource {
                     ));
                 }
             }
-            self.fetch_blob(&descriptor, request.cache, request.cancellation)
-                .await
+            let deadline = request
+                .deadline
+                .map(|deadline| deadline.0)
+                .unwrap_or_else(|| tokio::time::Instant::now() + self.client.timeouts().per_blob);
+            tokio::select! {
+                biased;
+                _ = request.cancellation.cancelled() => Err(HttpError::Cancelled),
+                result = tokio::time::timeout_at(deadline, self.fetch_blob(&descriptor, request.cache, request.cancellation, deadline)) =>
+                    result.unwrap_or(Err(HttpError::Timeout { phase: "blob" })),
+            }
                 .map_err(|error| {
                     if matches!(error, HttpError::Cancelled) {
-                        return SourceError::unavailable(self.name(), &descriptor, "cancelled");
+                        return SourceError::Cancelled;
+                    }
+                    if let HttpError::Timeout { phase } = error {
+                        return SourceError::Timeout { origin: self.name.clone(), kind: descriptor.kind().as_str(), digest: descriptor.digest.to_hex(), phase };
                     }
                     SourceError::unavailable(self.name(), &descriptor, error.to_string())
                 })

@@ -91,6 +91,8 @@ fn installer() -> Installer {
         frontend: Frontend::Gui,
         updates: None,
         install: Install {
+            generation_readers: Default::default(),
+            data: Vec::new(),
             scope: InstallScope::User,
             directory: InstallDirectory {
                 user: Some(Template::parse("${location.programs}/Consumer").expect("a template")),

@@ -30,7 +30,7 @@ pub struct Emitter {
 
 impl Emitter {
     /// Consume `events` on a background thread.
-    pub fn spawn(events: tokio::sync::mpsc::Receiver<AcquisitionEvent>, format: Format) -> Self {
+    pub fn spawn(events: zup_acquire::ProgressReceiver, format: Format) -> Self {
         let mut events = events;
         Self {
             handle: Some(std::thread::spawn(move || match format {
@@ -179,6 +179,8 @@ mod tests {
 
     fn progress(completed: u64, total: u64) -> AcquisitionProgress {
         let mut progress = AcquisitionProgress {
+            acquired_bytes: 0,
+            acquired_items: 0,
             phase: AcquisitionPhase::Downloading,
             completed_bytes: completed,
             total_bytes: total,

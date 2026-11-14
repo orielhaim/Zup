@@ -24,6 +24,8 @@ use crate::ui::{Callout, ChoiceHandler, Handler, Section, Tone, caption, muted};
 
 fn category_icon(category: ResourceCategory) -> IconName {
     match category {
+        ResourceCategory::Data => IconName::Files,
+        ResourceCategory::Application => IconName::AppWindow,
         ResourceCategory::Files => IconName::Files,
         ResourceCategory::Launchers => IconName::AppWindow,
         ResourceCategory::Path => IconName::SquareTerminal,
@@ -40,8 +42,13 @@ fn category_icon(category: ResourceCategory) -> IconName {
 fn change_tag(kind: ChangeKind) -> Tag {
     let label = model::change_label(kind);
     match kind {
+        ChangeKind::Preserve => Tag::new().outline().xsmall().child(label),
         ChangeKind::Create => Tag::success().outline().xsmall().child(label),
-        ChangeKind::Update => Tag::info().outline().xsmall().child(label),
+        ChangeKind::Prepare
+        | ChangeKind::Seal
+        | ChangeKind::Verify
+        | ChangeKind::Activate
+        | ChangeKind::Update => Tag::info().outline().xsmall().child(label),
         ChangeKind::Remove => Tag::danger().outline().xsmall().child(label),
         ChangeKind::Drift | ChangeKind::Conflict => Tag::warning().outline().xsmall().child(label),
         ChangeKind::NoOp => Tag::secondary().xsmall().child(label),

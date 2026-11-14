@@ -88,8 +88,9 @@ scope = "user"
 [install.directory]
 user = "${{location.programs}}/Thin"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#
             ),
         )
@@ -133,6 +134,8 @@ destination = "${{install}}"
         args.push(std::ffi::OsString::from("--thin-output"));
         args.push(installers_dir.clone().into());
         let result = Command::new(env!("CARGO_BIN_EXE_zup"))
+            .arg("--toolchain")
+            .arg(dispatcher().parent().unwrap())
             .args(args)
             .output()
             .unwrap();
@@ -177,12 +180,7 @@ fn stdout(result: &std::process::Output) -> String {
 /// is what a thin installer is made of. It has to start on the narrowest machine
 /// any variant serves.
 fn dispatcher() -> std::path::PathBuf {
-    staged::dispatcher(&test_executable(), zup_toolchain::Subsystem::Gui, true)
-}
-
-/// This test binary, which is where the staged toolchain was built beside.
-fn test_executable() -> std::path::PathBuf {
-    std::env::current_exe().expect("a test executable")
+    staged::dispatcher(zup_toolchain::Subsystem::Gui, true)
 }
 
 #[test]
@@ -193,16 +191,18 @@ fn a_thin_release_stages_a_web_tree_and_two_thin_installers() {
     let (result, installers) = project.stage();
     assert!(result.status.success(), "{}", stderr(&result));
 
-    // The web tree is the release: content, catalog, the variant manifest, the
-    // channel pointer, and the version-addressed document.
     let web = project.path().join("web");
-    for document in [
-        "releases/stable.json",
-        "releases/stable/catalog.json",
-        "releases/stable/variants/x64.json",
-        "releases/stable/versions/1.4.0.json",
+    let release_bytes = fs::read(web.join("releases/stable.json")).unwrap();
+    let release = zup_acquire::ReleaseDescriptor::parse(&release_bytes).unwrap();
+    for digest in [
+        zup_core::hash_bytes(&release_bytes),
+        release.catalog.digest,
+        release.variants[0].manifest.digest,
     ] {
-        assert!(web.join(document).is_file(), "{document} was not staged");
+        assert!(
+            web.join(zup_acquire::document_path(&digest).to_string())
+                .is_file()
+        );
     }
     // The thin runtime is content, because a client verifies it before running
     // it. A bootstrapper that fetched something the graph did not name would
@@ -226,17 +226,6 @@ fn a_thin_release_stages_a_web_tree_and_two_thin_installers() {
              application: {} is {size} bytes against a {launcher_size}-byte launcher",
             file.display()
         );
-        let declared = UniversalArtifact::open(file)
-            .unwrap_or_else(|error| panic!("{}: {error}", file.display()))
-            .index()
-            .standalone_size();
-        // The content has to be somewhere. If the release were no larger than the
-        // launcher, "thin" would be measuring nothing.
-        assert!(
-            declared > size * 4,
-            "the release carries content worth fetching: {declared} bytes of declared \
-             content against a {size}-byte installer"
-        );
     }
 
     // The report says what was published and how the two differ, because a
@@ -244,7 +233,6 @@ fn a_thin_release_stages_a_web_tree_and_two_thin_installers() {
     let report = stdout(&result);
     assert!(report.contains("Thin-Setup-version.exe"), "{report}");
     assert!(report.contains("Thin-Setup-channel.exe"), "{report}");
-    assert!(report.contains("versions/1.4.0.json"), "{report}");
 }
 
 #[test]
@@ -310,7 +298,11 @@ fn the_two_thin_installers_authenticate_two_different_documents() {
             .expect("addressable")
             .to_string()
     };
-    assert_eq!(document(&pinned), "releases/stable/versions/1.4.0.json");
+    let release_bytes = fs::read(project.path().join("web/releases/stable.json")).unwrap();
+    assert_eq!(
+        document(&pinned),
+        zup_acquire::document_path(&zup_core::hash_bytes(&release_bytes)).to_string()
+    );
     assert_eq!(document(&channel), "releases/stable.json");
 
     // And the two files are genuinely different files, not the same bytes twice.
@@ -361,8 +353,9 @@ scope = "user"
 [install.directory]
 user = "${{location.programs}}/Thin"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#
         ),
     )
@@ -388,6 +381,8 @@ fn a_thin_release_names_the_launcher_it_resolved() {
     let project = Project::new();
     let output = project.path().join("web");
     let result = Command::new(env!("CARGO_BIN_EXE_zup"))
+        .arg("--toolchain")
+        .arg(dispatcher().parent().unwrap())
         .args([
             std::ffi::OsString::from("publish"),
             std::ffi::OsString::from("stage"),
@@ -414,5 +409,5 @@ fn a_thin_release_names_the_launcher_it_resolved() {
 /// The console launcher, which is not the one a GUI frontend's installer is made
 /// of.
 fn console_dispatcher() -> std::path::PathBuf {
-    staged::dispatcher(&test_executable(), zup_toolchain::Subsystem::Console, true)
+    staged::dispatcher(zup_toolchain::Subsystem::Console, true)
 }

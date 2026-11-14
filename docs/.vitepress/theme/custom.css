@@ -7,7 +7,8 @@
   --vp-c-bg-alt: #f1f1ee;
   --vp-c-divider: #deded8;
   --vp-c-gutter: #deded8;
-  --vp-font-family-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --vp-font-family-mono:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   --vp-home-hero-name-color: #111111;
   --vp-button-brand-bg: #111111;
   --vp-button-brand-hover-bg: #2b2b2b;
@@ -98,7 +99,7 @@
   border-radius: 3px;
 }
 
-.vp-doc div[class*='language-'] {
+.vp-doc div[class*="language-"] {
   border-radius: 6px;
   box-shadow: none;
 }

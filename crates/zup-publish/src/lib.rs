@@ -11,13 +11,14 @@ pub use decision::{
     describe_conflict,
 };
 pub use naming::{
-    ASSET_NAME_MAX, DOCUMENT_PREFIX, DOCUMENT_SUFFIX, DocumentKind, asset_name, check_asset_name,
-    document_name, document_path, is_asset_name_byte, package_name, safe_segment, shard_index,
-    shard_name, shard_suffix,
+    ASSET_NAME_MAX, DOCUMENT_PREFIX, DOCUMENT_SUFFIX, DocumentKind, asset_name, blob_name,
+    check_asset_name, document_name, document_path, is_asset_name_byte, package_name, safe_segment,
+    shard_index, shard_name, shard_suffix,
 };
 pub use plan::{
     Application, ContentOrigin, HostLimits, OriginKind, PLAN_SCHEMA, PlanError, ProductClass,
-    ProductRole, ReleasePlan, ReleaseProduct, SourceClaim, TagIntent, TagPolicy,
+    ProductRole, ReleasePlan, ReleaseProduct, SourceClaim, TagIntent, TagPolicy, valid_commit,
+    valid_tag,
 };
 pub use receipt::{
     Notice, PRODUCT_STATES, PUBLICATION_STATES, ProductState, PublicationState, PublishReceipt,
@@ -26,5 +27,3 @@ pub use receipt::{
 pub use report::{
     PhaseReport, PhaseStatus, PublishReport, REPORT_SCHEMA, ReportBuilder, StepReport, StepStatus,
 };
-
-pub use zup_core::format_bytes;

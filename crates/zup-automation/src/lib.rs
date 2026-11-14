@@ -121,10 +121,10 @@ pub use crate::publication::{Publication, PublicationAsset};
 pub use crate::result::{
     Application, ArtifactInspectDetails, AutomationResult, BuildDetails, CheckDetails, Composition,
     ContractError, Details, DoctorCheck, DoctorDetails, DoctorTarget, InspectedContent,
-    InspectedTrust, InspectedVariant, PlanDetails, PlanResource, PublishDetails, PublishFailure,
-    PublishStageDetails, SignPrepareDetails, SignSubject, SignVerifyDetails, StagedPackage, Status,
-    Target, ToolchainCleanDetails, ToolchainComponentStatus, ToolchainInstallDetails,
-    ToolchainStatusDetails,
+    InspectedTrust, InspectedVariant, PlanDetails, PlanFilePlacement, PlanResource, PublishDetails,
+    PublishFailure, PublishStageDetails, SignPrepareDetails, SignSubject, SignVerifyDetails,
+    StagedPackage, Status, Target, ToolchainCleanDetails, ToolchainComponentStatus,
+    ToolchainInstallDetails, ToolchainStatusDetails,
 };
 pub use crate::stream::{LogLevel, StreamEvent, StreamVersion};
 pub use crate::version::{PROTOCOL, ProtocolError, ProtocolVersion};

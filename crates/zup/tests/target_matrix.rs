@@ -16,7 +16,7 @@ fn host_target() -> String {
     zup_core::Target::host().unwrap().to_string()
 }
 
-/// A Linux ABI Zup parses but no backend builds.
+/// A target without a GUI frontend.
 const UNSUPPORTED_TARGET: &str = "linux-x64-musl";
 
 /// The frontend every fixture project declares.
@@ -246,8 +246,9 @@ scope = "user"
 [install.directory]
 user = "${{location.user_data}}/OutputLifecycle"
 [[files]]
+id = "application"
 source = "**/*"
-destination = "${{install}}"
+placement = {{ kind = "fixed", directory = "${{install}}" }}
 "#,
             frontend = FRONTEND,
             host = host_target(),
@@ -341,7 +342,7 @@ user = "${{location.user_data}}/BackendBoundary"
         assert!(!output.status.success(), "{command} accepted the target");
         let stderr = flat(&output.stderr);
         assert!(
-            stderr.contains("unsupported backend for target"),
+            stderr.contains("frontend") && stderr.contains("not supported"),
             "{command} reported {stderr}"
         );
         for filesystem in ["dist/never-created", "does not exist", "source directory"] {

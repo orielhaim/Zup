@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use zup_acquire::{
     CatalogEntry, ContentCatalog, DocumentRef, RELEASE_SCHEMA, ReleaseDescriptor, ReleaseVariant,
-    WebLayout, blob_path, check_channel, check_segment,
+    blob_path, check_channel, check_segment, document_path,
 };
 use zup_core::Sha256Digest;
 
@@ -192,28 +192,15 @@ fn write_release(
 ) -> Result<(ReleaseDescriptor, Vec<String>), ArtifactError> {
     let catalog = ContentCatalog::new(catalog_entries).map_err(|_| ArtifactError::Invalid)?;
     let catalog_bytes = catalog.encode().map_err(|_| ArtifactError::Invalid)?;
-    let catalog_path = WebLayout::catalog(&channel.channel).map_err(|_| ArtifactError::Invalid)?;
-    write_atomic(
-        &join_relative(destination, &catalog_path.to_string())?,
-        &catalog_bytes,
-    )?;
+    let catalog_path = document_path(&zup_core::hash_bytes(&catalog_bytes));
+    write_document(destination, &catalog_bytes)?;
 
     let mut variants = Vec::new();
-    let mut tuf_targets = Vec::new();
+    let mut tuf_targets = vec![relative(&catalog_path)];
     for manifest in graph.manifests() {
-        let variant = write_variant(
-            graph,
-            &channel.channel,
-            &manifest.id,
-            &manifest.bytes,
-            destination,
-        )?;
+        let variant = write_variant(&manifest.id, &manifest.bytes, destination)?;
         tree.variant_count += 1;
-        tuf_targets.push(relative(&catalog_path));
-        tuf_targets.push(relative(
-            &WebLayout::variant_manifest(&channel.channel, &variant.id)
-                .map_err(|_| ArtifactError::Invalid)?,
-        ));
+        tuf_targets.push(document_path(&variant.manifest.digest).to_string());
         variants.push(variant);
     }
     variants.sort_by(|left, right| left.id.cmp(&right.id));
@@ -252,20 +239,18 @@ fn write_release(
     release.validate().map_err(|_| ArtifactError::Invalid)?;
 
     let release_bytes = release.encode().map_err(|_| ArtifactError::Invalid)?;
-    let release_path = WebLayout::release(&channel.channel).map_err(|_| ArtifactError::Invalid)?;
+    let immutable = write_document(destination, &release_bytes)?;
+    let release_path =
+        zup_acquire::release_path(&channel.channel).map_err(|_| ArtifactError::Invalid)?;
     write_atomic(
         &join_relative(destination, &release_path.to_string())?,
         &release_bytes,
     )?;
     tuf_targets.push(relative(&release_path));
 
-    let versioned = WebLayout::release_version(&channel.channel, &release.version)
-        .map_err(|_| ArtifactError::Invalid)?;
-    write_atomic(
-        &join_relative(destination, &versioned.to_string())?,
-        &release_bytes,
-    )?;
-    tuf_targets.push(relative(&versioned));
+    tuf_targets.push(document_path(&immutable).to_string());
+    tuf_targets.sort();
+    tuf_targets.dedup();
 
     write_tuf_input(
         destination,
@@ -273,25 +258,18 @@ fn write_release(
         &catalog_bytes,
         graph,
         &channel.channel,
-        &release.version,
     )?;
     Ok((release, tuf_targets))
 }
 
 fn write_variant(
-    _graph: &ArtifactGraph,
-    channel: &str,
     id: &str,
     manifest_bytes: &[u8],
     destination: &Path,
 ) -> Result<ReleaseVariant, ArtifactError> {
     check_segment(id).map_err(|_| ArtifactError::Invalid)?;
     let manifest: VariantManifest = VariantManifest::parse(manifest_bytes)?;
-    let path = WebLayout::variant_manifest(channel, id).map_err(|_| ArtifactError::Invalid)?;
-    write_atomic(
-        &join_relative(destination, &path.to_string())?,
-        manifest_bytes,
-    )?;
+    write_document(destination, manifest_bytes)?;
 
     let native = |descriptor: &Option<Descriptor>| {
         descriptor
@@ -330,26 +308,50 @@ fn write_tuf_input(
     catalog_bytes: &[u8],
     graph: &ArtifactGraph,
     channel: &str,
-    version: &str,
 ) -> Result<(), ArtifactError> {
     let root = destination.join("tuf-input");
     let mut documents: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let release_relative = WebLayout::release(channel).map_err(|_| ArtifactError::Invalid)?;
+    let release_relative =
+        zup_acquire::release_path(channel).map_err(|_| ArtifactError::Invalid)?;
     documents.insert(relative(&release_relative), release_bytes.to_vec());
-    let versioned =
-        WebLayout::release_version(channel, version).map_err(|_| ArtifactError::Invalid)?;
-    documents.insert(relative(&versioned), release_bytes.to_vec());
-    let catalog_relative = WebLayout::catalog(channel).map_err(|_| ArtifactError::Invalid)?;
-    documents.insert(relative(&catalog_relative), catalog_bytes.to_vec());
+    documents.insert(
+        document_path(&zup_core::hash_bytes(release_bytes)).to_string(),
+        release_bytes.to_vec(),
+    );
+    documents.insert(
+        document_path(&zup_core::hash_bytes(catalog_bytes)).to_string(),
+        catalog_bytes.to_vec(),
+    );
     for manifest in graph.manifests() {
-        let path = WebLayout::variant_manifest(channel, &manifest.id)
-            .map_err(|_| ArtifactError::Invalid)?;
-        documents.insert(relative(&path), manifest.bytes.clone());
+        documents.insert(
+            document_path(&zup_core::hash_bytes(&manifest.bytes)).to_string(),
+            manifest.bytes.clone(),
+        );
     }
     for (path, bytes) in documents {
         write_atomic(&join_relative(&root, &path)?, &bytes)?;
     }
     Ok(())
+}
+
+fn write_document(root: &Path, bytes: &[u8]) -> Result<Sha256Digest, ArtifactError> {
+    let digest = zup_core::hash_bytes(bytes);
+    let path = join_relative(root, &document_path(&digest).to_string())?;
+    match std::fs::File::open(&path) {
+        Ok(file) => {
+            use std::io::Read;
+            let observed = zup_core::hash_reader(file.take(bytes.len() as u64 + 1))?;
+            if observed != (bytes.len() as u64, digest) {
+                return Err(ArtifactError::DigestMismatch {
+                    media_type: "metadata document",
+                    digest: digest.to_hex(),
+                });
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => write_atomic(&path, bytes)?,
+        Err(error) => return Err(error.into()),
+    }
+    Ok(digest)
 }
 
 fn relative(path: &zup_acquire::RelativeContentPath) -> String {

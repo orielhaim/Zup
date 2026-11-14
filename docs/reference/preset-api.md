@@ -13,14 +13,14 @@ use zup_sdk::preset::prelude::*;
 
 ## `Preset`
 
-| Item | Meaning |
-| --- | --- |
-| `NAME` | this preset's Cargo package name, from `env!("CARGO_PKG_NAME")` |
-| `VERSION` | this preset's Cargo package version, from `env!("CARGO_PKG_VERSION")` |
-| `type Settings` | the typed settings, satisfying the `Settings` bound |
-| `required_capabilities()` | optional; what this preset cannot present without |
-| `assets()` | optional; files compiled into the preset |
-| `launch(PresetContext<Self::Settings>, &mut App)` | draw the installer |
+| Item                                              | Meaning                                                               |
+| ------------------------------------------------- | --------------------------------------------------------------------- |
+| `NAME`                                            | this preset's Cargo package name, from `env!("CARGO_PKG_NAME")`       |
+| `VERSION`                                         | this preset's Cargo package version, from `env!("CARGO_PKG_VERSION")` |
+| `type Settings`                                   | the typed settings, satisfying the `Settings` bound                   |
+| `required_capabilities()`                         | optional; what this preset cannot present without                     |
+| `assets()`                                        | optional; files compiled into the preset                              |
+| `launch(PresetContext<Self::Settings>, &mut App)` | draw the installer                                                    |
 
 `zup_sdk::preset::run::<P>()` is the whole of a preset's `main`. It describes the
 preset when a build asks it to, and otherwise connects to its host, completes the

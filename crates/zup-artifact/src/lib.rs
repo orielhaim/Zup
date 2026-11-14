@@ -35,8 +35,9 @@ pub use index::{
 };
 pub use platform::{HostArchitecture, Platform};
 pub use release::{
-    BuildArtifact, Measured, RELEASE_MANIFEST_NAME, RELEASE_SCHEMA, ReleaseArtifact, ReleaseError,
-    ReleaseManifest, ReleaseRuntime, ReleaseVariant, SigningPlan, SingleTarget,
+    BuildArtifact, BuildSource, Measured, RELEASE_MANIFEST_NAME, RELEASE_SCHEMA, ReleaseArtifact,
+    ReleaseDocument, ReleaseError, ReleaseManifest, ReleaseObject, ReleaseRuntime,
+    ReleaseTransport, ReleaseVariant, SigningPlan, SingleTarget,
 };
 pub use select::{
     CandidateVariant, Compatibility, HostExecution, ScoredCandidate, Selection, rank_all, score,

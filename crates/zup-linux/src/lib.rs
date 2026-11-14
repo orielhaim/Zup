@@ -7,12 +7,22 @@ mod backend;
 mod capabilities;
 mod carrier;
 #[cfg(target_os = "linux")]
+mod cleanup;
+#[cfg(target_os = "linux")]
+mod collection;
+#[cfg(target_os = "linux")]
+mod data_access;
+#[cfg(target_os = "linux")]
 mod elevate;
 mod error;
 #[cfg(target_os = "linux")]
 mod executor;
 #[cfg(target_os = "linux")]
 mod fs;
+#[cfg(target_os = "linux")]
+mod generation;
+#[cfg(target_os = "linux")]
+mod history;
 #[cfg(target_os = "linux")]
 mod input;
 mod integration;
@@ -24,18 +34,33 @@ mod lowering;
 #[cfg(target_os = "linux")]
 mod machine;
 #[cfg(target_os = "linux")]
+mod native_service;
+mod openrc;
+#[cfg(target_os = "linux")]
+mod openrc_native;
+#[cfg(target_os = "linux")]
 mod operation_host;
+#[cfg(target_os = "linux")]
+mod package_process;
 #[cfg(target_os = "linux")]
 mod paths;
 #[cfg(target_os = "linux")]
+mod persistent;
+#[cfg(target_os = "linux")]
 mod pkexec;
+#[cfg(target_os = "linux")]
+mod prerequisites;
 #[cfg(target_os = "linux")]
 mod refresh;
 mod resolve;
 #[cfg(target_os = "linux")]
 mod run;
 #[cfg(target_os = "linux")]
+mod service_control;
+#[cfg(target_os = "linux")]
 mod service_exec;
+#[cfg(target_os = "linux")]
+mod service_host;
 #[cfg(target_os = "linux")]
 mod service_ops;
 mod services;
@@ -44,7 +69,11 @@ mod session_host;
 #[cfg(target_os = "linux")]
 mod socket;
 #[cfg(target_os = "linux")]
+mod state;
+#[cfg(target_os = "linux")]
 mod systemd;
+#[cfg(target_os = "linux")]
+mod systemd_policy;
 #[cfg(all(target_os = "linux", feature = "test-support"))]
 #[allow(unsafe_code)]
 pub mod test_support;
@@ -52,7 +81,7 @@ pub mod test_support;
 mod worker;
 
 #[cfg(target_os = "linux")]
-pub use backend::{ExecutionReport, LinuxRuntimeBackend};
+pub use backend::{ExecutionReport, LinuxRuntimeBackend, recover_installation};
 pub use capabilities::{
     is_supported_linux_target, linux_capability_errors, linux_selection_errors,
     operation_capability_errors,
@@ -76,7 +105,7 @@ pub use input::{
 #[cfg(target_os = "linux")]
 pub use integration::{generated_for_plan, phase_keeps_generated, reap_generated, stage_generated};
 #[cfg(target_os = "linux")]
-pub use ledger::LinuxLedgerStore;
+pub use ledger::LinuxInstallationStore;
 pub use lifecycle::LinuxOutcome;
 pub use locations::{
     LinuxInstallLocationResolver, MACHINE_PROGRAMS_ROOT, MACHINE_SHARED_DATA_ROOT,
@@ -105,14 +134,12 @@ pub use resolve::{resolve_target, validate_target_plan};
 pub use run::{LinuxRunRequest, run, run_outcome};
 #[cfg(target_os = "linux")]
 pub use service_ops::{
-    MAX_UNIT_BYTES, SERVICE_BACKEND_PREFIX, ServicePayload, ServiceReceipt, admin_override_dir,
-    backend_id_for_unit, backend_key_for_unit, check_collisions, check_no_full_override,
-    decode_payload, desired_policy, encode_payload, ledger_key_for_payload, load_path_dirs,
-    policy_for_state, read_canonical_source, refuse_source_symlink, validate_changes,
-    validate_executable, validate_executable_live,
+    MAX_UNIT_BYTES, admin_override_dir, check_collisions, check_no_full_override, desired_policy,
+    load_path_dirs, policy_for_state, read_canonical_source, refuse_source_symlink,
+    validate_changes, validate_executable, validate_executable_live,
 };
 pub use services::{
-    MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, SYSTEMD_UNIT_DIR, SystemdUnit, UNIT_PREFIX, WANTED_BY,
+    MINIMUM_SYSTEMD_VERSION, SERVICE_TYPE, SYSTEMD_UNIT_DIR, SystemdUnit, WANTED_BY,
     parse_manager_version,
 };
 #[cfg(target_os = "linux")]
@@ -129,3 +156,14 @@ pub use worker::{EXECUTE_TIMEOUT, FilePin, WorkerContext, run_worker_mode};
 
 #[cfg(all(target_os = "linux", feature = "online"))]
 mod update;
+
+#[cfg(all(test, target_os = "linux"))]
+mod requirements_fixture {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/deployment.rs"
+    ));
+}
+
+#[cfg(target_os = "linux")]
+pub use persistent::resolve_persistent_bindings;

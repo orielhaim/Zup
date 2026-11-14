@@ -140,6 +140,12 @@ fn emit_failure(output: zup_presentation::OutputFormat, error: &miette::Report) 
 #[cfg(windows)]
 fn native_command() -> bool {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "update")
+    {
+        return true;
+    }
     if arguments.iter().any(|argument| argument == "--source")
         && host::command()
             .try_get_matches_from(std::env::args_os())
@@ -148,12 +154,31 @@ fn native_command() -> bool {
         return false;
     }
     arguments.iter().any(|argument| {
-        matches!(
-            argument.as_str(),
-            "__worker" | "__recover" | "__uninstall_runner" | "__terminal_runner" | "__upgrade"
-        ) || matches!(
-            argument.as_str(),
-            "--handoff" | "--acquired" | "--source" | "--ui"
-        )
+        matches!(argument.as_str(), "__worker" | "recover" | "upgrade")
+            || matches!(
+                argument.as_str(),
+                "--handoff" | "--acquired" | "--source" | "--ui"
+            )
     })
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn recovery_request(
+    assess: bool,
+    decision: Option<&std::path::Path>,
+) -> miette::Result<zup_transaction::RecoveryRequest> {
+    if assess {
+        return Ok(zup_transaction::RecoveryRequest::Assess {});
+    }
+    match decision {
+        Some(path) => Ok(zup_transaction::RecoveryRequest::CompleteForward {
+            decision: Box::new(
+                serde_json::from_slice(
+                    &std::fs::read(path).map_err(|error| miette::miette!("decision: {error}"))?,
+                )
+                .map_err(|error| miette::miette!("decision: {error}"))?,
+            ),
+        }),
+        None => Ok(zup_transaction::RecoveryRequest::Retry {}),
+    }
 }

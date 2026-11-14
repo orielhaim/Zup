@@ -1,19 +1,18 @@
 #![forbid(unsafe_code)]
 
-mod component;
+use zup_core::PluginArtifact;
 
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
-pub use component::{ComponentError, componentize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 pub use zup_bundle::MAX_PLUGIN_SOURCE_BYTES;
-use zup_bundle::{CompiledPluginArtifact, MAX_PLUGIN_AOT_TOTAL_BYTES, PluginArtifact};
+use zup_bundle::{CompiledPluginArtifact, MAX_PLUGIN_COMPONENT_TOTAL_BYTES};
 use zup_core::{MAX_PLUGIN_ARTIFACTS, ResolvedPlugin, Sha256Digest, Target, TargetBuildPlan};
 use zup_plugin_contract::{
-    AOT_FORMAT_VERSION, ContractError, EngineError, PLUGIN_API_VERSION, PluginEngine,
+    COMPONENT_FORMAT_VERSION, ContractError, EngineError, PLUGIN_API_VERSION, PluginEngine,
     WASMTIME_VERSION, wit_package_digest,
 };
 
@@ -73,17 +72,17 @@ pub fn compile_plugins(
     compile_with_engine(&plan.plugins, target, &engine)
 }
 
-fn add_aot_size(total: &mut u64, size: u64) -> Result<(), zup_bundle::PackageError> {
+fn add_component_size(total: &mut u64, size: u64) -> Result<(), zup_bundle::PackageError> {
     *total = total
         .checked_add(size)
-        .ok_or(zup_bundle::PackageError::PluginAotTooLarge {
+        .ok_or(zup_bundle::PackageError::PluginComponentTooLarge {
             size: u64::MAX,
-            limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
+            limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
         })?;
-    if *total > MAX_PLUGIN_AOT_TOTAL_BYTES {
-        return Err(zup_bundle::PackageError::PluginAotTooLarge {
+    if *total > MAX_PLUGIN_COMPONENT_TOTAL_BYTES {
+        return Err(zup_bundle::PackageError::PluginComponentTooLarge {
             size: *total,
-            limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
+            limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
         });
     }
     Ok(())
@@ -95,7 +94,7 @@ fn compile_with_engine(
     engine: &PluginEngine,
 ) -> Result<Vec<CompiledPluginArtifact>, PluginBuildError> {
     let mut artifacts = Vec::with_capacity(plugins.len());
-    let mut aot_total = 0u64;
+    let mut component_total = 0u64;
     for resolved in plugins {
         if resolved.size > MAX_PLUGIN_SOURCE_BYTES {
             return Err(PluginBuildError::SourceTooLarge {
@@ -112,29 +111,31 @@ fn compile_with_engine(
                 path: resolved.source.display().to_string(),
             });
         }
-        let aot = engine.precompile_component(&source)?;
-        let aot_size =
-            u64::try_from(aot.len()).map_err(|_| zup_bundle::PackageError::PluginAotTooLarge {
+        engine.compile_component(&source)?;
+        let component = source;
+        let component_size = u64::try_from(component.len()).map_err(|_| {
+            zup_bundle::PackageError::PluginComponentTooLarge {
                 size: u64::MAX,
-                limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
-            })?;
-        add_aot_size(&mut aot_total, aot_size)?;
-        let aot_sha256 = Sha256Digest::from_bytes(Sha256::digest(&aot).into());
+                limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
+            }
+        })?;
+        add_component_size(&mut component_total, component_size)?;
+        let component_sha256 = resolved.sha256;
         let metadata = PluginArtifact {
             plugin_id: resolved.id.clone(),
             source_size: resolved.size,
             source_sha256: resolved.sha256,
             target: *target,
             wasmtime_version: WASMTIME_VERSION.to_owned(),
-            aot_format_version: AOT_FORMAT_VERSION,
+            component_format_version: COMPONENT_FORMAT_VERSION,
             plugin_api_version: PLUGIN_API_VERSION.to_owned(),
             wit_digest: Sha256Digest::from_bytes(wit_package_digest()),
             engine_fingerprint: Sha256Digest::from_bytes(*engine.fingerprint().as_bytes()),
-            aot_size: aot.len() as u64,
-            aot_sha256,
-            blob: aot_sha256,
+            component_size: component.len() as u64,
+            component_sha256,
+            blob: component_sha256,
         };
-        artifacts.push(CompiledPluginArtifact::new(metadata, aot)?);
+        artifacts.push(CompiledPluginArtifact::new(metadata, component)?);
     }
     Ok(artifacts)
 }
@@ -235,21 +236,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_aggregate_aot_before_artifact_retention() {
-        let mut total = MAX_PLUGIN_AOT_TOTAL_BYTES - 1;
+    fn rejects_aggregate_component_before_artifact_retention() {
+        let mut total = MAX_PLUGIN_COMPONENT_TOTAL_BYTES - 1;
         assert!(matches!(
-            add_aot_size(&mut total, 2),
-            Err(zup_bundle::PackageError::PluginAotTooLarge {
+            add_component_size(&mut total, 2),
+            Err(zup_bundle::PackageError::PluginComponentTooLarge {
                 size,
-                limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
-            }) if size == MAX_PLUGIN_AOT_TOTAL_BYTES + 1
+                limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
+            }) if size == MAX_PLUGIN_COMPONENT_TOTAL_BYTES + 1
         ));
         let mut total = u64::MAX;
         assert!(matches!(
-            add_aot_size(&mut total, 1),
-            Err(zup_bundle::PackageError::PluginAotTooLarge {
+            add_component_size(&mut total, 1),
+            Err(zup_bundle::PackageError::PluginComponentTooLarge {
                 size: u64::MAX,
-                limit: MAX_PLUGIN_AOT_TOTAL_BYTES,
+                limit: MAX_PLUGIN_COMPONENT_TOTAL_BYTES,
             })
         ));
     }

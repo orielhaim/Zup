@@ -120,7 +120,7 @@ pub(crate) fn compile_icons(
 
 pub(crate) fn pack_linux_icons(
     icons: &TargetIcons,
-    installer: &Installer,
+    installer: &mut Installer,
 ) -> Result<Vec<ResolvedFile>, BuildError> {
     if installer.target.operating_system() != TargetOperatingSystem::Linux {
         return Ok(Vec::new());
@@ -161,9 +161,16 @@ pub(crate) fn pack_linux_icons(
                 reason: error.to_string(),
             })?;
         packed.push(ResolvedFile {
+            id: zup_core::PayloadId::TreeMember {
+                declaration: zup_core::ResourceId::new("zup-icons").expect("static resource id"),
+                member: name.clone(),
+            },
             source,
             source_relative,
-            destination: base.join_relative(&name),
+            placement: zup_core::PayloadPlacement::Fixed {
+                replacement: zup_core::FixedReplacement::Atomic,
+                path: base.join_relative(&name),
+            },
             size: artifact.size,
             sha256: artifact.sha256,
             component: None,
@@ -171,7 +178,21 @@ pub(crate) fn pack_linux_icons(
             executable: false,
         });
     }
-    packed.sort_by_key(|a| a.destination.to_string());
+    if !packed.is_empty() {
+        installer.files.push(zup_core::FileMapping {
+            id: zup_core::ResourceId::new("zup-icons").expect("static resource id"),
+            source: "__zup_icons__/*".to_owned(),
+            placement: zup_core::PayloadMapping::Fixed {
+                replacement: zup_core::FixedReplacement::Atomic,
+                directory: base,
+            },
+            component: None,
+            when: None,
+            allow_empty: false,
+            executable: false,
+        });
+    }
+    packed.sort_by_key(|a| a.placement.to_string());
     Ok(packed)
 }
 

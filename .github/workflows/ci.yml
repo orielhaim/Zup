@@ -3,7 +3,39 @@ name: CI
 on:
   push:
     branches: [master]
+    paths:
+      - "action.yml"
+      - "action/scripts/validate-workflow.ts"
+      - "**/*.rs"
+      - "**/*.wit"
+      - "native/**"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "scripts/**"
+      - "fixtures/**"
+      - "schema/**"
+      - "examples/**"
+      - ".github/workflows/**"
   pull_request:
+    paths:
+      - "action.yml"
+      - "action/scripts/validate-workflow.ts"
+      - "**/*.rs"
+      - "**/*.wit"
+      - "native/**"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".cargo/**"
+      - ".config/nextest.toml"
+      - "scripts/**"
+      - "fixtures/**"
+      - "schema/**"
+      - "examples/**"
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:
@@ -21,8 +53,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  lint:
-    name: lint ${{ matrix.os }}
+  check:
+    name: check ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -37,63 +69,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
           components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: fast-${{ runner.os }}-${{ runner.arch }}-debug0
-          cache-on-failure: false
-
-      - uses: ilammy/setup-nasm@v1
-        if: runner.os == 'Windows'
-        with:
-          platform: win64
-
-      - uses: rui314/setup-mold@v1
-        if: runner.os == 'Linux'
-        with:
-          mold-version: 3.0.0
-          make-default: "true"
-
-      - name: Formatting
-        run: cargo fmt --all --check
-
-      - name: Linux package selection
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          portable="$(cargo xtask emit-host-packages --host any --format cargo-args)"
-          linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
-          printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
-
-      - name: Windows Clippy
-        if: runner.os == 'Windows'
-        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
-
-      - name: Linux Clippy
-        if: runner.os == 'Linux'
-        shell: bash
-        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
-
-  test:
-    name: test ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -124,16 +101,40 @@ jobs:
           linux="$(cargo xtask emit-host-packages --host linux --format cargo-args)"
           printf 'PORTABLE=%s\nLINUX=%s\n' "$portable" "$linux" >> "$GITHUB_ENV"
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint@1.7.12
+
       - name: Linux dependencies
         if: runner.os == 'Linux'
         shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y desktop-file-utils shared-mime-info pkg-config libfontconfig1-dev libfreetype-dev libwayland-dev libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev
-          command -v update-mime-database
-          command -v update-desktop-database
-          command -v desktop-file-validate
-          mold --version
+
+      - name: Test CI diagnostics reporter
+        run: python -m unittest discover -s scripts/ci -p "test_*.py"
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Windows Clippy
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+
+      - name: Linux Clippy
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo clippy --all-features --all-targets $PORTABLE $LINUX -- -D warnings
+
+      - name: Build version-matched plugin test fixtures
+        run: |
+          rustup target add wasm32-wasip3
+          cargo xtask fixtures build
 
       - name: Windows tests
         if: runner.os == 'Windows'
@@ -141,7 +142,14 @@ jobs:
 
       - name: Windows machine authority tests
         if: runner.os == 'Windows'
-        run: cargo nextest run -p zup-windows --all-features --run-ignored ignored-only --no-fail-fast -E 'test(machine_fs::tests) | test(machine_authority::tests) | test(machine_runtime_)'
+        run: python scripts/ci/verify_windows_privileged.py
+
+      - name: Privileged coverage evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-privileged-evidence
+          path: target/f15
 
       - name: Linux tests
         if: runner.os == 'Linux'
@@ -176,7 +184,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.99"
+          toolchain: "1.100"
 
       - uses: Swatinem/rust-cache@v2
         with:
