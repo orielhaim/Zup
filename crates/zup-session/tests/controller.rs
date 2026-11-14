@@ -98,6 +98,9 @@ struct FakeHost {
     seen: Seen,
     refuse_backend: bool,
     after_commit_error: Option<String>,
+    journal: Option<Arc<JournalRecovery>>,
+    ledger_error: Arc<AtomicBool>,
+    refresh_failures: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 fn fixture_build() -> zup_core::TargetBuildPlan {
@@ -329,6 +332,58 @@ impl SessionHost for FakeHost {
     where
         Self: 'a;
 
+    fn state_root(
+        &self,
+        _installer: &zup_core::Installer,
+        scope: SelectedScope,
+        hint: Option<&Path>,
+    ) -> Result<PathBuf, String> {
+        Ok(hint
+            .map(Path::to_owned)
+            .or_else(|| {
+                self.installations
+                    .iter()
+                    .find(|i| i.scope == scope)
+                    .map(|i| i.state_root.clone())
+            })
+            .unwrap_or_default())
+    }
+
+    fn pending_recovery(
+        &self,
+        context: &OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<Option<zup_core::RecoverySummary>, String> {
+        if let Script::Recovery(transaction) = self.backend.script
+            && !self
+                .seen
+                .events
+                .lock()
+                .unwrap()
+                .contains(&format!("recover {transaction}"))
+        {
+            return Ok(Some(zup_core::RecoverySummary {
+                transaction,
+                installation: zup_core::InstallationId::new_v7(),
+                app: app.clone(),
+                version: self.build.installer.app.version.clone(),
+                scope: context.scope,
+                target: self.build.installer.target,
+                directory: None,
+                kind: zup_core::RecoveryKind::Interrupted,
+                cleanup: Vec::new(),
+                detail: "activation outcome is uncertain".into(),
+            }));
+        }
+        if self.journal.is_none() {
+            return Ok(None);
+        }
+        self.recovery_store(context, app)?
+            .pending_recovery(app, context.scope)
+            .map(|target| target.map(|target| target.summary()))
+            .map_err(|error| error.to_string())
+    }
+
     fn bind<'a>(&'a self, context: &'a OperationContext) -> Result<Self, String> {
         self.seen.events.lock().expect("seen").push(format!(
             "bind {} {}",
@@ -345,14 +400,62 @@ impl SessionHost for FakeHost {
     fn recover<'a>(
         &'a self,
         _context: &'a OperationContext,
-        transaction: zup_core::TransactionId,
+        target: zup_core::RecoverySummary,
         request: zup_transaction::RecoveryRequest,
         _control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<
         'a,
         Result<zup_runtime::InstallOutcome, zup_runtime::SessionError>,
     > {
+        let transaction = target.transaction;
         Box::pin(async move {
+            if let Some(journal) = &self.journal {
+                use zup_transaction::TransactionStore;
+                let store =
+                    zup_transaction::FilesystemTransactionStore::private_at(&_context.state_root);
+                let record = store.load(&transaction).unwrap();
+                assert_eq!(record.app_id, self.build.installer.app.id);
+                assert_eq!(record.scope, _context.scope);
+                assert_eq!(record.plan.installation, target.installation);
+                assert_eq!(record.target, target.target);
+                let mut executor = journal.executor.lock().unwrap();
+                let attempt = journal.attempts.fetch_add(1, Ordering::SeqCst);
+                if attempt > 0 {
+                    executor.fail_verify_operation = None;
+                }
+                let (record, outcome) = zup_transaction::recover_requested(
+                    record,
+                    &store,
+                    &mut *executor,
+                    &journal.publisher,
+                    &request,
+                )
+                .unwrap();
+                self.seen
+                    .events
+                    .lock()
+                    .unwrap()
+                    .push(format!("recover {transaction}"));
+                return Ok(match outcome {
+                    zup_transaction::TransactionOutcome::Committed => {
+                        zup_transaction::reconcile_committed(
+                            &store,
+                            &record,
+                            &_context.state_root,
+                            |_| Ok(()),
+                        )
+                        .unwrap();
+                        self.ledger_error.store(false, Ordering::SeqCst);
+                        zup_runtime::InstallOutcome::Recovered {
+                            settlement: zup_runtime::RecoverySettlement::Committed,
+                        }
+                    }
+                    zup_transaction::TransactionOutcome::RecoveryRequired => {
+                        zup_runtime::InstallOutcome::recovery(&record)
+                    }
+                    other => panic!("committed cleanup did not remain committed: {other:?}"),
+                });
+            }
             assert_eq!(request, zup_transaction::RecoveryRequest::Retry {});
             assert!(
                 matches!(self.backend.script, Script::Recovery(expected) if expected == transaction)
@@ -373,6 +476,15 @@ impl SessionHost for FakeHost {
         _context: &OperationContext,
     ) -> Result<Option<Arc<zup_core::TargetBuildPlan>>, String> {
         self.seen.events.lock().unwrap().push("refreshed".into());
+        if self
+            .refresh_failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err("presentation refresh unavailable".into());
+        }
         Ok(None)
     }
 
@@ -382,6 +494,9 @@ impl SessionHost for FakeHost {
         scope: SelectedScope,
         state_root: Option<&Path>,
     ) -> Result<OperationContext, String> {
+        if self.ledger_error.load(Ordering::SeqCst) {
+            return Err("installation ledger could not be read".into());
+        }
         let installation = self
             .installations
             .iter()
@@ -393,27 +508,6 @@ impl SessionHost for FakeHost {
                 .or_else(|| installation.map(|installation| installation.state_root.clone()))
                 .unwrap_or_default(),
             ledger: installation.and_then(|installation| installation.ledger.clone()),
-        })
-    }
-
-    fn discover(
-        &mut self,
-        _executable: &std::path::Path,
-        _launch: &SessionLaunch,
-    ) -> Result<SessionDiscovery, String> {
-        let installations = if self.installations.is_empty() {
-            let root = tempfile::tempdir().expect("state root");
-            vec![zup_session::ScopedInstallation {
-                scope: SelectedScope::User,
-                state_root: root.keep(),
-                ledger: None,
-            }]
-        } else {
-            self.installations.clone()
-        };
-        Ok(SessionDiscovery {
-            build: Arc::new(self.build.clone()),
-            installations,
         })
     }
 
@@ -435,11 +529,7 @@ impl SessionHost for FakeHost {
         Ok(Arc::new(self.backend.clone()))
     }
 
-    fn after_commit(
-        &self,
-        _context: &OperationContext,
-        _prepared: &zup_runtime::PreparedOperation,
-    ) -> Result<(), String> {
+    fn after_commit(&self, _context: &OperationContext) -> Result<(), String> {
         match &self.after_commit_error {
             Some(error) => Err(error.clone()),
             None => Ok(()),
@@ -478,10 +568,17 @@ fn host(preset: &str) -> FakeHost {
             script: Script::Commit,
         },
         preset: stub,
-        installations: Vec::new(),
+        installations: vec![zup_session::ScopedInstallation {
+            scope: SelectedScope::User,
+            state_root: tempfile::tempdir().unwrap().keep(),
+            ledger: None,
+        }],
         seen: Seen::default(),
         refuse_backend: false,
         after_commit_error: None,
+        journal: None,
+        ledger_error: Default::default(),
+        refresh_failures: Default::default(),
     }
 }
 
@@ -565,11 +662,29 @@ async fn post_commit_cleanup_failure_is_one_reconciliation_result() {
         matches!(
             completion.outcome,
             zup_session::SessionOutcome::Deployment(
-                zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. }
+                zup_runtime::InstallOutcome::CommittedWithWarning { .. }
             )
         ),
         "cleanup after commit stays a committed reconciliation: {:?}",
         completion.outcome
+    );
+    let zup_session::SessionOutcome::Deployment(ref outcome) = completion.outcome else {
+        panic!("deployment result expected");
+    };
+    let context = discovery.context(SelectedScope::User).unwrap();
+    let mut state = session_host.open_state(&discovery, &context, None);
+    state.finish_with(outcome);
+    assert_ne!(
+        state.snapshot().state,
+        zup_preset_protocol::InstallerState::RecoveryRequired,
+        "nonjournal cleanup must not invent journal recovery"
+    );
+    assert!(
+        !matches!(
+            state.accept(zup_preset_protocol::Action::Retry),
+            zup_session::HostDecision::Refused(_)
+        ),
+        "cleanup diagnostic must have a safe action"
     );
     assert!(
         std::iter::from_fn(|| received.try_recv().ok())
@@ -629,6 +744,7 @@ fn an_unspecified_either_scope_presents_an_existing_installation() {
             state_root: PathBuf::from("machine"),
             ledger: Some(installed(SelectedScope::Machine)),
         }],
+        &Default::default(),
     )
     .expect("presentation");
     assert_eq!(scope, SelectedScope::Machine);
@@ -636,6 +752,7 @@ fn an_unspecified_either_scope_presents_an_existing_installation() {
         zup_core::InstallScope::Either,
         &SessionLaunch::default(),
         &[],
+        &Default::default(),
     );
     assert!(
         headless.is_err(),
@@ -891,4 +1008,320 @@ async fn repair_uses_committed_components_despite_surface_defaults() {
         );
         assert!(session_host.backend.ran.load(Ordering::SeqCst));
     }
+}
+
+#[path = "../../zup-transaction/tests/common/mod.rs"]
+mod journal_fixture;
+
+#[test]
+fn a_committed_warning_offers_only_the_owned_active_launcher() {
+    let key = zup_core::ResourceKey::Launcher {
+        id: zup_core::DeclaredResourceId::Application {
+            id: zup_core::ResourceId::new("original-launcher").unwrap(),
+        },
+    };
+    let mut ledger = installed(SelectedScope::User);
+    ledger
+        .current
+        .requirements
+        .launchers
+        .push(zup_plan::DesiredLauncher {
+            key: key.clone(),
+            location: zup_core::LauncherLocation::Menu,
+            launcher_path: (),
+            name: zup_core::NonEmptyString::new("Original application").unwrap(),
+            target: zup_core::Template::parse("C:/Session/original.exe").unwrap(),
+            arguments: Vec::new(),
+            working_directory: None,
+            privilege: zup_core::Privilege::User,
+        });
+    ledger.current.resources.insert(
+        key,
+        zup_plan::OwnedResource::Launcher {
+            launcher_path: zup_core::TargetPath::new(ledger.target, "C:/Menu/Original.lnk")
+                .unwrap(),
+            privilege: zup_core::Privilege::User,
+            previous: zup_plan::LauncherState::Absent,
+            installed: zup_plan::LauncherState::Launcher {
+                target: zup_core::TargetPath::new(ledger.target, "C:/Session/original.exe")
+                    .unwrap(),
+                arguments: Vec::new(),
+                working_directory: None,
+            },
+        },
+    );
+    let discovery = SessionDiscovery {
+        build: Arc::new(fixture_build()),
+        installations: Vec::new(),
+        recoveries: Default::default(),
+        observation_errors: Default::default(),
+    };
+    let mut context = OperationContext {
+        scope: SelectedScope::User,
+        state_root: PathBuf::from("state"),
+        ledger: Some(ledger),
+    };
+    let mut state = zup_session::initial_state(&discovery, &context, None);
+    state.finish_with(&zup_runtime::InstallOutcome::CommittedWithWarning {
+        detail: "presentation refresh failed".into(),
+    });
+    assert_eq!(
+        state.snapshot().launch.as_ref().unwrap().name,
+        "Original application"
+    );
+    assert!(matches!(state.accept(zup_preset_protocol::Action::Launch),
+        zup_session::HostDecision::Launch(target) if target.name == "Original application"));
+    context.ledger.as_mut().unwrap().state = zup_plan::InstallationState::Removed;
+    let mut state = zup_session::initial_state(&discovery, &context, None);
+    state.finish_with(&zup_runtime::InstallOutcome::CommittedWithWarning {
+        detail: "presentation refresh failed".into(),
+    });
+    assert!(state.snapshot().launch.is_none());
+}
+
+#[rstest::rstest]
+#[case(zup_plan::LifecycleAction::Install)]
+#[case(zup_plan::LifecycleAction::Upgrade)]
+#[case(zup_plan::LifecycleAction::Uninstall)]
+#[tokio::test]
+async fn reopened_gui_finds_committed_cleanup_without_a_desired_target(
+    #[case] action: zup_plan::LifecycleAction,
+    #[values(false, true)] unreadable_ledger: bool,
+) {
+    use zup_plan::{HistoryFileTarget, HistoryObject, JournalMember, MetadataFile};
+    use zup_transaction::{TransactionCoordinator, TransactionPhase, TransactionStore};
+    let root = tempfile::tempdir().unwrap();
+    let state_root = root.path().join("state");
+    let store = zup_transaction::FilesystemTransactionStore::private_at(&state_root);
+    let publisher = journal_fixture::Publisher::default();
+    let mut input = journal_fixture::effects();
+    if action != zup_plan::LifecycleAction::Install {
+        let prior = TransactionCoordinator::new(store.clone())
+            .begin(
+                journal_fixture::sample_app_id(),
+                SelectedScope::User,
+                journal_fixture::sample_version(),
+                zup_plan::compile_deployment(&input).unwrap(),
+            )
+            .unwrap()
+            .execute(&mut journal_fixture::fake::FakeExecutor::new(), &publisher)
+            .unwrap();
+        zup_transaction::reconcile_committed(&store, &prior.record, &state_root, |_| Ok(()))
+            .unwrap();
+        let previous = publisher.0.lock().unwrap().clone().unwrap();
+        input.observed = Some(previous.current.selection());
+        input.observed_transaction = Some(previous.commit.transaction);
+        if action == zup_plan::LifecycleAction::Uninstall {
+            input.transition = zup_plan::DeploymentTransition::Remove;
+        }
+    }
+    let source = zup_core::TransactionId::new_v7();
+    let target = HistoryFileTarget::Collection {
+        intent: zup_core::hash_bytes(b"retired collection"),
+    };
+    let observed = MetadataFile {
+        object: journal_fixture::owned_instance().object,
+        size: 1,
+        sha256: zup_core::hash_bytes(b"metadata"),
+    };
+    let history = |object| zup_plan::CleanupOperation {
+        privilege: zup_core::Privilege::User,
+        candidate: zup_plan::CleanupCandidate::History(zup_plan::HistoryCleanup {
+            installation: input.installation,
+            source,
+            materializations: Vec::new(),
+            object,
+        }),
+    };
+    input.cleanup = vec![
+        history(HistoryObject::Journal {
+            plan_hash: zup_core::hash_bytes(b"retired plan"),
+            object: journal_fixture::owned_instance().object,
+            members: [(JournalMember::Record, observed.clone())].into(),
+            sidecars: vec![target.clone()],
+        }),
+        history(HistoryObject::File { target, observed }),
+    ];
+    let plan = zup_plan::compile_deployment(&input).unwrap();
+    plan.validate().unwrap();
+    let mut executor = journal_fixture::fake::FakeExecutor::new();
+    executor.fail_verify_operation = Some(
+        plan.execution_order
+            .iter()
+            .find(|id| {
+                plan.nodes
+                    .iter()
+                    .any(|node| node.id == **id && node.kind.is_post_commit())
+            })
+            .unwrap()
+            .clone(),
+    );
+    let settled = TransactionCoordinator::new(store.clone())
+        .begin(
+            journal_fixture::sample_app_id(),
+            SelectedScope::User,
+            journal_fixture::sample_version(),
+            plan,
+        )
+        .unwrap()
+        .execute(&mut executor, &publisher)
+        .unwrap();
+    assert_eq!(settled.record.phase, TransactionPhase::Committed);
+    assert!(!settled.record.cleanup_complete());
+    let id = settled.record.transaction_id;
+    drop(store);
+    let reopened = zup_transaction::FilesystemTransactionStore::private_at(&state_root);
+    assert!(!reopened.load(&id).unwrap().cleanup_complete());
+    let projection = reopened
+        .recovery_target(&journal_fixture::sample_app_id(), SelectedScope::User, id)
+        .unwrap()
+        .unwrap()
+        .summary();
+    assert_eq!(projection.kind, zup_core::RecoveryKind::CommittedCleanup);
+    assert_eq!(projection.cleanup.len(), 2);
+    assert!(
+        reopened
+            .recovery_target(
+                &journal_fixture::sample_app_id(),
+                SelectedScope::Machine,
+                id
+            )
+            .is_err()
+    );
+    assert!(
+        reopened
+            .recovery_target(
+                &zup_core::AppId::new("com.example.foreign").unwrap(),
+                SelectedScope::User,
+                id
+            )
+            .is_err()
+    );
+    assert!(
+        reopened
+            .recovery_target(
+                &journal_fixture::sample_app_id(),
+                SelectedScope::User,
+                zup_core::TransactionId::new_v7()
+            )
+            .is_err()
+    );
+    let mut session_host = host("close_preset");
+    session_host.build.installer.app.id = journal_fixture::sample_app_id();
+    session_host.build.installer.app.version = semver::Version::new(9, 0, 0);
+    session_host.installations = vec![zup_session::ScopedInstallation {
+        scope: SelectedScope::User,
+        state_root,
+        ledger: None,
+    }];
+    let before = executor
+        .calls
+        .iter()
+        .filter(|call| !call.id.starts_with("collect:"))
+        .count();
+    let journal = Arc::new(JournalRecovery {
+        publisher,
+        executor: Mutex::new(executor),
+        attempts: Default::default(),
+    });
+    session_host.journal = Some(journal.clone());
+    session_host
+        .ledger_error
+        .store(unreadable_ledger, Ordering::SeqCst);
+    let discovery = session_host
+        .discover(fake_exe(), &SessionLaunch::default())
+        .unwrap();
+    let context = discovery.context(SelectedScope::User).unwrap();
+    let mut state = session_host.open_state(&discovery, &context, None);
+    assert_eq!(
+        state.snapshot().recovery.as_ref().map(|r| r.transaction),
+        Some(id)
+    );
+    assert_eq!(
+        state.accept(zup_preset_protocol::Action::Recover { transaction: id }),
+        zup_session::HostDecision::Recover { transaction: id }
+    );
+    assert_eq!(
+        state.snapshot().settlement,
+        Some(zup_core::DeploymentSettlement::Committed)
+    );
+    assert_eq!(
+        state.snapshot().recovery.as_ref().unwrap().app,
+        journal_fixture::sample_app_id()
+    );
+    assert_eq!(
+        state.snapshot().recovery.as_ref().unwrap().version,
+        journal_fixture::sample_version()
+    );
+    zup_session::run(
+        session_host.clone(),
+        fake_exe(),
+        SessionLaunch {
+            maintenance: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !reopened.load(&id).unwrap().cleanup_complete(),
+        "closing the GUI retains recovery evidence"
+    );
+    session_host.preset = host("journal_recovery_preset").preset;
+    zup_session::run(session_host.clone(), fake_exe(), SessionLaunch::default())
+        .await
+        .unwrap();
+    let final_record = reopened.load(&id).unwrap();
+    assert_eq!(final_record.phase, TransactionPhase::Committed);
+    assert!(final_record.cleanup_complete());
+    assert_eq!(
+        final_record.reconciliation,
+        zup_transaction::ReconciliationState::Complete
+    );
+    assert_eq!(journal.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        journal
+            .executor
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|call| !call.id.starts_with("collect:"))
+            .count(),
+        before
+    );
+    assert!(
+        !session_host.backend.ran.load(Ordering::SeqCst),
+        "the new desired deployment was never executed"
+    );
+}
+
+struct JournalRecovery {
+    publisher: journal_fixture::Publisher,
+    executor: Mutex<journal_fixture::fake::FakeExecutor>,
+    attempts: std::sync::atomic::AtomicUsize,
+}
+
+#[tokio::test]
+async fn a_rollback_refresh_failure_preserves_settlement_and_has_a_safe_refresh_action() {
+    let mut session_host = host("refresh_preset");
+    let transaction = zup_core::TransactionId::new_v7();
+    session_host.backend.script = Script::Recovery(transaction);
+    session_host.refresh_failures.store(1, Ordering::SeqCst);
+    zup_session::run(session_host.clone(), fake_exe(), SessionLaunch::default())
+        .await
+        .unwrap();
+    let seen = session_host.seen.events.lock().unwrap();
+    assert_eq!(
+        seen.iter()
+            .filter(|line| **line == format!("recover {transaction}"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.as_str() == "refreshed")
+            .count(),
+        2
+    );
 }

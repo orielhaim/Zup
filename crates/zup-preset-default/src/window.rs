@@ -812,8 +812,11 @@ impl Installer {
         let close = self.close();
         let retry = self.send(
             snapshot
-                .recovery_transaction
-                .map(|transaction| Action::Recover { transaction })
+                .recovery
+                .as_ref()
+                .map(|target| Action::Recover {
+                    transaction: target.transaction,
+                })
                 .unwrap_or(Action::Retry),
         );
         let bar = ActionBar::new(layout)
@@ -824,13 +827,11 @@ impl Installer {
             )
             .trailing(
                 Button::new("retry")
-                    .disabled(
-                        snapshot.state == InstallerState::RecoveryRequired
-                            && snapshot.recovery_transaction.is_none(),
-                    )
                     .primary()
-                    .label(if snapshot.recovery_transaction.is_some() {
+                    .label(if snapshot.recovery.is_some() {
                         "Recover"
+                    } else if snapshot.state == InstallerState::RefreshRequired {
+                        "Refresh"
                     } else {
                         "Try again"
                     })
@@ -877,8 +878,11 @@ impl Installer {
         let close = self.close();
         let retry = self.send(
             snapshot
-                .recovery_transaction
-                .map(|transaction| Action::Recover { transaction })
+                .recovery
+                .as_ref()
+                .map(|target| Action::Recover {
+                    transaction: target.transaction,
+                })
                 .unwrap_or(Action::Retry),
         );
         let bar = ActionBar::new(layout)
@@ -889,13 +893,11 @@ impl Installer {
             )
             .trailing(
                 Button::new("retry")
-                    .disabled(
-                        snapshot.state == InstallerState::RecoveryRequired
-                            && snapshot.recovery_transaction.is_none(),
-                    )
                     .primary()
-                    .label(if snapshot.recovery_transaction.is_some() {
+                    .label(if snapshot.recovery.is_some() {
                         "Recover"
+                    } else if snapshot.state == InstallerState::RefreshRequired {
+                        "Refresh"
                     } else {
                         "Try again"
                     })

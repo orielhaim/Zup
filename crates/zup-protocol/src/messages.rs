@@ -4,7 +4,7 @@ use zup_core::Target;
 
 use zup_core::SessionId;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
@@ -43,6 +43,10 @@ pub struct WireEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Message {
+    RecoveryInspected {
+        target: Option<zup_core::RecoverySummary>,
+        active: Option<Box<zup_core::ActiveLaunchers>>,
+    },
     WorkerHello(WorkerHello),
     ParentHello(ParentHello),
     PrepareTransaction(Box<PrepareTransaction>),
@@ -114,6 +118,7 @@ pub struct PrepareTransaction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PreparedTransactionRequest {
+    InspectRecovery,
     Deployment {
         plan: Box<zup_plan::DeploymentPlan>,
         intent: Box<zup_plan::DeploymentIntent>,
@@ -285,6 +290,7 @@ pub struct TransactionStateChanged {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerOutcome {
+    RecoveryInspected,
     RecoveryAssessed,
     Committed,
     RolledBack,

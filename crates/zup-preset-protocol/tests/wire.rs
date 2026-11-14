@@ -20,7 +20,8 @@ fn product() -> ProductIdentity {
 
 fn snapshot() -> Snapshot {
     Snapshot {
-        recovery_transaction: None,
+        recovery: None,
+        settlement: None,
         product: product(),
         surface: Surface::Install(InstallOptions {
             existing_version: None,

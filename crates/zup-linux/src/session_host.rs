@@ -79,12 +79,12 @@ impl SessionHost for LinuxSessionHost {
         self.release.clone()
     }
 
-    fn observe(
+    fn state_root(
         &self,
         installer: &zup_core::Installer,
         scope: SelectedScope,
         state_root: Option<&Path>,
-    ) -> Result<zup_session::OperationContext, String> {
+    ) -> Result<PathBuf, String> {
         let state_root = match state_root {
             Some(root) if scope == SelectedScope::Machine => {
                 crate::machine::resolve_machine_state_root(
@@ -98,6 +98,16 @@ impl SessionHost for LinuxSessionHost {
             None => crate::paths::state_root(&installer.app.id, scope)
                 .map_err(|error| error.to_string())?,
         };
+        Ok(state_root)
+    }
+
+    fn observe(
+        &self,
+        installer: &zup_core::Installer,
+        scope: SelectedScope,
+        state_root: Option<&Path>,
+    ) -> Result<zup_session::OperationContext, String> {
+        let state_root = self.state_root(installer, scope, state_root)?;
         let ledger = crate::ledger::LinuxInstallationStore::new(&state_root)
             .observe(&installer.app.id, scope)
             .map_err(|error| error.to_string())?;
@@ -129,9 +139,14 @@ impl SessionHost for LinuxSessionHost {
         context: &zup_session::OperationContext,
     ) -> Result<zup_session::PresetLaunch, String> {
         let installer = discovery.installer();
-        let installed = context.ledger.is_some();
-        let capabilities = zup_preset_host::surface::capabilities(installer, installed);
-        let runtime = match context.ledger.as_ref() {
+        let capabilities = zup_session::session_capabilities(installer, context);
+        let runtime = match context.ledger.as_ref().filter(|ledger| {
+            ledger.is_installed()
+                && !discovery
+                    .recoveries
+                    .get(&context.scope)
+                    .is_some_and(|recovery| !matches!(recovery, Ok(None)))
+        }) {
             Some(ledger) => ledger
                 .preset()
                 .map(|recorded| recorded.preset.clone())
@@ -151,7 +166,13 @@ impl SessionHost for LinuxSessionHost {
         zup_preset_host::process::check_presentable(&runtime, &capabilities)
             .map_err(|error| error.to_string())?;
         let executable_name = format!("preset{}", installer.target.executable_suffix());
-        let files = match context.ledger.as_ref() {
+        let files = match context.ledger.as_ref().filter(|ledger| {
+            ledger.is_installed()
+                && !discovery
+                    .recoveries
+                    .get(&context.scope)
+                    .is_some_and(|recovery| !matches!(recovery, Ok(None)))
+        }) {
             Some(ledger) => {
                 let recorded = ledger.preset().ok_or_else(|| {
                     format!(
@@ -300,7 +321,7 @@ impl SessionHost for LinuxSessionHost {
     fn recover<'a>(
         &'a self,
         context: &'a zup_session::OperationContext,
-        transaction: zup_core::TransactionId,
+        target: zup_core::RecoverySummary,
         request: zup_transaction::RecoveryRequest,
         control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<
@@ -310,7 +331,7 @@ impl SessionHost for LinuxSessionHost {
         Box::pin(crate::backend::recover_installation(
             &self.installer,
             context,
-            transaction,
+            target.transaction,
             request,
             control,
         ))

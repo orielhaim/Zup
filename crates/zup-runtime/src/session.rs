@@ -76,6 +76,7 @@ pub struct RuntimeDeployment {
 
 #[derive(Clone)]
 pub enum RuntimeOperation {
+    InspectRecovery,
     Deployment(Box<RuntimeDeployment>),
     Recovery {
         transaction: TransactionId,
@@ -87,21 +88,23 @@ impl RuntimeOperation {
     pub fn deployment(&self) -> Option<&RuntimeDeployment> {
         match self {
             Self::Deployment(deployment) => Some(deployment),
-            Self::Recovery { .. } => None,
+            Self::Recovery { .. } | Self::InspectRecovery => None,
         }
     }
 
     pub fn recovery_request(&self) -> &zup_transaction::RecoveryRequest {
         match self {
             Self::Recovery { request, .. } => request,
-            Self::Deployment(_) => &zup_transaction::RecoveryRequest::Retry {},
+            Self::Deployment(_) | Self::InspectRecovery => {
+                &zup_transaction::RecoveryRequest::Retry {}
+            }
         }
     }
 
     pub fn recovery_transaction(&self) -> Option<TransactionId> {
         match self {
             Self::Recovery { transaction, .. } => Some(*transaction),
-            Self::Deployment(_) => None,
+            Self::Deployment(_) | Self::InspectRecovery => None,
         }
     }
 }
@@ -127,6 +130,10 @@ impl ExecutionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
+    RecoveryInspected {
+        target: Option<zup_core::RecoverySummary>,
+        active: Option<Box<zup_core::ActiveLaunchers>>,
+    },
     RecoveryAssessed {
         assessment: Box<zup_transaction::RecoveryAssessment>,
     },
@@ -144,9 +151,12 @@ pub enum InstallOutcome {
         transaction: Option<uuid::Uuid>,
         detail: String,
     },
-    /// The installation is committed; required post-commit work remains.
+    CommittedWithWarning {
+        detail: String,
+    },
+    /// The protected journal retains required post-commit work.
     CommittedPendingReconciliation {
-        transaction: Option<uuid::Uuid>,
+        transaction: TransactionId,
         detail: String,
     },
     AuthorizationRequired,
@@ -166,12 +176,31 @@ pub enum RecoverySettlement {
 }
 
 impl InstallOutcome {
+    pub fn recovery_failure(
+        store: &dyn zup_transaction::TransactionStore,
+        transaction: TransactionId,
+        detail: String,
+    ) -> Self {
+        if matches!(store.load(&transaction), Ok(record) if record.phase == zup_transaction::TransactionPhase::Committed)
+        {
+            Self::CommittedPendingReconciliation {
+                transaction,
+                detail: format!("Deployment committed; recovery could not finish: {detail}"),
+            }
+        } else {
+            Self::RecoveryRequired {
+                transaction: Some(transaction.as_uuid()),
+                detail,
+            }
+        }
+    }
+
     pub fn recovery(record: &zup_transaction::TransactionRecord) -> Self {
         let transaction = Some(record.transaction_id.as_uuid());
         let detail = record.recovery_detail();
         if record.phase == zup_transaction::TransactionPhase::Committed {
             Self::CommittedPendingReconciliation {
-                transaction,
+                transaction: record.transaction_id,
                 detail,
             }
         } else {
@@ -453,8 +482,8 @@ pub(crate) fn emit_terminal(
     result: &Result<InstallOutcome, SessionError>,
 ) {
     match result {
-        Ok(InstallOutcome::RecoveryAssessed { .. }) => {}
-        Ok(InstallOutcome::Committed) => {
+        Ok(InstallOutcome::RecoveryAssessed { .. } | InstallOutcome::RecoveryInspected { .. }) => {}
+        Ok(InstallOutcome::Committed | InstallOutcome::CommittedWithWarning { .. }) => {
             let _ = events.send(RuntimeEvent::Completed {
                 outcome: CompletionOutcome::Committed,
             });

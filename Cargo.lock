@@ -12513,6 +12513,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "uuid 1.29.2",
+ "zup-core",
  "zup-preset-protocol",
 ]
 
@@ -12668,6 +12669,7 @@ version = "0.0.1"
 dependencies = [
  "miette",
  "opener",
+ "rstest",
  "semver",
  "serde_json",
  "tempfile",

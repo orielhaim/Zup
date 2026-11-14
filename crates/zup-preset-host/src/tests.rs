@@ -316,14 +316,11 @@ fn a_recovery_failure_is_distinct_from_an_ordinary_one() {
         kind: zup_runtime::FailureKind::RecoveryRequired,
         message: "the journal is incomplete".into(),
     });
-    assert_eq!(host.snapshot().state, InstallerState::RecoveryRequired);
+    assert_eq!(host.snapshot().state, InstallerState::RefreshRequired);
     let diagnostic = host.snapshot().diagnostic.as_ref().expect("a diagnostic");
     assert_eq!(diagnostic.kind, DiagnosticKind::Recovery);
     assert!(host.snapshot().progress.is_none());
-    assert_eq!(
-        host.accept(Action::Retry),
-        HostDecision::Refused(ActionRefusal::NoRecovery)
-    );
+    assert_eq!(host.accept(Action::Retry), HostDecision::Refresh);
 }
 
 #[test]
@@ -332,6 +329,18 @@ fn recovery_only_accepts_the_transaction_reported_by_the_engine() {
     let transaction = zup_core::TransactionId::new_v7();
     host.finish_with(&InstallOutcome::RecoveryRequired {
         transaction: Some(transaction.0),
+        detail: "activation outcome must be observed".into(),
+    });
+    host.set_recovery(zup_core::RecoverySummary {
+        transaction,
+        installation: zup_core::InstallationId::new_v7(),
+        app: installer().app.id,
+        version: installer().app.version,
+        scope: SelectedScope::User,
+        target: installer().target,
+        directory: None,
+        kind: zup_core::RecoveryKind::Interrupted,
+        cleanup: Vec::new(),
         detail: "activation outcome must be observed".into(),
     });
     assert_eq!(
@@ -357,7 +366,7 @@ fn recovery_only_accepts_the_transaction_reported_by_the_engine() {
         settlement: zup_runtime::RecoverySettlement::RolledBack,
     });
     assert_eq!(host.snapshot().state, InstallerState::Succeeded);
-    assert_eq!(host.snapshot().recovery_transaction, None);
+    assert_eq!(host.snapshot().recovery, None);
     assert_eq!(
         host.accept(Action::Recover { transaction }),
         HostDecision::Refused(ActionRefusal::NoRecovery)
@@ -880,6 +889,36 @@ fn a_committed_install_offers_its_launcher() {
     assert!(matches!(
         host.accept(Action::Launch),
         HostDecision::Launch(target) if target.name == "Acme"
+    ));
+    let recovery = zup_core::RecoverySummary {
+        transaction: zup_core::TransactionId::new_v7(),
+        installation: zup_core::InstallationId::new_v7(),
+        app: installer.app.id,
+        version: installer.app.version,
+        scope: SelectedScope::User,
+        target: installer.target,
+        directory: None,
+        kind: zup_core::RecoveryKind::PublicationUncertain,
+        cleanup: Vec::new(),
+        detail: "publication requires verification".into(),
+    };
+    host.set_recovery(recovery.clone());
+    assert_eq!(
+        host.accept(Action::Launch),
+        HostDecision::Refused(ActionRefusal::NothingToLaunch)
+    );
+    host.refresh_required("journal authority is unavailable".into());
+    assert_eq!(
+        host.accept(Action::Launch),
+        HostDecision::Refused(ActionRefusal::NothingToLaunch)
+    );
+    host.set_recovery(zup_core::RecoverySummary {
+        kind: zup_core::RecoveryKind::CommittedCleanup,
+        ..recovery
+    });
+    assert!(matches!(
+        host.accept(Action::Launch),
+        HostDecision::Launch(_)
     ));
 }
 

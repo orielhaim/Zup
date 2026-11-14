@@ -841,15 +841,10 @@ fn verification() -> Machine {
 
 fn recovery() -> Machine {
     let mut machine = progress();
-    machine.finish_with(&InstallOutcome::RecoveryRequired {
-        transaction: Some(
-            "10000000-0000-4000-8000-000000000001"
-                .parse()
-                .expect("preview transaction"),
-        ),
-        detail:
-            "An interrupted transaction must be recovered before this application can be changed"
-                .into(),
-    });
+    machine
+        .show_recovery(
+            "An interrupted transaction must be recovered before this application can be changed",
+        )
+        .expect("valid recovery simulation");
     machine
 }

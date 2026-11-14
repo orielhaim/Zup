@@ -182,9 +182,9 @@ pub use operation_host::{WindowsContent, WindowsOperationHost};
 #[cfg(windows)]
 pub use payload_overlay::{
     PAYLOAD_OVERLAY_DIRECTORY, PayloadOverlayError, PayloadOverlayFileIdentity,
-    PayloadOverlayIdentity, cleanup_app_payload_overlays, cleanup_payload_overlay,
-    is_plugin_payload_path, materialize_payload_overlay, payload_overlay_base_root,
-    validate_payload_overlay_base, verify_payload_overlay,
+    PayloadOverlayIdentity, cleanup_payload_overlay, is_plugin_payload_path,
+    materialize_payload_overlay, payload_overlay_base_root, validate_payload_overlay_base,
+    verify_payload_overlay,
 };
 pub use pe_resources::{ResourceError, apply_icon, read_resource, write_resources};
 #[cfg(windows)]

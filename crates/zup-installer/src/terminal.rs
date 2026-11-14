@@ -381,9 +381,22 @@ fn drive<H: SessionHost>(
     }
     let scope = choose_scope(installer, cli.scope.map(Into::into), interactive, cli.plain)?;
     report.result.scope = Some(scope);
-    let context = host
-        .observe(installer, scope, cli.state_root.as_deref())
-        .map_err(|error| miette::miette!("{error}"))?;
+    #[cfg(target_os = "linux")]
+    let recovering = matches!(cli.operation, Some(Command::Recover { .. }));
+    #[cfg(not(target_os = "linux"))]
+    let recovering = false;
+    let context = if recovering {
+        zup_session::OperationContext {
+            scope,
+            state_root: host
+                .state_root(installer, scope, cli.state_root.as_deref())
+                .map_err(|error| miette::miette!("{error}"))?,
+            ledger: None,
+        }
+    } else {
+        host.observe(installer, scope, cli.state_root.as_deref())
+            .map_err(|error| miette::miette!("{error}"))?
+    };
     #[cfg(feature = "console")]
     let chosen = if interactive
         && cli.operation.is_none()
@@ -415,7 +428,8 @@ fn drive<H: SessionHost>(
         return execute_with_events(
             &control,
             report,
-            host.recover(
+            zup_linux::recover_installation(
+                &executable,
                 &context,
                 transaction
                     .parse()
@@ -721,6 +735,11 @@ impl Report {
 
         if let zup_runtime::RuntimeEvent::LogPath { path } = event {
             self.result.log_path = Some(path.clone());
+        }
+        if let zup_runtime::RuntimeEvent::PlanPrepared { plan } = event {
+            self.result.application = plan.requirements.app.id.to_string();
+            self.result.version = plan.requirements.app.version.to_string();
+            self.result.scope = Some(plan.requirements.scope);
         }
         for event in zup_session::automation_events(event) {
             if !matches!(

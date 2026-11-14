@@ -339,7 +339,11 @@ async fn runtime_handoff_requires_tuf_authorization_under_its_embedded_root() {
     assert!(bundle.validate_recorded_source(&content, &foreign).is_err());
 }
 
-fn install_previous(fixture: &ReleaseFixture, state: &project::State) -> std::path::PathBuf {
+fn install_previous(
+    fixture: &ReleaseFixture,
+    state: &project::State,
+    template: &Path,
+) -> std::path::PathBuf {
     let mut previous = fixture.app.clone();
     previous.version = "0.9.0".into();
     let source = fixture.root.path().join("previous");
@@ -361,14 +365,7 @@ fn install_previous(fixture: &ReleaseFixture, state: &project::State) -> std::pa
     plan.installer.files[0].placement = fixture.build.installer.files[0].placement.clone();
     plan.installer.updates = fixture.build.installer.updates.clone();
     let setup = source.join("Setup.exe");
-    zup_windows::build_self_contained_executable(
-        &project::template(Frontend::Console),
-        &setup,
-        &plan,
-        &[],
-        None,
-    )
-    .unwrap();
+    zup_windows::build_self_contained_executable(template, &setup, &plan, &[], None).unwrap();
     project::succeed(&setup, state, "install", &["--non-interactive", "--yes"]);
     state.maintenance(&previous)
 }
@@ -378,7 +375,7 @@ async fn maintenance_keeps_exact_sources_for_repair_and_follows_the_channel_for_
     let fixture = release_fixture(None).await;
     let state = project::State::new();
     let _cleanup = project::cleanup(&fixture.app, &state);
-    let old_tool = install_previous(&fixture, &state);
+    let old_tool = install_previous(&fixture, &state, &project::template(Frontend::Console));
     let before = std::fs::read(&old_tool).unwrap();
     project::succeed(
         &old_tool,
@@ -493,13 +490,17 @@ async fn maintenance_keeps_exact_sources_for_repair_and_follows_the_channel_for_
     );
 }
 
-#[cfg(feature = "test-faults")]
+#[cfg(all(feature = "test-faults", feature = "console"))]
 #[tokio::test]
 async fn authenticated_acquired_recovery_survives_process_exit_without_cache_or_repository() {
     let fixture = release_fixture(None).await;
     let state = project::State::new();
     let _cleanup = project::cleanup(&fixture.app, &state);
-    let old_tool = install_previous(&fixture, &state);
+    let old_tool = install_previous(
+        &fixture,
+        &state,
+        Path::new(env!("CARGO_BIN_EXE_zup-setup-console")),
+    );
     let interrupted = std::process::Command::new(&old_tool)
         .args(["update", "--scope", "user", "--state-root"])
         .arg(state.path())

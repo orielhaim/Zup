@@ -43,5 +43,6 @@ pub use wire::{
     Envelope, MAX_FRAME_BYTES, Message, PeerRole, SequenceTracker, decode, encode, message_name,
     negotiate, sender_is_allowed,
 };
+pub use zup_core::{DeploymentSettlement, RecoveryCleanup, RecoveryKind, RecoverySummary};
 
-pub const PRESET_PROTOCOL_VERSION: u32 = 1;
+pub const PRESET_PROTOCOL_VERSION: u32 = 2;

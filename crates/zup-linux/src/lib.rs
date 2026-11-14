@@ -81,7 +81,7 @@ pub mod test_support;
 mod worker;
 
 #[cfg(target_os = "linux")]
-pub use backend::{ExecutionReport, LinuxRuntimeBackend};
+pub use backend::{ExecutionReport, LinuxRuntimeBackend, recover_installation};
 pub use capabilities::{
     is_supported_linux_target, linux_capability_errors, linux_selection_errors,
     operation_capability_errors,

@@ -60,7 +60,7 @@ impl From<LinuxOutcome> for ExecutionReport {
                 detail,
             } => Self {
                 outcome: InstallOutcome::CommittedPendingReconciliation {
-                    transaction: Some(transaction),
+                    transaction: zup_core::TransactionId::from_uuid(transaction),
                     detail,
                 },
                 recovery_transaction: Some(transaction.to_string()),
@@ -92,6 +92,46 @@ impl LinuxRuntimeBackend {
             && !control.policy.allows_authorization()
         {
             return Err(SessionError::AuthorizationRequired);
+        }
+        if matches!(request.operation, RuntimeOperation::InspectRecovery) {
+            if request.scope == SelectedScope::Machine && rustix::process::geteuid().as_raw() != 0 {
+                return Err(SessionError::AuthorizationRequired);
+            }
+            crate::run::refuse_redirected_hierarchy(&request.state_root)
+                .map_err(|error| SessionError::Transaction(error.to_string()))?;
+            let key = ResourceLock::lock_key(request.app_id.as_str(), scope_token(request.scope));
+            let _lock = ResourceLock::try_acquire(&request.state_root, &key)
+                .map_err(|error| SessionError::Transaction(error.to_string()))?
+                .ok_or(SessionError::InstallationBusy)?;
+            let target = FilesystemTransactionStore::private_at(&request.state_root)
+                .pending_recovery(&request.app_id, request.scope)
+                .map_err(|error| SessionError::Transaction(error.to_string()))?
+                .map(|target| target.summary());
+            if target
+                .as_ref()
+                .is_some_and(|target| target.target != request.target)
+            {
+                return Err(SessionError::Protocol(
+                    "recovery inspection target mismatch".into(),
+                ));
+            }
+            return Ok(ExecutionReport {
+                outcome: InstallOutcome::RecoveryInspected {
+                    target,
+                    active: LinuxInstallationStore::new(&request.state_root)
+                        .observe(&request.app_id, request.scope)
+                        .ok()
+                        .flatten()
+                        .and_then(|installation| {
+                            FilesystemTransactionStore::private_at(&request.state_root)
+                                .active_launchers(&installation)
+                                .ok()
+                                .flatten()
+                        })
+                        .map(Box::new),
+                },
+                recovery_transaction: None,
+            });
         }
         if let Some(id) = request.operation.recovery_transaction() {
             return self.execute_recovery(request, control, &id);
@@ -176,6 +216,9 @@ impl LinuxRuntimeBackend {
             ));
         }
         let ledger_store = LinuxInstallationStore::new(&request.state_root);
+        let _ = events.send(RuntimeEvent::PlanPrepared {
+            plan: Box::new(record.plan.clone()),
+        });
         match record.phase {
             zup_transaction::TransactionPhase::Committed if record.cleanup_complete() => {
                 return match ledger_store.reconcile_installation(&record, request.scope) {
@@ -188,7 +231,7 @@ impl LinuxRuntimeBackend {
                     }
                     Err(error) => Ok(ExecutionReport {
                         outcome: InstallOutcome::CommittedPendingReconciliation {
-                            transaction: Some(record.transaction_id.as_uuid()),
+                            transaction: record.transaction_id,
                             detail: error.to_string(),
                         },
                         recovery_transaction: Some(record.transaction_id.to_string()),
@@ -262,7 +305,7 @@ impl LinuxRuntimeBackend {
                     }
                     Err(error) => Ok(ExecutionReport {
                         outcome: InstallOutcome::CommittedPendingReconciliation {
-                            transaction: Some(record.transaction_id.as_uuid()),
+                            transaction: record.transaction_id,
                             detail: error.to_string(),
                         },
                         recovery_transaction: Some(record.transaction_id.to_string()),
@@ -280,7 +323,10 @@ impl LinuxRuntimeBackend {
                 outcome: InstallOutcome::recovery(&record),
                 recovery_transaction: Some(record.transaction_id.to_string()),
             }),
-            Err(error) => Err(SessionError::Transaction(error.to_string())),
+            Err(error) => Ok(ExecutionReport {
+                outcome: InstallOutcome::recovery_failure(&store, *id, error.to_string()),
+                recovery_transaction: Some(id.to_string()),
+            }),
         }
     }
 
@@ -425,7 +471,7 @@ impl LinuxRuntimeBackend {
                 }
                 Err(error) => Ok(ExecutionReport {
                     outcome: InstallOutcome::CommittedPendingReconciliation {
-                        transaction: Some(record.transaction_id.as_uuid()),
+                        transaction: record.transaction_id,
                         detail: error.to_string(),
                     },
                     recovery_transaction: Some(record.transaction_id.to_string()),
@@ -798,7 +844,7 @@ fn observe_reap(
     }
 }
 
-pub(crate) async fn recover_installation(
+pub async fn recover_installation(
     installer: &std::path::Path,
     context: &zup_session::OperationContext,
     transaction: zup_core::TransactionId,

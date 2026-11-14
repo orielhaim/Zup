@@ -36,6 +36,11 @@ pub struct OperationContext {
 pub struct SessionDiscovery {
     pub build: Arc<TargetBuildPlan>,
     pub installations: Vec<ScopedInstallation>,
+    pub recoveries: std::collections::BTreeMap<
+        SelectedScope,
+        Result<Option<zup_core::RecoverySummary>, String>,
+    >,
+    pub observation_errors: std::collections::BTreeMap<SelectedScope, String>,
 }
 
 impl SessionDiscovery {
@@ -69,6 +74,10 @@ pub fn select_scope(
     declared: InstallScope,
     launch: &SessionLaunch,
     installations: &[ScopedInstallation],
+    recoveries: &std::collections::BTreeMap<
+        SelectedScope,
+        Result<Option<zup_core::RecoverySummary>, String>,
+    >,
 ) -> Result<SelectedScope, String> {
     if !launch.interactive {
         return declared
@@ -81,6 +90,13 @@ pub fn select_scope(
             .map_err(|error| error.to_string());
     }
     let permitted = declared.scopes();
+    if let Some(scope) = permitted.iter().find(|scope| {
+        recoveries
+            .get(scope)
+            .is_some_and(|result| matches!(result, Ok(Some(_))))
+    }) {
+        return Ok(*scope);
+    }
     let installed: Vec<SelectedScope> = permitted
         .iter()
         .copied()
@@ -96,9 +112,13 @@ pub fn select_scope(
         .collect();
     match installed.as_slice() {
         [scope, ..] => Ok(*scope),
-        [] => permitted
-            .first()
-            .copied()
+        [] => installations
+            .iter()
+            .find(|installation| {
+                installation.ledger.is_some() && permitted.contains(&installation.scope)
+            })
+            .map(|installation| installation.scope)
+            .or_else(|| permitted.first().copied())
             .ok_or_else(|| "this installer declares no installation scope".to_owned()),
     }
 }
@@ -132,6 +152,86 @@ pub trait SessionHost {
 
     fn describe(&mut self, executable: &Path) -> Result<Arc<TargetBuildPlan>, String>;
 
+    fn state_root(
+        &self,
+        installer: &Installer,
+        scope: SelectedScope,
+        hint: Option<&Path>,
+    ) -> Result<PathBuf, String>;
+
+    fn recovery_store(
+        &self,
+        context: &OperationContext,
+        _app: &AppId,
+    ) -> Result<zup_transaction::FilesystemTransactionStore, String> {
+        Ok(zup_transaction::FilesystemTransactionStore::private_at(
+            &context.state_root,
+        ))
+    }
+
+    fn pending_recovery(
+        &self,
+        context: &OperationContext,
+        app: &AppId,
+    ) -> Result<Option<zup_core::RecoverySummary>, String> {
+        self.recovery_store(context, app)?
+            .pending_recovery(app, context.scope)
+            .map(|target| target.map(|target| target.summary()))
+            .map_err(|error| error.to_string())
+    }
+
+    fn observe_recovery(
+        &self,
+        discovery: &SessionDiscovery,
+        context: &OperationContext,
+        state: &mut HostState,
+    ) {
+        match self.pending_recovery(context, discovery.app_id())
+        {
+            Ok(Some(target)) => {
+                state.set_recovery(target);
+            }
+            Ok(None) => {}
+            Err(error) => state.refresh_required(format!("Protected deployment state could not be inspected: {error}. Close other maintenance processes and refresh. Use an authorized administrator session for machine state.")),
+        }
+    }
+
+    fn active_launchers(
+        &self,
+        context: &OperationContext,
+        app: &AppId,
+    ) -> Result<Option<zup_core::ActiveLaunchers>, String> {
+        let Some(installation) = context.ledger.as_ref() else {
+            return Ok(None);
+        };
+        if installation.app_id != *app || installation.scope != context.scope {
+            return Err("launcher installation identity mismatch".into());
+        }
+        self.recovery_store(context, app)?
+            .active_launchers(installation)
+    }
+
+    fn open_state(
+        &self,
+        discovery: &SessionDiscovery,
+        context: &OperationContext,
+        preselected: Option<&[ComponentId]>,
+    ) -> HostState {
+        let mut state = initial_state(discovery, context, preselected);
+        match discovery.recoveries.get(&context.scope) {
+            Some(Ok(Some(target))) => state.set_recovery(target.clone()),
+            Some(Err(error)) => state.refresh_required(format!("Protected recovery inspection failed: {error}. Refresh with the required authority or use the source-free recovery console.")),
+            Some(Ok(None)) => {}
+            None => self.observe_recovery(discovery, context, &mut state),
+        }
+        if state.snapshot().recovery.is_none()
+            && let Some(error) = discovery.observation_errors.get(&context.scope)
+        {
+            state.refresh_required(format!("The installation ledger could not be observed: {error}. Protected journal recovery was inspected independently. Refresh or inspect the journal through the recovery console."));
+        }
+        state
+    }
+
     fn content_executable(&self, executable: &Path) -> PathBuf {
         executable.to_path_buf()
     }
@@ -156,31 +256,41 @@ pub trait SessionHost {
             return Err("a custom state root requires an explicit user or machine scope".into());
         }
         let mut installations = Vec::new();
+        let mut recoveries = std::collections::BTreeMap::new();
+        let mut observation_errors = std::collections::BTreeMap::new();
         for scope in build.installer.install.scope.scopes() {
             let state_root = launch
                 .state_root
                 .as_deref()
                 .filter(|_| launch.scope.is_none_or(|selected| selected == *scope));
-            let context = self.observe(&build.installer, *scope, state_root)?;
+            let context = match self.observe(&build.installer, *scope, state_root) {
+                Ok(context) => context,
+                Err(error) => {
+                    observation_errors.insert(*scope, error);
+                    OperationContext {
+                        scope: *scope,
+                        state_root: self.state_root(&build.installer, *scope, state_root)?,
+                        ledger: None,
+                    }
+                }
+            };
+            if launch.scope.is_none_or(|selected| selected == *scope) {
+                recoveries.insert(
+                    *scope,
+                    self.pending_recovery(&context, &build.installer.app.id),
+                );
+            }
             installations.push(ScopedInstallation {
                 scope: context.scope,
                 state_root: context.state_root,
                 ledger: context.ledger,
             });
         }
-        if launch.maintenance
-            && installations.iter().all(|installation| {
-                installation
-                    .ledger
-                    .as_ref()
-                    .is_none_or(|record| !record.is_installed())
-            })
-        {
-            return Err("the installed application was not found".into());
-        }
         Ok(SessionDiscovery {
             build,
             installations,
+            recoveries,
+            observation_errors,
         })
     }
 
@@ -232,7 +342,7 @@ pub trait SessionHost {
     fn recover<'a>(
         &'a self,
         _context: &'a OperationContext,
-        _transaction: zup_core::TransactionId,
+        _target: zup_core::RecoverySummary,
         _request: zup_transaction::RecoveryRequest,
         _control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<'a, Result<InstallOutcome, zup_runtime::SessionError>> {
@@ -250,11 +360,7 @@ pub trait SessionHost {
         Ok(None)
     }
 
-    fn after_commit(
-        &self,
-        _context: &OperationContext,
-        _prepared: &PreparedOperation,
-    ) -> Result<(), String> {
+    fn after_commit(&self, _context: &OperationContext) -> Result<(), String> {
         Ok(())
     }
 
@@ -275,13 +381,61 @@ pub trait SessionHost {
     fn copy_diagnostics(&self, _text: &str) {}
 }
 
+pub fn session_capabilities(
+    installer: &Installer,
+    context: &OperationContext,
+) -> zup_preset_protocol::Capabilities {
+    let installed = context
+        .ledger
+        .as_ref()
+        .is_some_and(InstallationRecord::is_installed);
+    let capabilities = zup_preset_host::surface::capabilities(installer, installed);
+    if active_launchers(context).is_empty() {
+        capabilities
+    } else {
+        capabilities.with(zup_preset_protocol::Capability::Launch)
+    }
+}
+
+fn active_launchers(context: &OperationContext) -> Vec<zup_preset_host::Launchable> {
+    context
+        .ledger
+        .as_ref()
+        .filter(|record| record.is_installed())
+        .into_iter()
+        .flat_map(|record| {
+            record
+                .current
+                .requirements
+                .launchers
+                .iter()
+                .filter(|launcher| {
+                    matches!(
+                        record.current.resources.get(&launcher.key),
+                        Some(zup_plan::OwnedResource::Launcher {
+                            installed: zup_plan::LauncherState::Launcher { .. },
+                            ..
+                        })
+                    )
+                })
+                .map(|launcher| zup_preset_host::Launchable {
+                    target: zup_preset_protocol::LaunchTarget {
+                        name: launcher.name.to_string(),
+                    },
+                    component: None,
+                })
+        })
+        .collect()
+}
+
 pub fn initial_state(
     discovery: &SessionDiscovery,
     context: &OperationContext,
     preselected: Option<&[ComponentId]>,
 ) -> HostState {
     let installer = discovery.installer();
-    let launchers = zup_preset_host::surface::launchers(installer);
+    let launchers = active_launchers(context);
+    let capabilities = session_capabilities(installer, context);
     let state = match context
         .ledger
         .as_ref()
@@ -293,7 +447,7 @@ pub fn initial_state(
             HostState::maintenance(
                 zup_preset_host::surface::product(installer),
                 maintenance,
-                zup_preset_host::surface::capabilities(installer, true),
+                capabilities,
             )
         }
         None => {
@@ -307,7 +461,7 @@ pub fn initial_state(
             HostState::install(
                 zup_preset_host::surface::product(installer),
                 options,
-                zup_preset_host::surface::capabilities(installer, false),
+                capabilities,
             )
         }
     };

@@ -1,6 +1,11 @@
 #![forbid(unsafe_code)]
 
+mod recovery;
 mod storage;
+pub use recovery::{
+    ActiveLauncher, ActiveLaunchers, DeploymentSettlement, RecoveryCleanup, RecoveryKind,
+    RecoverySummary,
+};
 pub use storage::DeploymentStorageEstimate;
 
 mod build_plan;

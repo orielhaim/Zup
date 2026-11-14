@@ -112,22 +112,6 @@ fn launch_maintenance(maintenance: &Path, state: &State) -> std::process::Output
         .expect("the maintenance runtime runs")
 }
 
-/// The failure a machine-readable run reported, as its code and its reason.
-fn reported_failure(output: &std::process::Output) -> (u64, String) {
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let start = text.find('{').expect("a JSON document on stdout");
-    let document: serde_json::Value =
-        serde_json::from_str(&text[start..]).expect("one JSON document");
-    (
-        document["code"].as_u64().expect("a code"),
-        document["message"].as_str().unwrap_or_default().to_owned(),
-    )
-}
-
 /// After a successful install, the installer a person downloaded is disposable.
 ///
 /// The property, end to end: what the original installer carried is what the
@@ -310,14 +294,8 @@ fn a_failed_update_leaves_the_previous_window_coherent() {
     );
 }
 
-/// A graphical installation whose window is not recorded says so, rather than
-/// opening one of its own choosing.
-///
-/// The temptation is to fall back to whatever preset happens to be available. An
-/// installation that lost its window has lost something a person chose, and
-/// quietly showing them something else is worse than telling them.
 #[test]
-fn a_corrupted_installation_record_never_launches_a_preset() {
+fn a_corrupted_ledger_opens_the_trusted_carriers_diagnostic() {
     let state_root = tempfile::tempdir().expect("a state root");
     let state = State::with_root(state_root.path().join("state"));
     let scratch = tempfile::tempdir().expect("a scratch directory");
@@ -340,18 +318,15 @@ fn a_corrupted_installation_record_never_launches_a_preset() {
     std::fs::write(&path, serde_json::to_vec(&document).expect("it serializes"))
         .expect("the record is rewritten");
 
+    let corrupted = std::fs::read(&path).unwrap();
     let output = launch_maintenance(&maintenance, &state);
     assert!(
-        !output.status.success(),
-        "an installation that lost its window must not open one of its own choosing"
+        output.status.success(),
+        "trusted diagnostic carrier: {output:?}"
     );
-    let (code, said) = reported_failure(&output);
-    assert_ne!(code, 0, "reported as a failure, not a success: {said}");
-    assert!(!said.is_empty());
-    assert!(
-        !report.exists(),
-        "no preset was launched, so nothing reported"
-    );
+    let report = std::fs::read_to_string(&report).expect("trusted preset diagnostic");
+    assert!(report.contains("state=RefreshRequired"), "{report}");
+    assert_eq!(std::fs::read(&path).unwrap(), corrupted);
 }
 
 /// Content the installation recorded but cannot produce is an integrity problem,

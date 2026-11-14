@@ -1,3 +1,9 @@
+fn settled_deployment(state: &Path, source: &Path, effects: DeploymentEffects) -> InstallationRecord {
+    let installed = commit_effects(state, source, effects);
+    let record = zup_transaction::TransactionStore::load(&FilesystemTransactionStore::private_at(state), &installed.commit.transaction).unwrap();
+    native_publisher(state).reconcile_installation(&record, installed.scope).unwrap()
+}
+
 fn native_effects(application: &Path, source: &Path, contents: &[u8], previous: Option<&InstallationRecord>) -> DeploymentEffects {
     let mut effects = deployment_effects(application, source, contents, previous, None);
     effects.generations.retain(|generation| matches!(generation.publication, zup_plan::GenerationPublication::Application { .. }));
@@ -59,7 +65,7 @@ fn generation_collection_preserves_live_consumers_and_foreign_objects(#[case] ru
     let image = Path::new("/usr/bin/sleep");
     std::fs::copy(image, source.join("build/runner.bin")).unwrap();
     std::fs::write(source.join("build/asset.bin"), b"first").unwrap();
-    let first = commit_effects(&state, &source, native_effects(&application, &source, b"first", None));
+    let first = settled_deployment(&state, &source, native_effects(&application, &source, b"first", None));
     let old = Path::new(first.current.materialization.as_ref().unwrap().directory().as_str());
     let mut process = if running {
         let mut command = std::process::Command::new(old.join(if cfg!(windows) { "bin/runner.exe" } else { "bin/sleep" }));
@@ -70,7 +76,7 @@ fn generation_collection_preserves_live_consumers_and_foreign_objects(#[case] ru
         Some(command.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::inherit()).spawn().unwrap())
     } else { None };
     std::fs::write(source.join("build/asset.bin"), b"second").unwrap();
-    let second = commit_effects(&state, &source, native_effects(&application, &source, b"second", Some(&first)));
+    let second = settled_deployment(&state, &source, native_effects(&application, &source, b"second", Some(&first)));
     let data = second.data.values().next().unwrap().ownership.binding().path(second.target).unwrap();
     std::fs::write(Path::new(data.as_str()).join("user-data"), b"keep").unwrap();
     if substitute {
@@ -103,14 +109,24 @@ fn generation_collection_preserves_live_consumers_and_foreign_objects(#[case] ru
         if running {
             assert_eq!(completion, zup_transaction::CleanupCompletion::Deferred { reason: zup_transaction::CleanupDeferral::InUse });
             assert!(old.join("lib/data.txt").exists());
+            let store = FilesystemTransactionStore::private_at(&state);
+            let target = store.pending_recovery(&second.app_id, SelectedScope::User).unwrap().unwrap().summary();
+            assert_eq!(target.transaction, record.transaction_id);
+            assert_eq!(target.kind, zup_core::RecoveryKind::CommittedCleanup);
+            let mut executor = native_executor(&state, &source, &record);
+            let (record, outcome) = zup_transaction::recover(record, &store, &mut executor, &native_publisher(&state)).unwrap();
+            assert_eq!(outcome, TransactionOutcome::RecoveryRequired);
+            assert_eq!(store.pending_recovery(&second.app_id, SelectedScope::User).unwrap().unwrap().summary().transaction, target.transaction);
             let process = process.as_mut().unwrap();
             process.kill().unwrap(); process.wait().unwrap();
             assert!(!record.cleanup_complete());
-            let store = FilesystemTransactionStore::private_at(&state);
+            std::fs::remove_dir_all(&source).unwrap();
             let mut executor = native_executor(&state, &source, &record);
             let (record, outcome) = zup_transaction::recover(record, &store, &mut executor, &native_publisher(&state)).unwrap();
             assert_eq!(outcome, TransactionOutcome::Committed);
             assert!(record.cleanup_complete());
+            native_publisher(&state).repair_committed(&record.app_id, record.scope).unwrap();
+            assert!(store.pending_recovery(&record.app_id, record.scope).unwrap().is_none());
         } else { assert_eq!(completion, zup_transaction::CleanupCompletion::Removed); }
         assert!(!old.exists());
     }
@@ -158,9 +174,9 @@ fn interrupted_native_collection_resumes_without_reverting_the_activation(#[case
     #[cfg(not(windows))]
     std::fs::copy("/usr/bin/sleep", source.join("build/runner.bin")).unwrap();
     std::fs::write(source.join("build/asset.bin"), b"first").unwrap();
-    let first = commit_effects(&state, &source, native_effects(&application, &source, b"first", None));
+    let first = settled_deployment(&state, &source, native_effects(&application, &source, b"first", None));
     std::fs::write(source.join("build/asset.bin"), b"second").unwrap();
-    let second = commit_effects(&state, &source, native_effects(&application, &source, b"second", Some(&first)));
+    let second = settled_deployment(&state, &source, native_effects(&application, &source, b"second", Some(&first)));
     let result = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "cleanup_lifecycle::collection_fault_child", "--nocapture"])
         .env("ZUP_COLLECTION_FIXTURE", temporary.path())
@@ -174,10 +190,16 @@ fn interrupted_native_collection_resumes_without_reverting_the_activation(#[case
     let record = store.load(&installation.commit.transaction).unwrap();
     assert_eq!(record.phase, zup_transaction::TransactionPhase::Committed);
     if point != "verified_persisted" { assert!(!record.cleanup_complete()); }
+    let target = store.pending_recovery(&second.app_id, SelectedScope::User).unwrap().unwrap().summary();
+    assert_eq!(target.transaction, record.transaction_id);
+    assert!(matches!(target.kind, zup_core::RecoveryKind::CommittedCleanup | zup_core::RecoveryKind::CommittedReconciliation));
+    std::fs::remove_dir_all(&source).unwrap();
     let mut executor = native_executor(&state, &source, &record);
     let (record, outcome) = zup_transaction::recover(record, &store, &mut executor, &native_publisher(&state)).unwrap();
     assert_eq!(outcome, TransactionOutcome::Committed, "{:?}", record.recovery_failure);
     assert!(record.cleanup_complete());
+    native_publisher(&state).repair_committed(&record.app_id, record.scope).unwrap();
+    assert!(store.pending_recovery(&record.app_id, record.scope).unwrap().is_none());
     assert!(!Path::new(first.current.materialization.as_ref().unwrap().directory().as_str()).exists());
     let installation = native_publisher(&state).load(&second.app_id, SelectedScope::User).unwrap().unwrap();
     assert_eq!(installation.current, second.current);
@@ -219,7 +241,7 @@ fn retired_fixed_collection_removes_only_the_recorded_backup(#[case] changed_bac
         });
         effects.requirements.files.push(zup_plan::RequiredFile { key: key.clone(), placement: zup_core::PayloadPlacement::Fixed { path: zup_core::Template::parse(destination.as_str()).unwrap(), replacement: zup_core::FixedReplacement::Quiescent }, size: contents.len() as u64, sha256: hash_bytes(contents), executable: false, privilege: Privilege::User });
         effects.requirements.files.sort_by(|a, b| a.key.cmp(&b.key));
-        previous = Some(commit_effects(&state, &source, effects));
+        previous = Some(settled_deployment(&state, &source, effects));
     }
     let installation = previous.unwrap();
     let retirement = zup_plan::RetentionChange::keeping_previous(&installation, 0);
@@ -296,7 +318,7 @@ fn compensated_generation_is_collected_without_retiring_the_active_snapshot(#[ca
     #[cfg(not(windows))]
     std::fs::copy("/usr/bin/sleep", source.join("build/runner.bin")).unwrap();
     std::fs::write(source.join("build/asset.bin"), b"first").unwrap();
-    let first = commit_effects(&state, &source, native_effects(&application, &source, b"first", None));
+    let first = settled_deployment(&state, &source, native_effects(&application, &source, b"first", None));
     std::fs::write(source.join("build/asset.bin"), b"second").unwrap();
     let effects = native_effects(&application, &source, b"second", Some(&first));
     let failed_path = effects.generations[0].materialization.directory().clone();

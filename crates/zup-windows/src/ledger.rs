@@ -87,6 +87,22 @@ impl InstallationRecordStore {
         Ok(Some(ledger))
     }
 
+    pub fn recovery_store(
+        &self,
+        app_id: &AppId,
+        scope: SelectedScope,
+    ) -> Result<zup_transaction::FilesystemTransactionStore, LedgerError> {
+        if scope == SelectedScope::Machine {
+            let machine = crate::machine_authority::MachineRoot::from_existing(&self.root, app_id)
+                .map_err(|error| LedgerError::Ownership(error.to_string()))?;
+            Ok(machine.transaction_store())
+        } else {
+            Ok(zup_transaction::FilesystemTransactionStore::private_at(
+                &self.root,
+            ))
+        }
+    }
+
     fn load_evidence(
         &self,
         app_id: &AppId,

@@ -100,15 +100,8 @@ impl WindowsRuntimeBackend {
                 .collect();
             let base = crate::payload_overlay_base_root(state_root, scope)
                 .map_err(|error| error.to_string())?;
-            match crate::materialize_payload_overlay(&base, &transaction_identity, &overlay_files) {
-                Ok(overlay) => overlay,
-                Err(error) => {
-                    if let Some(overlay) = transaction_identity.path_under(&base) {
-                        let _ = cleanup_payload_overlay(&base, Some(&overlay));
-                    }
-                    return Err(error.to_string());
-                }
-            }
+            crate::materialize_payload_overlay(&base, &transaction_identity, &overlay_files)
+                .map_err(|error| error.to_string())?
         };
         if let Some(overlay) = overlay {
             self.payload = Arc::new(zup_bundle::OverlayPayloadSource::new(
@@ -580,6 +573,7 @@ async fn run_elevated_bootstrap(
                             return Err(SessionError::Protocol("bootstrap completion identity mismatch".into()));
                         }
                         return Ok(match completed.outcome {
+                            zup_protocol::WorkerOutcome::RecoveryInspected => return Err(SessionError::Protocol("unexpected recovery inspection".into())),
                             zup_protocol::WorkerOutcome::Committed => BootstrapOutcome::Ready,
                             zup_protocol::WorkerOutcome::RebootRequired => {
                                 let exit_code = completed.exit_code.ok_or_else(|| {
@@ -879,7 +873,8 @@ async fn run_elevated_worker(
     let mut server =
         crate::PipeServer::create(&pipe).map_err(|e| SessionError::Protocol(e.to_string()))?;
 
-    let recovering = request.operation.recovery_transaction().is_some();
+    let inspecting = matches!(request.operation, RuntimeOperation::InspectRecovery);
+    let recovering = inspecting || request.operation.recovery_transaction().is_some();
     let (payload_root, payload_overlay_root, payload_overlay_base_root, content) = if recovering {
         (Path::new(""), None, None, None)
     } else {
@@ -928,6 +923,9 @@ async fn run_elevated_worker(
         ));
     }
     let operation = match &request.operation {
+        RuntimeOperation::InspectRecovery => {
+            zup_protocol::PreparedTransactionRequest::InspectRecovery
+        }
         RuntimeOperation::Deployment(deployment) => {
             zup_protocol::PreparedTransactionRequest::Deployment {
                 plan: Box::new(deployment.plan.clone()),
@@ -1070,6 +1068,15 @@ async fn run_elevated_worker(
                        worker_sequence.accept(message.sequence)
                            .map_err(|e| SessionError::Protocol(e.to_string()))?;
                        match message.message {
+                       zup_protocol::Message::RecoveryInspected { target, active } if inspecting => {
+                           if target.as_ref().is_some_and(|target| target.app != request.app_id || target.scope != request.scope || target.target != request.target) {
+                               return Err(SessionError::Protocol("worker recovery identity mismatch".into()));
+                           }
+                           if active.as_ref().is_some_and(|active| active.app != request.app_id || active.scope != request.scope || active.target != request.target) {
+                               return Err(SessionError::Protocol("worker launcher identity mismatch".into()));
+                           }
+                           return Ok(InstallOutcome::RecoveryInspected { target, active });
+                       }
                        zup_protocol::Message::Prepared(prepared) => {
                            if execution_sent || prepared.target != request.target
                                || prepared.plan.requirements.app.id != request.app_id
@@ -1114,6 +1121,7 @@ async fn run_elevated_worker(
                                zup_protocol::WorkerOutcome::Committed => InstallOutcome::Committed,
                                zup_protocol::WorkerOutcome::RolledBack => InstallOutcome::RolledBack,
                                zup_protocol::WorkerOutcome::Cancelled => InstallOutcome::Cancelled,
+                               zup_protocol::WorkerOutcome::RecoveryInspected => return Err(SessionError::Protocol("unexpected inspection completion envelope".into())),
                                zup_protocol::WorkerOutcome::RecoveryAssessed => InstallOutcome::RecoveryAssessed {
                                    assessment: Box::new(serde_json::from_str(completed.detail.as_deref().ok_or_else(|| SessionError::Protocol("worker assessment missing".into()))?).map_err(|error| SessionError::Protocol(format!("worker assessment: {error}")))?),
                                },
@@ -1123,7 +1131,7 @@ async fn run_elevated_worker(
                                },
                                zup_protocol::WorkerOutcome::CommittedPendingReconciliation => {
                                    InstallOutcome::CommittedPendingReconciliation {
-                                       transaction: Some(completed.transaction_id),
+                                       transaction: zup_core::TransactionId::from_uuid(completed.transaction_id),
                                        detail: completed.detail.unwrap_or_else(|| "The transaction committed; ownership reconciliation requires recovery".into()),
                                    }
                                }
@@ -1159,6 +1167,9 @@ fn validate_runtime_request(
     request: &RuntimeRequest,
     backend: &WindowsRuntimeBackend,
 ) -> Result<(), SessionError> {
+    if matches!(request.operation, RuntimeOperation::InspectRecovery) {
+        return Ok(());
+    }
     let Some(id) = request.operation.recovery_transaction() else {
         return validate_request(request, backend);
     };
@@ -1198,18 +1209,10 @@ fn validate_overlay_identity(
                 base.display()
             ));
         }
-        let expected = identity
-            .path_under(base)
-            .ok_or_else(|| "generated payload identity has no path".to_owned())?;
-        let actual = actual.ok_or_else(|| {
-            "generated plugin payload requires a deterministic overlay".to_owned()
-        })?;
-        if actual != expected {
-            return Err(format!(
-                "payload overlay path mismatch: expected `{}`, found `{}`",
-                expected.display(),
-                actual.display()
-            ));
+        let actual = actual
+            .ok_or_else(|| "generated plugin payload requires a staging overlay".to_owned())?;
+        if !identity.matches_path(base, actual) {
+            return Err("payload overlay is outside the authenticated content namespace".into());
         }
         return Ok(());
     }
@@ -1285,6 +1288,27 @@ fn execute_local_blocking_with_events(
 
     let store = FilesystemTransactionStore::private_at(&state_root);
     let coordinator = TransactionCoordinator::new(store.clone());
+    if matches!(request.operation, RuntimeOperation::InspectRecovery) {
+        return match store.pending_recovery(&request.app_id, request.scope) {
+            Ok(target)
+                if target
+                    .as_ref()
+                    .is_some_and(|target| target.record().target != request.target) =>
+            {
+                InstallOutcome::Failed("recovery inspection target mismatch".into())
+            }
+            Ok(target) => InstallOutcome::RecoveryInspected {
+                target: target.map(|target| target.summary()),
+                active: InstallationRecordStore::new(&state_root)
+                    .observe(&request.app_id, request.scope)
+                    .ok()
+                    .flatten()
+                    .and_then(|installation| store.active_launchers(&installation).ok().flatten())
+                    .map(Box::new),
+            },
+            Err(error) => InstallOutcome::Failed(error.to_string()),
+        };
+    }
     if let Some(id) = request.operation.recovery_transaction() {
         let record = match store.load(&id) {
             Ok(record)
@@ -1297,6 +1321,11 @@ fn execute_local_blocking_with_events(
             Ok(_) => return InstallOutcome::Failed("recovery identity mismatch".into()),
             Err(error) => return InstallOutcome::Failed(error.to_string()),
         };
+        if let Some(events) = &events {
+            let _ = events.send(RuntimeEvent::PlanPrepared {
+                plan: Box::new(record.plan.clone()),
+            });
+        }
         let payload = match crate::recovery::RetainedSource::load(&state_root, &record) {
             Ok(source) => source,
             Err(error) => {
@@ -1348,7 +1377,7 @@ fn execute_local_blocking_with_events(
                         InstallOutcome::Committed
                     }
                     Err(error) => InstallOutcome::CommittedPendingReconciliation {
-                        transaction: Some(record.transaction_id.as_uuid()),
+                        transaction: record.transaction_id,
                         detail: error.to_string(),
                     },
                 }
@@ -1358,10 +1387,7 @@ fn execute_local_blocking_with_events(
                 InstallOutcome::RolledBack
             }
             Ok((record, TransactionOutcome::RecoveryRequired)) => InstallOutcome::recovery(&record),
-            Err(error) => InstallOutcome::RecoveryRequired {
-                transaction: Some(id.as_uuid()),
-                detail: error.to_string(),
-            },
+            Err(error) => InstallOutcome::recovery_failure(&store, id, error.to_string()),
         };
     }
     if let Err(e) =
@@ -1409,17 +1435,6 @@ fn execute_local_blocking_with_events(
                 };
             }
         };
-    if request.scope == SelectedScope::User
-        && let Ok(identity) = PayloadOverlayIdentity::from_transaction(
-            request.app_id.clone(),
-            request.app_version.clone(),
-            request.scope,
-            &open.record().plan,
-        )
-        && let Some(overlay) = identity.path_under(&state_root)
-    {
-        let _ = cleanup_payload_overlay(&state_root, Some(&overlay));
-    }
     let transaction_id = open.record().transaction_id;
     let plan_for_executor = open.record().plan.clone();
     let target_suffix = open.record().target.executable_suffix();
@@ -1504,7 +1519,7 @@ fn execute_local_blocking_with_events(
                     InstallOutcome::Committed
                 }
                 Err(e) => InstallOutcome::CommittedPendingReconciliation {
-                    transaction: Some(record.transaction_id.as_uuid()),
+                    transaction: record.transaction_id,
                     detail: format!("installation committed but reconciliation failed: {e}"),
                 },
             }

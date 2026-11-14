@@ -1,7 +1,7 @@
 use zup_sdk::preset::prelude::*;
 use zup_sdk::preset::presentation::{
-    ChangeGroup, ChangeKind, DiagnosticKind, InstallOptions, InstallationHealth, OperationPhase,
-    RequirementStatus, ResourceCategory, UpdateState,
+    ChangeGroup, ChangeKind, DeploymentSettlement, DiagnosticKind, InstallOptions,
+    InstallationHealth, OperationPhase, RequirementStatus, ResourceCategory, UpdateState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +22,9 @@ impl Screen {
             InstallerState::Running | InstallerState::WaitingForSafeCancellation => Self::Operation,
             InstallerState::Succeeded | InstallerState::RebootRequired => Self::Outcome,
             InstallerState::Blocked { .. } => Self::Blocked,
-            InstallerState::Failed | InstallerState::RecoveryRequired => Self::Problem,
+            InstallerState::Failed
+            | InstallerState::RecoveryRequired
+            | InstallerState::RefreshRequired => Self::Problem,
         }
     }
 }
@@ -396,7 +398,11 @@ pub fn outcome(snapshot: &Snapshot) -> Outcome {
     match operation(snapshot) {
         OperationKind::Recover => Outcome {
             title: "Recovery finished".into(),
-            detail: "The interrupted transaction was reconciled with the installed state.".into(),
+            detail: match snapshot.settlement {
+                Some(DeploymentSettlement::Committed) => "The committed deployment is settled and its remaining cleanup finished.",
+                Some(DeploymentSettlement::RolledBack) => "The interrupted transaction was rolled back. The previous deployment is restored.",
+                None => "The protected transaction was reconciled with the installed state.",
+            }.into(),
             ..base
         },
         OperationKind::Cleanup => Outcome { title: "Storage cleanup finished".into(), detail: "Unused owned payloads were checked for collection. Payloads still in use were retained.".into(), ..base },

@@ -112,17 +112,12 @@ pub fn run_uninstall(context: RuntimeContext, args: UninstallArgs) -> miette::Re
             build.as_ref().map(|build| build.installer.frontend),
         )?,
     };
-    let result = if output == OutputFormat::Human {
+    if output == OutputFormat::Human {
         crate::execute::execute_with_policy(prepared, policy).map_err(Into::into)
     } else {
         crate::execute::execute_frontend(prepared, output, LifecycleAction::Uninstall)
             .map_err(Into::into)
-    };
-    if result.is_ok() {
-        zup_windows::cleanup_app_payload_overlays(&state_root, &app_id, scope)
-            .map_err(|error| miette::miette!("clean up payload overlays: {error}"))?;
     }
-    result
 }
 
 fn prepare_from_package(

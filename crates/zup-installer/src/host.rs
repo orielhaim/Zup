@@ -150,6 +150,62 @@ impl WindowsSessionHost {
             acquire_prerequisites: true,
         })
     }
+    fn inspect_deployment(
+        &self,
+        context: &zup_session::OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<
+        (
+            Option<zup_core::RecoverySummary>,
+            Option<Box<zup_core::ActiveLaunchers>>,
+        ),
+        String,
+    > {
+        let request = zup_runtime::RuntimeRequest {
+            operation: zup_runtime::RuntimeOperation::InspectRecovery,
+            target: zup_core::Target::host().map_err(|error| error.to_string())?,
+            app_id: app.clone(),
+            app_version: self
+                .bundle
+                .as_ref()
+                .ok_or("authenticated GUI carrier unavailable")?
+                .plan()
+                .installer
+                .app
+                .version
+                .clone(),
+            scope: context.scope,
+            state_root: context.state_root.clone(),
+        };
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?
+                .block_on(async {
+                    let control = zup_runtime::OperationControl::new(
+                        zup_runtime::ExecutionPolicy::Interactive,
+                    );
+                    match zup_runtime::execute(
+                        &zup_windows::WindowsRuntimeBackend::for_recovery(),
+                        request,
+                        &control,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?
+                    {
+                        zup_runtime::InstallOutcome::RecoveryInspected { target, active } => {
+                            Ok((target, active))
+                        }
+                        outcome => {
+                            Err(format!("Recovery inspection did not complete: {outcome:?}"))
+                        }
+                    }
+                })
+        })
+        .join()
+        .map_err(|_| "recovery inspection task failed".to_owned())?
+    }
 }
 
 impl SessionHost for WindowsSessionHost {
@@ -399,15 +455,23 @@ impl SessionHost for WindowsSessionHost {
         Ok(Arc::new(build))
     }
 
+    fn state_root(
+        &self,
+        installer: &zup_core::Installer,
+        scope: SelectedScope,
+        hint: Option<&Path>,
+    ) -> Result<PathBuf, String> {
+        state::resolve_state_root(&installer.app.id, hint.map(Path::to_owned), scope)
+            .map_err(|error| error.to_string())
+    }
+
     fn observe(
         &self,
         installer: &zup_core::Installer,
         scope: SelectedScope,
         state_root: Option<&Path>,
     ) -> Result<zup_session::OperationContext, String> {
-        let state_root =
-            state::resolve_state_root(&installer.app.id, state_root.map(Path::to_path_buf), scope)
-                .map_err(|error| error.to_string())?;
+        let state_root = self.state_root(installer, scope, state_root)?;
         let ledger = zup_windows::InstallationRecordStore::new(&state_root)
             .observe(&installer.app.id, scope)
             .map_err(|error| error.to_string())?;
@@ -416,6 +480,41 @@ impl SessionHost for WindowsSessionHost {
             state_root,
             ledger,
         })
+    }
+
+    fn recovery_store(
+        &self,
+        context: &zup_session::OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<zup_transaction::FilesystemTransactionStore, String> {
+        zup_windows::InstallationRecordStore::new(&context.state_root)
+            .recovery_store(app, context.scope)
+            .map_err(|error| error.to_string())
+    }
+
+    fn pending_recovery(
+        &self,
+        context: &zup_session::OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<Option<zup_core::RecoverySummary>, String> {
+        if context.scope == SelectedScope::User {
+            return self
+                .recovery_store(context, app)?
+                .pending_recovery(app, context.scope)
+                .map(|target| target.map(|target| target.summary()))
+                .map_err(|error| error.to_string());
+        }
+        self.inspect_deployment(context, app)
+            .map(|(target, _)| target)
+    }
+
+    fn active_launchers(
+        &self,
+        context: &zup_session::OperationContext,
+        app: &zup_core::AppId,
+    ) -> Result<Option<zup_core::ActiveLaunchers>, String> {
+        self.inspect_deployment(context, app)
+            .map(|(_, active)| active.map(|active| *active))
     }
 
     fn backend(
@@ -453,7 +552,7 @@ impl SessionHost for WindowsSessionHost {
     fn recover<'a>(
         &'a self,
         context: &'a zup_session::OperationContext,
-        transaction: zup_core::TransactionId,
+        target: zup_core::RecoverySummary,
         request: zup_transaction::RecoveryRequest,
         control: &'a zup_runtime::OperationControl,
     ) -> zup_runtime::RuntimeFuture<
@@ -461,44 +560,24 @@ impl SessionHost for WindowsSessionHost {
         Result<zup_runtime::InstallOutcome, zup_runtime::SessionError>,
     > {
         Box::pin(async move {
-            use zup_transaction::TransactionStore as _;
-            let build = match &self.acquired {
-                Some(content) => crate::acquire::target_plan(&content.release.manifest)
-                    .map_err(|error| zup_runtime::SessionError::Protocol(error.to_string()))?,
-                None => package::target_plan(self.bundle.as_ref().ok_or_else(|| {
-                    zup_runtime::SessionError::Protocol(
-                        "recovery requires an authenticated application package".into(),
-                    )
-                })?)
-                .map_err(|error| zup_runtime::SessionError::Protocol(error.to_string()))?,
-            };
-            let app = &build.installer.app;
-            let version = if context.scope == SelectedScope::User {
-                let record =
-                    zup_transaction::FilesystemTransactionStore::private_at(&context.state_root)
-                        .load(&transaction)
-                        .map_err(|error| zup_runtime::SessionError::Protocol(error.to_string()))?;
-                if record.app_id != app.id
-                    || record.scope != context.scope
-                    || record.target != build.installer.target
-                {
-                    return Err(zup_runtime::SessionError::Protocol(
-                        "recovery transaction belongs to a different application, scope, or target"
-                            .into(),
-                    ));
-                }
-                record.app_version
-            } else {
-                app.version.clone()
-            };
+            let app = self.app_id.as_ref().ok_or_else(|| {
+                zup_runtime::SessionError::Protocol(
+                    "authenticated application identity unavailable".into(),
+                )
+            })?;
+            if target.app != *app || target.scope != context.scope {
+                return Err(zup_runtime::SessionError::Protocol(
+                    "recovery application or scope differs from the session".into(),
+                ));
+            }
             let request = zup_runtime::RuntimeRequest {
                 operation: zup_runtime::RuntimeOperation::Recovery {
-                    transaction,
+                    transaction: target.transaction,
                     request,
                 },
-                target: build.installer.target,
-                app_id: app.id.clone(),
-                app_version: version,
+                target: target.target,
+                app_id: target.app,
+                app_version: target.version,
                 scope: context.scope,
                 state_root: context.state_root.clone(),
             };
@@ -517,11 +596,17 @@ impl SessionHost for WindowsSessionHost {
             .bundle
             .as_ref()
             .ok_or_else(|| "this file carries no installer package".to_owned())?;
-        let installed = context.ledger.is_some();
-        let capabilities = zup_preset_host::surface::capabilities(installer, installed);
+        let capabilities = zup_session::session_capabilities(installer, context);
         let installed: Option<(zup_core::InstalledPreset, PathBuf)> = context
             .ledger
             .as_ref()
+            .filter(|ledger| {
+                ledger.is_installed()
+                    && !discovery
+                        .recoveries
+                        .get(&context.scope)
+                        .is_some_and(|recovery| !matches!(recovery, Ok(None)))
+            })
             .map(|ledger| {
                 let runtime = ledger.preset().cloned().ok_or_else(|| {
                     format!(
@@ -792,19 +877,7 @@ impl SessionHost for WindowsSessionHost {
         let _ = std::process::Command::new("clip").arg(text).output();
     }
 
-    fn after_commit(
-        &self,
-        context: &zup_session::OperationContext,
-        prepared: &zup_runtime::PreparedOperation,
-    ) -> Result<(), String> {
-        let app_id = self
-            .app_id
-            .as_ref()
-            .ok_or_else(|| "the session host was not discovered".to_owned())?;
-        if prepared.action == zup_plan::LifecycleAction::Uninstall {
-            zup_windows::cleanup_app_payload_overlays(&context.state_root, app_id, context.scope)
-                .map_err(|error| error.to_string())?;
-        }
+    fn after_commit(&self, _context: &zup_session::OperationContext) -> Result<(), String> {
         if let Some(acquired) = &self.acquired {
             acquired
                 .release

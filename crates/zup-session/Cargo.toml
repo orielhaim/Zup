@@ -45,6 +45,14 @@ required-features = ["test-support"]
 name = "user_scope_install_preset"
 required-features = ["test-support"]
 
+[[bin]]
+name = "refresh_preset"
+required-features = ["test-support"]
+
+[[bin]]
+name = "journal_recovery_preset"
+required-features = ["test-support"]
+
 [dependencies]
 miette.workspace = true
 opener.workspace = true
@@ -63,6 +71,7 @@ zup-runtime.workspace = true
 zup-transaction.workspace = true
 
 [dev-dependencies]
+rstest.workspace = true
 tempfile.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 zup-bundle.workspace = true

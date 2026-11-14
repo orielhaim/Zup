@@ -98,6 +98,7 @@ fn materialize_stages_a_private_executable_preset() {
             ..Default::default()
         },
         &discovery.installations,
+        &discovery.recoveries,
     )
     .expect("user scope");
     let context = discovery.context(scope).expect("context");

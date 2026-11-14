@@ -581,8 +581,14 @@ impl PlanPreview {
         }
         Ok(Self {
             basis: PlanBasis::ObservedMachine,
-            application: target.map_or_else(String::new, |target| target.app.name.to_string()),
-            version: target.map_or_else(String::new, |target| target.app.version.to_string()),
+            application: target.map_or_else(
+                || plan.requirements.app.id.to_string(),
+                |target| target.app.name.to_string(),
+            ),
+            version: target.map_or_else(
+                || plan.requirements.app.version.to_string(),
+                |target| target.app.version.to_string(),
+            ),
             scope,
             install_directory: target.map_or_else(
                 || {
@@ -1081,6 +1087,9 @@ impl InstallerResult {
         self.outcome = ProcessOutcome::from(outcome);
         self.code = self.outcome.code();
         let message = match outcome {
+            InstallOutcome::RecoveryInspected { target, .. } => {
+                target.as_ref().map(|target| target.detail.clone())
+            }
             InstallOutcome::RecoveryAssessed { assessment } => {
                 self.recovery_assessment = Some(assessment.clone());
                 self.transaction = Some(assessment.transaction.to_string());
@@ -1104,14 +1113,18 @@ impl InstallerResult {
             InstallOutcome::RecoveryRequired {
                 transaction,
                 detail,
-            }
-            | InstallOutcome::CommittedPendingReconciliation {
-                transaction,
-                detail,
             } => {
                 self.transaction = transaction.map(|transaction| transaction.to_string());
                 Some(detail.clone())
             }
+            InstallOutcome::CommittedPendingReconciliation {
+                transaction,
+                detail,
+            } => {
+                self.transaction = Some(transaction.to_string());
+                Some(detail.clone())
+            }
+            InstallOutcome::CommittedWithWarning { detail } => Some(detail.clone()),
             InstallOutcome::Failed(message) => Some(message.clone()),
             InstallOutcome::Busy { operation } => {
                 Some(format!("Another {operation} operation is running"))
@@ -1203,9 +1216,15 @@ impl From<&zup_runtime::InstallOutcome> for ProcessOutcome {
     fn from(outcome: &zup_runtime::InstallOutcome) -> Self {
         use zup_runtime::InstallOutcome;
         match outcome {
-            InstallOutcome::RecoveryAssessed { .. } => Self::Success,
+            InstallOutcome::RecoveryAssessed { .. }
+            | InstallOutcome::RecoveryInspected { target: None, .. } => Self::Success,
+            InstallOutcome::RecoveryInspected {
+                target: Some(_), ..
+            } => Self::RecoveryRequired,
             InstallOutcome::RebootRequired { .. } => Self::RebootRequired,
-            InstallOutcome::Committed | InstallOutcome::Recovered { .. } => Self::Success,
+            InstallOutcome::Committed
+            | InstallOutcome::Recovered { .. }
+            | InstallOutcome::CommittedWithWarning { .. } => Self::Success,
             InstallOutcome::Cancelled => Self::Cancelled,
             InstallOutcome::RecoveryRequired { .. }
             | InstallOutcome::CommittedPendingReconciliation { .. } => Self::RecoveryRequired,
@@ -1231,7 +1250,7 @@ mod tests {
                 detail: "Native startup admission is closed".into(),
             },
             zup_runtime::InstallOutcome::CommittedPendingReconciliation {
-                transaction: Some(transaction),
+                transaction: zup_core::TransactionId::from_uuid(transaction),
                 detail: "Native startup admission is closed".into(),
             },
         ] {

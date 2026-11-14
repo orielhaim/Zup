@@ -227,6 +227,66 @@ fresh service runtime state after reboot; that separate verification limitation
 remains. A pending recovery is distinct from a committed deployment with remaining
 reconciliation work.
 
+### Session recovery and presentation
+
+`FilesystemTransactionStore::recovery_target` authenticates the exact transaction
+through its journal volume and checks the application and scope. `pending_recovery`
+refuses ambiguous multiple pending transactions. `RecoveryTarget` has no public
+constructor. Its `RecoverySummary` is a presentation projection, not native authority.
+The summary includes the installation, transaction, application, recorded version,
+platform, scope, directory and remaining cleanup locations.
+
+`RecoveryKind` distinguishes committed cleanup, committed ownership reconciliation,
+interrupted execution, uncertain publication and operator-required resolution.
+The session inspects journals independently of installation-ledger observation and
+before planning a new desired deployment. Scope selection prefers a protected pending
+transaction. Explicitly selected scopes avoid inspecting unrelated scopes. Maintenance
+can open without an active installation or a readable presentation ledger. Recovery
+uses the available trusted GUI carrier instead of requiring its installed maintenance
+generation.
+
+`Action::Recover` must match the displayed protected transaction and scope. The GUI
+passes only `RecoveryRequest::Retry`; it cannot grant an F08 forward decision. Native
+execution reloads the original journal under the installation lock. Committed recovery
+resumes remaining cleanup in validated dependency order and repairs ownership metadata.
+It never rolls back or republishes the committed deployment. Deferral retains the
+same recovery identity and incomplete receipts, including after the GUI closes.
+
+Windows machine inspection uses an authenticated worker and UAC when required. The
+worker validates its carrier identity, application and scope, resolves the protected
+machine root itself and inspects the journal under the lifecycle lock. Parent paths,
+package versions and UI projections cannot replace journal authority. User recovery
+uses the protected user volume. Linux user and root inspection use the same journal
+classification; unprivileged machine inspection requires authorization.
+
+`Snapshot::settlement` preserves verified commit or rollback independently of
+presentation. `CommittedPendingReconciliation` requires a transaction ID.
+`CommittedWithWarning` describes nonjournal housekeeping after a verified commit.
+A cache error or presentation refresh error produces `RefreshRequired`, not an
+invented recovery transaction. Retry reobserves state and retries housekeeping
+without replaying a deployment. `RecoveryRequired` always includes a recovery
+summary. Launch actions use the installed ownership record and verify its original
+committed journal again before starting the recorded command. They do not plan a
+new deployment from the available carrier. A different unresolved transaction must
+settle before an older installation record can select a launcher. Uncertain or
+unapplied recovery does not offer Launch. Machine launch verification uses the
+authenticated inspection worker; the GUI starts the returned command unelevated.
+Inspection returns an optional `ActiveLaunchers` projection only after checking
+the current ledger against its original committed journal. The public ledger alone
+does not authorize this projection. Missing or invalid evidence offers no launch.
+
+Uninstall does not sweep the app overlay namespace after releasing the
+transaction lock. The runtime retires its own bound overlay; protected journal
+collectors retain authority over journaled recovery content. Another process's
+staging input remains intact. Generated input staging uses a fresh nonce even for
+identical content. The worker checks the app, scope and content namespace and
+verifies the staged files. A content hash is not ownership of a physical input
+cache directory. Recovery preserves abandoned unjournaled input caches rather than
+adopting them for deletion; required source bytes belong to the protected journal.
+Unreadable, missing or ambiguous authority remains diagnostic and offers
+refresh or reopening a trusted carrier. Runtime and preset protocols are version 2;
+the journal remains schema 4.
+
 Source content stays rooted until rollback settles, or commit, post-commit work and
 ownership reconciliation all finish. Collection removes only declared members
 through validated handles and verifies the empty directory's object identity before

@@ -58,6 +58,7 @@ fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> 
         discovery.installer().install.scope,
         &launch,
         &discovery.installations,
+        &discovery.recoveries,
     )
     .map_err(ExecError::Ownership)?;
     let context = discovery.context(scope).map_err(ExecError::Ownership)?;
@@ -116,6 +117,12 @@ fn execute_request(request: &LinuxRunRequest) -> Result<ExecutedRun, ExecError> 
 fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
     let ExecutedRun { outcome, version } = executed;
     match outcome {
+        zup_runtime::InstallOutcome::RecoveryInspected { .. } => Err(ExecError::Ownership(
+            "inspection is not a deployment result".into(),
+        )),
+        zup_runtime::InstallOutcome::CommittedWithWarning { .. } => Ok(LinuxOutcome::Committed {
+            version: version.clone(),
+        }),
         zup_runtime::InstallOutcome::RecoveryAssessed { assessment } => {
             Ok(LinuxOutcome::Assessed(assessment.clone()))
         }
@@ -134,11 +141,7 @@ fn linux_outcome(executed: &ExecutedRun) -> Result<LinuxOutcome, ExecError> {
             detail,
         } => Ok(LinuxOutcome::CommittedPendingReconciliation {
             detail: detail.clone(),
-            transaction: transaction.ok_or_else(|| {
-                ExecError::Ownership(format!(
-                    "{detail}; committed reconciliation omitted its transaction identity"
-                ))
-            })?,
+            transaction: transaction.as_uuid(),
         }),
         zup_runtime::InstallOutcome::RecoveryRequired {
             transaction,

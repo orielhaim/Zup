@@ -112,6 +112,7 @@ fn install_state(installer: &Installer) -> HostState {
 /// A one-word account of a decision, so a failure names which step was refused.
 fn describe(decision: HostDecision) -> String {
     match decision {
+        HostDecision::Refresh => "refresh".into(),
         HostDecision::Recover { .. } => "recover".into(),
         HostDecision::Run { .. } => "run".into(),
         HostDecision::Plan(_) => "plan".into(),

@@ -127,16 +127,15 @@ pub fn reconcile_operation<H: SessionHost>(
     mut outcome: InstallOutcome,
 ) -> (InstallOutcome, Vec<String>) {
     if matches!(outcome, InstallOutcome::Committed)
-        && let Err(detail) = host.after_commit(context, prepared)
+        && let Err(detail) = host.after_commit(context)
     {
-        outcome = InstallOutcome::CommittedPendingReconciliation {
-            transaction: None,
-            detail,
-        };
+        outcome = InstallOutcome::CommittedWithWarning { detail };
     }
     let drift = if matches!(prepared.action, LifecycleAction::Repair { .. })
-        && matches!(outcome, InstallOutcome::Committed)
-    {
+        && matches!(
+            outcome,
+            InstallOutcome::Committed | InstallOutcome::CommittedWithWarning { .. }
+        ) {
         prepared
             .transaction_plan
             .retired_keys

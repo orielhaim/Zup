@@ -192,6 +192,7 @@ pub enum InstallerState {
     RebootRequired,
     Failed,
     RecoveryRequired,
+    RefreshRequired,
 }
 
 impl InstallerState {
@@ -209,7 +210,8 @@ pub struct Snapshot {
     pub progress: Option<ProgressPresentation>,
     pub plan: PlanStatus,
     pub diagnostic: Option<DiagnosticPresentation>,
-    pub recovery_transaction: Option<zup_core::TransactionId>,
+    pub recovery: Option<zup_core::RecoverySummary>,
+    pub settlement: Option<zup_core::DeploymentSettlement>,
     pub update: Option<UpdatePresentation>,
     pub repair_drift: Vec<String>,
     pub launch: Option<LaunchTarget>,

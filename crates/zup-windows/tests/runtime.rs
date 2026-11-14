@@ -234,7 +234,7 @@ async fn generated_overlay_is_consumed_and_cleaned_by_adapter() {
     )
     .unwrap();
     let base = zup_windows::payload_overlay_base_root(&request.state_root, request.scope).unwrap();
-    let overlay = identity.path_under(&base).unwrap();
+    let overlay = identity.new_staging_path(&base).unwrap();
     std::fs::create_dir_all(overlay.join("__zup_plugins__")).unwrap();
     std::fs::write(overlay.join("__zup_plugins__/generated.exe"), b"installed").unwrap();
     let payload_root = root.path().join("payload");
@@ -627,6 +627,34 @@ async fn recovery_of_an_untouched_transaction_needs_no_installer_or_payload() {
     std::fs::remove_dir_all(root.path().join("payload")).unwrap();
     let backend = WindowsRuntimeBackend::for_recovery();
     request.app_version = "0.9.0".parse().unwrap();
+    request.operation = zup_runtime::RuntimeOperation::InspectRecovery;
+    let inspected = run(&backend, request.clone(), ExecutionPolicy::Interactive)
+        .await
+        .unwrap();
+    let InstallOutcome::RecoveryInspected {
+        target: Some(summary),
+        ..
+    } = inspected
+    else {
+        panic!("protected pending transaction expected");
+    };
+    assert_eq!(summary.transaction, pending.transaction_id);
+    assert_eq!(summary.installation, pending.plan.installation);
+    assert_eq!(summary.version, pending.app_version);
+    assert_eq!(summary.kind, zup_core::RecoveryKind::Interrupted);
+    assert_eq!(
+        store.load(&pending.transaction_id).unwrap(),
+        pending,
+        "inspection must not execute or advance a transaction"
+    );
+    let mut foreign = request.clone();
+    foreign.app_id = AppId::new("com.example.foreign").unwrap();
+    assert!(matches!(
+        run(&backend, foreign, ExecutionPolicy::Interactive)
+            .await
+            .unwrap(),
+        InstallOutcome::Failed(_)
+    ));
     request.operation = zup_runtime::RuntimeOperation::Recovery {
         transaction: pending.transaction_id,
         request: Default::default(),

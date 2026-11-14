@@ -280,8 +280,10 @@ pub fn apply(simulator: &mut Simulator, scenario: &mut Scenario, command: Comman
             publish(simulator)
         }
         Command::RecoveryRequired => {
-            simulator.finish_with(&InstallOutcome::RecoveryRequired { transaction: None, detail: "An interrupted transaction must be recovered before this application can be changed".into() });
-            publish(simulator)
+            match simulator.machine_mut().show_recovery("An interrupted transaction must be recovered before this application can be changed") {
+                Ok(()) => publish(simulator),
+                Err(error) => Effect::Refused(error),
+            }
         }
         Command::RebootRequired => {
             simulator.observe(&RuntimeEvent::RebootRequired {

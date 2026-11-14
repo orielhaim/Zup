@@ -2,11 +2,10 @@ use std::path::{Path, PathBuf};
 use zup_plan::LifecycleAction;
 use zup_preset_host::{HostDecision, HostState, Selection};
 use zup_preset_protocol::{Action, UpdateState};
-use zup_runtime::{CancellationHandle, OperationControl, OperationHost, RuntimeEvent};
+use zup_runtime::{CancellationHandle, OperationControl, RuntimeEvent};
 
 use crate::host::{
-    OperationContext, PresetLaunch, SessionDiscovery, SessionHost, SessionLaunch, initial_state,
-    is_terminal, select_scope,
+    PresetLaunch, SessionDiscovery, SessionHost, SessionLaunch, is_terminal, select_scope,
 };
 
 #[derive(Clone)]
@@ -68,12 +67,23 @@ where
         discovery.installer().install.scope,
         &launch,
         &discovery.installations,
+        &discovery.recoveries,
     )
     .map_err(|error| miette::miette!("{error}"))?;
     let context = discovery
         .context(presented)
         .map_err(|error| miette::miette!("{error}"))?;
-    let state = initial_state(&discovery, &context, launch.preselected.as_deref());
+    let mut state = host.open_state(&discovery, &context, launch.preselected.as_deref());
+    if launch.maintenance
+        && context
+            .ledger
+            .as_ref()
+            .is_none_or(|record| !record.is_installed())
+        && state.snapshot().recovery.is_none()
+        && state.snapshot().state != zup_preset_protocol::InstallerState::RefreshRequired
+    {
+        state.refresh_required("No active installation or pending protected transaction was found in this scope. Refresh to check again, or close maintenance and use a trusted installer.".into());
+    }
     let PresetLaunch {
         executable: preset_exe,
         configuration,
@@ -148,14 +158,16 @@ where
                         }
                     },
                     Report::Plan(generation, plan) => {
-                        if generation != control.plans.generation {
+                        if generation != control.plans.generation || control.state.snapshot().recovery.is_some() {
                             continue;
                         }
                         match plan {
                             Ok(plan) => control.state.set_plan(plan),
                             Err(zup_runtime::OperationError::RecoveryRequired(transaction)) => {
                                 control.state.plan_failed(format!("Transaction {transaction} requires recovery"));
-                                control.state.recovery_required(Some(transaction), "A previous deployment transaction requires recovery before another change can proceed".into());
+                                if let Ok(context) = control.discovery.context(control.presented) {
+                                    control.host.observe_recovery(&control.discovery, &context, &mut control.state);
+                                }
                             }
                             Err(error) => control.state.plan_failed(error.to_string()),
                         }
@@ -296,7 +308,9 @@ fn apply_completion<H: SessionHost>(
     };
     if matches!(
         outcome,
-        zup_runtime::InstallOutcome::Committed | zup_runtime::InstallOutcome::Recovered { .. }
+        zup_runtime::InstallOutcome::Committed
+            | zup_runtime::InstallOutcome::Recovered { .. }
+            | zup_runtime::InstallOutcome::CommittedWithWarning { .. }
     ) && completion.kind != crate::runner::CompletionKind::UpdateCheck
     {
         let previous = control
@@ -323,11 +337,13 @@ fn apply_completion<H: SessionHost>(
                 {
                     installation.ledger = context.ledger.clone();
                 }
-                control.state.refresh_installation(initial_state(
-                    &control.discovery,
-                    &context,
-                    None,
-                ));
+                control
+                    .state
+                    .refresh_installation(crate::host::initial_state(
+                        &control.discovery,
+                        &context,
+                        None,
+                    ));
                 if completion.kind == crate::runner::CompletionKind::UpdateInstall
                     && let Some(ledger) = context
                         .ledger
@@ -344,10 +360,13 @@ fn apply_completion<H: SessionHost>(
                 Ok(())
             });
         if let Err(error) = refreshed {
-            control.state.finish_with(&zup_runtime::InstallOutcome::CommittedPendingReconciliation {
-                transaction: control.state.snapshot().recovery_transaction.map(|id| id.0),
-                detail: format!("The operation settled, but the installed state could not be refreshed: {error}"),
-            });
+            control.state.finish_with(&outcome);
+            control.state.refresh_required(format!("The operation settled as {outcome:?}, but the installed state could not be refreshed: {error}. Refresh to inspect protected deployment state."));
+            if let Ok(context) = control.discovery.context(control.presented) {
+                control
+                    .host
+                    .observe_recovery(&control.discovery, &context, &mut control.state);
+            }
             return;
         }
     }
@@ -356,10 +375,25 @@ fn apply_completion<H: SessionHost>(
     }
     control.state.finish_with(&outcome);
     if matches!(
+        outcome,
+        zup_runtime::InstallOutcome::RecoveryRequired { .. }
+            | zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. }
+            | zup_runtime::InstallOutcome::RecoveryAssessed { .. }
+            | zup_runtime::InstallOutcome::Failed(_)
+    ) && let Ok(context) = control.discovery.context(control.presented)
+    {
+        control
+            .host
+            .observe_recovery(&control.discovery, &context, &mut control.state);
+    }
+    if matches!(
         completion.kind,
         crate::runner::CompletionKind::UpdateCheck | crate::runner::CompletionKind::UpdateInstall
-    ) && !matches!(outcome, zup_runtime::InstallOutcome::Committed)
-    {
+    ) && !matches!(
+        outcome,
+        zup_runtime::InstallOutcome::Committed
+            | zup_runtime::InstallOutcome::CommittedWithWarning { .. }
+    ) {
         let status = if matches!(outcome, zup_runtime::InstallOutcome::Cancelled) {
             UpdateState::Idle
         } else {
@@ -392,6 +426,9 @@ fn request_plan<H>(control: &mut Control<H>, selection: Selection)
 where
     H: SessionHost + Clone + Send + Sync + 'static,
 {
+    if control.state.snapshot().recovery.is_some() {
+        return;
+    }
     control.plans.generation += 1;
     let generation = control.plans.generation;
     let reports = control.reports.clone();
@@ -458,6 +495,91 @@ where
                 request_plan(control, selection);
             }
         }
+        HostDecision::Refresh => {
+            let previous = control
+                .discovery
+                .installation(control.presented)
+                .map(|i| i.state_root.clone());
+            match control.host.observe(
+                control.discovery.installer(),
+                control.presented,
+                previous.as_deref(),
+            ) {
+                Ok(context) => {
+                    control.discovery.observation_errors.remove(&context.scope);
+                    match control
+                        .host
+                        .pending_recovery(&context, control.discovery.app_id())
+                    {
+                        Ok(Some(target)) => {
+                            control.state.set_recovery(target);
+                            return;
+                        }
+                        Err(error) => {
+                            control.state.refresh_required(format!("Protected recovery state is unavailable: {error}. Refresh with the required authority or use the recovery console."));
+                            return;
+                        }
+                        Ok(None) => {
+                            control.discovery.recoveries.insert(context.scope, Ok(None));
+                        }
+                    }
+                    if let Err(error) = control.host.after_commit(&context) {
+                        control.state.refresh_required(format!("The deployment remains settled; housekeeping could not finish: {error}. Refresh to retry, or close setup and use a trusted maintenance carrier."));
+                        control.host.observe_recovery(
+                            &control.discovery,
+                            &context,
+                            &mut control.state,
+                        );
+                        return;
+                    }
+                    match control.host.refresh_installation(&context) {
+                        Ok(Some(build)) => {
+                            control.discovery.build = build;
+                            control.executable =
+                                control.host.content_executable(&control.executable);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            control.state.refresh_required(format!("Presentation refresh failed: {error}. Close setup and reopen an available trusted GUI carrier, or refresh again."));
+                            return;
+                        }
+                    }
+                    if let Some(installation) = control
+                        .discovery
+                        .installations
+                        .iter_mut()
+                        .find(|i| i.scope == context.scope)
+                    {
+                        installation.ledger = context.ledger.clone();
+                    }
+                    control.state.refresh_installation(control.host.open_state(
+                        &control.discovery,
+                        &context,
+                        None,
+                    ));
+                    control
+                        .state
+                        .finish_with(&zup_runtime::InstallOutcome::RecoveryInspected {
+                            target: None,
+                            active: None,
+                        });
+                    control.plans.generation += 1;
+                    if let Some(selection) = control.state.plan_request() {
+                        request_plan(control, selection);
+                    }
+                }
+                Err(error) => {
+                    control.state.refresh_required(format!("Deployment state is unavailable: {error}. Close other maintenance processes and refresh."));
+                    if let Ok(context) = control.discovery.context(control.presented) {
+                        control.host.observe_recovery(
+                            &control.discovery,
+                            &context,
+                            &mut control.state,
+                        );
+                    }
+                }
+            }
+        }
         HostDecision::Recover { transaction } => {
             if control.active.is_some() {
                 return;
@@ -473,6 +595,16 @@ where
                     return;
                 }
             };
+            let Some(target) = control.state.snapshot().recovery.clone().filter(|target| {
+                target.transaction == transaction
+                    && target.scope == scope
+                    && target.app == *control.discovery.app_id()
+            }) else {
+                control.state.refresh_required(
+                    "Recovery identity changed. Refresh the protected deployment state.".into(),
+                );
+                return;
+            };
             let operation = OperationControl::new(zup_runtime::ExecutionPolicy::Interactive);
             let cancel = operation.cancellation();
             let received = operation.subscribe();
@@ -480,7 +612,7 @@ where
             let host = control.host.clone();
             let work = async move {
                 let outcome = zup_runtime::outcome_of(
-                    host.recover(&context, transaction, Default::default(), &operation)
+                    host.recover(&context, target, Default::default(), &operation)
                         .await,
                 );
                 crate::runner::OperationCompletion {
@@ -641,7 +773,8 @@ fn rebind<H: SessionHost + Clone + Send + Sync + 'static>(
         }
     };
     let log = control.state.log_path().map(str::to_owned);
-    let mut state = initial_state(&control.discovery, &context, None);
+    control.discovery.recoveries.remove(&scope);
+    let mut state = control.host.open_state(&control.discovery, &context, None);
     if let Some(log) = log {
         state.set_log_path(log);
     }
@@ -774,72 +907,26 @@ fn launch_target<H: SessionHost>(
     selection: &Selection,
     name: &str,
 ) -> Result<(), String> {
-    let context = discovery.context(selection.scope)?;
-    let (_, _, target) = target_plan(host, discovery, &context, selection)?;
-    let launcher = target
+    let previous = discovery.context(selection.scope)?;
+    let context = host.observe(
+        discovery.installer(),
+        selection.scope,
+        Some(&previous.state_root),
+    )?;
+    let active = host
+        .active_launchers(&context, discovery.app_id())?
+        .ok_or("the active launcher could not be authenticated; reconcile deployment state")?;
+    let launcher = active
         .launchers
         .iter()
-        .find(|launcher| launcher.name.as_str() == name)
-        .ok_or_else(|| format!("no launcher is named `{name}`"))?;
+        .find(|launcher| launcher.name == name)
+        .ok_or_else(|| format!("no installed launcher is named `{name}`"))?;
     let mut command = std::process::Command::new(launcher.target.as_str());
     command.args(&launcher.arguments);
     if let Some(directory) = &launcher.working_directory {
         command.current_dir(directory.as_str());
     }
     command.spawn().map(drop).map_err(|error| error.to_string())
-}
-
-fn target_plan<H: SessionHost>(
-    host: &H,
-    discovery: &SessionDiscovery,
-    context: &OperationContext,
-    selection: &Selection,
-) -> Result<
-    (
-        zup_plan::DesiredState,
-        zup_core::Installer,
-        zup_plan::BoundDeployment,
-    ),
-    String,
-> {
-    let bound = host.bind(context)?;
-    let installer = discovery.build.installer.clone();
-    let action = zup_runtime::resolve_operation(
-        zup_runtime::Operation::Apply,
-        context
-            .ledger
-            .as_ref()
-            .map(|ledger| &ledger.current.version),
-        &installer.app.version,
-    )
-    .map_err(|error| error.to_string())?;
-    let (enable, disable) = crate::host::selection_of(&installer, selection);
-    let operation_selection = zup_runtime::OperationSelection {
-        deployment: None,
-        enable,
-        disable,
-        install_directory: selection.install_directory.as_deref().map(PathBuf::from),
-    };
-    let directory = bound.install_directory(
-        operation_selection.install_directory.as_deref(),
-        context.ledger.as_ref(),
-        installer.install.allow_directory_override,
-        matches!(action, LifecycleAction::Repair { .. }),
-    )?;
-    let request = zup_runtime::plan_request(
-        &installer,
-        selection.scope,
-        context.ledger.as_ref(),
-        &operation_selection,
-        action,
-        directory,
-    )
-    .map_err(|error| error.to_string())?;
-    let plan = bound
-        .plan_build(&discovery.build, &request, &zup_plan::NeverCancelled)
-        .map_err(|error| error.to_string())?;
-    let target = bound.resolve_target(&plan.plan)?;
-    Ok((plan.plan, installer, target))
 }
 
 fn diagnostic_summary(path: Option<&str>) -> String {

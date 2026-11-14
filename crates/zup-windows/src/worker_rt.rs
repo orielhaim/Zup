@@ -116,6 +116,104 @@ impl WorkerError {
     }
 }
 
+fn inspect_recovery(
+    exec: &zup_protocol::PrepareTransaction,
+    bootstrap: &WorkerBootstrap,
+    authorized_scope: zup_core::SelectedScope,
+) -> Result<
+    (
+        Option<zup_core::RecoverySummary>,
+        Option<Box<zup_core::ActiveLaunchers>>,
+    ),
+    WorkerError,
+> {
+    if exec.target != bootstrap.target
+        || exec
+            .digest()
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?
+            != bootstrap.expected_request_digest
+        || exec.content.is_some()
+        || exec.release.is_some()
+        || !exec.payload_root.is_empty()
+        || exec.payload_overlay_root.is_some()
+        || exec.payload_overlay_base_root.is_some()
+    {
+        return Err(WorkerError::AuthFailed(
+            "invalid protected recovery inspection request".into(),
+        ));
+    }
+    let app = zup_core::AppId::new(&exec.app_id)
+        .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+    let scope = match exec.scope.as_str() {
+        "user" => zup_core::SelectedScope::User,
+        "machine" => zup_core::SelectedScope::Machine,
+        _ => {
+            return Err(WorkerError::Protocol(
+                "invalid recovery inspection scope".into(),
+            ));
+        }
+    };
+    if scope != authorized_scope {
+        return Err(WorkerError::AuthFailed(
+            "recovery inspection scope exceeds worker authority".into(),
+        ));
+    }
+    let bundle = EmbeddedBundle::open(
+        &current_exe().map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
+    )
+    .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
+    validate_transaction_bundle_identity(
+        &app,
+        &bundle.plan().installer.app.version,
+        scope,
+        &bootstrap.target,
+        &bundle,
+    )?;
+    let machine = if scope == zup_core::SelectedScope::Machine {
+        Some(
+            crate::machine_authority::MachineRoot::acquire(&app)
+                .map_err(|error| WorkerError::AuthFailed(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let root = machine.as_ref().map_or_else(
+        || PathBuf::from(&exec.state_root),
+        |root| root.path().to_owned(),
+    );
+    let store = machine.as_ref().map_or_else(
+        || FilesystemTransactionStore::private_at(&root),
+        |root| root.transaction_store(),
+    );
+    let key = ResourceLock::lock_key(app.as_str(), &exec.scope);
+    let _lock = match &machine {
+        Some(root) => root
+            .try_lock(&key)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+        None => ResourceLock::try_acquire(&root, &key)
+            .map_err(|error| WorkerError::Transaction(error.to_string()))?,
+    }
+    .ok_or_else(|| WorkerError::Transaction("installation busy".into()))?;
+    let target = store
+        .pending_recovery(&app, scope)
+        .map_err(|error| WorkerError::Transaction(error.to_string()))?
+        .map(|target| target.summary());
+    if target
+        .as_ref()
+        .is_some_and(|target| target.target != exec.target)
+    {
+        return Err(WorkerError::AuthFailed(
+            "recovery inspection target mismatch".into(),
+        ));
+    }
+    let active = crate::ledger::InstallationRecordStore::new(&root)
+        .observe(&app, scope)
+        .ok()
+        .flatten()
+        .and_then(|installation| store.active_launchers(&installation).ok().flatten());
+    Ok((target, active.map(Box::new)))
+}
+
 pub fn worker_capabilities() -> Capabilities {
     Capabilities {
         file_transactions_v1: true,
@@ -309,6 +407,23 @@ async fn run_worker_inner(
         }
     };
 
+    if matches!(
+        exec.operation,
+        zup_protocol::PreparedTransactionRequest::InspectRecovery
+    ) {
+        let message = match inspect_recovery(&exec, &bootstrap, authorized_scope) {
+            Ok((target, active)) => Message::RecoveryInspected { target, active },
+            Err(error) => Message::Failed(zup_protocol::Failed {
+                kind: error.failure_kind(),
+                message: error.to_string(),
+            }),
+        };
+        send_and_close(writer, bootstrap.session_id, outgoing, message)
+            .await
+            .map_err(|error| WorkerError::Protocol(error.to_string()))?;
+        return Ok(zup_protocol::WorkerOutcome::RecoveryInspected);
+    }
+
     let recovering = matches!(
         exec.operation,
         zup_protocol::PreparedTransactionRequest::Recovery { .. }
@@ -349,6 +464,7 @@ async fn run_worker_inner(
                 Some(plan.as_ref().clone())
             }
             zup_protocol::PreparedTransactionRequest::Recovery { .. } => None,
+            zup_protocol::PreparedTransactionRequest::InspectRecovery => unreachable!(),
         };
 
         let app_id = zup_core::AppId::new(&exec.app_id)
@@ -1006,7 +1122,18 @@ async fn run_worker_inner(
         ),
         Err(error) => (
             journal_id.as_uuid(),
-            zup_protocol::WorkerOutcome::RecoveryRequired,
+            if matches!(
+                zup_runtime::InstallOutcome::recovery_failure(
+                    &cleanup_store,
+                    journal_id,
+                    error.to_string()
+                ),
+                zup_runtime::InstallOutcome::CommittedPendingReconciliation { .. }
+            ) {
+                zup_protocol::WorkerOutcome::CommittedPendingReconciliation
+            } else {
+                zup_protocol::WorkerOutcome::RecoveryRequired
+            },
             Some(error.to_string()),
         ),
     };
@@ -1439,13 +1566,10 @@ fn validate_worker_overlay(
         })?;
         validate_payload_overlay_base(state_root, scope, base, expected_parent_sid)
             .map_err(|error| WorkerError::AuthFailed(error.to_string()))?;
-        let expected = identity.path_under(base).ok_or_else(|| {
-            WorkerError::AuthFailed("generated payload identity has no overlay path".into())
-        })?;
         let actual = actual.ok_or_else(|| {
             WorkerError::AuthFailed("generated plugin payload has no overlay".into())
         })?;
-        if actual != expected {
+        if !identity.matches_path(base, actual) {
             return Err(WorkerError::AuthFailed(
                 "payload overlay identity mismatch".into(),
             ));
@@ -1838,7 +1962,7 @@ mod tests {
         let state_root = PathBuf::from(r"C:\state");
         let identity = identity_with_file();
         let base = machine_base_for_sid(parent_sid);
-        let overlay = identity.path_under(&base).unwrap();
+        let overlay = identity.new_staging_path(&base).unwrap();
 
         assert!(
             validate_worker_overlay(

@@ -73,7 +73,9 @@ pub fn install_then_recover() {
         };
         if snapshot.state == InstallerState::RecoveryRequired {
             let transaction = snapshot
-                .recovery_transaction
+                .recovery
+                .as_ref()
+                .map(|target| target.transaction)
                 .expect("the engine reported its transaction");
             send(&channel, &mut peer, Action::Recover { transaction });
             break;
@@ -200,5 +202,108 @@ fn wait_until_succeeded(channel: Channel) {
     }
     if !succeeded {
         std::process::exit(3);
+    }
+}
+
+pub fn recover_journal() {
+    let (mut channel, mut peer) = connect();
+    let mut expected = None;
+    let mut stale_sent = false;
+    let mut recovering = false;
+    loop {
+        let (next, incoming) = channel
+            .recv_within(std::time::Duration::from_secs(30))
+            .expect("recovery snapshot");
+        channel = next;
+        let Message::Snapshot(snapshot) = incoming.message else {
+            continue;
+        };
+        match snapshot.state {
+            InstallerState::RecoveryRequired => {
+                let target = snapshot
+                    .recovery
+                    .as_ref()
+                    .expect("protected recovery target");
+                assert_eq!(
+                    snapshot.settlement,
+                    Some(zup_core::DeploymentSettlement::Committed)
+                );
+                let id = *expected.get_or_insert(target.transaction);
+                assert_eq!(
+                    id, target.transaction,
+                    "deferral retains the exact transaction"
+                );
+                if !stale_sent {
+                    send(
+                        &channel,
+                        &mut peer,
+                        Action::Recover {
+                            transaction: zup_core::TransactionId::new_v7(),
+                        },
+                    );
+                    stale_sent = true;
+                }
+                send(&channel, &mut peer, Action::Recover { transaction: id });
+                recovering = true;
+            }
+            InstallerState::Succeeded if recovering => {
+                assert!(snapshot.recovery.is_none());
+                send(&channel, &mut peer, Action::Close);
+                return;
+            }
+            InstallerState::Failed => panic!("recovery failed: {:?}", snapshot.diagnostic),
+            _ => {}
+        }
+    }
+}
+
+pub fn recover_then_refresh() {
+    let (mut channel, mut peer) = connect();
+    let mut requested_refresh = false;
+    loop {
+        let (next, incoming) = channel
+            .recv_within(std::time::Duration::from_secs(30))
+            .expect("settlement snapshot");
+        channel = next;
+        let Message::Snapshot(snapshot) = incoming.message else {
+            continue;
+        };
+        match snapshot.state {
+            InstallerState::RecoveryRequired => send(
+                &channel,
+                &mut peer,
+                Action::Recover {
+                    transaction: snapshot
+                        .recovery
+                        .as_ref()
+                        .expect("protected recovery projection")
+                        .transaction,
+                },
+            ),
+            InstallerState::RefreshRequired => {
+                assert_eq!(
+                    snapshot.settlement,
+                    Some(zup_core::DeploymentSettlement::RolledBack)
+                );
+                assert!(
+                    snapshot.recovery.is_none(),
+                    "presentation failure cannot invent a journal"
+                );
+                assert!(!requested_refresh, "one refresh must complete");
+                requested_refresh = true;
+                send(&channel, &mut peer, Action::Retry);
+            }
+            InstallerState::Options | InstallerState::Maintenance if requested_refresh => {
+                assert_eq!(
+                    snapshot.settlement,
+                    Some(zup_core::DeploymentSettlement::RolledBack)
+                );
+                assert!(snapshot.diagnostic.is_none());
+                send(&channel, &mut peer, Action::Close);
+                return;
+            }
+            InstallerState::Failed => panic!("unexpected failure: {:?}", snapshot.diagnostic),
+            _ => {}
+        }
     }
 }

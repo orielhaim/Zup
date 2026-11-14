@@ -36,6 +36,8 @@ pub use publication::{
 };
 mod native_service;
 mod reconciliation;
+mod recovery_target;
+pub use recovery_target::RecoveryTarget;
 mod retained_content;
 pub use retained_content::{RetainedFileSource, retained_file_sources};
 mod record;

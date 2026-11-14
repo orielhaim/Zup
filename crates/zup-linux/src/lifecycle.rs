@@ -37,7 +37,7 @@ impl LinuxOutcome {
                 transaction,
                 detail,
             } => InstallOutcome::CommittedPendingReconciliation {
-                transaction: Some(*transaction),
+                transaction: zup_core::TransactionId::from_uuid(*transaction),
                 detail: detail.clone(),
             },
             Self::Busy => InstallOutcome::Busy {
